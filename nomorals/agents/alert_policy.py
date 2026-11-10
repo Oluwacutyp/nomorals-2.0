@@ -85,13 +85,47 @@ in the candidate journal (:data:`CANDIDATE_JOURNAL_KEY`), which is
 therefore the 100%-coverage decision journal of record; the legacy
 journal above stays the hinted-decision ledger the recurrence
 counting reads.
+
+Doc 15 Pass 3 — the decision record is completed, and releases are
+rechecked against it:
+
+* **Routing is a decision output.**  ``AlertDecision.routing``
+  records the audience + channel policy the decision chose (from
+  the candidate — the producer's ``channels=`` restriction, or all
+  owner channels), it is journaled with the decision, and delivery
+  follows the *record*: a redelivery restricts itself to the
+  recorded channels instead of re-deriving "everywhere" at send
+  time (:meth:`AlertPolicy.recorded_channels`).  Decision-time
+  annotations (delivery acks, release records) never rewrite the
+  routing — the record as decided is the record released under.
+* **Freshness recheck before release.**  The journal is the
+  recheck source: :meth:`AlertPolicy.superseding_record` finds the
+  newest later candidate for the same subject asserting a
+  different revision or outcome than a held item's — the fact
+  moved on, and the held item must not be delivered as if fresh.
+  A newer record with a different *outcome* supersedes; a newer
+  record with a different *revision* supersedes only while the
+  held item asserts no outcome of its own — an out-of-order older
+  state can never downgrade a recorded result (doc §5).  Ticks
+  and deduped replays assert the same state by construction, so
+  they never supersede anything.
+* **Delivery acks + release records (G8's notification half).**
+  Each candidate row gains a ``delivery`` summary (the latest
+  delivery outcome for its notification: sent / failed / pending /
+  held / digest / suppressed / deduped / dead / …) and a bounded
+  ``releases`` list — one record per release attempt of a held or
+  retried item, carrying the freshness verdict (``fresh`` /
+  ``superseded`` / ``moot-deadline`` / ``unverifiable``), the
+  item's age at release, and the delivery ack that followed.  The
+  chain an inspection reads is therefore complete: decision →
+  routing → release-time freshness verdict → delivery ack.
 """
 
 from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.logging_setup import get_logger
@@ -220,6 +254,11 @@ class AlertDecision:
     #: evidence-asserting candidate page.  A bare legacy pass-through
     #: page keeps its historical body byte-for-byte.
     annotate: bool = False
+    #: Pass 3: the routing this decision chose — ``audience``,
+    #: ``channel_policy`` and the resolved ``channels`` list (empty
+    #: = all owner channels).  Journaled with the decision; delivery
+    #: at release time follows this record, never a re-derivation.
+    routing: dict[str, Any] = field(default_factory=dict)
 
     @property
     def suppressed(self) -> bool:
@@ -355,11 +394,264 @@ class AlertPolicy:
                 "material_gaps": list(decision.material_gaps),
                 "escalated": decision.escalated,
             }
+            routing = getattr(decision, "routing", None)
+            if routing:
+                # Pass 3: the routing the decision chose rides the
+                # record — release-time delivery follows it.
+                row["decision"]["routing"] = dict(routing)
         rows.append(row)
         AlertPolicy._save_journal(
             db, rows, now, DEFAULT_RECURRENCE_WINDOW_S,
             key=CANDIDATE_JOURNAL_KEY,
             max_rows=CANDIDATE_JOURNAL_MAX_ROWS)
+
+    # ── Pass 3: delivery acks, release records, freshness source ──
+
+    #: release records retained per candidate row — a held item's
+    #: release history is an audit trail, not an archive.
+    RELEASE_RECORDS_MAX = 10
+
+    @staticmethod
+    def _update_candidate_row(db: Any, event_id: str, mutate: Any,
+                              now: float) -> bool:
+        """Apply ``mutate(row)`` to the candidate row for
+        ``event_id`` and persist the journal when it changed
+        something.  Returns True when the row was found.  Best-
+        effort exactly like :meth:`record_candidate`: the journal
+        load/save swallow their own failures."""
+        if db is None or not event_id:
+            return False
+        rows = AlertPolicy._load_journal(db, CANDIDATE_JOURNAL_KEY)
+        for row in reversed(rows):
+            if str(row.get("event_id") or "") != event_id:
+                continue
+            if mutate(row):
+                AlertPolicy._save_journal(
+                    db, rows, now, DEFAULT_RECURRENCE_WINDOW_S,
+                    key=CANDIDATE_JOURNAL_KEY,
+                    max_rows=CANDIDATE_JOURNAL_MAX_ROWS)
+            return True
+        return False
+
+    @staticmethod
+    def record_delivery(db: Any, event_id: str, *, state: str,
+                        notification_id: str = "", channel: str = "",
+                        detail: str = "",
+                        now: float | None = None) -> bool:
+        """Record the delivery outcome of one decided publish on
+        its candidate row (Pass 3 — G8's notification half).
+
+        ``state`` is the delivery vocabulary the notifier already
+        uses (``sent`` / ``failed`` / ``pending`` /
+        ``held-quiet-hours`` / ``held-brain-degraded`` /
+        ``disabled`` / ``muted`` / ``digest`` / ``logged``) plus the
+        two decision-only outcomes that store no notification row
+        (``suppressed``, ``deduped``).  This is the ack half of the
+        record a later inspection reads: decision → routing →
+        release verdict → this.  Returns True when the candidate
+        row was found; a publish whose machinery failed (or was
+        disabled) has no row and its delivery stays unrecorded —
+        the honest bound, named in the notifier's release code.
+        """
+        now = time.time() if now is None else now
+
+        def _apply(row: dict[str, Any]) -> bool:
+            row["delivery"] = {
+                "state": str(state or ""),
+                "notification_id": str(notification_id or ""),
+                "channel": str(channel or ""),
+                "detail": str(detail or "")[:300],
+                "ts": now,
+            }
+            return True
+
+        return AlertPolicy._update_candidate_row(db, event_id, _apply,
+                                                 now)
+
+    @staticmethod
+    def record_release(db: Any, event_id: str, *, path: str,
+                       verdict: str, ack: str = "",
+                       notification_id: str = "",
+                       age_s: float | None = None,
+                       superseded_by: str = "", detail: str = "",
+                       now: float | None = None) -> bool:
+        """Append one release record to a candidate row (Pass 3).
+
+        A *release* is a held or retried item reaching its delivery
+        moment again: ``path`` names the seam (``redelivery`` /
+        ``digest-fold``), ``verdict`` is the freshness recheck's
+        answer (``fresh`` / ``superseded`` / ``moot-deadline`` /
+        ``unverifiable``), ``ack`` the delivery outcome that
+        followed (``sent`` / ``failed`` / ``dead`` / ``superseded``
+        / ``demoted-to-digest`` / ``digest-delivered``).  ``age_s``
+        is how old the fact was at release — recorded on every
+        release, so a release that could not be verified still
+        carries its age honestly instead of pretending freshness.
+        When ``ack`` is given it also refreshes the row's
+        ``delivery`` summary.  Returns True when the row was found.
+        """
+        now = time.time() if now is None else now
+        record = {
+            "ts": now,
+            "path": str(path or ""),
+            "verdict": str(verdict or ""),
+            "ack": str(ack or ""),
+            "age_s": (None if age_s is None
+                      else round(max(0.0, float(age_s)), 1)),
+            "superseded_by": str(superseded_by or ""),
+            "detail": str(detail or "")[:300],
+        }
+
+        def _apply(row: dict[str, Any]) -> bool:
+            releases = row.get("releases")
+            if not isinstance(releases, list):
+                releases = []
+            releases.append(record)
+            row["releases"] = releases[
+                -AlertPolicy.RELEASE_RECORDS_MAX:]
+            if ack:
+                row["delivery"] = {
+                    "state": str(ack),
+                    "notification_id": str(notification_id or ""),
+                    "channel": "",
+                    "detail": str(detail or "")[:300],
+                    "ts": now,
+                }
+            return True
+
+        return AlertPolicy._update_candidate_row(db, event_id, _apply,
+                                                 now)
+
+    @staticmethod
+    def candidate_for_notification(db: Any,
+                                   notification_id: str
+                                   ) -> dict[str, Any] | None:
+        """The candidate journal row whose delivery ack names
+        ``notification_id`` — the reverse link the release path
+        uses to find a stored notification's decision record.
+        Newest match wins; None when the row was stored without
+        the mandatory decision (machinery disabled, machinery
+        failure, or a direct store that bypassed publish) — such
+        rows have no recheck source and the release code says so.
+        """
+        if db is None or not notification_id:
+            return None
+        rows = AlertPolicy._load_journal(db, CANDIDATE_JOURNAL_KEY)
+        for row in reversed(rows):
+            delivery = row.get("delivery")
+            if isinstance(delivery, dict) and \
+                    str(delivery.get("notification_id") or "") \
+                    == notification_id:
+                return row
+        return None
+
+    @staticmethod
+    def recorded_channels(row: dict[str, Any]) -> list[str] | None:
+        """The channel restriction a decision recorded, or None
+        for "all owner channels" (the historical default).
+
+        Reads the decision's routing record first, then the
+        candidate's channel policy it was derived from — the two
+        agree by construction; the fallback keeps rows journaled
+        before the routing field existed readable.
+        """
+        if not isinstance(row, dict):
+            return None
+        decision = row.get("decision")
+        if isinstance(decision, dict):
+            routing = decision.get("routing")
+            if isinstance(routing, dict):
+                channels = routing.get("channels")
+                if isinstance(channels, list) and channels:
+                    return [str(c) for c in channels if str(c)]
+                if routing.get("channel_policy"):
+                    return None  # recorded: all owner channels
+        candidate = row.get("candidate")
+        if isinstance(candidate, dict):
+            policy = str(candidate.get("channel_policy") or "")
+            if policy.startswith("channels:"):
+                out = [c.strip() for c in policy[len("channels:"):]
+                       .split(",") if c.strip()]
+                return out or None
+        return None
+
+    @staticmethod
+    def superseding_record(db: Any, row: dict[str, Any]
+                           ) -> dict[str, Any] | None:
+        """The newest later candidate record that supersedes
+        ``row``'s asserted fact — Pass 3's freshness source.
+
+        Two records concern the same fact when they name the same
+        subject (the candidate's resolved subject; a subject-less
+        candidate has no recheck source and returns None here).
+        A later record supersedes when it asserts a *different*
+        state for that subject:
+
+        * a different **outcome** (waiting → succeeded, failed →
+          recovered): the later outcome is the current truth,
+          whatever the revision says;
+        * a different **current revision** while the held record
+          asserts no outcome of its own (progress r1 → progress
+          r2): newer progress replaces stale progress — but a
+          record carrying an outcome is never downgraded by a
+          later outcome-less state (doc §5: out-of-order events
+          cannot downgrade a displayed newer result).
+
+        Same-state later records — unchanged ticks, deduped
+        replays, a persisting failure re-asserting itself — fail
+        both tests by construction and never supersede.  Records
+        are compared in journal (record) order: for legacy
+        candidates ``event_time == publish time``, so record order
+        *is* freshness order; the journal's bounded retention is
+        the recheck's honest bound (a row whose own record has
+        pruned out is unlinked and unverifiable, never guessed).
+        """
+        if db is None or not isinstance(row, dict):
+            return None
+        candidate = row.get("candidate")
+        cand = candidate if isinstance(candidate, dict) else {}
+        subject = str(cand.get("subject") or row.get("subject") or "")
+        if not subject:
+            return None
+        my_ts = float(row.get("ts") or 0)
+        my_rev = str(cand.get("current_revision") or "")
+        my_outcome = str(cand.get("outcome") or "")
+        best: dict[str, Any] | None = None
+        for other in AlertPolicy._load_journal(db,
+                                              CANDIDATE_JOURNAL_KEY):
+            if other is row:
+                continue
+            if float(other.get("ts") or 0) <= my_ts:
+                continue
+            ocand = other.get("candidate")
+            oc = ocand if isinstance(ocand, dict) else {}
+            if str(oc.get("subject") or other.get("subject")
+                   or "") != subject:
+                continue
+            o_rev = str(oc.get("current_revision") or "")
+            o_outcome = str(oc.get("outcome") or "")
+            if o_outcome and o_outcome != my_outcome:
+                pass  # a different asserted outcome: newer truth
+            elif o_rev != my_rev and not my_outcome:
+                pass  # progress moved; nothing of mine to protect
+            else:
+                continue
+            if best is None or float(other.get("ts") or 0) \
+                    > float(best.get("ts") or 0):
+                best = other
+        if best is None:
+            return None
+        bdec = best.get("decision")
+        bdec = bdec if isinstance(bdec, dict) else {}
+        bcand = best.get("candidate")
+        bc = bcand if isinstance(bcand, dict) else {}
+        return {
+            "event_id": str(best.get("event_id") or ""),
+            "ts": float(best.get("ts") or 0),
+            "current_revision": str(bc.get("current_revision") or ""),
+            "outcome": str(bc.get("outcome") or ""),
+            "identity": str(bdec.get("identity") or ""),
+        }
 
     @staticmethod
     def candidate_journal(db: Any, *, limit: int = 50, kind: str = "",
@@ -457,6 +749,13 @@ class AlertPolicy:
                 "identity": dec.get("identity"),
                 "dedupe_mode": dec.get("dedupe_mode"),
                 "material_gaps": dec.get("material_gaps") or [],
+                #: Pass 3: the routing the decision chose, the
+                #: latest delivery ack, and the release history —
+                #: the full chain for "why did this reach me /
+                #: why not" (P6's inspection reads these).
+                "routing": dec.get("routing") or {},
+                "delivery": row.get("delivery") or {},
+                "releases": row.get("releases") or [],
             })
             if len(out) >= max(1, int(limit)):
                 break
@@ -610,6 +909,11 @@ class AlertPolicy:
         dedupe_mode = "semantic" if identity else "legacy-fallback"
         subj = (candidate.subject or candidate.source_id
                 or candidate.kind)
+        #: Pass 3: routing is decided here, with the verdict — the
+        #: decision record carries the audience + channel policy the
+        #: candidate requested, and release-time delivery follows
+        #: the record (see recorded_channels).
+        routing = _candidate_routing(candidate)
 
         if hints is not None:
             decision = self.decide(
@@ -618,6 +922,7 @@ class AlertPolicy:
             decision.candidate_id = candidate.event_id
             decision.identity = identity
             decision.dedupe_mode = dedupe_mode
+            decision.routing = routing
             if decision.tier == TIER_PAGE and identity \
                     and self._already_paged(db, identity):
                 decision.deduped = True
@@ -638,14 +943,16 @@ class AlertPolicy:
                         "transition, no outcome and no new evidence; "
                         "a timer firing is not news"),
                 subject=subj, candidate_id=candidate.event_id,
-                identity=identity, dedupe_mode=dedupe_mode)
+                identity=identity, dedupe_mode=dedupe_mode,
+                routing=routing)
         if identity and self._already_paged(db, identity):
             return AlertDecision(
                 tier=TIER_PAGE, deduped=True,
                 reason=("semantic duplicate — this transition was "
                         f"already reported (identity: {identity})"),
                 subject=subj, candidate_id=candidate.event_id,
-                identity=identity, dedupe_mode=dedupe_mode)
+                identity=identity, dedupe_mode=dedupe_mode,
+                routing=routing)
         fact = _asserted_fact(candidate)
         if fact:
             material = _material_gaps(candidate)
@@ -659,20 +966,22 @@ class AlertPolicy:
                               "if complete"),
                     subject=subj, candidate_id=candidate.event_id,
                     identity=identity, dedupe_mode=dedupe_mode,
-                    material_gaps=tuple(material))
+                    material_gaps=tuple(material),
+                    routing=routing)
             return AlertDecision(
                 tier=TIER_PAGE, escalated=True,
                 reason=f"reportable fact — {fact}",
                 subject=subj, candidate_id=candidate.event_id,
                 identity=identity, dedupe_mode=dedupe_mode,
-                annotate=True)
+                annotate=True, routing=routing)
         return AlertDecision(
             tier=TIER_PAGE,
             reason=("legacy notice — no structured evidence asserted; "
                     "the decision ran and the gaps are on record "
                     "(RULE-LEGACY-PASSTHROUGH)"),
             subject=subj, candidate_id=candidate.event_id,
-            identity=identity, dedupe_mode=dedupe_mode)
+            identity=identity, dedupe_mode=dedupe_mode,
+            routing=routing)
 
 
 #: canonical order for naming material gaps (stable reasons/journals)
@@ -691,6 +1000,28 @@ _ATTEMPT_CLASSES = ("mission", "job")
 #: producer classes whose pages are only actionable with their
 #: impact stated — a market/money alert without impact is noise.
 _IMPACT_CLASSES = ("trading", "finance")
+
+
+def _candidate_routing(candidate: Any) -> dict[str, Any]:
+    """The routing a decision records for one candidate (Pass 3).
+
+    Derived from the candidate alone: its audience, and its
+    channel policy resolved to a concrete channel list — empty
+    when the policy is "all owner channels" (the notifier's only
+    destination is the owner's channels; ``channels=`` at publish
+    time is the only restriction a producer can request today).
+    """
+    policy = str(getattr(candidate, "channel_policy", "")
+                 or "all-owner-channels")
+    channels: list[str] = []
+    if policy.startswith("channels:"):
+        channels = [c.strip() for c in policy[len("channels:"):]
+                    .split(",") if c.strip()]
+    return {
+        "audience": str(getattr(candidate, "audience", "") or "owner"),
+        "channel_policy": policy,
+        "channels": channels,
+    }
 
 
 def _asserted_fact(candidate: Any) -> str:

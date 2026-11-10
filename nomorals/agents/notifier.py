@@ -30,7 +30,8 @@ __all__ = ["Notifier", "notify", "notify_doc", "resolve_gateway",
            "resolve_brain_gate",
            "DeliveryOutcome",
            "ATTEMPT_SENT", "ATTEMPT_FAILED", "ATTEMPT_SKIPPED",
-           "STATE_DIGEST", "STATE_LOGGED", "STATE_HELD_BRAIN"]
+           "STATE_DIGEST", "STATE_LOGGED", "STATE_HELD_BRAIN",
+           "STATE_SUPERSEDED"]
 
 
 def resolve_gateway(context: Any) -> Any | None:
@@ -98,6 +99,13 @@ STATE_DISABLED = "disabled"        # proactive master/kind switch off
 STATE_MUTED = "muted"              # feature flag ``notifier`` off
 STATE_DEDUPED = "deduped"
 STATE_DEAD = "dead"                # dead-letter: delivery retries exhausted
+#: Doc 15 Pass 3: retired at release by the freshness recheck —
+#: a later record superseded this row's fact before it could be
+#: delivered, so it is never sent.  Terminal like ``dead`` (the
+#: redelivery queue never picks it up), but the content stays
+#: readable and the supersession is journaled on the candidate's
+#: release record — never a silent drop.
+STATE_SUPERSEDED = "superseded"
 #: alert-policy tiers (Pass 7): the row is the whole delivery — a
 #: DIGEST row waits to be read batched on /notify, a LOGGED row is
 #: silent housekeeping kept only as journal evidence.  Both are
@@ -375,6 +383,18 @@ class Notifier:
         (RULE-LEGACY-PASSTHROUGH — the pass-7 pin).  Omitting hints
         no longer bypasses the decision.  Disable the whole
         machinery per-instance with ``observe_candidates = False``.
+
+        Doc 15 Pass 3: the decision also records its routing
+        (audience + channel policy) on the candidate's journal row,
+        and every terminal outcome of this publish — sent, failed,
+        pending, held, digested, muted, suppressed, deduped — is
+        acked onto that same row (``AlertPolicy.record_delivery``),
+        so the record an inspection reads is decision → routing →
+        delivery ack, with release-time freshness verdicts appended
+        later by :meth:`redeliver` / the digest fold.  A publish
+        whose decision machinery failed (or is disabled) stores its
+        row exactly as before and simply has no ack — the bound is
+        named, never papered over.
         """
         doc_json = ""
         if doc is not None:
@@ -422,6 +442,8 @@ class Notifier:
                 # decision record above; no notification row (a
                 # /notify surface flooded with ticks is the failure
                 # this pass exists to end), no push.
+                self._ack_decision(decision, "suppressed",
+                                   detail=decision.reason)
                 return {"id": "", "kind": kind, "title": title,
                         "delivered": False, "suppressed": True,
                         "tier": decision.tier,
@@ -430,6 +452,8 @@ class Notifier:
             if decision.deduped:
                 # RULE-DEDUP-SEMANTIC: the same event — reworded or
                 # not — already paged under this identity.
+                self._ack_decision(decision, "deduped",
+                                   detail=decision.reason)
                 return {"id": "", "kind": kind, "title": title,
                         "delivered": False, "deduped": True,
                         "delivery_state": STATE_DEDUPED,
@@ -449,6 +473,9 @@ class Notifier:
                 result["subject"] = decision.subject
                 if decision.material_gaps:
                     result["material_gaps"] = list(decision.material_gaps)
+                self._ack_decision(decision, state,
+                                   nid=str(result.get("id") or ""),
+                                   detail=decision.reason)
                 return result
             # TIER_PAGE: deliver as today.  Only a recurrence
             # page forces past dedupe (the repeat IS the signal);
@@ -486,6 +513,10 @@ class Notifier:
                 pass  # semantic dedupe already adjudicated above
             elif not force and self._is_duplicate(kind, title):
                 # same alert already went out in the window — skip, don't re-spam
+                self._ack_decision(
+                    decision, "deduped",
+                    detail="legacy (kind, title) dedupe — the same "
+                           "alert already went out in the window")
                 return {"id": "", "kind": kind, "title": title,
                         "delivered": False, "deduped": True,
                         "delivery_state": STATE_DEDUPED}
@@ -500,6 +531,10 @@ class Notifier:
                                          delivery_state=STATE_MUTED,
                                          doc_json=doc_json)
                     result["attempts"] = []
+                    self._ack_decision(
+                        decision, STATE_MUTED,
+                        nid=str(result.get("id") or ""),
+                        detail="notifier feature flag off")
                     return result
                 if proactive_check:
                     gate = proactive_gate(self.context, kind)
@@ -508,6 +543,10 @@ class Notifier:
                                              delivery_state=gate,
                                              doc_json=doc_json)
                         result["attempts"] = []
+                        self._ack_decision(
+                            decision, gate,
+                            nid=str(result.get("id") or ""),
+                            detail="proactive gate hold at publish")
                         return result
                     # Competence gate (brain_gate): a proactive push
                     # is an unsolicited send to the owner's own chats.
@@ -529,6 +568,10 @@ class Notifier:
                                 delivery_state=STATE_HELD_BRAIN,
                                 doc_json=doc_json)
                             result["attempts"] = []
+                            self._ack_decision(
+                                decision, STATE_HELD_BRAIN,
+                                nid=str(result.get("id") or ""),
+                                detail="brain competence gate hold")
                             return result
         nid = new_id()
         if self.gateway is None:
@@ -541,6 +584,8 @@ class Notifier:
                 attempts = [self._termux_attempt(title)]
                 self._record_attempts(nid, attempts)
                 result["attempts"] = attempts
+                self._ack_decision(decision, STATE_SENT, nid=nid,
+                                   channel="termux")
                 return result
             # next_retry_at = 0: the first redelivery attempt is due
             # immediately (a hot-starting platform should drain the queue
@@ -549,6 +594,9 @@ class Notifier:
                                  delivery_state=STATE_PENDING, nid=nid,
                                  doc_json=doc_json)
             result["attempts"] = []
+            self._ack_decision(decision, STATE_PENDING, nid=nid,
+                               detail="no live gateway — parked for "
+                                      "redelivery")
             return result
         outcome = self._deliver(kind, title, body, channels=channels,
                                 output_kind=output_kind,
@@ -561,6 +609,8 @@ class Notifier:
                                  doc_json=doc_json)
             self._record_attempts(nid, outcome.attempts)
             result["attempts"] = outcome.attempts
+            self._ack_decision(decision, STATE_SENT, nid=nid,
+                               channel=outcome.first_channel)
             return result
         # No owner chat channel is live in this session (the Termux
         # reality: Discord banned the token, the Telegram user session
@@ -574,6 +624,8 @@ class Notifier:
             attempts = outcome.attempts + [self._termux_attempt(title)]
             self._record_attempts(nid, attempts)
             result["attempts"] = attempts
+            self._ack_decision(decision, STATE_SENT, nid=nid,
+                               channel="termux")
             return result
         if not reached:
             _log.warning("notifier: %r reached 0 chat channels%s", title,
@@ -586,6 +638,10 @@ class Notifier:
                              doc_json=doc_json)
         self._record_attempts(nid, outcome.attempts)
         result["attempts"] = outcome.attempts
+        self._ack_decision(
+            decision, state, nid=nid,
+            detail=("" if reached else
+                    "no owner channel reached — redelivery queued"))
         return result
 
     def publish_doc(self, kind: str, doc: Any, **kw: Any) -> dict[str, Any]:
@@ -639,6 +695,36 @@ class Notifier:
             record_failure("notifier.decide_publish", exc)
             return None
 
+    def _ack_decision(self, decision: Any, state: str, *,
+                      nid: str = "", channel: str = "",
+                      detail: str = "") -> None:
+        """Ack one publish's delivery outcome onto its candidate
+        journal row (Doc 15 P3 — the delivery half of the decision
+        record, G8's notification side).
+
+        No-ops when there is no decision to ack against: the
+        decision machinery was disabled for this instance, it
+        failed (the publish then followed the historical path —
+        its row simply carries no ack), or the decision came from
+        the hinted-only legacy path, which journals no candidate.
+        Never raises: an ack failure is recorded and the delivery
+        that already happened stands.
+        """
+        if decision is None or self.db is None:
+            return
+        event_id = str(getattr(decision, "candidate_id", "") or "")
+        if not event_id:
+            return
+        try:
+            from .alert_policy import AlertPolicy
+
+            AlertPolicy.record_delivery(
+                self.db, event_id, state=state,
+                notification_id=str(nid or ""), channel=channel,
+                detail=detail)
+        except Exception as exc:  # noqa: BLE001 - acks never break sends
+            record_failure("notifier.ack_decision", exc)
+
     @staticmethod
     def _termux_attempt(title: str) -> dict[str, Any]:
         return {"platform": "termux", "chat_id": "", "source": "",
@@ -652,15 +738,17 @@ class Notifier:
         Alert-policy DIGEST/LOG rows never "went out", so they do not
         count as the alert having fired — a subject whose first
         instances logged silently must still be able to page when the
-        policy escalates it inside the window.
+        policy escalates it inside the window.  Superseded rows
+        (Pass 3) never went out either, for the same reason.
         """
         try:
             cutoff = time.time() - self.DEDUPE_WINDOW_SECONDS
             row = self.db.query_one(
                 "SELECT id FROM notifications WHERE kind = ? AND title = ? "
                 "AND created_at > ? AND COALESCE(delivery_state, '') "
-                "NOT IN (?, ?)",
-                (kind, title, cutoff, STATE_DIGEST, STATE_LOGGED),
+                "NOT IN (?, ?, ?)",
+                (kind, title, cutoff, STATE_DIGEST, STATE_LOGGED,
+                 STATE_SUPERSEDED),
             )
             return row is not None
         except Exception as exc:  # noqa: BLE001 - dedupe is best-effort
@@ -1221,7 +1309,7 @@ class Notifier:
                 "SELECT * FROM notifications WHERE delivered = 0 "
                 "AND COALESCE(delivery_state, '') NOT IN "
                 "('disabled', 'deduped', 'muted', 'dead', 'digest', "
-                "'logged') "
+                "'logged', 'superseded') "
                 "ORDER BY created_at ASC LIMIT 20"
             )
         except Exception:  # noqa: BLE001
@@ -1259,11 +1347,22 @@ class Notifier:
         surfaces in exactly one briefing.  Pre-F7 databases (no
         ``digest_folded_at`` column) return []: folding is an F7
         behaviour and never guesses at an unmigrated store.  Never
-        raises."""
+        raises.
+
+        Doc 15 Pass 3: this read is the digest tier's release seam
+        — the moment digest content is chosen for a delivered
+        briefing — so it passes the freshness recheck first
+        (:meth:`_digest_release_filter`): an item whose fact a
+        later record superseded is retired unsent and never folds
+        as stale "waiting" text, and when every item is retired
+        the fold is empty and no digest section is sent at all
+        (acceptance scenario 5).  The moot-deadline rule does not
+        apply here: a digest item is already a digest-level note.
+        """
         if self.db is None:
             return []
         try:
-            return self.db.query(
+            rows = self.db.query(
                 "SELECT * FROM notifications WHERE delivery_state = ? "
                 "AND COALESCE(digest_folded_at, 0) = 0 "
                 "ORDER BY created_at ASC LIMIT ?",
@@ -1272,13 +1371,79 @@ class Notifier:
         except Exception as exc:  # noqa: BLE001 - pre-F7 DBs have no fold column
             record_failure("notifier.digest_unfolded", exc)
             return []
+        return self._digest_release_filter(rows, time.time())
+
+    def _digest_release_filter(self, rows: list[dict[str, Any]],
+                               now: float) -> list[dict[str, Any]]:
+        """Retire superseded digest rows before a fold (Pass 3).
+
+        Per row: linked candidate + a superseding later record →
+        the row leaves the digest queue in the ``superseded``
+        state (guarded on still being an unfolded digest row, so
+        a row a racing reader already folded is untouched) and
+        the retirement is journaled on its release record.  Every
+        other row — fresh, unverifiable, unlinked — folds exactly
+        as before; a recheck failure on a row keeps the row (a
+        filter bug must never eat digest content).  Never raises.
+        """
+        kept: list[dict[str, Any]] = []
+        for row in rows:
+            try:
+                fresh = self._release_freshness(row, now)
+                if fresh.get("action") == "supersede" \
+                        and fresh.get("event_id"):
+                    retired = False
+                    try:
+                        with self.db.transaction():
+                            cur = self.db.execute(
+                                "UPDATE notifications SET "
+                                "delivery_state = ? WHERE id = ? "
+                                "AND delivery_state = ? AND "
+                                "COALESCE(digest_folded_at, 0) = 0",
+                                (STATE_SUPERSEDED, row["id"],
+                                 STATE_DIGEST))
+                            retired = int(
+                                getattr(cur, "rowcount", 0) or 0) > 0
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure(
+                            "notifier.digest_unfolded.retire", exc)
+                    if retired:
+                        from .alert_policy import AlertPolicy
+
+                        AlertPolicy.record_release(
+                            self.db, str(fresh["event_id"]),
+                            path="digest-fold", verdict="superseded",
+                            ack="superseded",
+                            notification_id=str(row.get("id") or ""),
+                            age_s=fresh.get("age_s"),
+                            superseded_by=str(
+                                fresh.get("superseded_by") or ""),
+                            detail=str(fresh.get("detail") or ""))
+                    # retired here or state-moved elsewhere: the
+                    # row does not fold as fresh content either way
+                    continue
+                kept.append(row)
+            except Exception as exc:  # noqa: BLE001 - keep the row
+                record_failure("notifier.digest_unfolded.recheck", exc)
+                kept.append(row)
+        return kept
 
     def mark_digest_folded(self, ids: Any) -> int:
         """Mark DIGEST rows folded into a delivered briefing (F7).
 
         Only rows still in the digest state are touched — a row the
         owner already saw another way is never re-marked.  Returns
-        the number of rows marked.  Never raises."""
+        the number of rows marked.  Never raises.
+
+        Doc 15 Pass 3: each row actually marked also gets its
+        delivery ack on the candidate's record (release path
+        ``digest-fold``, ack ``digest-delivered``) — the digest
+        tier's half of the decision → release → ack chain.  The
+        freshness verdict is re-read at fold time: a superseding
+        record that landed between the fold's composition and its
+        confirmed delivery is named on the record rather than
+        hidden by a retroactive "fresh".
+        """
         if self.db is None:
             return 0
         clean = [str(i) for i in (ids or []) if i]
@@ -1287,17 +1452,63 @@ class Notifier:
         try:
             with self.db.transaction():
                 marked = 0
+                marked_ids: list[str] = []
                 for nid in clean:
                     cur = self.db.execute(
                         "UPDATE notifications SET digest_folded_at = ? "
                         "WHERE id = ? AND delivery_state = ? "
                         "AND COALESCE(digest_folded_at, 0) = 0",
                         (time.time(), nid, STATE_DIGEST))
-                    marked += int(getattr(cur, "rowcount", 0) or 0)
-            return marked
+                    hit = int(getattr(cur, "rowcount", 0) or 0)
+                    marked += hit
+                    if hit:
+                        marked_ids.append(nid)
         except Exception as exc:  # noqa: BLE001 - pre-F7 DBs have no fold column
             record_failure("notifier.mark_digest_folded", exc)
             return 0
+        for nid in marked_ids:
+            self._ack_digest_folded(nid)
+        return marked
+
+    def _ack_digest_folded(self, nid: str) -> None:
+        """Journal one folded digest row's delivery ack (Pass 3).
+
+        The verdict is re-read at fold time (see
+        :meth:`mark_digest_folded`).  Unlinked rows (stored
+        without the decision machinery) get no ack — the named
+        bound.  Never raises; ack bookkeeping never changes the
+        fold's own result."""
+        try:
+            from .alert_policy import AlertPolicy
+
+            cand_row = AlertPolicy.candidate_for_notification(
+                self.db, nid)
+            if cand_row is None:
+                return
+            sup = AlertPolicy.superseding_record(self.db, cand_row)
+            cand = cand_row.get("candidate")
+            cand = cand if isinstance(cand, dict) else {}
+            now = time.time()
+            age = max(0.0, now - float(cand.get("event_time")
+                                       or cand_row.get("ts") or now))
+            if sup is not None:
+                verdict = "superseded"
+                detail = ("folded into a delivered briefing; a "
+                          "later record superseded the fact after "
+                          "the fold was composed — the record "
+                          "states the order honestly")
+            else:
+                verdict = "fresh"
+                detail = "folded into a delivered briefing"
+            AlertPolicy.record_release(
+                self.db, str(cand_row.get("event_id") or ""),
+                path="digest-fold", verdict=verdict,
+                ack="digest-delivered", notification_id=nid,
+                age_s=age,
+                superseded_by=(sup["event_id"] if sup else ""),
+                detail=detail)
+        except Exception as exc:  # noqa: BLE001 - bookkeeping only
+            record_failure("notifier.mark_digest_folded.ack", exc)
 
     def alert_journal(self, limit: int = 50, kind: str = "",
                       subject: str = "") -> list[dict[str, Any]]:
@@ -1445,8 +1656,193 @@ class Notifier:
                 record_failure("notifier._due_redeliveries.fallback", exc)
                 return []
 
+    # ── Pass 3: freshness recheck before release ─────────────────
+
+    def _release_freshness(self, row: dict[str, Any],
+                           now: float) -> dict[str, Any]:
+        """Recheck one due row's fact before it is released (P3).
+
+        Returns a verdict dict: ``action`` — ``"deliver"`` (release
+        it), ``"supersede"`` (retire it: a later record moved the
+        fact on) or ``"demote"`` (its action deadline passed while
+        held: it may only surface as a digest-level note, never as
+        a live page); ``candidate_row`` — the row's decision
+        record, or None when the notification was stored without
+        one (decision machinery disabled or failed, or a direct
+        store that bypassed publish — missions progress's
+        quiet-hours notes are the live example): such rows have
+        NO recheck source, are released exactly as before, and get
+        no verdict record — the bound is stated, not smoothed
+        over; ``verdict`` / ``age_s`` / ``superseded_by`` /
+        ``detail`` / ``channels`` feed the release record and the
+        send (delivery follows the recorded channels).
+
+        The rules, named:
+
+        * **RULE-RECHECK-SUPERSEDED** — the candidate journal
+          holds a later record for the same subject asserting a
+          different revision or outcome
+          (:meth:`AlertPolicy.superseding_record`): the held fact
+          is stale, and releasing it would deliver yesterday's
+          state as today's news.  Retire it instead.
+        * **RULE-RECHECK-MOOT-DEADLINE** — the candidate asserts
+          an owner action (``action_needed``) whose parseable
+          deadline has passed while the item sat held/failed: the
+          action window is gone, so the item demotes to the
+          digest tier rather than paging as if the action were
+          still live.  An unparseable deadline never fires this
+          rule (whose clock it names is unknowable —
+          :func:`parse_deadline` refuses to guess one).
+        * **RULE-RECHECK-AGE-HONEST** — when the recheck ran but
+          the candidate carries no subject, no supersession check
+          is possible: the release proceeds (nothing contradicts
+          the fact) with verdict ``"unverifiable"`` and the fact's
+          age on the record.  A subject-bearing candidate with no
+          later contradicting record is ``"fresh"`` — fresh *as
+          far as the journal knows*, the journal being the only
+          freshness source legacy candidates honestly have: their
+          ``observed_at == event_time`` anchor proves when the
+          system last spoke, never when the world last changed.
+
+        No producer-provided recheck seam exists to consult —
+        candidates are durable records, a callback cannot persist
+        — so the journal-derived recheck above is the honest one.
+        Never raises: a recheck failure is recorded and the row
+        releases on the historical path; the recheck must never
+        lose an alert either.
+        """
+        out: dict[str, Any] = {
+            "action": "deliver", "candidate_row": None,
+            "event_id": "", "verdict": "", "age_s": None,
+            "superseded_by": "", "detail": "", "channels": None,
+        }
+        if self.db is None:
+            return out
+        try:
+            from .alert_policy import AlertPolicy
+            from .report_candidate import parse_deadline
+
+            cand_row = AlertPolicy.candidate_for_notification(
+                self.db, str(row.get("id") or ""))
+            if cand_row is None:
+                return out
+            out["candidate_row"] = cand_row
+            out["event_id"] = str(cand_row.get("event_id") or "")
+            out["channels"] = AlertPolicy.recorded_channels(cand_row)
+            cand = cand_row.get("candidate")
+            cand = cand if isinstance(cand, dict) else {}
+            event_time = float(cand.get("event_time")
+                               or cand_row.get("ts") or now)
+            out["age_s"] = max(0.0, now - event_time)
+            sup = AlertPolicy.superseding_record(self.db, cand_row)
+            if sup is not None:
+                out["action"] = "supersede"
+                out["verdict"] = "superseded"
+                out["superseded_by"] = sup["event_id"]
+                moved = (f"outcome {sup['outcome']}"
+                         if sup["outcome"]
+                         else f"revision {sup['current_revision']}")
+                out["detail"] = (
+                    "release suppressed — a later record for this "
+                    f"subject asserts {moved}; the held text is "
+                    "stale")
+                return out
+            deadline_raw = str(cand.get("deadline") or "")
+            deadline = (parse_deadline(deadline_raw)
+                        if deadline_raw else None)
+            if deadline is not None and now > deadline \
+                    and cand.get("action_needed") is True:
+                out["action"] = "demote"
+                out["verdict"] = "moot-deadline"
+                out["detail"] = (
+                    f"action deadline {deadline_raw} passed while "
+                    "held — demoted to the digest tier rather than "
+                    "paged as a live action")
+                return out
+            subject = str(cand.get("subject") or "")
+            out["verdict"] = "fresh" if subject else "unverifiable"
+            notes = []
+            if deadline_raw and deadline is None:
+                notes.append("deadline unparseable — moot rule not "
+                             "applied")
+            if not subject:
+                notes.append("candidate carries no subject — no "
+                             "supersession check possible")
+            out["detail"] = "; ".join(notes)
+            return out
+        except Exception as exc:  # noqa: BLE001 - recheck never loses an alert
+            record_failure("notifier.release_freshness", exc)
+            out["action"] = "deliver"
+            out["candidate_row"] = None
+            out["event_id"] = ""
+            return out
+
+    def _retire_release(self, row: dict[str, Any],
+                        fresh: dict[str, Any]) -> None:
+        """Retire a due row the freshness recheck refused to
+        release: superseded rows leave the queue in their own
+        terminal state; moot-deadline rows demote to the digest
+        tier (from where the fold rechecks them again).  The
+        refusal is journaled on the candidate's release record
+        with the superseding fact named — never a silent drop.
+        """
+        from .alert_policy import AlertPolicy
+
+        if fresh.get("action") == "supersede":
+            new_state, ack = STATE_SUPERSEDED, "superseded"
+        else:
+            new_state, ack = STATE_DIGEST, "demoted-to-digest"
+        try:
+            with self.db.transaction():
+                self.db.execute(
+                    "UPDATE notifications SET delivery_state = ? "
+                    "WHERE id = ?", (new_state, row["id"]))
+        except Exception as exc:  # noqa: BLE001 - pre-migration DBs
+            record_failure("notifier.retire_release", exc)
+        if fresh.get("event_id"):
+            AlertPolicy.record_release(
+                self.db, str(fresh["event_id"]), path="redelivery",
+                verdict=str(fresh.get("verdict") or ""), ack=ack,
+                notification_id=str(row.get("id") or ""),
+                age_s=fresh.get("age_s"),
+                superseded_by=str(fresh.get("superseded_by") or ""),
+                detail=str(fresh.get("detail") or ""))
+
+    def _record_release_outcome(self, row: dict[str, Any],
+                                fresh: dict[str, Any]) -> None:
+        """Journal a release that WAS attempted: the freshness
+        verdict it passed under, plus the delivery ack that
+        followed (``sent`` / ``dead`` / ``failed``), read back
+        from the row's resulting state.  Rows without a candidate
+        record get no release record — the named unverifiable
+        bound.  Never raises."""
+        if not fresh.get("event_id") or self.db is None:
+            return
+        try:
+            from .alert_policy import AlertPolicy
+
+            current = self.db.query_one(
+                "SELECT delivered, delivery_state FROM notifications "
+                "WHERE id = ?", (row["id"],))
+            state = str((current or {}).get("delivery_state") or "")
+            if current and current.get("delivered"):
+                ack = STATE_SENT
+            elif state == STATE_DEAD:
+                ack = STATE_DEAD
+            else:
+                ack = STATE_FAILED
+            AlertPolicy.record_release(
+                self.db, str(fresh["event_id"]), path="redelivery",
+                verdict=str(fresh.get("verdict") or ""), ack=ack,
+                notification_id=str(row.get("id") or ""),
+                age_s=fresh.get("age_s"),
+                detail=str(fresh.get("detail") or ""))
+        except Exception as exc:  # noqa: BLE001 - bookkeeping only
+            record_failure("notifier.record_release_outcome", exc)
+
     def _redeliver_row(self, row: dict[str, Any], now: float,
-                       *, consume_attempt: bool) -> bool:
+                       *, consume_attempt: bool,
+                       channels: list[str] | None = None) -> bool:
         """Attempt one redelivery.  Returns True when it landed.
 
         Every attempt burns one retry and reschedules with exponential
@@ -1454,6 +1850,12 @@ class Notifier:
         only reaches this method once the hold has ended (see
         :meth:`redeliver`) — but a send attempted after the hold is a
         real attempt and counts toward the dead-letter cap.
+
+        ``channels`` (Pass 3) is the channel restriction the
+        decision recorded for this row, resolved by the caller from
+        the candidate journal: delivery follows the record, not a
+        send-time re-derivation.  None (unrecorded rows) keeps the
+        historical all-owner-channels behaviour.
         """
         attempts = int(row.get("retry_count") or 0)
         if consume_attempt:
@@ -1475,7 +1877,8 @@ class Notifier:
                     record_failure("notifier._redeliver_row.doc", exc)
                     doc = None
             outcome = self._deliver(row["kind"], row.get("title", ""),
-                                    row.get("body", ""), doc=doc)
+                                    row.get("body", ""), doc=doc,
+                                    channels=channels)
         # record this pass's per-channel attempts against the row, so
         # /notify shows every retry's channel detail, not just the last.
         self._record_attempts(str(row.get("id") or ""), outcome.attempts)
@@ -1542,6 +1945,15 @@ class Notifier:
         :data:`DELIVERY_MAX_ATTEMPTS` are dead-lettered
         (``delivery_state = "dead"``) instead of retried forever.
         Never raises.
+
+        Doc 15 Pass 3: every release — a quiet-hours hold ending or
+        a retry falling due — passes the freshness recheck
+        (:meth:`_release_freshness`) before anything is sent.  A
+        row whose fact was superseded while it waited is retired
+        unsent (``superseded``); a row whose action deadline went
+        moot demotes to the digest tier; a row that passes is sent
+        under the channels its decision recorded, and the release
+        (verdict + ack) is journaled on its candidate record.
         """
         sent = 0
         now = time.time()
@@ -1579,16 +1991,32 @@ class Notifier:
                             _log.debug("notifier: could not park held row "
                                        "as disabled", exc_info=True)
                         continue
-                    # Quiet hours ended: deliver now.  The hold itself
-                    # consumed no attempt, but a failed send here is a
-                    # real attempt — it counts toward the dead-letter
-                    # cap, else a dead channel retries every sweep
-                    # forever.
-                    if self._redeliver_row(row, now, consume_attempt=True):
+                    # Quiet hours ended — but release is a fresh
+                    # decision (Pass 3): the fact is rechecked
+                    # before the held text may go out.
+                    fresh = self._release_freshness(row, now)
+                    if fresh["action"] != "deliver":
+                        self._retire_release(row, fresh)
+                        continue
+                    # The hold itself consumed no attempt, but a
+                    # failed send here is a real attempt — it counts
+                    # toward the dead-letter cap, else a dead channel
+                    # retries every sweep forever.
+                    if self._redeliver_row(
+                            row, now, consume_attempt=True,
+                            channels=fresh["channels"]):
                         sent += 1
+                    self._record_release_outcome(row, fresh)
                     continue
-                if self._redeliver_row(row, now, consume_attempt=True):
+                fresh = self._release_freshness(row, now)
+                if fresh["action"] != "deliver":
+                    self._retire_release(row, fresh)
+                    continue
+                if self._redeliver_row(
+                        row, now, consume_attempt=True,
+                        channels=fresh["channels"]):
                     sent += 1
+                self._record_release_outcome(row, fresh)
             except Exception:  # noqa: BLE001 - one bad row must not stop the queue
                 _log.debug("notifier: redelivery row errored", exc_info=True)
         return sent

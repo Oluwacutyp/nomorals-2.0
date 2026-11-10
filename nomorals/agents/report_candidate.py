@@ -32,8 +32,18 @@ Field map against the doc's required candidate fields:
   ``current_revision``, ``change_evidence``, ``event_time``,
   ``observed_at``.  For legacy calls the observation *is* the
   publish, so ``observed_at == event_time`` — the anchor exists but
-  is weak, which is exactly what the freshness recheck (Pass 3)
-  will have to reckon with.
+  is weak.  Pass 3's reckoning with it, stated plainly: the legacy
+  anchor can prove *when the system last spoke* about a subject,
+  never when the world last changed — so the release recheck does
+  not trust the anchor as freshness evidence at all.  It re-reads
+  the candidate journal's own later records for the same subject
+  (a different revision or outcome recorded since *is* fresher
+  truth), and where a held item's subject has no later record —
+  or the item carries no subject at all — the release is journaled
+  with its age and an ``unverifiable`` verdict rather than a
+  pretended freshness pass (see :mod:`.alert_policy`
+  :meth:`AlertPolicy.superseding_record` and the notifier's
+  release path).
 * actual outcome, useful result/artifact refs, impact and
   uncertainty → ``outcome`` (the :mod:`..core.result_contract`
   vocabulary), ``result_refs``, ``impact``, ``uncertainty``.
@@ -81,6 +91,7 @@ from .notify_producers import producer_class_for_module
 __all__ = [
     "ReportCandidate", "build_legacy_candidate", "caller_module",
     "semantic_identity", "is_unchanged_tick",
+    "parse_deadline", "deadline_epoch",
     "REPORT_CLASS_PROACTIVE", "URGENCY_CRITICAL",
 ]
 
@@ -239,6 +250,48 @@ def is_unchanged_tick(candidate: ReportCandidate) -> bool:
     if candidate.current_revision and not candidate.prev_revision:
         return not candidate.change_evidence
     return False
+
+
+def parse_deadline(value: Any) -> float | None:
+    """Best-effort epoch seconds for a deadline value, or None.
+
+    Accepts an epoch number (or a numeric string) and an ISO-8601
+    string carrying an explicit zone.  A *naive* ISO string — no
+    zone — returns None: whose clock it names is unknowable, and
+    guessing one would manufacture verdicts (Pass 3's
+    RULE-RECHECK-MOOT-DEADLINE simply does not apply to it).
+    Unparseable values return None too.  Callers that need to tell
+    "no deadline" from "unparseable deadline" compare against the
+    raw value, which stays on the candidate untouched.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        from datetime import datetime
+
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.timestamp()
+
+
+def deadline_epoch(candidate: ReportCandidate) -> float | None:
+    """The candidate's deadline as epoch seconds (see
+    :func:`parse_deadline` for what honestly parses), or None."""
+    return parse_deadline(candidate.deadline)
 
 
 def caller_module() -> str:
