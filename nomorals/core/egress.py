@@ -240,11 +240,18 @@ class EgressToken:
         timeout: float = 30.0,
         allow_private_ips: bool = False,
         policy: Policy | None = None,
+        registry: Any = None,
     ) -> "EgressToken":
-        """Mint a token for ``task_id`` with a fresh :class:`TimedGrant`."""
+        """Mint a token for ``task_id`` with a fresh :class:`TimedGrant`.
+
+        The grant's issuance lands in the grant registry (doc 20
+        P7) with source ``egress`` and this task as subject, so
+        the token is revocable by id through the registry / the
+        immune police — not only by whoever holds the token."""
         grant = (policy or Policy()).issue_grant(
             "net.out", ttl_s=ttl_s, actor=task_id,
-            note=f"egress for task {task_id}")
+            note=f"egress for task {task_id}",
+            source="egress", subject=task_id, registry=registry)
         return cls(task_id, grant, domains=tuple(domains),
                    path_prefixes=tuple(path_prefixes),
                    max_requests=max_requests, max_bytes=max_bytes,

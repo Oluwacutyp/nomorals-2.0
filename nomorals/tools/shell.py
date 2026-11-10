@@ -43,6 +43,7 @@ from typing import Any
 
 from ..core.errors import SandboxError, ToolError
 from ..core.logging_setup import get_logger
+from ..core.own_processes import mark_spawned_exited, register_spawned
 from ..core.policy import Capability
 
 __all__ = ["SandboxLimits", "register", "run_sandboxed"]
@@ -280,6 +281,15 @@ def run_sandboxed(
     except OSError as exc:
         raise SandboxError(f"could not start sandbox ({chosen}): {exc}") from exc
 
+    # Doc 20 P7: the sandbox child is one of Devon's own spawned
+    # processes — registered (fail-open; the record never breaks
+    # the run) so the immune police's fenced kill can name it if
+    # it ever runs away, and marked exited when it ends.
+    proc_row = register_spawned(
+        process.pid, label="sandboxed command",
+        spawned_by="tools.shell.run_sandboxed",
+        argv0=str(argv[0]) if argv else "")
+
     timed_out = False
     try:
         stdout, stderr = process.communicate(input=stdin, timeout=timeout)
@@ -287,6 +297,8 @@ def run_sandboxed(
         timed_out = True
         _kill_tree(process)
         stdout, stderr = process.communicate()
+    mark_spawned_exited(
+        proc_row, note="timeout kill by the sandbox" if timed_out else "")
 
     elapsed = time.perf_counter() - started
     return {

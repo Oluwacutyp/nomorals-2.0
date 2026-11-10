@@ -65,16 +65,29 @@ def board_rows(db: Any, *, registry: Any = None,
                tool_registry: Any = None, coremind: Any = None,
                journal: Any = None, immune_states: Any = None,
                antibody_stores: Any = None, baseline: Any = None,
+               grant_registry: Any = None,
                limit: int = 50) -> dict[str, Any]:
     """Enumerate the board: every execution + healing ticket, live
     first. Each row carries its full projected ticket, so detail and
     stop act on exactly what the board showed."""
+    if grant_registry is None:
+        # Doc 20 P7: the board is the production reader of the
+        # grant registry (a disarm ticket's evidence cites the
+        # registry's record). Fail-open: an unreadable registry
+        # degrades to the pre-P7 projection, never a broken board.
+        try:
+            from ..core.grant_registry import default_grant_registry
+
+            grant_registry = default_grant_registry()
+        except Exception:  # noqa: BLE001 - reader degrades, board lives
+            grant_registry = None
     run_cov = ticket_coverage(
         db, registry=registry, tool_registry=tool_registry,
         coremind=coremind, limit=limit)
     heal_cov = healing_ticket_coverage(
         journal=journal, immune_states=immune_states,
         antibody_stores=antibody_stores, baseline=baseline,
+        grant_registry=grant_registry,
         limit=limit)
     rows: list[dict[str, Any]] = []
     for entry in run_cov.get("operations_detail") or []:
@@ -93,7 +106,8 @@ def board_rows(db: Any, *, registry: Any = None,
             continue
         ticket = healing_ticket_for(
             ref, journal=journal, immune_states=immune_states,
-            antibody_stores=antibody_stores, baseline=baseline)
+            antibody_stores=antibody_stores, baseline=baseline,
+            grant_registry=grant_registry)
         if not ticket.get("found", True):
             continue
         rows.append(_row(ref, "heal", ticket))

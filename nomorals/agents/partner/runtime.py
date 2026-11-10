@@ -4280,6 +4280,25 @@ class PartnerRuntime(
 
         return _sink
 
+    def _immune_police_fns(self):
+        """The immune police's teeth (doc 20 P7): the grant
+        registry's revoke-by-id and the own-process registry's
+        fenced kill, injected into the immune surface at this
+        composition point — immune/ imports no core module
+        (layering), and injection is its pattern for every
+        cross-layer capability (the event sink above is the
+        precedent). Fail-open: a wiring failure returns
+        (None, None) and the surface keeps its honest unwired
+        receipts rather than breaking."""
+        try:
+            from ...core.grant_registry import police_revoke_fn
+            from ...core.own_processes import police_kill_fn
+
+            return police_revoke_fn(), police_kill_fn()
+        except Exception as e:  # noqa: BLE001 - unwired beats broken
+            record_failure("runtime.PartnerRuntime._immune_police_fns", e)
+            return None, None
+
     def _is_operator(self, message: ChatMessage) -> bool:
         # Surface rule (owner's model, 2026-10-20): operator power is a
         # property of the surface, not just the person. On the gated
@@ -6813,6 +6832,7 @@ class PartnerRuntime(
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
             from ...immune.chat import control_immune
+            _revoke_fn, _kill_fn = self._immune_police_fns()
             return control_immune(
                 command.tail or arg,
                 context=self.context,
@@ -6821,6 +6841,8 @@ class PartnerRuntime(
                 sender=getattr(message, "sender", "") if message else "",
                 chat_key=chat_key,
                 event_sink=self._immune_event_sink(),
+                revoke_fn=_revoke_fn,
+                kill_fn=_kill_fn,
             )
         if kind == "research":
             # Web research — swarm -> digest -> brief. Owner-only.

@@ -1100,6 +1100,9 @@ class Policy:
         ttl_s: float,
         actor: str = "",
         note: str = "",
+        source: str = "",
+        subject: str = "",
+        registry: Any = None,
     ) -> "TimedGrant":
         """Mint a time-bounded capability grant.
 
@@ -1107,6 +1110,15 @@ class Policy:
         :class:`CapabilitySet` goes. It stops granting the moment it expires
         or is revoked — a stale capability can never be reused. Issuance is
         audit-recorded.
+
+        Since doc 20 P7 the issuance ALSO lands in the grant
+        registry (:mod:`nomorals.core.grant_registry`) — the durable
+        record that makes the grant revocable BY ID later (see
+        :meth:`revoke_issued_grant`). ``source`` names the issuing
+        seam and ``subject`` who/what the grant is for; ``registry``
+        injects the record (default: the shared registry).
+        Registration is fail-open: a registry failure is logged and
+        never breaks the issuance.
         """
         grant = TimedGrant(*patterns, ttl_s=ttl_s, actor=actor, note=note,
                            clock=self._clock)
@@ -1118,6 +1130,17 @@ class Policy:
         )
         self._record(AUDIT_GRANT, decision,
                      {"grant_id": grant.grant_id, "ttl_s": ttl_s})
+        try:
+            from .grant_registry import default_grant_registry
+
+            target = registry if registry is not None \
+                else default_grant_registry()
+            target.record_issuance(
+                grant, source=source or "policy.issue_grant",
+                subject=subject)
+        except Exception:  # noqa: BLE001 - the record never breaks
+            _log.debug("grant registry issuance record failed",
+                       exc_info=True)
         return grant
 
     def revoke_grant(self, grant: "TimedGrant", *, actor: str = "",
@@ -1134,6 +1157,47 @@ class Policy:
             self._record(AUDIT_REVOKE, decision, {"grant_id": grant.grant_id})
         except Exception:  # noqa: BLE001 - revocation never raises
             _log.debug("revoke_grant failed", exc_info=True)
+
+    def revoke_issued_grant(self, grant_id: str, *, actor: str = "",
+                            note: str = "",
+                            registry: Any = None) -> dict[str, Any]:
+        """Revoke an issued grant BY ID, through the grant registry.
+
+        :meth:`revoke_grant` revokes the grant OBJECT a caller
+        holds; this is its identity-based sibling (doc 20 P7): the
+        registry resolves the id to its durable record, flips the
+        record's state, flips the live object when this process
+        holds it, and journals the event. This is the resolution of
+        the old awkwardness — the immune police's disarm rung is
+        handed an id, and until the registry existed there was no
+        honest way to act on one.
+
+        Returns the registry row. Raises
+        :class:`~nomorals.core.grant_registry.GrantNotFound` for an
+        unknown id — unlike :meth:`revoke_grant` this method does
+        NOT swallow its failure, because a revocation that names
+        nothing must never be recordable as performed (the police
+        receipt machinery turns the raise into a failed effect, in
+        words). The AUDIT_REVOKE record lands on this instance
+        exactly as :meth:`revoke_grant` records it — in production
+        mint/revoke callers build ephemeral Policy instances, so
+        the durable journal of record is the registry row + event;
+        the audit entry rides along for holders of a live instance.
+        """
+        from .grant_registry import default_grant_registry
+
+        target = registry if registry is not None \
+            else default_grant_registry()
+        row = target.revoke(grant_id, actor=actor, note=note)
+        decision = PolicyDecision(
+            allowed=True,
+            reason=note or "grant revoked",
+            capability=",".join(row.get("patterns") or []),
+            actor=actor,
+        )
+        self._record(AUDIT_REVOKE, decision,
+                     {"grant_id": grant_id, "via": "grant_registry"})
+        return row
 
     def child_grant(self, parent: CapabilitySet | "TimedGrant",
                     role: str) -> CapabilitySet | "TimedGrant":

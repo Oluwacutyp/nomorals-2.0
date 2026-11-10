@@ -88,6 +88,7 @@ from typing import Any, Protocol
 from ..codews.patch import apply_patch, check_patch, review_patch
 from ..codews.run import run_tests
 from ..core.incidents import RecoveryRecord
+from ..core.own_processes import mark_spawned_exited, register_spawned
 from ..os.update import default_health_checks
 from ..security.audit_patterns import entropy_hits, scan_text_for_secrets
 
@@ -392,8 +393,17 @@ def _subprocess_runner(argv: list, *, cwd: Path, timeout: float,
     proc = subprocess.Popen(
         argv, cwd=str(cwd), env=env, stdout=subprocess.PIPE,
         stderr=subprocess.PIPE, text=True, start_new_session=True)
+    # Doc 20 P7: this child is one of Devon's own spawned
+    # processes — registered (fail-open; the record never breaks
+    # the run) so the immune police's fenced kill can name it if
+    # it ever runs away, and marked exited when it ends.
+    proc_row = register_spawned(
+        proc.pid, label="repair pipeline command",
+        spawned_by="repair_pipeline",
+        argv0=str(argv[0]) if argv else "")
     try:
         out, err = proc.communicate(timeout=timeout)
+        mark_spawned_exited(proc_row)
         return proc.returncode, out[-1500:], err[-1500:]
     except subprocess.TimeoutExpired:
         try:
@@ -401,6 +411,7 @@ def _subprocess_runner(argv: list, *, cwd: Path, timeout: float,
         except (ProcessLookupError, PermissionError):
             proc.kill()
         out, err = proc.communicate()
+        mark_spawned_exited(proc_row, note="timeout kill by the runner")
         return 124, (out or "")[-1500:], "TIMEOUT after " + str(timeout) + "s"
 
 

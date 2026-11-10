@@ -38,6 +38,20 @@ def _cmd_immune(args: Any, context: Any) -> int:
         def sink(kind: str, payload: dict) -> None:
             organs.emit(db, "immune", "brain", kind, payload)
 
+    # Same police teeth the chat surface injects (doc 20 P7):
+    # revoke-by-id from the grant registry, the fenced
+    # own-process kill. Fail-open — an unwired console keeps its
+    # honest receipts rather than breaking.
+    revoke_fn = kill_fn = None
+    try:
+        from ...core.grant_registry import police_revoke_fn
+        from ...core.own_processes import police_kill_fn
+
+        revoke_fn, kill_fn = police_revoke_fn(), police_kill_fn()
+    except Exception:  # noqa: BLE001 - unwired beats a broken console
+        revoke_fn = kill_fn = None
+
     print(control_immune(" ".join(words), context=context, chat_key="cli",
-                         event_sink=sink))
+                         event_sink=sink,
+                         revoke_fn=revoke_fn, kill_fn=kill_fn))
     return 0

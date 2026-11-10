@@ -36,6 +36,15 @@ append-only journal in immune/feeds.py, wiring-shared): what
 those organs observe survives restart, and the tool failure
 ledger's recurrences arrive as case files through the failure
 feed, evaluated lazily on the status / casefile / feeds reads.
+Since doc 20 P7 the police has real teeth, delivered by
+INJECTION from the composition callers (the partner runtime and
+the nm CLI pass revoke_fn / kill_fn into control_immune, the
+same pattern as the event sink): disarm revokes real issued
+grants BY ID through the core grant registry, and arrest
+terminates only processes Devon herself spawned and registered
+(the core own-process registry, fenced by pid + start-token
+identity) — a pid she did not spawn is refused in words and
+left untouched.
 Police vault, fever, drift monitor, case files and
 receipts stay per-chat in-memory. The adaptive cancer gate is
 also shared: its baseline, incident state and quarantine count
@@ -246,6 +255,18 @@ class _ImmuneState:
 
             self.observations = ObservationLog()
         self.vault: List[Any] = []
+        # Doc 20 P7: the police's teeth arrive by INJECTION
+        # through control_immune (revoke_fn / kill_fn) from the
+        # composition callers — this package imports no core
+        # module (layering), and injection is its established
+        # pattern for every cross-layer capability (the event
+        # sink, the labeller). Uninjected, the police keeps its
+        # honest unwired posture: receipts record not_performed.
+        # The cancel half of arrest is never injected here by
+        # design: it names a mission, and mission cancellation
+        # belongs to the doc-18 cancellation facade's subjects,
+        # not to a process id — the receipt records that half as
+        # not performed, in words.
         self.police = Police(vault_fn=self.vault.append)
         self.fever = Fever()
         self.fever_announcements: List[str] = []
@@ -311,7 +332,9 @@ def control_immune(tail: str, context: Any = None, chat: Any = None,
                    sender_id: str = "", sender: str = "",
                    chat_key: str = "", event_sink: Any = None,
                    scan_patterns: Any = None,
-                   label_fn: Any = None) -> str:
+                   label_fn: Any = None,
+                   revoke_fn: Any = None,
+                   kill_fn: Any = None) -> str:
     """``/immune`` — one front door over nomorals.immune. Never raises.
 
     Live-scan injections (AA-41/42), all optional: ``scan_patterns``
@@ -319,12 +342,22 @@ def control_immune(tail: str, context: Any = None, chat: Any = None,
     ``label_fn`` is the adaptive layer's injected labeller, and
     ``event_sink`` receives immune events (organ bus). They persist
     on the per-chat state so later scans in the same chat use them.
+
+    Police-teeth injections (doc 20 P7), same pattern: ``revoke_fn``
+    (revocation of issued grants by id, from the core grant
+    registry) and ``kill_fn`` (the fenced own-process kill, from
+    the core own-process registry) are supplied by the composition
+    callers — the partner runtime and the nm CLI — and persist on
+    the state's police. Uninjected, disarm/arrest keep their
+    honest unwired receipts.
     """
     try:
         return _control_immune(tail, chat_key=chat_key, context=context,
                                event_sink=event_sink,
                                scan_patterns=scan_patterns,
-                               label_fn=label_fn)
+                               label_fn=label_fn,
+                               revoke_fn=revoke_fn,
+                               kill_fn=kill_fn)
     except Exception as exc:  # noqa: BLE001 — never raise from chat
         return f"Immune hit an error ({exc})."
 
@@ -349,7 +382,9 @@ def _monitor_for(context: Any = None):
 def _control_immune(tail: str, *, chat_key: str = "",
                     context: Any = None, event_sink: Any = None,
                     scan_patterns: Any = None,
-                    label_fn: Any = None) -> str:
+                    label_fn: Any = None,
+                    revoke_fn: Any = None,
+                    kill_fn: Any = None) -> str:
     state = get_immune_state(chat_key)
     if event_sink is not None:
         state.event_sink = event_sink
@@ -357,6 +392,10 @@ def _control_immune(tail: str, *, chat_key: str = "",
         state.scan_patterns = list(scan_patterns)
     if label_fn is not None:
         state.label_fn = label_fn
+    if revoke_fn is not None:
+        state.police.revoke_fn = revoke_fn
+    if kill_fn is not None:
+        state.police.kill_fn = kill_fn
     monitor = _monitor_for(context)
     if monitor is not None:
         # This chat's fever is an incident like any other: while it
@@ -920,6 +959,13 @@ def _disarm(state: _ImmuneState, grant_id: str) -> str:
     # The reply follows the receipt's recorded effect — never the
     # success wording for an effect that was not performed.
     if receipt.details.get("effect") == "performed":
+        # Doc 20 P7: the revocation also lands in the durable
+        # observation journal — the registry row is the record of
+        # authority; this is the immune plane's own sight of it.
+        state.observations.append("grant_revoked", {
+            "grant_id": grant_id.strip(),
+            "receipt_id": receipt.id,
+        })
         return (f"disarmed: grant {grant_id.strip()} revoked "
                 f"(receipt {receipt.id[:8]}).")
     return (f"disarm NOT performed: {receipt.reason} "
@@ -945,9 +991,24 @@ def _arrest(state: _ImmuneState, rest: str) -> str:
         )
     receipt = state.police.arrest(process_id)
     state._record(receipt)
+    # The reply follows the receipt's recorded effect (doc 20
+    # P2's discipline, now that P7 wired the kill): success
+    # wording only when the kill function actually performed.
+    kill_outcome = next(
+        (o for o in receipt.details.get("effect_outcomes") or []
+         if o.get("fn") == "kill_fn"), {})
+    if kill_outcome.get("ok"):
+        state.observations.append("process_killed", {
+            "process_id": process_id,
+            "receipt_id": receipt.id,
+        })
+        return (
+            f"arrested: {process_id} (receipt {receipt.id[:8]}). "
+            f"{receipt.reason}"
+        )
     return (
-        f"arrested: {process_id} (receipt {receipt.id[:8]}). "
-        "No kill wired in chat — receipt only; wire kill_fn to enforce."
+        f"arrest NOT performed: {receipt.reason} "
+        f"(receipt {receipt.id[:8]})."
     )
 
 

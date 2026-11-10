@@ -77,6 +77,17 @@ P2 carry no effect record; they are graded exactly as P1 graded
 them — on the artifacts they cite, never on their wording — so a
 bare legacy success claim still earns G0 here.
 
+Doc 20 P7 has since given the police real teeth: issued grants
+are recorded in the core grant registry and revocation acts on
+them by id, so a disarm performed through the wired surface
+records its effect as performed and grades on that record exactly
+as P2 specified. When a caller supplies the registry
+(``grant_registry=``), this projection also READS it: a disarm
+receipt's evidence field cites the registry's own record for the
+target grant. The reader changes no grading rule — a legacy
+receipt's claim still grades on what the receipt itself cites —
+it adds the durable record the claim is ultimately about.
+
 Reference shapes are the organs' own keys: ``incident:<id>`` ·
 ``heal:<recovery row id>`` (both incident-journal keys) ·
 ``case:<casefile id>`` · ``antibody:<id>`` · ``receipt:<id>``
@@ -764,7 +775,50 @@ def _settle_claim_from_effect(ticket: HealingTicket, receipt: Any,
     return True
 
 
-def _receipt_ticket(receipt: Any, now: float) -> HealingTicket:
+def _grant_record_for(action: str, target: str, details: dict,
+                      grant_registry: Any) -> dict[str, Any] | None:
+    """The grant registry's record for a disarm receipt's target
+    grant (doc 20 P7) — read at projection time from the registry,
+    the revocation's durable record of authority. None when no
+    registry is supplied, the receipt is not a disarm, the receipt
+    names no grant, or the registry holds no such grant."""
+    if grant_registry is None or action != "disarm":
+        return None
+    grant_id = str(details.get("grant_id") or target or "")
+    if not grant_id:
+        return None
+    try:
+        row = grant_registry.get(grant_id)
+    except Exception:  # noqa: BLE001 - an unreadable registry
+        return None
+    if row is None:
+        return None
+    standing = ""
+    standing_fn = getattr(grant_registry, "standing", None)
+    if callable(standing_fn):
+        try:
+            standing = str(standing_fn(row))
+        except Exception:  # noqa: BLE001 - derive below instead
+            standing = ""
+    if not standing:
+        standing = ("revoked" if _get(row, "state") == "revoked"
+                    else "active")
+    return {
+        "grant_id": grant_id,
+        "patterns": _get(row, "patterns"),
+        "actor": _get(row, "actor"),
+        "subject": _get(row, "subject"),
+        "source": _get(row, "source"),
+        "issued_at": _get(row, "issued_at"),
+        "expires_at": _get(row, "expires_at"),
+        "standing": standing,
+        "revoked_at": _get(row, "revoked_at"),
+        "revoked_by": _get(row, "revoked_by"),
+    }
+
+
+def _receipt_ticket(receipt: Any, now: float,
+                    grant_registry: Any = None) -> HealingTicket:
     ident = str(_get(receipt, "id", ""))
     rung = _get(receipt, "rung", 0)
     action = str(_get(receipt, "action", "") or "")
@@ -861,8 +915,24 @@ def _receipt_ticket(receipt: Any, now: float) -> HealingTicket:
     if details.get("case_id"):
         cited.append(f"case:{details['case_id']}")
         ticket.related_refs.append(f"case:{details['case_id']}")
+    evidence: dict[str, Any] = {}
     if cited:
-        ticket.fill("evidence", {"cited_refs": cited}, "immune.police")
+        evidence["cited_refs"] = cited
+    grant_record = _grant_record_for(action, target, details,
+                                     grant_registry)
+    if grant_record is not None:
+        # Doc 20 P7: the registry reader — a disarm receipt's
+        # evidence cites the registry's own durable record for
+        # the grant it names. The claim's grading (above) is
+        # untouched: it reads the receipt, exactly as P1/P2
+        # specified; this field is the record the claim is about.
+        evidence["grant_registry"] = grant_record
+        ticket.related_refs.append(
+            f"grant:{grant_record['grant_id']}")
+    if evidence:
+        ticket.fill("evidence", evidence,
+                    "immune.police" if cited
+                    else "core.grant_registry")
     else:
         ticket.mark_absent(
             "evidence",
@@ -989,6 +1059,7 @@ def healing_ticket_for(ref: str, *, journal: Any = None,
                        immune_states: Any = None,
                        antibody_stores: Any = None,
                        baseline: Any = None,
+                       grant_registry: Any = None,
                        now: float | None = None) -> dict[str, Any]:
     """One immune/healing operation's ticket, by the owning
     organ's own reference, or a typed not-found dict
@@ -1001,7 +1072,9 @@ def healing_ticket_for(ref: str, *, journal: Any = None,
     is the chat module's keying (chat key → state) or an iterable
     of immune states; ``antibody_stores`` adds standalone
     AntibodyStore instances; ``baseline`` is an AdaptiveBaseline
-    (wiring's ImmuneMonitor.baseline) for ``state:`` tickets.
+    (wiring's ImmuneMonitor.baseline) for ``state:`` tickets;
+    ``grant_registry`` is the core grant registry (doc 20 P7)
+    whose record a disarm receipt's evidence field cites.
     """
     now = time.time() if now is None else now
     prefix, _, ident = str(ref or "").partition(":")
@@ -1070,7 +1143,7 @@ def healing_ticket_for(ref: str, *, journal: Any = None,
             return _not_found(ref, "no police receipt with id "
                                    f"{ident!r} exists in the "
                                    "supplied immune states")
-        return _receipt_ticket(receipt, now).to_dict()
+        return _receipt_ticket(receipt, now, grant_registry).to_dict()
     # kind == "immune_state"
     if not items:
         return _not_found(ref, "reading an immune-state ticket "
@@ -1087,6 +1160,7 @@ def healing_ticket_coverage(*, journal: Any = None,
                             immune_states: Any = None,
                             antibody_stores: Any = None,
                             baseline: Any = None, limit: int = 50,
+                            grant_registry: Any = None,
                             now: float | None = None) -> dict[str, Any]:
     """The envelope over the live stores: every operation the
     supplied organs currently hold (up to ``limit`` per source),
@@ -1145,7 +1219,8 @@ def healing_ticket_coverage(*, journal: Any = None,
         for case in getattr(state, "casefiles", None) or []:
             tickets.append(_case_ticket(case, items, now))
         for receipt in getattr(state, "receipts", None) or []:
-            tickets.append(_receipt_ticket(receipt, now))
+            tickets.append(_receipt_ticket(receipt, now,
+                                           grant_registry))
         store = getattr(state, "store", None)
         if store is not None:
             stores.append(store)
