@@ -1465,6 +1465,18 @@ def _domain_of(url: str) -> str:
     return host.strip().lower().lstrip(".")
 
 
+def _endpoint_of(url: str) -> str:
+    """``host:port`` for a proxy URL — the receipt-side endpoint
+    identity (doc 17 P2).  Never the raw URL: a receipt carries no
+    userinfo, so the endpoint is all a decision is attributed to."""
+    try:
+        parsed = urlparse(url if "://" in url else f"http://{url}")
+        host = (parsed.hostname or "").strip().lower()
+        return f"{host}:{parsed.port}" if parsed.port else host
+    except ValueError:
+        return ""
+
+
 class DomainAffinityManager:
     """Sticky proxy per site: the same domain keeps using the same proxy
     (sessions, rate-limit buckets, and login flows all survive rotation).
@@ -2345,8 +2357,19 @@ class ProxyRotationManager:
                 bound = self._affinity().lookup(target, store=lab.store)
                 if bound:
                     self._count_served(bound)
+                    self._record_route(
+                        consumer="core_http", route="free",
+                        source="proxylab", reason_code="affinity_hit",
+                        reason="domain affinity pin for "
+                               f"{_domain_of(target)}",
+                        host=_domain_of(target),
+                        proxy_id=_endpoint_of(bound),
+                        protocol=urlparse(bound).scheme,
+                        candidates=1, candidate_tiers={"free": 1},
+                        sticky_key=_domain_of(target),
+                        selected_by="affinity")
                     return bound
-            chosen = self.pick()
+            chosen = self.pick(consumer="core_http")
             if chosen and target:
                 self._affinity().bind(target, chosen)
             return chosen
@@ -2368,6 +2391,53 @@ class ProxyRotationManager:
             aff = DomainAffinityManager(self._lab().store.dir / "affinity.json")
             self._affinity_cache = aff
         return aff
+
+    # -- route authority (doc 17 P2) ----------------------------------
+    def _route_authority(self):
+        """The one route authority, journaling beside the lab store
+        (``<home>/proxies/route_receipts.jsonl``)."""
+        auth = getattr(self, "_authority_cache", None)
+        if auth is None:
+            from ..core.proxy_routing import RouteAuthority, RouteReceiptJournal
+
+            auth = RouteAuthority(RouteReceiptJournal(
+                self._lab().store.dir / "route_receipts.jsonl"))
+            self._authority_cache = auth
+        return auth
+
+    def _record_route(self, **fields: Any) -> None:
+        """Journal one route decision through the authority.  The
+        journal itself is fail-open; a failure to even build the
+        authority is ledger-recorded and swallowed — routing never
+        breaks over a receipt."""
+        try:
+            receipt = self._route_authority().record(**fields)
+            endpoint = fields.get("proxy_id") or ""
+            if endpoint and fields.get("route") in ("free", "paid"):
+                book = getattr(self, "_decision_by_endpoint", None)
+                if book is None:
+                    book = self._decision_by_endpoint = {}
+                if len(book) > 512:
+                    book.clear()
+                book[endpoint] = receipt.decision_id
+        except Exception as exc:  # noqa: BLE001 - receipts never break routing
+            record_failure("ProxyRotationManager._record_route", exc)
+
+    def _record_route_outcome(self, proxy_url: str, outcome: str,
+                              detail: str = "") -> None:
+        """Append the observed outcome for the most recent decision
+        that handed out this endpoint (the core.http reporters are
+        the observers; attribution is to that decision, by endpoint).
+        No matching decision → no outcome is fabricated."""
+        try:
+            book = getattr(self, "_decision_by_endpoint", None) or {}
+            decision_id = book.get(_endpoint_of(proxy_url))
+            if decision_id:
+                self._route_authority().record_outcome(
+                    decision_id, outcome, detail)
+        except Exception as exc:  # noqa: BLE001 - reporting never breaks
+            record_failure(
+                "ProxyRotationManager._record_route_outcome", exc)
 
     def _count_served(self, proxy_url: str) -> None:
         entry = self.state["usage"].setdefault(proxy_url,
@@ -2434,11 +2504,13 @@ class ProxyRotationManager:
         return out
 
     def pick(self, *, schemes: tuple[str, ...] = (),
-             target: str = "") -> str:
+             target: str = "", consumer: str = "proxylab") -> str:
         """The next proxy for this request ('' = direct fallback).
 
         ``schemes`` restricts the protocol (protocol-aware routing);
         ``target`` lets domain affinity pin one proxy per site.
+        ``consumer`` names who is asking, for the route receipt the
+        authority journals for this decision (doc 17 P2).
         """
         st = self.state
         st["stats"]["requests"] += 1
@@ -2447,6 +2519,16 @@ class ProxyRotationManager:
             bound = self._affinity().lookup(target, store=lab.store)
             if bound:
                 self._count_served(bound)
+                self._record_route(
+                    consumer=consumer, route="free", source="proxylab",
+                    reason_code="affinity_hit",
+                    reason="domain affinity pin for "
+                           f"{_domain_of(target)}",
+                    host=_domain_of(target),
+                    proxy_id=_endpoint_of(bound),
+                    protocol=urlparse(bound).scheme,
+                    candidates=1, candidate_tiers={"free": 1},
+                    sticky_key=_domain_of(target), selected_by="affinity")
                 return bound
         healthy = self._healthy(self._pool_urls())
         # protocol-aware filter on the URL list (cheap) …
@@ -2461,6 +2543,13 @@ class ProxyRotationManager:
         if not ordered:
             st["stats"]["direct_fallbacks"] += 1
             self._save_state()
+            self._record_route(
+                consumer=consumer, route="direct", source="proxylab",
+                reason_code="pool_empty_direct_fallback",
+                reason="no eligible healthy proxies — traffic goes "
+                       "direct",
+                host=_domain_of(target) if target else "",
+                candidates=0, selected_by="pick")
             return ""
         strategy = st.get("strategy", "round_robin")
         usage = st["usage"]
@@ -2486,6 +2575,17 @@ class ProxyRotationManager:
         if target:
             self._affinity().bind(target, chosen)
         self._save_state()
+        self._record_route(
+            consumer=consumer, route="free", source="proxylab",
+            reason_code=f"strategy:{strategy}",
+            reason=f"{strategy} over {len(ordered)} eligible healthy",
+            host=_domain_of(target) if target else "",
+            proxy_id=_endpoint_of(chosen),
+            protocol=urlparse(chosen).scheme,
+            candidates=len(ordered),
+            candidate_tiers={"free": len(ordered)},
+            sticky_key=_domain_of(target) if target else "",
+            selected_by="pick")
         return chosen
 
     def pick_for_job(self, *, needs_udp: bool = False,
@@ -2503,6 +2603,12 @@ class ProxyRotationManager:
           prefer_ng_eu → NG first, EU second (Nigeria-friendly)
         """
         if needs_auth:
+            self._record_route(
+                consumer="proxy_pick", route="none", source="proxylab",
+                reason_code="needs_auth_unavailable",
+                reason="the free-proxy pool holds no authenticated "
+                       "proxies",
+                selected_by="pick_for_job")
             return {"proxy": "",
                     "note": "the free-proxy pool holds no authenticated "
                             "proxies — the lab's verified pool also "
@@ -2520,6 +2626,11 @@ class ProxyRotationManager:
         try:
             lab = self._lab()
         except Exception as exc:  # noqa: BLE001
+            self._record_route(
+                consumer="proxy_pick", route="none", source="proxylab",
+                reason_code="pool_unavailable",
+                reason=f"pool unavailable: {exc}",
+                selected_by="pick_for_job")
             return {"proxy": "",
                     "note": f"pool unavailable: {exc}"}
         proxies = lab.store.pool(
@@ -2535,6 +2646,13 @@ class ProxyRotationManager:
             proxies = [p for p in proxies
                        if _ANON_SCORE.get(p.anonymity, 1) >= floor]
         if not proxies:
+            self._record_route(
+                consumer="proxy_pick", route="none", source="proxylab",
+                reason_code="no_matching_candidates",
+                reason=f"scheme={schemes or 'any'} "
+                       f"country={country or 'any'} "
+                       f"anonymity>={min_anonymity or 'any'}",
+                candidates=0, selected_by="pick_for_job")
             return {"proxy": "",
                     "note": empty_pool_guidance(
                         lab.store,
@@ -2550,6 +2668,15 @@ class ProxyRotationManager:
         if target:
             self._affinity().bind(target, best.url)
             why += f" · pinned to { _domain_of(target)}"
+        self._record_route(
+            consumer="proxy_pick", route="free", source="proxylab",
+            reason_code="job_rank_first", reason=why,
+            host=_domain_of(target) if target else "",
+            proxy_id=_endpoint_of(best.url), protocol=best.scheme,
+            country=best.country or "", candidates=len(proxies),
+            candidate_tiers={"free": len(proxies)},
+            sticky_key=_domain_of(target) if target else "",
+            selected_by="pick_for_job")
         return {"proxy": best.url, "why": why,
                 "details": best.to_dict()}
 
@@ -2566,6 +2693,8 @@ class ProxyRotationManager:
                 proxy_url, ok=True, latency_ms=latency_ms)
         except Exception as exc:  # noqa: BLE001
             _log.warning("rotation success record failed: %s", exc)
+        self._record_route_outcome(
+            proxy_url, "used", f"latency_ms={latency_ms:.0f}")
 
     def report_error(self, proxy_url: str, reason: str = "") -> None:
         """A request through ``proxy_url`` failed at the connection level.
@@ -2600,10 +2729,11 @@ class ProxyRotationManager:
                   proxy_url, cooldown, entry["failures"],
                   (reason or "connection failure")[:120])
         self._save_state()
+        self._record_route_outcome(proxy_url, "failed", reason)
 
     def next(self) -> str:
         """Force rotation to the next proxy now (returns the new pick)."""
-        return self.pick()
+        return self.pick(consumer="proxy_rotate")
 
     def report_block(self, proxy_url: str, kind: str = "block",
                      reason: str = "", retry_after: float = 0.0) -> None:

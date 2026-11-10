@@ -3442,17 +3442,25 @@ class BrowserService:
             raise BrowserError(
                 "no proxy pool attached — attach_proxy_pool() first")
         try:
-            select = getattr(self._proxy_pool, "select", None)
-            if callable(select):
-                details = select(require_tier=require_tier,
-                                 carries_credentials=carries_credentials)
-            else:
-                details = self._proxy_pool.rotate()
-                tier = normalize_tier(
-                    (details or {}).get("tier", "free")
-                    if isinstance(details, dict) else "free")
-                TierGate.require(tier, carries_credentials=carries_credentials,
-                                 require_tier=require_tier)
+            # The decision is minted by the one route authority
+            # (doc 17 P2): it delegates to the pool's select() when
+            # the pool has one (the real proxypool enforces the
+            # gate); a rotate-only pool gets rotate() + the gate
+            # composed inside the authority.  Either way the decision
+            # is journaled as a route receipt.  The post-check below
+            # still runs: the service never trusts the pool's word
+            # alone.
+            from ..core.proxy_routing import (
+                RouteAuthority,
+                RouteReceiptJournal,
+                default_receipts_path,
+            )
+
+            details = RouteAuthority(
+                RouteReceiptJournal(default_receipts_path())).decide_pool(
+                    self._proxy_pool, consumer="browser",
+                    require_tier=require_tier,
+                    carries_credentials=carries_credentials)
         except BrowserError:
             raise
         except Exception as exc:
