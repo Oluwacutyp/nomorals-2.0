@@ -28,6 +28,8 @@ def _cmd_audio(args: argparse.Namespace, context: Any) -> int:
         return _audio_fingerprint(args)
     if action == "match":
         return _audio_match(args)
+    if action == "lineage":
+        return _audio_lineage(args)
     print(f"unknown audio action: {action}", file=sys.stderr)
     return 2
 
@@ -146,4 +148,20 @@ def _audio_match(args: argparse.Namespace) -> int:
         measure = f"coherent-offset fraction {res.get('score')}"
     print(f"🎵 {res.get('artist')} — {res.get('title')} "
           f"(local match; {measure})")
+    return 0
+
+
+def _audio_lineage(args: argparse.Namespace) -> int:
+    from ...audio.lineage import render_lineage_lines, scan_lineage_db
+
+    res = scan_lineage_db(args.file)
+    if args.json:
+        print(json.dumps(res, indent=2, default=str))
+        return 0 if res.get("ok") else 1
+    if not res.get("ok"):
+        print(f"lineage scan unavailable: {res.get('reason')}",
+              file=sys.stderr)
+        return 1
+    for line in render_lineage_lines(res):
+        print(line)
     return 0

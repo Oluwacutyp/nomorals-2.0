@@ -2815,7 +2815,8 @@ def _parser() -> argparse.ArgumentParser:
                      "nm audio fx-list\n"
                      "nm audio analyze <file>\n"
                      "nm audio fingerprint <file> [--title T] [--artist A]\n"
-                     "nm audio match <file>"),
+                     "nm audio match <file>\n"
+                     "nm audio lineage <file>"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     a_sub = audio.add_subparsers(dest="audio_action", required=True)
@@ -2848,6 +2849,12 @@ def _parser() -> argparse.ArgumentParser:
                            help="recognize against the local library")
     a_m.add_argument("file", help="audio file")
     a_m.add_argument("--json", action="store_true")
+    a_l = a_sub.add_parser(
+        "lineage",
+        help="sample/lineage scan against the local library "
+             "(regions + originality band, never a verdict)")
+    a_l.add_argument("file", help="audio file")
+    a_l.add_argument("--json", action="store_true")
 
     room = sub.add_parser("room", aliases=CLI_ALIASES["room"],
         help="Project rooms: persistent per-goal workspaces",

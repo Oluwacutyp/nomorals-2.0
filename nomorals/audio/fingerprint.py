@@ -1263,6 +1263,59 @@ class FingerprintDB:
             _log.debug("rank_candidates failed", exc_info=True)
             return []
 
+    def hash_occurrences(
+            self, hashes: Sequence[tuple[int, float]]
+            ) -> dict[int, list[tuple[int, int]]]:
+        """Raw catalog occurrences for a query fingerprint.
+
+        Returns ``{hash: [(track_id, reference_offset_ms), ...]}`` —
+        every enrolled occurrence of every distinct query hash. This
+        is the evidence substrate for windowed/partial matching
+        (doc 24 SR4 lineage): :meth:`match` collapses it into one
+        whole-track vote, while a sample is a *locally* coherent
+        slice of it. Never raises; returns {} when nothing can be
+        said.
+        """
+        try:
+            wanted = {int(h) for h, _t in hashes}
+            if not wanted:
+                return {}
+            out: dict[int, list[tuple[int, int]]] = {}
+            with self._lock:
+                conn = self._connect()
+                for h in sorted(wanted):
+                    rows = conn.execute(
+                        "SELECT track_id, offset_ms FROM hashes "
+                        "WHERE hash = ?", (h,)).fetchall()
+                    if rows:
+                        out[h] = [(int(tid), int(off))
+                                  for tid, off in rows]
+            return out
+        except Exception:  # noqa: BLE001
+            _log.debug("hash_occurrences failed", exc_info=True)
+            return {}
+
+    def track_hashes(self, track_id: int
+                     ) -> list[tuple[int, float]]:
+        """The stored fingerprint of one enrolled track:
+        ``[(hash, offset_seconds), ...]``, anchor-time order.
+
+        Lets a lineage scan treat an enrolled work as the query —
+        lineage records *between* works in the catalog, not only
+        between an upload and the catalog. Never raises.
+        """
+        try:
+            with self._lock:
+                conn = self._connect()
+                rows = conn.execute(
+                    "SELECT hash, offset_ms FROM hashes "
+                    "WHERE track_id = ? ORDER BY offset_ms",
+                    (int(track_id),)).fetchall()
+            return [(int(h), int(off) / 1000.0) for h, off in rows]
+        except Exception:  # noqa: BLE001
+            _log.debug("track_hashes failed", exc_info=True)
+            return []
+
     def match(self, path: str | os.PathLike[str], *,
               threshold: float = MATCH_THRESHOLD
               ) -> dict[str, Any]:
