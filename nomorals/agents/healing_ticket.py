@@ -24,9 +24,12 @@ WHAT THE SURVEY FOUND (the field partitions below are this table):
   journal: ``core/selfheal.py`` records a ``RecoveryRecord`` per
   attempt, verified or explicitly unverified) are real records
   with real read paths.
-* antibody store (``immune/antibodies.py``) — durable WHEN built
-  over a path; the production chat state builds it in-memory
-  (doc 20's P3 problem, not this pass's). The projection reads
+* antibody store (``immune/antibodies.py``) — durable: since
+  doc 20 P3 the production chat state shares ONE path-backed
+  store (``immune/wiring.shared_antibody_store``), and every
+  record carries its P3 lifecycle (probation / active / retired,
+  match + false-positive evidence, transition reasons) — the
+  lifecycle this projection reports. The projection reads
   whatever store instance it is handed.
 * immune case files + police receipts (``immune/casefile.py``,
   ``immune/police.py``) — records exist ONLY on the per-chat
@@ -651,11 +654,20 @@ def _antibody_ticket(record: Any, store: Any,
             "evidence",
             "the resolving store exposes no version history for "
             "this record, and the record itself cites no evidence")
-    ticket.fill("lifecycle",
-                {"status": status,
+    lifecycle = {"status": status,
                  "version": _get(record, "version"),
-                 "retire_reason": _get(record, "retire_reason")},
-                "immune.antibodies")
+                 "retire_reason": _get(record, "retire_reason")}
+    # Doc 20 P3 lifecycle detail, copied when the record carries
+    # it (P3 records always do; a pre-P3 record simply lacks the
+    # keys and the ticket says no more than the record knows).
+    for key in ("origin", "status_reason", "status_ts",
+                "match_count", "false_positive_count",
+                "probation_since", "probation_matches",
+                "probation_false_positives", "status_evidence"):
+        value = _get(record, key)
+        if value is not None:
+            lifecycle[key] = value
+    ticket.fill("lifecycle", lifecycle, "immune.antibodies")
     created = _get(record, "created_ts")
     ticket.fill("liveness",
                 {"created_at": created, "age_s": _age(now, created)},

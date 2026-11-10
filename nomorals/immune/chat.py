@@ -7,7 +7,7 @@ list`` / ``drift report`` / ``casefile list`` are readable.
 Usage:
     /immune status
     /immune scan <text>
-    /immune antibodies list | add <pattern> <reason> | retire <id> <reason> | test <pattern>
+    /immune antibodies list | add <pattern> <reason> | promote <id> | retire <id> <reason> | test <pattern>
     /immune quarantine <artifact text>
     /immune disarm <grant-id>
     /immune arrest <process-id> [system]
@@ -16,16 +16,22 @@ Usage:
     /immune casefile list | add <text> | seal <id-prefix>
     /immune gate [spawned growth]
 
-State is in-memory per chat key (same as /tutor): antibody store,
-police vault, fever, drift monitor, case files, receipts. The
-adaptive cancer gate is NOT per-chat: its baseline, incident state
-and quarantine count live in the shared persisted monitor
-(immune/wiring.py), fed by the durable sampler job — ``status``
-reports that live state, and this chat's fever is registered with
-the monitor so its samples quarantine like any incident. The
-constitution lives in police.py — this control only routes; it never
-grants capability, and ``arrest`` without the ``system`` keyword
-returns a report-only receipt.
+State is in-memory per chat key (same as /tutor), EXCEPT the
+antibody store: since doc 20 P3 it is the shared, path-backed
+store (immune/wiring.py ``shared_antibody_store``) — one immune
+memory for the whole organism, durable across restarts, with the
+P3 lifecycle on every record (learned antibodies enter on
+probation, observe-only, and promote on evidence or the owner's
+verb). Police vault, fever, drift monitor, case files and
+receipts stay per-chat in-memory. The adaptive cancer gate is
+also shared: its baseline, incident state and quarantine count
+live in the shared persisted monitor (immune/wiring.py), fed by
+the durable sampler job — ``status`` reports that live state, and
+this chat's fever is registered with the monitor so its samples
+quarantine like any incident. The constitution lives in
+police.py — this control only routes; it never grants capability,
+and ``arrest`` without the ``system`` keyword returns a
+report-only receipt.
 """
 
 from __future__ import annotations
@@ -165,18 +171,31 @@ class _ImmuneState:
     """Per-chat in-memory immune state."""
 
     def __init__(self) -> None:
-        from .antibodies import AntibodyStore
         from .casefile import CaseFile
         from .drift import BehaviourDriftMonitor
         from .fever import Fever
         from .police import Police
         from .thymus import SelfCorpus, Thymus
+        from .wiring import shared_antibody_store
 
         corpus = SelfCorpus()
         for text in _SELF_EXEMPLARS:
             corpus.add(text=text)
         self.thymus = Thymus(corpus)
-        self.store = AntibodyStore()
+        # Doc 20 P3: the antibody store is the organism's shared,
+        # path-backed immune memory — NOT per-chat in-memory. A
+        # store that cannot load must not break the surface: fall
+        # back to a private in-memory store and say so in the log
+        # (status still renders; learning this session is volatile,
+        # never silently presented as durable).
+        try:
+            self.store = shared_antibody_store()
+        except Exception:  # noqa: BLE001 — surface never breaks
+            _log.warning("immune antibody store unavailable — "
+                         "falling back to in-memory", exc_info=True)
+            from .antibodies import AntibodyStore
+
+            self.store = AntibodyStore()
         self.vault: List[Any] = []
         self.police = Police(vault_fn=self.vault.append)
         self.fever = Fever()
@@ -209,6 +228,16 @@ def get_immune_state(chat_key: str = "") -> _ImmuneState:
 
 def reset_immune_state(chat_key: str = "") -> None:
     _STATES.pop(chat_key or "default", None)
+    # The antibody store is shared organism memory (doc 20 P3), so
+    # resetting a chat state also clears it — a reset that left
+    # learned antibodies in place would not be a reset. Resetting
+    # is a test/support operation; production code never calls it.
+    try:
+        from .wiring import clear_shared_antibody_store
+
+        clear_shared_antibody_store()
+    except Exception:  # noqa: BLE001 — reset stays best-effort
+        _log.warning("immune antibody store reset failed", exc_info=True)
 
 
 def control_immune(tail: str, context: Any = None, chat: Any = None,
@@ -300,10 +329,15 @@ def _control_immune(tail: str, *, chat_key: str = "",
 
 def _status(state: _ImmuneState, monitor: Any = None) -> str:
     active = state.store.list_active()
+    probation = state.store.list_probation()
+    antibody_line = f"  antibodies: {len(active)} active"
+    if probation:
+        antibody_line += (
+            f" · {len(probation)} on probation (observe-only)")
     drift = state.drift.current_report()
     lines = [
         "🛡️ immune status",
-        f"  antibodies: {len(active)} active",
+        antibody_line,
         f"  fever: {'ACTIVE — ' + state.fever.reason if state.fever.is_active() else 'off'}",
         f"  drift: {drift.verdict} ({drift.days_considered} days)",
         f"  quarantined artifacts: {len(state.vault)} (vault, never deleted)",
@@ -427,16 +461,37 @@ def _gate(state: _ImmuneState, monitor: Any, rest: str) -> str:
 def _scan(state: _ImmuneState, text: str) -> str:
     if not text:
         return "usage: /immune scan <text>"
-    # Second-exposure matching against accepted antibodies (innate
-    # speed, compiled regexes).
+    # Second-exposure matching against stored antibodies (innate
+    # speed, compiled regexes). Matching is complete — probation
+    # antibodies match too, and every hit is recorded on its
+    # record as evidence — but the RESPONSE seam reads active
+    # only (doc 20 P3): a probation hit is reported as an
+    # observation and drives nothing.
     hits = state.store.match(text)
     state._record(state.police.observe({"target": "scan", "text": text}, "scan"))
     lines: list[str] = []
-    if hits:
+    enforcing = [h for h in hits if h.get("status") == "active"]
+    observing = [h for h in hits if h.get("status") != "active"]
+    if enforcing:
         lines.append("🛡️ scan: antibody match (second exposure, innate speed):")
-        for hit in hits:
+        for hit in enforcing:
             lines.append(
                 f"  • {hit.get('id', '?')[:8]} pattern={hit.get('pattern', '?')!r} "
+                f"reason={hit.get('reason', '')}"
+            )
+    if observing:
+        from .antibodies import promotion_policy
+
+        min_matches, min_window = promotion_policy()
+        lines.append(
+            "🛡️ scan: probation antibody observed (match recorded as "
+            "evidence — NOT enforced; probation antibodies only "
+            "observe until promoted):")
+        for hit in observing:
+            lines.append(
+                f"  • {hit.get('id', '?')[:8]} pattern={hit.get('pattern', '?')!r} "
+                f"matches={hit.get('probation_matches', 0)}/{min_matches} "
+                f"toward promotion (clean window >={min_window:.0f}s) "
                 f"reason={hit.get('reason', '')}"
             )
     # First exposure (AA-42): the innate layer evaluates the catalog
@@ -485,9 +540,13 @@ def _label_and_learn(state: _ImmuneState, text: str,
     from .adaptive import label_antigen, present, should_create_antibody
 
     patterns_by_id = {str(p.get("id")): p for p in state.scan_patterns}
-    active_patterns = {
+    # A pattern already in memory — active OR on probation — is
+    # already covered: re-proposing it would mint a duplicate
+    # record instead of letting the existing one accrue evidence.
+    known_patterns = {
         str(entry.get("pattern", ""))
-        for entry in state.store.list_active()
+        for entry in state.store.all()
+        if entry.get("status") != "retired"
     }
     lines: list[str] = []
     seen: set[str] = set()
@@ -518,8 +577,8 @@ def _label_and_learn(state: _ImmuneState, text: str,
             continue
         pattern = str((patterns_by_id.get(hit.pattern_id) or {}).get(
             "pattern") or "")
-        if not pattern or pattern in active_patterns:
-            continue  # already covered by an active antibody
+        if not pattern or pattern in known_patterns:
+            continue  # already covered by a stored antibody
         reason = (f"adaptive: innate hit {hit.pattern_id} labelled "
                   f"{labelled.verdict} — {labelled.reasoning}")
         try:
@@ -530,16 +589,20 @@ def _label_and_learn(state: _ImmuneState, text: str,
                 f"  ⚠ thymus rejected antibody for {hit.pattern_id} "
                 f"(fires on self): {exc}")
             continue
-        state.store.add(accepted)
-        active_patterns.add(pattern)
+        # Doc 20 P3: a LEARNED antibody enters on probation. The
+        # thymus's accept is its negative-selection verdict, not a
+        # promotion — the store's add_learned records the standing.
+        state.store.add_learned(accepted)
+        known_patterns.add(pattern)
         learned += 1
         _emit_event(state, "antibody_created", {
             "antibody_id": accepted.id, "pattern": pattern,
             "pathogen_class": hit.class_id, "verdict": labelled.verdict,
-            "source": "chat-scan",
+            "source": "chat-scan", "status": "probation",
         })
         lines.append(
-            f"  🧬 antibody created: {accepted.id[:8]} "
+            f"  🧬 antibody created (probation — observe-only until "
+            f"it earns promotion): {accepted.id[:8]} "
             f"pattern={pattern!r} class={hit.class_id}")
     return lines
 
@@ -550,15 +613,32 @@ def _antibodies(state: _ImmuneState, rest: str) -> str:
     tail = tail.strip()
     if verb == "list" or not verb:
         active = state.store.list_active()
-        if not active:
+        probation = state.store.list_probation()
+        if not active and not probation:
             return "antibodies: none active."
-        lines = ["antibodies (active):"]
-        for entry in active:
-            data = entry if isinstance(entry, dict) else {}
-            lines.append(
-                f"  • {data.get('id', '?')[:8]} pattern={data.get('pattern', '?')!r} "
-                f"class={data.get('pathogen_class', '?')} reason={data.get('reason', '')}"
-            )
+        lines: list[str] = []
+        if active:
+            lines.append("antibodies (active):")
+            for entry in active:
+                data = entry if isinstance(entry, dict) else {}
+                lines.append(
+                    f"  • {data.get('id', '?')[:8]} pattern={data.get('pattern', '?')!r} "
+                    f"class={data.get('pathogen_class', '?')} reason={data.get('reason', '')}"
+                )
+        if probation:
+            from .antibodies import promotion_policy
+
+            min_matches, min_window = promotion_policy()
+            lines.append("antibodies (probation — observe-only):")
+            for entry in probation:
+                data = entry if isinstance(entry, dict) else {}
+                lines.append(
+                    f"  • {data.get('id', '?')[:8]} pattern={data.get('pattern', '?')!r} "
+                    f"class={data.get('pathogen_class', '?')} "
+                    f"matches={data.get('probation_matches', 0)}/{min_matches} "
+                    f"clean-window>={min_window:.0f}s "
+                    f"reason={data.get('reason', '')}"
+                )
         return "\n".join(lines)
     if verb == "add":
         pattern, _, reason = tail.partition(" ")
@@ -571,10 +651,36 @@ def _antibodies(state: _ImmuneState, rest: str) -> str:
             accepted = state.thymus.accept(candidate)
         except ValueError as exc:
             return f"antibody rejected: {exc}"
-        state.store.add(accepted)
+        # Owner-directed: the owner's own add IS the vetting (the
+        # thymus still ran negative selection) — the record keeps
+        # the accepted standing, stamped with its origin. Only
+        # LEARNED antibodies enter on probation (doc 20 P3).
+        state.store.add(accepted, origin="owner")
         return (
             f"antibody accepted: id={accepted.id[:8]} pattern={pattern!r} "
             f"reason={reason}"
+        )
+    if verb == "promote":
+        if not tail:
+            return "usage: /immune antibodies promote <id>"
+        entry = state.store.get(tail.strip())
+        if entry is None:
+            # prefix match on the short id shown by list
+            for candidate in state.store.all():
+                if str(candidate.get("id", "")).startswith(tail.strip()):
+                    entry = candidate
+                    break
+        if entry is None:
+            return f"no antibody {tail.strip()!r}."
+        try:
+            record = state.store.promote(
+                str(entry.get("id", "")),
+                reason="owner promotion via /immune antibodies promote")
+        except ValueError as exc:
+            return f"promotion refused: {exc}"
+        return (
+            f"antibody {str(entry.get('id', ''))[:8]} promoted to active "
+            f"(version {record.get('version', '?')}): {record.get('status_reason', '')}"
         )
     if verb == "retire":
         ab_id, _, reason = tail.partition(" ")
@@ -602,6 +708,14 @@ def _antibodies(state: _ImmuneState, rest: str) -> str:
         full["status"] = "retired"
         full["retire_reason"] = antibody.retire_reason
         state.store.update(full)
+        # This surface's retire IS the owner's false-positive
+        # verdict (its event below is named for it): record the
+        # outcome on the antibody's own record (doc 20 P3), so
+        # hit/miss evidence survives the retirement. demote=False
+        # — the retirement in this same act supersedes demotion.
+        state.store.record_false_positive(
+            str(entry.get("id", "")), reason=reason.strip(),
+            demote=False)
         _emit_event(state, "false_positive_retired", {
             "antibody_id": str(entry.get("id", "")),
             "reason": reason.strip(), "source": "chat",

@@ -39,6 +39,7 @@ from .baseline import (
     sampling_availability,
 )
 from .wiring import (
+    ANTIBODY_STORE_ENV_VAR,
     BASELINE_WINDOW,
     IMMUNE_SAMPLER_INTERVAL_S,
     IMMUNE_SAMPLER_JOB,
@@ -47,13 +48,25 @@ from .wiring import (
     LEGACY_IMMUNE_SAMPLER_JOB,
     BaselineStore,
     ImmuneMonitor,
+    clear_shared_antibody_store,
+    default_antibodies_path,
     default_store_path,
     ensure_immune_sampler_job,
+    reset_shared_antibody_stores,
     reset_shared_monitors,
+    shared_antibody_store,
     shared_monitor,
     summarize_tick_event,
 )
-from .antibodies import AntibodyStore
+from .antibodies import (
+    PROMOTION_MIN_MATCHES,
+    PROMOTION_MIN_WINDOW_S,
+    STATUS_ACTIVE,
+    STATUS_PROBATION,
+    STATUS_RETIRED,
+    AntibodyStore,
+    promotion_policy,
+)
 from .casefile import CaseFile, build_case
 from .drift import BehaviourDriftMonitor, DriftReport
 from .events import EVENT_KINDS, emit_immune_event, immune_event
@@ -91,6 +104,12 @@ __all__ = [
     "should_create_antibody",
     # antibodies
     "AntibodyStore",
+    "STATUS_PROBATION",
+    "STATUS_ACTIVE",
+    "STATUS_RETIRED",
+    "PROMOTION_MIN_MATCHES",
+    "PROMOTION_MIN_WINDOW_S",
+    "promotion_policy",
     # police
     "RUNGS",
     "CANCER_MAX_PROCESSES",
@@ -133,6 +152,12 @@ __all__ = [
     "default_store_path",
     "shared_monitor",
     "reset_shared_monitors",
+    # wiring (shared durable antibody store, doc 20 P3)
+    "ANTIBODY_STORE_ENV_VAR",
+    "default_antibodies_path",
+    "shared_antibody_store",
+    "reset_shared_antibody_stores",
+    "clear_shared_antibody_store",
     "ensure_immune_sampler_job",
     "summarize_tick_event",
     "IMMUNE_SAMPLER_JOB",

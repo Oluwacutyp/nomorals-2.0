@@ -91,6 +91,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
+from .antibodies import AntibodyStore
 from .baseline import (
     MIN_SAMPLES,
     AdaptiveBaseline,
@@ -104,6 +105,11 @@ __all__ = [
     "BASELINE_WINDOW",
     "STORE_ENV_VAR",
     "STORE_VERSION",
+    "ANTIBODY_STORE_ENV_VAR",
+    "default_antibodies_path",
+    "shared_antibody_store",
+    "reset_shared_antibody_stores",
+    "clear_shared_antibody_store",
     "IMMUNE_SAMPLER_JOB",
     "LEGACY_IMMUNE_SAMPLER_JOB",
     "IMMUNE_SAMPLER_TOOL",
@@ -204,6 +210,39 @@ def default_store_path(context: Any = None) -> Path:
         except Exception:  # noqa: BLE001 - fall through to home default
             pass
     return _settings_home(settings) / "data" / "immune-baseline.json"
+
+
+#: Env override for the antibody store path (same convention as
+#: STORE_ENV_VAR).
+ANTIBODY_STORE_ENV_VAR = "NM_IMMUNE_ANTIBODIES_STORE"
+
+
+def default_antibodies_path(context: Any = None) -> Path:
+    """Resolve the antibody store path (doc 20 P3).
+
+    ``NM_IMMUNE_ANTIBODIES_STORE`` wins when set (absolute as-is,
+    relative resolved against the settings home); otherwise
+    ``<settings home>/data/immune-antibodies.json`` via the
+    context's settings when one is supplied, else the home
+    default — the same file from chat, CLI and scheduler, next
+    to the baseline store. Before P3 the production antibody
+    store was built in-memory per chat (``immune/chat.py``), so
+    learned immunity died at every restart.
+    """
+    settings = getattr(context, "settings", None) if context is not None \
+        else None
+    override = os.environ.get(ANTIBODY_STORE_ENV_VAR, "")
+    if override:
+        p = Path(os.path.expanduser(override))
+        if p.is_absolute():
+            return p
+        return (_settings_home(settings) / p).resolve()
+    if settings is not None:
+        try:
+            return Path(settings.resolve("data/immune-antibodies.json"))
+        except Exception:  # noqa: BLE001 - fall through to home default
+            pass
+    return _settings_home(settings) / "data" / "immune-antibodies.json"
 
 
 # ── persistent store ──────────────────────────────────────────────
@@ -791,6 +830,60 @@ def reset_shared_monitors() -> None:
     """Drop all shared monitors (tests)."""
     with _MONITORS_LOCK:
         _MONITORS.clear()
+
+
+# ── the shared antibody store (doc 20 P3) ───────────────────────
+
+_ANTIBODY_STORES: dict[str, AntibodyStore] = {}
+_ANTIBODY_STORES_LOCK = threading.Lock()
+
+
+def shared_antibody_store(path: Any = None) -> AntibodyStore:
+    """The process-wide antibody store for a path (one per path).
+
+    The :func:`shared_monitor` pattern, for the same reason: chat
+    states for different chats are live simultaneously, and two
+    store instances over one file would lose each other's learned
+    antibodies on save. Every chat state and the CLI share ONE
+    instance, so immune memory accumulates organism-wide and
+    survives restart through the store's own atomic persistence.
+    """
+    resolved = Path(path) if path is not None else default_antibodies_path()
+    key = str(resolved)
+    with _ANTIBODY_STORES_LOCK:
+        store = _ANTIBODY_STORES.get(key)
+        if store is None:
+            store = AntibodyStore(resolved)
+            _ANTIBODY_STORES[key] = store
+        return store
+
+
+def reset_shared_antibody_stores() -> None:
+    """Drop all shared antibody stores (tests). The next
+    :func:`shared_antibody_store` call reloads from disk — this
+    is also the restart simulation: memory survives it, by the
+    store file."""
+    with _ANTIBODY_STORES_LOCK:
+        _ANTIBODY_STORES.clear()
+
+
+def clear_shared_antibody_store(path: Any = None) -> AntibodyStore:
+    """Replace the shared store for ``path`` with a fresh EMPTY
+    one and persist the empty population.
+
+    The seam behind ``immune/chat.reset_immune_state``: resetting
+    is a test/support operation (production code never resets
+    immune state), and a reset that left the organism's learned
+    memory in place would not be a reset.
+    """
+    resolved = Path(path) if path is not None else default_antibodies_path()
+    key = str(resolved)
+    with _ANTIBODY_STORES_LOCK:
+        store = AntibodyStore()
+        store.path = resolved
+        _ANTIBODY_STORES[key] = store
+        store.save()
+        return store
 
 
 # ── scheduler registration ────────────────────────────────────────

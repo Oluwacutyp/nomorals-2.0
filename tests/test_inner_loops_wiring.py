@@ -105,14 +105,23 @@ def test_live_scan_labels_learns_and_emits(immune_chat):
     assert "adaptive:" in out and "real_threat" in out
     assert "antibody created" in out
     state = get_immune_state(immune_chat)
-    assert len(state.store.list_active()) == 1
+    # Doc 20 P3: a LEARNED antibody enters on probation — it is in
+    # memory and observes, but it is NOT active and enforces
+    # nothing until it earns promotion (was: active immediately).
+    assert len(state.store.all()) == 1
+    assert state.store.all()[0]["status"] == "probation"
+    assert state.store.list_active() == []
     # Events reached BOTH the state record and the injected sink.
     assert [k for k, _ in sink] == ["threat_detected", "antibody_created"]
     assert [e["kind"] for e in state.events] == [
         "threat_detected", "antibody_created"]
-    # Second exposure now hits the learned antibody at innate speed.
+    # Second exposure now hits the learned antibody at innate
+    # speed — as a recorded probation observation, not an
+    # enforcing match (doc 20 P3's response seam reads active only).
     out2 = control_immune(f"scan {_VIRUS_TEXT}", chat_key=immune_chat)
-    assert "antibody match (second exposure" in out2
+    assert "probation antibody observed" in out2
+    assert "antibody match (second exposure" not in out2
+    assert state.store.all()[0]["probation_matches"] == 1
 
 
 def test_live_scan_noise_creates_no_antibody(immune_chat):
@@ -152,7 +161,9 @@ def test_retire_emits_false_positive_event(immune_chat):
                    event_sink=sink_fn)
     from nomorals.immune.chat import get_immune_state
 
-    ab_id = get_immune_state(immune_chat).store.list_active()[0]["id"]
+    # Doc 20 P3: the scan-learned antibody is on probation, not
+    # active — retire resolves it from the whole store.
+    ab_id = get_immune_state(immune_chat).store.all()[0]["id"]
     out = control_immune(f"antibodies retire {ab_id} it was a drill",
                          chat_key=immune_chat, event_sink=sink_fn)
     assert "retired" in out
