@@ -272,13 +272,20 @@ def _network_pack(root: Path, pack_id="netpack"):
 
 @pytest.fixture()
 def shelf(tmp_path, monkeypatch):
-    """A context + packs dir holding the network pack."""
+    """A context + packs dir holding the network pack, with
+    its gazetteer index built — the universality pass made the
+    build an explicit operator act (query paths never build
+    inline), so the fixture builds it through the shipped
+    Gazetteer, the way `nm maps index` does."""
+    from nomorals.maps.gazetteer import Gazetteer
+
     home = tmp_path / "home"
     home.mkdir()
     packs = tmp_path / "packs"
     pack_dir = packs / "netpack"
     pack_dir.mkdir(parents=True)
-    _network_pack(pack_dir)
+    manifest = _network_pack(pack_dir)
+    Gazetteer(packs).build([(pack_dir, manifest)])
     monkeypatch.setenv("NM_MAPS_ENABLED", "1")
     monkeypatch.setenv("NM_MAPS_PACKS_DIR", str(packs))
     settings = load_settings(overrides={

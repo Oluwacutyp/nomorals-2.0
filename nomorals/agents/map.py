@@ -52,6 +52,7 @@ from ..maps.coords import (
     validate_lat,
     validate_lon,
 )
+from ..maps.gazetteer import index_status_line
 from ..maps.manifest import PackError, load_manifest
 from ..maps.marks import Mark, MarkStore
 from ..maps.overlays import (
@@ -305,7 +306,10 @@ class MapAgent:
 
     def find(self, query: str, limit: int = 8) -> dict[str, Any]:
         """Forward geocode over the local gazetteer (M4).  The
-        index builds itself on first use, like the surface.
+        query reads the index as it stands — it never triggers
+        the (minutes-long) build; an absent, stale or mid-build
+        index is named in the ticket (``index_state`` + the
+        detail's build command) instead.
 
         M9: the OWNER'S MARKS resolve FIRST — a mark with this
         label is prepended (kind ``"mark"``) ahead of any
@@ -330,8 +334,9 @@ class MapAgent:
                               "gazetteer indexes installed packs "
                               "only, and the shelf is empty"}
         gazetteer = self._gazetteer()
-        built = gazetteer.ensure(shelf)
-        result = gazetteer.search(query, limit=int(limit))
+        statuses = gazetteer.index_status(shelf)
+        result = gazetteer.search(query, limit=int(limit),
+                                  packs=shelf)
         candidates = [
             {"name": c.name, "kind": c.kind, "lat": c.lat,
              "lon": c.lon, "pack_id": c.pack_id,
@@ -348,14 +353,21 @@ class MapAgent:
             "note": result.note,
             "receipt_id": (result.receipt.receipt_id
                            if result.receipt else "")}
-        if built.built_any:
-            ticket["indexed"] = {
-                "entries": built.total_entries,
-                "packs": len(shelf)}
+        pending = [s for s in statuses if s.state != "current"]
+        if pending:
+            ticket["index_state"] = [
+                {"pack_id": s.pack_id, "state": s.state}
+                for s in pending]
         if not candidates:
-            ticket["detail"] = (
-                "no place named " + repr(query) + " in the local "
-                "Atlas index — " + result.note)
+            state_line = index_status_line(statuses)
+            if state_line:
+                ticket["detail"] = (
+                    "no place named " + repr(query) + " in the "
+                    "local Atlas index — " + state_line)
+            else:
+                ticket["detail"] = (
+                    "no place named " + repr(query) + " in the "
+                    "local Atlas index — " + result.note)
         return ticket
 
     def near(self, lat: float, lon: float,
@@ -373,9 +385,9 @@ class MapAgent:
                               "gazetteer indexes installed packs "
                               "only, and the shelf is empty"}
         gazetteer = self._gazetteer()
-        gazetteer.ensure(shelf)
+        statuses = gazetteer.index_status(shelf)
         result = gazetteer.reverse(float(lat), float(lon),
-                                   limit=int(limit))
+                                   limit=int(limit), packs=shelf)
         ticket: dict[str, Any] = {
             "operation": "near",
             "outcome": "ok" if result.candidates else "unavailable",
@@ -391,21 +403,30 @@ class MapAgent:
             "note": result.note,
             "receipt_id": (result.receipt.receipt_id
                            if result.receipt else "")}
+        pending = [s for s in statuses if s.state != "current"]
+        if pending:
+            ticket["index_state"] = [
+                {"pack_id": s.pack_id, "state": s.state}
+                for s in pending]
         if not result.candidates:
+            state_line = index_status_line(statuses)
+            note = state_line or result.note
             ticket["detail"] = (
                 "no named place within "
                 + str(int(result.searched_km)) + " km — "
-                + result.note)
+                + note)
         return ticket
 
     # ── routing ──────────────────────────────────────────────
 
-    def _resolve_endpoint(self, text: str, gazetteer):
+    def _resolve_endpoint(self, text: str, gazetteer, shelf=None):
         """One route end as ``(LatLon, label)`` — or ``(None,
         error)``.  Raw "lat,lon" wins first; then the OWNER'S
         MARKS by label (M9 — his own named places outrank the
         index, as in find); otherwise the gazetteer's top hit
-        (the surface's rule, shared)."""
+        (the surface's rule, shared).  A name that fails against
+        a not-current index says so — the miss may be the index,
+        not the place."""
         raw = (text or "").strip()
         nums: list[float] = []
         try:
@@ -423,10 +444,16 @@ class MapAgent:
         mark = self.mark_store().get(raw)
         if mark is not None:
             return LatLon(mark.lat, mark.lon), mark.label
-        result = gazetteer.search(raw)
+        result = gazetteer.search(raw, packs=shelf)
         if not result.candidates:
+            note = result.note
+            if shelf is not None:
+                state_line = index_status_line(
+                    gazetteer.index_status(shelf))
+                if state_line:
+                    note = state_line
             return None, ("no place named " + repr(raw) + " in the "
-                          "local Atlas index — " + result.note)
+                          "local Atlas index — " + note)
         top = result.candidates[0]
         return LatLon(top.lat, top.lon), top.name
 
@@ -450,13 +477,13 @@ class MapAgent:
                 "fallback")
             return ticket
         gazetteer = self._gazetteer()
-        gazetteer.ensure(shelf)
         start, from_label = self._resolve_endpoint(from_text,
-                                                   gazetteer)
+                                                   gazetteer, shelf)
         if start is None:
             ticket["detail"] = from_label
             return ticket
-        end, to_label = self._resolve_endpoint(to_text, gazetteer)
+        end, to_label = self._resolve_endpoint(to_text, gazetteer,
+                                               shelf)
         if end is None:
             ticket["detail"] = to_label
             return ticket

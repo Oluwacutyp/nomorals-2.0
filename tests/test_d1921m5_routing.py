@@ -782,6 +782,15 @@ class TestMapRouteSurface(unittest.TestCase):
         self.packs = self.home / "packs"
         self.packs.mkdir(parents=True)
         _network_pack(self.packs / "net")
+        # route-by-name resolves through the gazetteer index;
+        # since the universality pass it is built explicitly
+        # (queries never build inline), never by the surface
+        from nomorals.maps.gazetteer import Gazetteer
+        from nomorals.maps.manifest import load_manifest
+
+        Gazetteer(self.packs).build(
+            [(self.packs / "net",
+              load_manifest(self.packs / "net"))])
         from nomorals.agents.partner.runtime import PartnerRuntime
 
         rt = PartnerRuntime.__new__(PartnerRuntime)

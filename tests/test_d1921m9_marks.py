@@ -291,6 +291,19 @@ def _agent(shelf):
     return MapAgent(shelf.ctx)
 
 
+def _build_index(shelf):
+    """The explicit build door (universality pass): query
+    paths never build the gazetteer index inline, so a test
+    that needs gazetteer answers builds it through the
+    shipped Gazetteer over the fixture shelf first."""
+    from nomorals.maps.gazetteer import Gazetteer
+    from nomorals.maps.manifest import load_manifest
+
+    pack_dir = shelf.packs / "netpack"
+    Gazetteer(shelf.packs).build(
+        [(pack_dir, load_manifest(pack_dir))])
+
+
 # ── the marks store (file backing) ───────────────────────────
 
 
@@ -416,6 +429,7 @@ class TestMarkStoreDb:
 
 class TestAgentMarks:
     def test_find_resolves_the_mark_first(self, shelf):
+        _build_index(shelf)
         agent = _agent(shelf)
         agent.mark_store().save("Alpha Town", D_LL[0], D_LL[1])
         ticket = agent.find("Alpha Town")
@@ -448,7 +462,14 @@ class TestAgentMarks:
         agent.mark_store().save("hostel", A_LL[0], A_LL[1])
         # no index yet: capture/read never builds one for a hint
         assert agent.mark_for("hostel").place_hint == ""
-        agent.find("Alpha Town")  # the find path builds the index
+        # and a find does not build one either (universality
+        # pass): it names the state and the hint stays empty
+        ticket = agent.find("Alpha Town")
+        assert ticket["index_state"] == [
+            {"pack_id": "netpack", "state": "absent"}]
+        assert agent.mark_for("hostel").place_hint == ""
+        # the explicit build lands the index; the hint fills
+        _build_index(shelf)
         filled = agent.mark_for("hostel")
         assert filled.place_hint == "Alpha Town"
         # and the fill persisted in the store
@@ -482,6 +503,7 @@ class TestAgentMarks:
         assert "no mark named" in missing["detail"]
 
     def test_route_accepts_a_mark_at_either_end(self, shelf):
+        _build_index(shelf)
         agent = _agent(shelf)
         agent.mark_store().save("base", A_LL[0], A_LL[1])
         out = agent.route("base", "Delta Village")
@@ -506,6 +528,7 @@ def _tool_registry(shelf):
 
 class TestMapToolMarks:
     def test_find_and_marks_and_view_inherit_the_agent(self, shelf):
+        _build_index(shelf)
         _agent(shelf).mark_store().save("hostel", A_LL[0], A_LL[1])
         registry = _tool_registry(shelf)
         found = registry.call("map", operation="find",
@@ -614,9 +637,9 @@ class TestMarkVerbs:
 
     def test_immediate_capture_names_the_place_hint(self, shelf):
         rt = _runtime(shelf)
-        # a find first: the shipped path builds the local index
-        rt._control_map("find Alpha Town", "telegram:42",
-                        message=_ref())
+        # the index built first, through the explicit door —
+        # capture itself never builds one for a hint
+        _build_index(shelf)
         msg = _ref(meta={"location": {"lat": A_LL[0],
                                       "lon": A_LL[1]}})
         out = rt._control_map("mark hostel", "telegram:42",
@@ -683,6 +706,7 @@ class TestMarkVerbs:
         assert "couldn't parse coordinates" in bad
 
     def test_find_surface_puts_the_mark_first(self, shelf):
+        _build_index(shelf)
         rt = _runtime(shelf)
         # a mark whose label collides with an indexed place
         _store(shelf).save("Alpha Town", D_LL[0], D_LL[1])
@@ -694,6 +718,7 @@ class TestMarkVerbs:
         assert rt.gateway.files[-1]["name"].startswith("mark-")
 
     def test_route_surface_accepts_a_mark(self, shelf):
+        _build_index(shelf)
         rt = _runtime(shelf)
         _store(shelf).save("base", A_LL[0], A_LL[1])
         out = rt._control_map("route base to Delta Village",

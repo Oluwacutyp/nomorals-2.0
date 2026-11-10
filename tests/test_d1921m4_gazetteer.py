@@ -757,17 +757,33 @@ class TestMapFindNearSurface(unittest.TestCase):
         self.env.stop()
         self.tmp.cleanup()
 
-    def test_find_builds_index_on_first_use_then_reuses(self):
+    def _build_index(self):
+        """The explicit build door (universality pass): surface
+        queries never build the index inline, so a test that
+        needs gazetteer answers builds it the operator's way
+        first — through the shipped Gazetteer over the shelf."""
+        manifest = load_manifest(self.packs / "nigeria")
+        Gazetteer(self.packs).build(
+            [(self.packs / "nigeria", manifest)])
+
+    def test_find_names_the_unbuilt_index_then_answers_once_built(
+            self):
         _surface_pack(self.packs)
         out = self.rt._control_map("find ilawe", message=_msg())
-        self.assertIn("indexed the local gazetteer first", out)
-        self.assertIn("Ìláwé — town", out)
+        # the query names the state and the build command; it
+        # does not build inline and does not invent the place
+        self.assertIn("nm maps index", out)
+        self.assertNotIn("Ìláwé — town", out)
+        self.assertFalse(
+            (self.packs / "gazetteer.sqlite3").exists())
+        self._build_index()
         out2 = self.rt._control_map("find ilawe", message=_msg())
-        self.assertNotIn("indexed the local gazetteer first", out2)
+        self.assertNotIn("nm maps index", out2)
         self.assertIn("Ìláwé — town", out2)
 
     def test_find_clear_winner_sends_photo_and_list(self):
         _surface_pack(self.packs)
+        self._build_index()
         out = self.rt._control_map("find ado ekiti",
                                    chat_key="telegram:1",
                                    message=_msg())
@@ -780,6 +796,7 @@ class TestMapFindNearSurface(unittest.TestCase):
 
     def test_find_tie_sends_no_photo(self):
         _surface_pack(self.packs)
+        self._build_index()
         out = self.rt._control_map("find ode", chat_key="telegram:1",
                                    message=_msg())
         self.assertIn("Ode — town", out)
@@ -788,6 +805,7 @@ class TestMapFindNearSurface(unittest.TestCase):
 
     def test_find_no_match_is_honest(self):
         _surface_pack(self.packs)
+        self._build_index()
         out = self.rt._control_map("find atlantis", message=_msg())
         self.assertIn("no place named 'atlantis'", out)
         self.assertIn("local-first", out)
@@ -795,6 +813,7 @@ class TestMapFindNearSurface(unittest.TestCase):
 
     def test_find_federation_on_names_missing_provider(self):
         _surface_pack(self.packs)
+        self._build_index()
         with mock.patch.dict(os.environ,
                              {"NM_MAPS_GEOCODE_FEDERATION": "1"}):
             out = self.rt._control_map("find atlantis",
@@ -807,6 +826,7 @@ class TestMapFindNearSurface(unittest.TestCase):
 
     def test_near_lists_distances(self):
         _surface_pack(self.packs)
+        self._build_index()
         out = self.rt._control_map("near 7.6211,5.2214",
                                    message=_msg())
         self.assertIn("named places near", out)

@@ -3237,7 +3237,8 @@ def _parser() -> argparse.ArgumentParser:
         description=("nm maps build <pack> [--packs-dir D] [--build-dir D] [--xmx 2g] [--threads N]\n"
                      "nm maps packs [--packs-dir D]\n"
                      "nm maps verify <pack|dir> [--packs-dir D]\n"
-                     "nm maps sources"),
+                     "nm maps sources\n"
+                     "nm maps index [pack] [--packs-dir D] [--status] [--force]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     maps_sub = maps.add_subparsers(dest="maps_action", required=True)
@@ -3258,6 +3259,12 @@ def _parser() -> argparse.ArgumentParser:
     m_verify.add_argument("--json", action="store_true", help="Output as JSON")
     m_sources = maps_sub.add_parser("sources", help="the registered sources: hash discipline, licence, attribution")
     m_sources.add_argument("--json", action="store_true", help="Output as JSON")
+    m_index = maps_sub.add_parser("index", help="build or resume the gazetteer index over the installed packs (chunked, digest-cached; query paths never build it inline)")
+    m_index.add_argument("pack", nargs="?", default="", help="only this installed pack id (default: every installed pack)")
+    m_index.add_argument("--packs-dir", default="", help="packs directory (default as for build)")
+    m_index.add_argument("--status", action="store_true", help="report each pack's index state; build nothing")
+    m_index.add_argument("--force", action="store_true", help="rebuild even digest-current packs")
+    m_index.add_argument("--json", action="store_true", help="Output as JSON")
 
     swarm = sub.add_parser("swarm", aliases=CLI_ALIASES["swarm"],
         help="Agent swarm: specialist roles, debate, fan-out/fan-in",

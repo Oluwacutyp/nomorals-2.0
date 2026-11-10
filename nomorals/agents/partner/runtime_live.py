@@ -265,6 +265,18 @@ class RuntimeLiveMixin:
                      if m is not None]
         return gazetteer, installed
 
+    @staticmethod
+    def _map_index_line(gazetteer, installed) -> str:
+        """The named-state line for a not-current gazetteer
+        index, or "" when every installed pack's index is
+        current.  Query surfaces read the index as it stands —
+        they never trigger the minutes-long build inline; this
+        line names the state and the build command instead."""
+        from ...maps.gazetteer import index_status_line
+
+        line = index_status_line(gazetteer.index_status(installed))
+        return "(" + line + ".)" if line else ""
+
     def _map_router(self):
         """The local router (M5) over the shelf, federation
         posture from settings."""
@@ -636,14 +648,10 @@ class RuntimeLiveMixin:
                     "fallback.")
         names = {m.pack_id: m.name for _d, m in installed}
         lines: list[str] = []
-        built = gazetteer.ensure(installed)
-        if built.built_any:
-            lines.append(
-                f"(indexed the local gazetteer first: "
-                f"{built.total_entries} named places from "
-                f"{len(installed)} pack(s) — it rebuilds only when "
-                "a pack changes.)")
-        result = gazetteer.search(query)
+        index_line = self._map_index_line(gazetteer, installed)
+        if index_line:
+            lines.append(index_line)
+        result = gazetteer.search(query, packs=installed)
         if not result.candidates:
             if mark is not None:
                 lines.append(self._map_mark_line(mark))
@@ -703,14 +711,10 @@ class RuntimeLiveMixin:
                     "fallback.")
         names = {m.pack_id: m.name for _d, m in installed}
         lines: list[str] = []
-        built = gazetteer.ensure(installed)
-        if built.built_any:
-            lines.append(
-                f"(indexed the local gazetteer first: "
-                f"{built.total_entries} named places from "
-                f"{len(installed)} pack(s) — it rebuilds only when "
-                "a pack changes.)")
-        result = gazetteer.reverse(lat, lon)
+        index_line = self._map_index_line(gazetteer, installed)
+        if index_line:
+            lines.append(index_line)
+        result = gazetteer.reverse(lat, lon, packs=installed)
         if not result.candidates:
             lines.append(result.note + ".")
             return "\n".join(lines)
@@ -744,13 +748,16 @@ class RuntimeLiveMixin:
             return f"~{minutes} min"
         return f"~{minutes // 60} h {minutes % 60:02d} min"
 
-    def _map_route_endpoint(self, text, gazetteer):
+    def _map_route_endpoint(self, text, gazetteer, packs=None):
         """One route end as ``(point, label)`` — or ``(None,
         error)``.  Raw "lat,lon" wins first; then the OWNER'S
         MARKS by label (M9); otherwise the gazetteer's top hit,
-        its display name the label the summary answers with."""
+        its display name the label the summary answers with.
+        A name that fails against a not-current index names
+        that state — the miss may be the index, not the place."""
         from ...location.primitives import LatLon
         from ...maps.coords import validate_lat, validate_lon
+        from ...maps.gazetteer import index_status_line
 
         raw = (text or "").strip()
         nums: list[float] = []
@@ -769,10 +776,16 @@ class RuntimeLiveMixin:
         mark = self._map_agent().mark_store().get(raw)
         if mark is not None:
             return LatLon(mark.lat, mark.lon), mark.label
-        result = gazetteer.search(raw)
+        result = gazetteer.search(raw, packs=packs)
         if not result.candidates:
+            note = result.note
+            if packs is not None:
+                state_line = index_status_line(
+                    gazetteer.index_status(packs))
+                if state_line:
+                    note = state_line
             return None, (f"no place named {raw!r} in the local "
-                          "Atlas index — " + result.note)
+                          "Atlas index — " + note)
         top = result.candidates[0]
         return LatLon(top.lat, top.lon), top.name
 
@@ -795,19 +808,16 @@ class RuntimeLiveMixin:
                     "installed packs only; there is no provider "
                     "fallback.")
         lines: list[str] = []
-        built = gazetteer.ensure(installed)
-        if built.built_any:
-            lines.append(
-                f"(indexed the local gazetteer first: "
-                f"{built.total_entries} named places from "
-                f"{len(installed)} pack(s) — it rebuilds only when "
-                "a pack changes.)")
+        index_line = self._map_index_line(gazetteer, installed)
+        if index_line:
+            lines.append(index_line)
         start, from_label = self._map_route_endpoint(
-            from_text, gazetteer)
+            from_text, gazetteer, packs=installed)
         if start is None:
             lines.append(from_label + ".")
             return "\n".join(lines)
-        end, to_label = self._map_route_endpoint(to_text, gazetteer)
+        end, to_label = self._map_route_endpoint(
+            to_text, gazetteer, packs=installed)
         if end is None:
             lines.append(to_label + ".")
             return "\n".join(lines)
