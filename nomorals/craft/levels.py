@@ -29,18 +29,30 @@ L4/L5 therefore map to **no grade** — the row says so, following
 proof_grade's own convention for semantics that do not correspond
 (a ``None`` row is a finding, not an omission).  They are never
 refusal tiers: the neighbouring work is done, and what is handed
-off is named.  What this module enforces today is the *claim* law:
+off is named.  What Stage A enforced is the *claim* law:
 a level-labelled claim carries at most the grade its level means
 **and** at most the grade its attached evidence earns
 (:func:`cap_claim`) — the no-silent-upgrade rule, applied to
-levels.  The record-reading derivation itself is the levels pass
-(Stage C P10); nothing here invents a derivation Stage A has not
-built.
+levels.
+
+Stage C P10 adds the record-reading derivation itself:
+:func:`derive_level` reads a :class:`LevelFacts` — a small set of
+booleans, each one the presence of a *record* (a live pack in the
+filebook, claims on a contract ledger, a delivery receipt) — and
+returns the highest level those records earn, with the earning
+facts named.  The derivation is a pure function: it stores
+nothing, trusts no stored level token, and a field's level changes
+only when its underlying records change.  The gathering of facts
+from the stores lives in :mod:`nomorals.craft.coverage`; this
+module stays the vocabulary and the rules.  L4/L5 are never
+derived: they are classes of *deliverable* (whose final act is an
+attestation or physical work), not states a record set can earn.
 """
 
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 from ..core.proof_grade import (
     EvidenceRef,
@@ -58,6 +70,9 @@ __all__ = [
     "grade_for_level",
     "is_handoff_level",
     "cap_claim",
+    "LevelFacts",
+    "DerivedLevel",
+    "derive_level",
 ]
 
 
@@ -168,3 +183,102 @@ def cap_claim(level: object, evidence: Iterable[EvidenceRef]) -> ProofGrade:
     if ceiling is None:
         return derived
     return min(derived, ceiling)
+
+
+# ── the derivation (Stage C P10) ─────────────────────────────────
+
+
+@dataclass(frozen=True)
+class LevelFacts:
+    """The record facts a level derivation reads.  Each field is
+    the presence of a RECORD — never a declaration, never a stored
+    level token:
+
+    * ``live_knowledge`` — a pack/skill for the field is live
+      (non-draft) in the filebook: routed knowledge exists;
+    * ``draft_knowledge`` — the field's only pack/skill is an
+      unproven draft (it earns NO level — the claim waits for its
+      benchmark or promotion records; it is reported as a note so
+      the work is visible without being dressed as competence);
+    * ``produced`` — a cell has produced the artifact class: a
+      delegation contract for the field carries claims on its
+      ledger;
+    * ``tool_executed`` — a real tool path produced the artifact
+      under contract: a contract for the field completed with
+      supported evidence claims carrying evidence refs;
+    * ``operated`` — a delivery under grant is on record for the
+      field (a delivery receipt tied to one of its contracts).
+    """
+
+    live_knowledge: bool = False
+    draft_knowledge: bool = False
+    produced: bool = False
+    tool_executed: bool = False
+    operated: bool = False
+
+
+@dataclass(frozen=True)
+class DerivedLevel:
+    """One derivation's outcome: the level the records earn
+    (``None`` when they earn none), the earning facts in ladder
+    order, and honest notes about what the records do NOT earn."""
+
+    level: str | None
+    basis: tuple[str, ...] = ()
+    notes: tuple[str, ...] = ()
+
+
+#: Each earning fact, its level, and the basis line it contributes
+#: — the gap-10 derivation rules in ladder order.
+_EARNING: tuple[tuple[str, str, str], ...] = (
+    ("live_knowledge", "L0",
+     "knowledge: a routed pack/skill for the field is live in "
+     "the filebook"),
+    ("produced", "L1",
+     "drafted: a cell has produced the artifact class — a "
+     "delegation contract for the field carries claims on its "
+     "ledger"),
+    ("tool_executed", "L2",
+     "tool-executed: a contract for the field completed with "
+     "supported evidence carrying refs — a real tool path "
+     "produced the artifact under contract"),
+    ("operated", "L3",
+     "operated: a delivery under grant is on record for the "
+     "field"),
+)
+
+
+def derive_level(facts: LevelFacts) -> DerivedLevel:
+    """The level a field's records earn — derived, never assigned.
+
+    The highest earning fact present sets the level; every earning
+    fact present is named in the basis.  Facts are read as they
+    stand: the derivation fills in no implications (an operated
+    record does not invent the tool-executed record beneath it —
+    the delivery receipt IS its own earning fact).  L4/L5 are
+    never returned: handoff classes describe a deliverable's final
+    act, not a state of Devon's records.
+    """
+    basis: list[str] = []
+    level: str | None = None
+    for field_name, earned, line in _EARNING:
+        if getattr(facts, field_name):
+            basis.append(line)
+            level = earned
+    notes: list[str] = []
+    if level is None:
+        if facts.draft_knowledge:
+            notes.append(
+                "an unproven draft pack/skill exists for the "
+                "field — work is on record, but no level is read "
+                "from a draft: the claim waits for its benchmark "
+                "or promotion records")
+        else:
+            notes.append(
+                "no records earn a level for this field")
+    elif facts.draft_knowledge and not facts.live_knowledge:
+        notes.append(
+            "an unproven draft also exists for the field; the "
+            "level above rests on the other records, not on it")
+    return DerivedLevel(level=level, basis=tuple(basis),
+                        notes=tuple(notes))
