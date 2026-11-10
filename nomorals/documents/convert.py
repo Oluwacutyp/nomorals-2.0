@@ -246,10 +246,34 @@ def to_html(doc: Document, *, theme: str = "light",
 
 
 def to_pdf(doc: Document) -> bytes:
-    """Render a Document to PDF bytes via the pure-Python PDF writer."""
+    """Render a Document to PDF bytes via the pure-Python PDF writer.
+
+    The PDF is a stamped derivative of the document's CURRENT
+    revision (Doc 16 P5): the revision + declared completeness ride
+    the /Info metadata (the owner-words line as subject, the full
+    manifest revision_ref in keywords) and a front-matter line under
+    the title, so a saved copy can never be mistaken for another
+    revision of the document.  ``to_markdown`` itself is untouched —
+    the stamp lands only in the copy rendered here."""
     markdown = to_markdown(doc)  # raises DocumentError when there is no content
+    from ..core.edition import completeness_line
+    from .manifest import manifest_from_document
+
+    manifest = manifest_from_document(doc)
+    line = f"Revision {doc.revision} · {completeness_line(manifest)}"
+    if "\n\n" in markdown:
+        head, rest = markdown.split("\n\n", 1)
+        markdown = f"{head}\n\n{line}\n\n{rest}"
+    else:
+        markdown = f"{line}\n\n{markdown}"
     try:
-        return render_pdf(markdown, title=doc.title or "Document", headings=True)
+        return render_pdf(markdown, title=doc.title or "Document",
+                          headings=True,
+                          metadata={"title": doc.title or "Document",
+                                    "author": doc.author or "",
+                                    "subject": line.replace("—", "-"),
+                                    "keywords": "nomorals-longdoc "
+                                                + manifest.revision_ref})
     except PdfError as exc:
         raise DocumentError(f"PDF rendering failed: {exc}", kind="write") from exc
 
@@ -458,6 +482,22 @@ def to_epub(doc: Document, *, epub_title: str = "") -> bytes:
     if not chapters:
         chapters.append(("chapter1.xhtml", _xhtml_page(title, [])))
 
+    # the derivative's truth (Doc 16 P5): the OPF records the
+    # manifest revision_ref this EPUB was built from plus the
+    # declared completeness, so a saved copy is provably tied to one
+    # revision of the document.
+    from .manifest import manifest_from_document
+
+    manifest = manifest_from_document(doc)
+    comp = manifest.completeness
+    comp_total = (comp.declared_total if comp.declared_total is not None
+                  else comp.present_count)
+    stamp_meta = (
+        '  <meta property="nomorals:revision_ref">'
+        f'{html_module.escape(manifest.revision_ref)}</meta>\n'
+        '  <meta property="nomorals:completeness">'
+        f'{comp.status} {comp.present_count} of {comp_total}</meta>\n')
+
     opf_items = "\n".join(
         f'    <item id="ch{i}" href="{name}" '
         f'media-type="application/xhtml+xml"/>'
@@ -472,7 +512,7 @@ def to_epub(doc: Document, *, epub_title: str = "") -> bytes:
   <dc:title>{html_module.escape(title)}</dc:title>
   <dc:creator>{html_module.escape(doc.author)}</dc:creator>
   <dc:language>en</dc:language>
- </metadata>
+{stamp_meta} </metadata>
  <manifest>
 {opf_items}
  </manifest>

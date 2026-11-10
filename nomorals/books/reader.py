@@ -49,6 +49,12 @@ _log = get_logger(__name__)
 
 __all__ = ["StoryReader", "FollowedStory", "ReaderError"]
 
+#: The declaration an export prints where a chapter it does not hold
+#: would sit (Doc 16 P5): the gap is named, the text is never invented.
+_STORY_MISSING_NOTE = (
+    "Chapter {n} is not in the local library yet — declared missing "
+    "here, never invented. Sync the story to fetch it.")
+
 
 class ReaderError(Exception):
     """The reader could not do what was asked."""
@@ -542,6 +548,112 @@ class StoryReader:
         if ch is None:
             raise ReaderError(f"chapter {number} unavailable")
         return f"# {ch.title}\n\n{ch.text}"
+
+    def export_story(self, slug: str, fmt: str = "pdf", *,
+                     brand_policy: str = "", brand_text: str = "",
+                     ) -> dict[str, Any]:
+        """Export a followed story from its LOCALLY HELD chapters
+        (Doc 16 P5) — PDF, EPUB or HTML, built through the story's
+        manifest (the P1 derivation + the P2 resolver), so the file
+        contains exactly the held chapters, in order, at full text:
+        never the 12000-char :meth:`read` preview, and never a fetch.
+        Chapters the library does not hold are DECLARED missing where
+        they would sit (a notice section/page) — their text is never
+        invented, and a partial export can never pose as complete.
+
+        Every file records the manifest ``revision_ref`` it was built
+        from plus the declared completeness: HTML inherits the P3
+        edition front matter; EPUB carries the completeness line on
+        its title page and both stamps in OPF metadata; PDF carries
+        the line as a front-matter paragraph under the title and both
+        stamps in its /Info metadata.  A story with zero held chapters
+        refuses honestly — no empty book ships as success."""
+        fmt = (fmt or "pdf").strip().lower()
+        if fmt not in ("pdf", "epub", "html"):
+            raise ReaderError(
+                f"unknown export format {fmt!r} — use pdf, epub or html")
+        slug = self.resolve_slug(slug)
+        story = self._load(slug)
+        from ..core.edition import completeness_line
+        from .manifest import manifest_from_story, story_content_resolver
+
+        manifest = manifest_from_story(self, slug)
+        comp = manifest.completeness
+        if comp.present_count == 0:
+            raise ReaderError(
+                f"{story.title!r} has no chapters in the local library "
+                "yet — read or sync it first; there is nothing to export")
+        line = completeness_line(manifest)
+        held = {int(seg.segment_id.split("-", 1)[1])
+                for seg in manifest.segments}
+        total = comp.declared_total
+        numbers = (sorted(set(range(1, total + 1)) | held) if total
+                   else sorted(held))
+        out_dir = self.story_dir(slug) / "exports"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        path = out_dir / f"{slug}.{fmt}"
+        if fmt == "html":
+            from ..core.edition import render_edition
+
+            html = render_edition(
+                manifest, story_content_resolver(self),
+                brand_policy=brand_policy, brand_text=brand_text,
+                subtitle=f"by {story.author}" if story.author else "")
+            path.write_text(html, encoding="utf-8")
+            data = html.encode("utf-8")
+        elif fmt == "epub":
+            from .forge import _epub_stamp_meta, epub_from_chapters
+
+            chapters: list[tuple[int, str, str | None, str]] = []
+            for n in numbers:
+                ch = self._cached_chapter(slug, n) if n in held else None
+                if ch is not None:
+                    ch_title = ch.title or f"Chapter {n}"
+                    chapters.append(
+                        (n, ch_title, f"# {ch_title}\n\n{ch.text.strip()}",
+                         ""))
+                else:
+                    chapters.append(
+                        (n, f"Chapter {n}", None,
+                         _STORY_MISSING_NOTE.format(n=n)))
+            data = epub_from_chapters(
+                slug=slug, title=story.title, author=story.author,
+                description=story.synopsis,
+                subjects=tuple(story.genres or ()),
+                chapters=chapters, front_note=line,
+                extra_meta=_epub_stamp_meta(manifest))
+            path.write_bytes(data)
+        else:
+            from ..core.pdf import render_pdf
+
+            head = f"# {story.title}"
+            if story.author:
+                head += f"\nby {story.author}"
+            parts = [head, line]
+            for n in numbers:
+                ch = self._cached_chapter(slug, n) if n in held else None
+                if ch is not None:
+                    ch_title = ch.title or f"Chapter {n}"
+                    parts.append(f"# {ch_title}\n\n{ch.text.strip()}")
+                else:
+                    parts.append(
+                        f"# Chapter {n}\n\n"
+                        f"*{_STORY_MISSING_NOTE.format(n=n)}*")
+            data = render_pdf(
+                "\n\n".join(parts) + "\n", title=story.title,
+                headings=True, chapter_break=True, toc=True,
+                metadata={"title": story.title,
+                          "author": story.author or "",
+                          "subject": line.replace("—", "-"),
+                          "keywords": "nomorals-longdoc "
+                                      + manifest.revision_ref})
+            path.write_bytes(data)
+        return {"slug": slug, "title": story.title, "format": fmt,
+                "path": str(path), "bytes": len(data),
+                "present": comp.present_count,
+                "declared_total": comp.declared_total,
+                "completeness": comp.status, "completeness_line": line,
+                "revision_ref": manifest.revision_ref}
 
     def sync(self, slug: str = "", *, chapters: int = 0) -> dict[str, Any]:
         """Fetch the next few unread chapters for one/all followed stories."""

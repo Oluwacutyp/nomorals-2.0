@@ -2220,7 +2220,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                       "Scribble Hub, AO3, Wattpad, Webnovel), read chapters with "
                       "progress tracking, continue past the ending in the story's "
                       "voice, list sources.",
-             "usage": "/books read <url|slug> [n] | /books part <slug> [back] | /books contents <slug> | /books continue <slug> [n] | /books sources | /books library",
+             "usage": "/books read <url|slug> [n] | /books part <slug> [back] | /books contents <slug> | /books export <slug> [pdf|epub|html] | /books continue <slug> [n] | /books sources | /books library",
              "example": "/books read https://www.gutenberg.org/ebooks/84",
              "related": "/book /novel"},
     "novel": {"what": "Story reader + continuer: follow webnovels (freewebnovel, pandanovel, "
@@ -4761,7 +4761,7 @@ LIST_ONELINERS: dict[str, str] = {
     "search": "quick research + cited summary",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",
-    "books": "story reader + continuer: /books read <url|slug> | part <slug> | contents <slug> | continue <slug> [n] | sources",
+    "books": "story reader + continuer: /books read <url|slug> | part <slug> | contents <slug> | export <slug> [pdf|epub|html] | continue <slug> [n] | sources",
     "decode": "identify + decode anything: /decode <data|file|hash>",
     "investigate": "one-pass investigation: decode → crack → OSINT → knowledge graph",
     "cookies": "cookie state: YouTube download cookies + browser session bundles (/cookies import|status|clear)",

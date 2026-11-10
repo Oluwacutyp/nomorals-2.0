@@ -269,8 +269,49 @@ class RuntimeSearchMixin:
                 lines.append("\n/books read <url|slug> [n] follows + reads; "
                              "/books part <slug> turns the page where buttons can't; "
                              "/books contents <slug> lists chapters; "
+                             "/books export <slug> [pdf|epub|html] exports the "
+                             "held chapters as a stamped file; "
                              "/books continue <slug> [n] continues in its voice")
                 return "\n".join(lines)
+
+            if verb == "export":
+                # /books export <slug> [pdf|epub|html] — export a
+                # FOLLOWED story from its locally held chapters
+                # (Doc 16 P5): the file is built through the story's
+                # manifest, carries its revision + declared
+                # completeness, and declares any missing chapters
+                # instead of inventing them.  Authored books export
+                # through /book build — this verb is stories only.
+                from pathlib import Path as _Path
+
+                from ...books.reader import ReaderError, StoryReader
+                if len(parts) < 2:
+                    return "usage: /books export <slug> [pdf|epub|html]"
+                fmt = parts[2].lower() if len(parts) > 2 else "pdf"
+                if fmt not in ("pdf", "epub", "html"):
+                    return ("usage: /books export <slug> [pdf|epub|html]"
+                            " — formats: pdf, epub, html")
+                reader = StoryReader(self.context)
+                try:
+                    r = reader.export_story(parts[1], fmt)
+                except ReaderError as exc:
+                    return f"📕 export refused: {exc}"
+                except Exception as exc:  # noqa: BLE001 - chat surface
+                    record_failure("runtime_search._control_book.export",
+                                   exc)
+                    return f"📕 export failed: {exc}"
+                chat = self._ref_from_key(chat_key)
+                name = _Path(r["path"]).name
+                result = self.gateway.send_file(
+                    chat.platform, chat, r["path"],
+                    caption=f"📕 {r['title']} — {r['completeness_line']}",
+                    name=name)
+                if not getattr(result, "ok", False):
+                    return (f"📕 exported but the file send did not go "
+                            f"through — it is saved at {r['path']}\n"
+                            f"{r['completeness_line']}")
+                return (f"📄 {name} sent above.\n"
+                        f"{r['completeness_line']}")
 
             if verb == "read":
                 # /books read <url|slug> [n] — follow a URL, or read a

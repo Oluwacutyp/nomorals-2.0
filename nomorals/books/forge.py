@@ -28,7 +28,8 @@ from . import write as write_mod
 
 _log = get_logger(__name__)
 
-__all__ = ["BookForge", "md_to_xhtml", "epub_bytes", "html_book"]
+__all__ = ["BookForge", "md_to_xhtml", "epub_bytes", "epub_from_chapters",
+           "html_book"]
 
 _NOTES_CAP = 16000
 
@@ -673,15 +674,34 @@ class BookForge:
         }
         want = {f.lower() for f in formats} or {"pdf"}
         if "pdf" in want:
+            from ..core.edition import completeness_line
             from ..core.pdf import render_pdf
+            from .manifest import manifest_from_book
 
+            # the PDF is a stamped derivative of the book's manifest
+            # (Doc 16 P5): the declared completeness line sits in the
+            # front matter under the title head, and the /Info
+            # metadata records the line (subject) plus the manifest
+            # revision_ref it was built from (keywords).  The saved
+            # manuscript.md stays the pure manuscript.
+            manifest = manifest_from_book(book)
+            edition_line = completeness_line(manifest)
+            pdf_source = manuscript
+            if "\n\n" in pdf_source:
+                head, rest = pdf_source.split("\n\n", 1)
+                pdf_source = f"{head}\n\n{edition_line}\n\n{rest}"
             data = render_pdf(
-                manuscript,
+                pdf_source,
                 title=book.display_title,
                 page_size=page_size,
                 headings=True,
                 chapter_break=True,
                 toc=True,
+                metadata={"title": book.display_title,
+                          "author": book.author or "",
+                          "subject": edition_line.replace("—", "-"),
+                          "keywords": "nomorals-longdoc "
+                                      + manifest.revision_ref},
             )
             pdf_path = d / f"{slug}.pdf"
             pdf_path.write_bytes(data)
@@ -905,22 +925,56 @@ blockquote { margin: 1em 2em; font-style: italic; }
 """
 
 
-def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
-    """Build a valid EPUB3 for ``book``.  Stdlib only (zipfile)."""
+def _epub_stamp_meta(manifest) -> str:
+    """The OPF recording of what a derivative was built from (Doc 16
+    P5): the manifest's full ``revision_ref`` — the P1 provenance
+    token, carried in machine metadata so the derivative's origin is
+    provable, never printed as an owner-facing stamp — plus the
+    declared completeness in counts."""
+    comp = manifest.completeness
+    total = comp.declared_total
+    total_txt = str(total) if total is not None else "open"
+    return (
+        f'<meta property="nomorals:revision_ref">'
+        f'{_esc(manifest.revision_ref)}</meta>\n'
+        f'<meta property="nomorals:completeness">{_esc(comp.status)} '
+        f'{comp.present_count} of {total_txt}</meta>')
+
+
+def epub_from_chapters(*, slug: str, title: str, author: str = "",
+                       subtitle: str = "", language: str = "en",
+                       description: str = "",
+                       subjects: tuple[str, ...] = (),
+                       series: str = "", series_index: int = 0,
+                       chapters: list[tuple[int, str, str | None, str]],
+                       front_note: str = "", extra_meta: str = "",
+                       cover_path: str = "") -> bytes:
+    """Assemble a valid EPUB3 from chapter markdown — the shared seam
+    behind :func:`epub_bytes` (forge books) and the followed-story
+    exports (Doc 16 P5).  Stdlib only (zipfile).
+
+    ``chapters`` is a list of ``(number, title, body_md,
+    missing_note)`` in reading order.  A chapter whose ``body_md`` is
+    None renders as a declared-absent page carrying ``missing_note``
+    where the chapter would sit — the edition's shape stays honest
+    (a gap is named, never silently dropped) and no text is ever
+    invented for it.  ``front_note`` (the caller's completeness line)
+    prints on the title page; ``extra_meta`` is raw OPF metadata XML
+    inserted at the end of the metadata block — the recording surface
+    for the manifest revision_ref + completeness the file was built
+    from."""
     import io
     import uuid
     import zipfile
     from datetime import datetime, timezone
 
-    written = [c for c in book.chapters
-               if c.status == STATUS_WRITTEN and c.text.strip()]
-    if not written:
-        raise BookError(f"book {book.slug!r} has no written chapters yet")
+    if not any(body for _, _, body, _ in chapters):
+        raise BookError(f"{slug!r} has no chapter text to export yet")
 
     uid = f"urn:uuid:{uuid.uuid4()}"
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    author = book.author or "Devon"
-    lang = book.language or "en"
+    creator = author or "Devon"
+    lang = language or "en"
 
     files: list[tuple[str, bytes, bool]] = []  # (name, data, compress)
 
@@ -930,21 +984,22 @@ def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
     # title page
     title_body = (
         f'<div class="title-page">\n'
-        f'<div class="book-title">{_esc(book.display_title)}</div>\n'
-        + (f'<div class="book-author">{_esc(book.author)}</div>\n' if book.author else "")
-        + (f"<p><em>{_esc(book.subtitle)}</em></p>\n" if book.subtitle else "")
+        f'<div class="book-title">{_esc(title)}</div>\n'
+        + (f'<div class="book-author">{_esc(author)}</div>\n' if author else "")
+        + (f"<p><em>{_esc(subtitle)}</em></p>\n" if subtitle else "")
+        + (f"<p><em>{_esc(front_note)}</em></p>\n" if front_note else "")
         + "</div>")
     xhtml("title.xhtml",
           f'<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
           f'<html xmlns="http://www.w3.org/1999/xhtml"><head>'
-          f"<title>{_esc(book.display_title)}</title>"
+          f"<title>{_esc(title)}</title>"
           f'<link rel="stylesheet" type="text/css" href="style.css"/>'
           f"</head><body>\n{title_body}\n</body></html>")
 
     # cover page (optional image)
     cover_item = ""
     cover_id = ""
-    cpath = Path(cover_path or book.cover_image or "")
+    cpath = Path(cover_path or "")
     if cpath.is_file():
         suffix = cpath.suffix.lower()
         mime = {"jpg": "image/jpeg", "jpeg": "image/jpeg",
@@ -963,13 +1018,15 @@ def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
         cover_item = (f'<item id="{cover_id}" href="images/cover{suffix}" '
                       f'media-type="{mime}" properties="cover-image"/>')
 
-    # chapters
+    # chapters — present chapters carry their full text; absent ones
+    # carry only their declaration.
     ch_names: list[str] = []
-    for c in written:
-        name = f"ch{c.number:03d}.xhtml"
+    for number, ch_title, body_md, missing_note in chapters:
+        name = f"ch{number:03d}.xhtml"
         ch_names.append(name)
-        body_md = f"# {c.title or f'Chapter {c.number}'}\n\n{c.text.strip()}"
-        xhtml(name, md_to_xhtml(body_md, c.title or f"Chapter {c.number}"))
+        if body_md is None:
+            body_md = f"# {ch_title}\n\n*{missing_note}*"
+        xhtml(name, md_to_xhtml(body_md, ch_title))
 
     manifest_items = [
         '<item id="ncx" href="toc.ncx" media-type="application/x-dtbncx+xml"/>',
@@ -983,7 +1040,7 @@ def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
             '<item id="cover" href="cover.xhtml" '
             'media-type="application/xhtml+xml"/>')
         manifest_items.append(cover_item)
-    spine_ids = ["title"] + ([ "cover"] if cover_id else [])
+    spine_ids = ["title"] + (["cover"] if cover_id else [])
     for i, name in enumerate(ch_names):
         cid = f"ch{i + 1}"
         manifest_items.append(
@@ -992,21 +1049,25 @@ def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
         spine_ids.append(cid)
 
     meta_extra = ""
-    if book.series:
+    if series:
         meta_extra = (
-            f'<meta property="belongs-to-collection">{_esc(book.series)}</meta>'
-            f'<meta property="group-position">{book.series_index}</meta>')
+            f'<meta property="belongs-to-collection">{_esc(series)}</meta>'
+            f'<meta property="group-position">{series_index}</meta>')
+    if extra_meta:
+        meta_extra = (meta_extra + "\n" if meta_extra else "") + extra_meta
+    subjects_xml = "".join(
+        f"<dc:subject>{_esc(s)}</dc:subject>\n" for s in subjects if s)
     opf = (
         f'<?xml version="1.0" encoding="utf-8"?>\n'
         f'<package xmlns="http://www.idpf.org/2007/opf" version="3.0" '
         f'unique-identifier="uid">\n<metadata '
         f'xmlns:dc="http://purl.org/dc/elements/1.1/">\n'
         f'<dc:identifier id="uid">{_esc(uid)}</dc:identifier>\n'
-        f"<dc:title>{_esc(book.display_title)}</dc:title>\n"
-        + (f"<dc:creator>{_esc(author)}</dc:creator>\n")
-        + (f"<dc:description>{_esc(book.description[:500])}</dc:description>\n"
-           if book.description else "")
-        + (f"<dc:subject>{_esc(book.genre)}</dc:subject>\n" if book.genre else "")
+        f"<dc:title>{_esc(title)}</dc:title>\n"
+        + (f"<dc:creator>{_esc(creator)}</dc:creator>\n")
+        + (f"<dc:description>{_esc(description[:500])}</dc:description>\n"
+           if description else "")
+        + subjects_xml
         + f"<dc:language>{_esc(lang)}</dc:language>\n"
         f"<dc:date>{now}</dc:date>\n"
         f'<meta property="dcterms:modified">{now}</meta>\n'
@@ -1019,12 +1080,13 @@ def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
 
     # NCX (EPUB2 compat)
     nav_points = []
-    for i, c in enumerate(written):
+    for i, ((_, ch_title, _, _), name) in enumerate(
+            zip(chapters, ch_names, strict=True)):
         nav_points.append(
             f'<navPoint id="np{i + 1}" playOrder="{i + 2}">'
-            f"<navLabel><text>{_esc(c.title or f'Chapter {c.number}')}</text>"
+            f"<navLabel><text>{_esc(ch_title)}</text>"
             f"</navLabel>"
-            f'<content src="{ch_names[i]}"/></navPoint>')
+            f'<content src="{name}"/></navPoint>')
     ncx = (
         f'<?xml version="1.0" encoding="utf-8"?>\n'
         f'<ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">\n'
@@ -1033,14 +1095,14 @@ def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
         f'<meta name="dtb:depth" content="1"/>'
         f'<meta name="dtb:totalPageCount" content="0"/>'
         f'<meta name="dtb:maxPageNumber" content="0"/></head>\n'
-        f'<docTitle><text>{_esc(book.display_title)}</text></docTitle>\n'
+        f'<docTitle><text>{_esc(title)}</text></docTitle>\n'
         f"<navMap>\n" + "\n".join(nav_points) + "\n</navMap>\n</ncx>")
     files.append(("OEBPS/toc.ncx", ncx.encode("utf-8"), True))
 
     # EPUB3 nav
     nav_items = "".join(
-        f'<li><a href="{n}">{_esc(c.title or f"Chapter {c.number}")}</a></li>\n'
-        for n, c in zip(ch_names, written))
+        f'<li><a href="{n}">{_esc(t)}</a></li>\n'
+        for n, (_, t, _, _) in zip(ch_names, chapters, strict=True))
     nav = (
         f'<?xml version="1.0" encoding="utf-8"?>\n<!DOCTYPE html>\n'
         f'<html xmlns="http://www.w3.org/1999/xhtml" '
@@ -1069,6 +1131,46 @@ def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
         for name, data, _ in files:
             zf.writestr(name, data, compress_type=zipfile.ZIP_DEFLATED)
     return buf.getvalue()
+
+
+def epub_bytes(book: Book, *, cover_path: str = "") -> bytes:
+    """Build a valid EPUB3 for ``book``.  Stdlib only (zipfile).
+
+    Since Doc 16 P5 the EPUB is a stamped derivative of the book's
+    manifest: the title page carries the declared completeness line,
+    the OPF metadata records the manifest revision_ref it was built
+    from, and a chapter that is declared in the outline but not
+    written yet appears as a declared-absent page — listed, never
+    silently dropped, never filled with invented text."""
+    written = [c for c in book.chapters
+               if c.status == STATUS_WRITTEN and c.text.strip()]
+    if not written:
+        raise BookError(f"book {book.slug!r} has no written chapters yet")
+    from ..core.edition import completeness_line
+    from .manifest import manifest_from_book
+
+    manifest = manifest_from_book(book)
+    chapters: list[tuple[int, str, str | None, str]] = []
+    for c in book.chapters:
+        ch_title = c.title or f"Chapter {c.number}"
+        if c.status == STATUS_WRITTEN and c.text.strip():
+            chapters.append((c.number, ch_title,
+                             f"# {ch_title}\n\n{c.text.strip()}", ""))
+        else:
+            chapters.append((c.number, ch_title, None,
+                             "This chapter is in the book's outline but "
+                             "has not been written yet — it is declared "
+                             "here so the edition's shape is honest; no "
+                             "text is invented for it."))
+    return epub_from_chapters(
+        slug=book.slug, title=book.display_title, author=book.author,
+        subtitle=book.subtitle, language=book.language or "en",
+        description=book.description,
+        subjects=(book.genre,) if book.genre else (),
+        series=book.series, series_index=book.series_index,
+        chapters=chapters, front_note=completeness_line(manifest),
+        extra_meta=_epub_stamp_meta(manifest),
+        cover_path=cover_path or book.cover_image or "")
 
 
 def html_book(book: Book, *, theme: str = "light",
