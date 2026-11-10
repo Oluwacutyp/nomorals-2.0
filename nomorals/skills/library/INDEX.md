@@ -18,6 +18,9 @@
 ## context
 
 - `context-budgeting` — Context budgeting — the prompt is assembled, not accumulated: How working context is built: prioritized sections, honest truncation, skills loaded on demand. (topics: context, prompts, budget, tokens)
+## craft
+
+- `software-craft-pack` — Software craft pack — the cooperative delivery cell as a pack: The software cooperative in pack form: the contract-first workflow, rubric, anti-patterns, evaluators and failure modes a delivery cell runs when it builds software. (topics: cooperative, craft, delivery cell, software engineering)
 ## media
 
 - `media-delivery-shapes` — Media delivery shapes — consumable form or it didn't happen: Media must arrive in the form the chat consumes: photos inline, GIFs animated, couples as two pictures. (topics: media, delivery, photos, gifs, stickers)

@@ -79,6 +79,13 @@ LAYERS: dict[str, int] = {
     # downward/sideways.
     "triggers": 5,
     "agents": 5,
+    # craft/ is the cooperative foundation (docs 22+23 Stage A): the
+    # CraftGraph projection, the universal receipt schema and the
+    # capability-level mapping.  An L5 organ beside agents — it
+    # projects over agents' records (delegation, run tickets,
+    # manifests) and the L4 services below it (skills, goals,
+    # storage), and is consumed by the composition layer.
+    "craft": 5,
     # codews/ is the Wave K code workspace object (repo/branch/worktree/
     # patch/test/build): an L5 organ beside agents/missions, reusing
     # core/diff and tools/git.

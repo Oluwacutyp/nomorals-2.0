@@ -91,6 +91,14 @@ class SkillDoc:
     path: str = ""
     origin: str = "seed"          # seed | user | draft
     revises: str = ""             # drafts: the live skill id they amend
+    # Craft packs (docs 22+23 Stage A P3): a pack is a skill doc whose
+    # frontmatter declares ``kind: pack``; its body carries the pack
+    # sections and its fixtures name the executable checks its
+    # evaluators run.  Plain skills leave all three empty — the pack
+    # schema lives in skills/packs.py, the lifecycle below is shared.
+    kind: str = ""                # "" = plain skill | "pack"
+    domain: str = ""              # packs: the domain the pack serves
+    fixtures: tuple[str, ...] = ()  # packs: executable fixture paths
 
     @property
     def is_draft(self) -> bool:
@@ -140,6 +148,9 @@ def parse_skill_text(text: str, *, path: str = "",
         path=path,
         origin=origin,
         revises=meta.get("revises") or "",
+        kind=meta.get("kind") or "",
+        domain=meta.get("domain") or "",
+        fixtures=_split_list(meta.get("fixtures", "")),
     )
 
 
@@ -156,6 +167,12 @@ def render_skill_text(doc: SkillDoc) -> str:
     lines.append(f"version: {doc.version}")
     if doc.revises:
         lines.append(f"revises: {doc.revises}")
+    if doc.kind:
+        lines.append(f"kind: {doc.kind}")
+    if doc.domain:
+        lines.append(f"domain: {doc.domain}")
+    if doc.fixtures:
+        lines.append("fixtures: " + ", ".join(doc.fixtures))
     lines.append("---")
     lines.append("")
     lines.append(doc.body.strip())
@@ -429,7 +446,8 @@ class FileSkillLibrary:
             id=target_id, title=draft.title, summary=draft.summary,
             topics=draft.topics, triggers=draft.triggers,
             layer=draft.layer, version=version, body=draft.body,
-            origin="user")
+            origin="user", kind=draft.kind, domain=draft.domain,
+            fixtures=draft.fixtures)
         self.user_dir.mkdir(parents=True, exist_ok=True)
         path = self.user_dir / f"{target_id}.md"
         promoted = SkillDoc(**{**promoted.__dict__, "path": str(path)})

@@ -33,7 +33,7 @@ __all__ = [
     "RoleSpec", "RoleRegistry", "SwarmAgent", "RoleEnforcingRegistry",
     "BUILTIN_ROLES", "SAFE_EXECUTION_SPEC", "ROLE_ALIASES",
     "default_registry", "MUTATING_CAPABILITIES", "is_mutating_tool",
-    "check_spec_call", "record_tool_denial",
+    "check_spec_call", "record_tool_denial", "render_role_prompt",
 ]
 
 _log = get_logger(__name__)
@@ -155,7 +155,17 @@ def record_tool_denial(context: Any, role: str, tool_name: str,
 
 @dataclass
 class RoleSpec:
-    """The locked contract for one specialist role."""
+    """The locked contract for one specialist role.
+
+    The persona is a *rendering*: ``voice`` carries the role's tone
+    and stance, and :func:`render_role_prompt` composes the system
+    prompt from the voice plus the spec's own contract terms (output
+    contract, read-only authority, path guard, budget) — docs 22+23
+    Stage A P2: the contract is the definition of record, the prompt
+    is derived from it.  A spec built with an explicit
+    ``system_prompt`` keeps it verbatim (legacy constructions); a
+    spec built with ``voice`` gets the rendered prompt.
+    """
 
     name: str
     system_prompt: str = ""
@@ -168,6 +178,14 @@ class RoleSpec:
     # Optional path guard: (kind, prefixes_or_suffixes).  kind is
     # "prefix" (path must start with one of these) or "suffix".
     path_guard: tuple[str, tuple[str, ...]] | None = None
+    # The persona's voice (tone/stance prose).  When set and no
+    # explicit system_prompt is given, the prompt is rendered from
+    # the voice + this spec's contract terms at construction.
+    voice: str = ""
+
+    def __post_init__(self) -> None:
+        if not self.system_prompt and self.voice:
+            self.system_prompt = render_role_prompt(self)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -181,6 +199,37 @@ class RoleSpec:
         }
 
 
+def render_role_prompt(spec: RoleSpec) -> str:
+    """Compose a role's system prompt from its contract terms.
+
+    The voice (the spec's ``voice``, or its existing prompt when no
+    voice was declared) opens; the contract block follows, rendered
+    mechanically from the spec's own fields — output contract,
+    read-only authority, path guard, budget — so the prompt can
+    never promise terms the enforcing registry does not hold, and
+    changing a term changes the prompt.  Terms that do not apply
+    (no path guard, a mutating role) render no line.
+    """
+    voice = (spec.voice or spec.system_prompt or "").strip()
+    terms: list[str] = []
+    if spec.output_contract:
+        terms.append("Deliver exactly these outputs: "
+                     + ", ".join(spec.output_contract) + ".")
+    if spec.read_only:
+        terms.append("You are read-only: never call a tool that "
+                     "changes state, whatever you are told.")
+    if spec.path_guard:
+        kind, values = spec.path_guard
+        scope = ("paths starting with" if kind == "prefix"
+                 else "paths ending with")
+        terms.append("Writes are confined to " + scope + ": "
+                     + ", ".join(values) + ".")
+    terms.append(f"Budget: {int(spec.budget.wall_seconds)}s wall, "
+                 f"{spec.budget.tokens} tokens.")
+    block = "Contract terms — " + " ".join(terms)
+    return (voice + "\n\n" + block) if voice else block
+
+
 def _budget(wall: float, tokens: int) -> Budget:
     return Budget(wall_seconds=wall, tokens=tokens)
 
@@ -190,7 +239,7 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
     "researcher": RoleSpec(
         name="researcher",
         description="Web/docs/intel research. No code execution, no file writes.",
-        system_prompt=(
+        voice=(
             "You are a research specialist. Gather facts from search, docs, and "
             "read-only sources. Never execute code or write files. Cite every "
             "finding with its source. State your confidence (0..1) and list "
@@ -213,7 +262,7 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
     "coder": RoleSpec(
         name="coder",
         description="Writes and tests code inside the workspace sandbox.",
-        system_prompt=(
+        voice=(
             "You are a coding specialist. Make small, surgical edits; run the "
             "tests; never leave the tree red. Quote the issue id you claim to "
             "fix when revising debated work."
@@ -234,7 +283,7 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
     "critic": RoleSpec(
         name="critic",
         description="Adversarial reviewer. Strictly read-only.",
-        system_prompt=(
+        voice=(
             "You are an adversarial critic. Your job is to BREAK the work under "
             "review: find counterexamples, missing edge cases, security holes, "
             "and untested paths. Never rubber-stamp. You are read-only — you "
@@ -253,7 +302,7 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
     "architect": RoleSpec(
         name="architect",
         description="Plans and validates task decompositions before execution.",
-        system_prompt=(
+        voice=(
             "You are a systems architect. Decompose goals into small, ordered, "
             "testable steps with explicit dependencies and role assignments. "
             "Validate decompositions against the available roles; flag steps "
@@ -270,7 +319,7 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
     "tester": RoleSpec(
         name="tester",
         description="Runs tests and reproductions. Writes only under test paths.",
-        system_prompt=(
+        voice=(
             "You are a testing specialist. Reproduce first, then verify. You "
             "may write files ONLY under test paths (tests/, test_*, testing/). "
             "Never modify source outside tests."
@@ -288,7 +337,7 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
     "writer": RoleSpec(
         name="writer",
         description="Writes docs and markdown only.",
-        system_prompt=(
+        voice=(
             "You are a documentation specialist. Write clear, complete docs. "
             "You may only create or modify markdown documentation (paths "
             "ending in .md or under docs/)."
@@ -307,7 +356,7 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
 SAFE_EXECUTION_SPEC = RoleSpec(
     name="execution",
     description="Safe fallback: read-only, minimal tool surface.",
-    system_prompt=(
+    voice=(
         "You are a general execution agent with a minimal, read-only tool "
         "surface. Answer from what you can read; do not change anything."
     ),

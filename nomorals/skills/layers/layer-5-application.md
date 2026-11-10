@@ -10,7 +10,7 @@ version: 1
 
 # Layer 5 — Application — agents, missions, partner, context
 
-**Packages:** agents, autonomy, backup, books, codews, connectors, console, context, games, health, hub, integrations, mesh, missions, partner, power, search, stream, sync, travel, triggers, wisdom, workspace
+**Packages:** agents, autonomy, backup, books, codews, connectors, console, context, craft, games, health, hub, integrations, mesh, missions, partner, power, search, stream, sync, travel, triggers, wisdom, workspace
 
 ## What this layer owns
 

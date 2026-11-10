@@ -59,7 +59,15 @@ def _stemmed(text: str) -> set[str]:
 
 @dataclass(frozen=True)
 class SpecialistManifest:
-    """One specialist class, described over the existing roster."""
+    """One specialist class, described over the existing roster.
+
+    The last five fields are the class's **role-contract terms**
+    (docs 22+23 Stage A P2; doc 22 §2: a role is a contract, not a
+    persona).  :mod:`nomorals.agents.role_contracts` derives the
+    enforceable :class:`RoleContract` from them; the persona strings
+    in ``role_specs``/``subagents`` render *from* contract terms,
+    they do not define the class independently.
+    """
 
     class_id: str
     title: str
@@ -71,6 +79,16 @@ class SpecialistManifest:
     role_specs: tuple[str, ...] = ()     # agents.role_specs names
     evidence_duties: tuple[str, ...] = ()
     heavy: bool = False                  # needs a real workstation/GPU
+    # Role-contract terms (agents.role_contracts).  ``authority`` is
+    # one of role_contracts.AUTHORITIES' words (mirrored here as data;
+    # the Stage A suite pins every value used below to that
+    # vocabulary).  ``output_schema`` defaults to the evidence duties
+    # — the class's deliverable must carry exactly that evidence.
+    authority: str = ""
+    output_schema: tuple[str, ...] = ()
+    quality_rubric: str = ""
+    escalation: str = ""
+    budget: str = ""
 
     def bindings(self) -> dict[str, list[str]]:
         return {"subagents": list(self.subagents),
@@ -89,13 +107,22 @@ def _m(class_id: str, title: str, responsibilities: str,
        subagents: Sequence[str] = (), roles: Sequence[str] = (),
        specs: Sequence[str] = (),
        evidence: Sequence[str] = (),
-       heavy: bool = False) -> SpecialistManifest:
+       heavy: bool = False,
+       authority: str = "", output_schema: Sequence[str] = (),
+       rubric: str = "", escalation: str = "",
+       budget: str = "") -> SpecialistManifest:
+    duties = tuple(evidence)
     return SpecialistManifest(
         class_id=class_id, title=title, responsibilities=responsibilities,
         example_subagents=tuple(examples), keywords=tuple(keywords),
         subagents=tuple(subagents), agent_roles=tuple(roles),
-        role_specs=tuple(specs), evidence_duties=tuple(evidence),
-        heavy=heavy)
+        role_specs=tuple(specs), evidence_duties=duties,
+        heavy=heavy, authority=authority,
+        output_schema=tuple(output_schema) or duties,
+        quality_rubric=rubric or (
+            "Accepted only when the work carries its evidence "
+            "duties: " + ", ".join(duties) + "."),
+        escalation=escalation, budget=budget)
 
 
 MANIFESTS: tuple[SpecialistManifest, ...] = (
@@ -106,14 +133,24 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("plan", "decompose", "coordinate", "integrate", "release",
         "recover", "lead"),
        subagents=("planner",), specs=("architect",),
-       evidence=("plan record", "integration verdict")),
+       evidence=("plan record", "integration verdict"),
+       authority="operate",
+       escalation="to the owner as arbiter when a step names work "
+                  "no bound role can perform",
+       budget="the mission's step budget, allocated per step"),
     _m("product_requirements", "Product & requirements",
        "User intent, domain research, acceptance criteria and scope control.",
        ("research analyst", "specification writer", "workflow mapper"),
        ("requirements", "research", "spec", "scope", "acceptance",
         "user intent"),
        roles=("research",), specs=("researcher",), subagents=("planner",),
-       evidence=("source citations", "acceptance criteria")),
+       evidence=("source citations", "acceptance criteria"),
+       authority="read_only",
+       output_schema=("findings", "sources", "confidence",
+                      "open_questions"),
+       escalation="to lead engineering when acceptance criteria "
+                  "cannot be grounded in a citable source",
+       budget="600s wall / 200000 tokens (researcher spec)"),
     _m("architecture", "Architecture",
        "Boundaries, data flow, interfaces, technology choice and "
        "long-term change paths.",
@@ -121,7 +158,12 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("architecture", "api", "interface", "boundary", "design",
         "data flow", "schema"),
        subagents=("api_designer", "planner"), specs=("architect",),
-       evidence=("interface contract", "decision record")),
+       evidence=("interface contract", "decision record"),
+       authority="read_only",
+       output_schema=("steps", "risks", "role_assignments"),
+       escalation="to lead engineering when a decomposition names a "
+                  "step no role can perform",
+       budget="600s wall / 200000 tokens (architect spec)"),
     _m("ux_interaction", "UX & interaction",
        "Flows, states, commands, errors, accessibility and usability evidence.",
        ("dialogue designer", "interaction prototyper", "accessibility "
@@ -129,14 +171,21 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("ux", "flow", "interaction", "usability", "accessibility",
         "dialogue", "states"),
        roles=("vision",), subagents=("reviewer",),
-       evidence=("flow walkthrough", "state coverage")),
+       evidence=("flow walkthrough", "state coverage"),
+       authority="read_only",
+       escalation="to lead engineering with the failing flow named",
+       budget="per-task brief; no standing budget"),
     _m("visual_ui_design", "Visual & UI design",
        "Layout, typography, visual systems, design tokens and interface polish.",
        ("design-system builder", "typography specialist", "motion designer"),
        ("visual", "layout", "typography", "design", "ui", "theme",
         "polish"),
        roles=("vision",), subagents=("reviewer",),
-       evidence=("rendered screenshot", "token diff")),
+       evidence=("rendered screenshot", "token diff"),
+       authority="read_only",
+       escalation="to lead engineering when a design cannot be "
+                  "rendered for evidence",
+       budget="per-task brief; no standing budget"),
     _m("frontend", "Frontend",
        "Web/native interfaces, client state, rendering, forms and media display.",
        ("React specialist", "canvas/WebGL UI engineer", "form and "
@@ -144,7 +193,13 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("frontend", "ui code", "client", "render", "form", "page",
         "component"),
        subagents=("implementer",), specs=("coder",), roles=("coding",),
-       evidence=("build output", "rendered screenshot")),
+       evidence=("build output", "rendered screenshot"),
+       authority="workspace_write",
+       output_schema=("files_changed", "tests_run", "tests_passed",
+                      "notes"),
+       escalation="to lead engineering when the build stays red "
+                  "after two repair attempts",
+       budget="1200s wall / 500000 tokens (coder spec)"),
     _m("backend", "Backend",
        "Services, business rules, jobs, APIs, realtime systems and integrations.",
        ("service engineer", "queue/worker engineer", "integration engineer"),
@@ -152,7 +207,13 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
         "integration", "endpoint"),
        subagents=("implementer", "api_designer"), specs=("coder",),
        roles=("coding", "execution"),
-       evidence=("test run", "api transcript")),
+       evidence=("test run", "api transcript"),
+       authority="workspace_write",
+       output_schema=("files_changed", "tests_run", "tests_passed",
+                      "notes"),
+       escalation="to lead engineering when the test run stays red "
+                  "after two repair attempts",
+       budget="1200s wall / 500000 tokens (coder spec)"),
     _m("data_storage", "Data & storage",
        "Schemas, migrations, indexing, caching, backups and data integrity.",
        ("database engineer", "search/index engineer", "backup and "
@@ -160,14 +221,25 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("database", "schema", "storage", "migration", "index", "cache",
         "backup", "data"),
        roles=("data_collection", "memory"), specs=("coder",),
-       evidence=("schema diff", "integrity check")),
+       evidence=("schema diff", "integrity check"),
+       authority="workspace_write",
+       output_schema=("files_changed", "tests_run", "tests_passed",
+                      "notes"),
+       escalation="to lead engineering when an integrity check "
+                  "fails — never forward over a corrupt store",
+       budget="1200s wall / 500000 tokens (coder spec)"),
     _m("platform_delivery", "Platform & delivery",
        "Builds, packaging, CI/CD, environments, observability and rollback.",
        ("build engineer", "release automation", "SRE and observability"),
        ("build", "deploy", "ci", "release", "packaging", "rollback",
         "environment"),
        subagents=("dep_hunter",), roles=("execution",), heavy=True,
-       evidence=("build log", "deploy receipt")),
+       evidence=("build log", "deploy receipt"),
+       authority="execute",
+       escalation="to lead engineering on a failed deploy; roll "
+                  "back before any retry",
+       budget="workstation job budget; heavy class — remote worker "
+              "or explicit deferral on constrained profiles"),
     _m("desktop_mobile_embedded", "Desktop, mobile & embedded",
        "Native apps, device APIs, permissions, offline behaviour and "
        "hardware interfaces.",
@@ -175,7 +247,14 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("android", "mobile", "desktop", "native", "device", "offline",
         "embedded"),
        roles=("execution",), subagents=("implementer",),
-       evidence=("device run log", "install receipt")),
+       evidence=("device run log", "install receipt"),
+       authority="workspace_write",
+       output_schema=("files_changed", "tests_run", "tests_passed",
+                      "notes"),
+       escalation="to lead engineering when no bound device will "
+                  "run the build",
+       budget="per-task brief; device runs bounded by the device "
+              "profile"),
     _m("graphics_3d", "Graphics, simulation & 3D",
        "Geometry, materials, rendering, animation, physics and generated assets.",
        ("Three.js/WebGPU engineer", "Blender automation", "shader "
@@ -183,7 +262,14 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("3d", "graphics", "render", "blender", "shader", "animation",
         "game", "asset"),
        roles=("vision",), subagents=("implementer",), heavy=True,
-       evidence=("rendered frame", "asset manifest")),
+       evidence=("rendered frame", "asset manifest"),
+       authority="workspace_write",
+       output_schema=("files_changed", "tests_run", "tests_passed",
+                      "notes"),
+       escalation="to lead engineering when a frame cannot be "
+                  "rendered for evidence",
+       budget="workstation job budget; heavy class — remote worker "
+              "or explicit deferral on constrained profiles"),
     _m("media_audio", "Media & audio",
        "Image, video and audio generation/editing, transcription and "
        "provenance.",
@@ -191,7 +277,14 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("media", "image", "video", "audio", "music", "transcription",
         "voice"),
        roles=("social",), subagents=("implementer",),
-       evidence=("artifact file", "provenance record")),
+       evidence=("artifact file", "provenance record"),
+       authority="workspace_write",
+       output_schema=("files_changed", "tests_run", "tests_passed",
+                      "notes"),
+       escalation="to lead engineering when a render cannot be "
+                  "produced by any bound worker",
+       budget="per-task brief; renders bounded by the media "
+              "profile"),
     _m("ai_automation", "AI & automation",
        "Model/tool orchestration, retrieval, evaluations, workflow "
        "automation and agent systems.",
@@ -200,7 +293,13 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("ai", "model", "llm", "agent", "automation", "retrieval",
         "evaluation", "prompt"),
        roles=("training", "research"), specs=("researcher",),
-       evidence=("evaluation run", "trace sample")),
+       evidence=("evaluation run", "trace sample"),
+       authority="read_only",
+       output_schema=("findings", "sources", "confidence",
+                      "open_questions"),
+       escalation="implementation lands through the coding "
+                  "classes; this class evaluates and specifies",
+       budget="600s wall / 200000 tokens (researcher spec)"),
     _m("quality_resilience", "Quality & resilience",
        "Testing, fuzzing, performance, failure injection and acceptance "
        "verification.",
@@ -210,7 +309,12 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
         "acceptance", "regression"),
        subagents=("tester", "reviewer"), specs=("tester", "critic"),
        roles=("critic",),
-       evidence=("test run", "failure reproduction")),
+       evidence=("test run", "failure reproduction"),
+       authority="execute",
+       escalation="a failing acceptance with no reproduction "
+                  "escalates to lead engineering as unverified, "
+                  "never as passed",
+       budget="900s wall / 300000 tokens (tester spec)"),
     _m("security_privacy", "Security & privacy",
        "Threat models, auth, secrets, permissions, abuse resistance and "
        "data handling.",
@@ -219,7 +323,12 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("security", "auth", "secret", "permission", "privacy", "abuse",
         "vulnerability", "audit"),
        subagents=("reviewer",), specs=("critic",), roles=("critic",),
-       evidence=("threat note", "audit result")),
+       evidence=("threat note", "audit result"),
+       authority="read_only",
+       output_schema=("verdict", "issues", "score"),
+       escalation="a critical finding escalates to the owner "
+                  "immediately, not at task end",
+       budget="600s wall / 200000 tokens (critic spec)"),
     _m("documentation_support", "Documentation & support",
        "User guides, developer docs, release notes, diagnostics and "
        "knowledge transfer.",
@@ -228,7 +337,12 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
        ("docs", "documentation", "guide", "release notes", "support",
         "explain"),
        specs=("writer",), roles=("memory", "reflection"),
-       evidence=("published doc", "changelog entry")),
+       evidence=("published doc", "changelog entry"),
+       authority="workspace_write",
+       output_schema=("files_changed", "notes"),
+       escalation="to lead engineering when the source material "
+                  "contradicts itself",
+       budget="600s wall / 200000 tokens (writer spec)"),
     _m("integration_maintenance", "Integration & maintenance",
        "Cross-specialist assembly, dependency upgrades, refactoring and "
        "compatibility.",
@@ -238,7 +352,14 @@ MANIFESTS: tuple[SpecialistManifest, ...] = (
         "compatibility", "maintenance"),
        subagents=("refactorer",), specs=("architect",),
        roles=("reflection",),
-       evidence=("integration test run", "compatibility note")),
+       evidence=("integration test run", "compatibility note"),
+       authority="workspace_write",
+       output_schema=("files_changed", "tests_run", "tests_passed",
+                      "notes"),
+       escalation="to lead engineering when an upgrade breaks a "
+                  "consumer outside the change set",
+       budget="per-task brief; bounded by the mission step "
+              "budget"),
 )
 
 _BY_ID = {m.class_id: m for m in MANIFESTS}
@@ -263,13 +384,23 @@ def manifest(class_id: str) -> SpecialistManifest | None:
     return _BY_ID.get(class_id)
 
 
+def _contract_terms(m: SpecialistManifest) -> dict[str, Any]:
+    """The class's role-contract terms, as data (Stage A P2)."""
+    return {"authority": m.authority,
+            "output_schema": list(m.output_schema),
+            "quality_rubric": m.quality_rubric,
+            "escalation": m.escalation,
+            "budget": m.budget}
+
+
 def manifest_index() -> dict[str, Any]:
     """The full index, JSON-shaped for the composition root."""
     return {m.class_id: {"title": m.title,
                          "responsibilities": m.responsibilities,
                          "bindings": m.bindings(),
                          "evidence_duties": list(m.evidence_duties),
-                         "heavy": m.heavy}
+                         "heavy": m.heavy,
+                         "contract": _contract_terms(m)}
             for m in MANIFESTS}
 
 
@@ -319,6 +450,7 @@ def select_specialists(text: str, *, limit: int = 4, profile: str = "",
     return [{"class_id": m.class_id, "title": m.title, "score": score,
              "bindings": m.bindings(),
              "evidence_duties": list(m.evidence_duties),
+             "contract": _contract_terms(m),
              "execution_location": execution_location(
                  m, profile=profile, remote_available=remote_available)}
             for score, m in scored[:max(0, limit)]]
@@ -338,6 +470,7 @@ def plan_for_steps(steps: Iterable[Mapping[str, Any]], *,
             "class_id": class_id, "title": m.title,
             "bindings": m.bindings(),
             "evidence_duties": list(m.evidence_duties),
+            "contract": _contract_terms(m),
             "execution_location": execution_location(
                 m, profile=profile, remote_available=remote_available),
         })

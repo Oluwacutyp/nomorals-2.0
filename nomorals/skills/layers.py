@@ -94,7 +94,7 @@ LAYER_GROUPS: dict[int, dict[str, Any]] = {
         "name": "application",
         "title": "Application — agents, missions, partner, context",
         "packages": ["agents", "autonomy", "backup", "books", "codews",
-                     "connectors", "console", "context", "games",
+                     "connectors", "console", "context", "craft", "games",
                      "health", "hub", "integrations", "mesh", "missions",
                      "partner", "power", "search", "stream", "sync",
                      "travel", "triggers", "wisdom", "workspace"],
