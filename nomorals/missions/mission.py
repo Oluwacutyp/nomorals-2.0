@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from ..core.errors import NotFound, ValidationError
@@ -42,6 +44,9 @@ __all__ = [
     "Mission",
     "MissionStore",
     "Checkpoint",
+    "MissionEffectOutcome",
+    "mission_effect_outcome",
+    "mission_failure_basis",
     "ACCEPTANCE_STATE_KEY",
     "normalize_acceptance",
     "mission_liveness",
@@ -521,6 +526,296 @@ def validate_plan_roles(plan: Any, *, source: str = "plan") -> None:
             )
 
 
+#: The effect-outcome vocabulary of the projection below. ``unknown``
+#: is the default truth and the only value an unevidenced effect may
+#: carry — the projection never upgrades past its evidence.
+EFFECT_UNKNOWN = "unknown"
+EFFECT_SUCCEEDED = "succeeded"
+EFFECT_FAILED = "failed"
+EFFECT_PARTIAL = "partial"
+
+
+def mission_failure_basis(mission: "Mission") -> str:
+    """What a FAILED mission's record rests on: ``"liveness"`` when
+    the only failure evidence is :meth:`MissionStore.reconcile`'s
+    marker (a dead runner — status_note ``reconciled: …`` / a
+    ``runner died`` last_error) with no step or effect failure beside
+    it, ``"recorded"`` when the record carries a real failure, and
+    ``""`` when the mission has not failed."""
+    if mission.status != MissionStatus.FAILED:
+        return ""
+    state = mission.state or {}
+    note = str(state.get("status_note") or "")
+    error = str(state.get("last_error") or "")
+    if note.startswith("reconciled:") or "runner died" in error:
+        return "liveness"
+    return "recorded"
+
+
+@dataclass
+class MissionEffectOutcome:
+    """The effect-outcome projection: what a mission's own records
+    establish about its EFFECT, kept strictly separate from the
+    mission's runner status.
+
+    A mission reconcile() marked FAILED on liveness keeps that status
+    forever — this projection neither rewrites it nor borrows it. It
+    answers a different question: did the work the mission existed to
+    do actually land? ``effect`` is one of ``unknown`` (the default —
+    no record establishes anything), ``succeeded``, ``failed`` or
+    ``partial``, derived ONLY from the mission's own records: its
+    persisted plan vs its recorded step completions/outputs, its step
+    idempotency claims (recomputed from the plan), its delegation
+    contracts, its acceptance-verification record and its artifacts.
+    """
+
+    mission_id: str
+    status: str = ""
+    failure_basis: str = ""
+    effect: str = EFFECT_UNKNOWN
+    steps_total: int = 0
+    steps_completed: int = 0
+    claims_completed: int = 0
+    claims_failed: int = 0
+    contracts_total: int = 0
+    contracts_completed: int = 0
+    contracts_waived: int = 0
+    contracts_refused: int = 0
+    contracts_open: int = 0
+    verification: str = ""  # "" | "passed" | "failed"
+    artifacts: int = 0
+    evidence: list[dict[str, str]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mission_id": self.mission_id, "status": self.status,
+            "failure_basis": self.failure_basis, "effect": self.effect,
+            "steps_total": self.steps_total,
+            "steps_completed": self.steps_completed,
+            "claims_completed": self.claims_completed,
+            "claims_failed": self.claims_failed,
+            "contracts_total": self.contracts_total,
+            "contracts_completed": self.contracts_completed,
+            "contracts_waived": self.contracts_waived,
+            "contracts_refused": self.contracts_refused,
+            "contracts_open": self.contracts_open,
+            "verification": self.verification,
+            "artifacts": self.artifacts,
+            "evidence": [dict(e) for e in self.evidence],
+        }
+
+
+def _plan_entries(state: dict[str, Any]) -> list[Any]:
+    plan = state.get("plan")
+    if isinstance(plan, dict):
+        steps = plan.get("steps")
+        return list(steps) if isinstance(steps, list) else []
+    if isinstance(plan, list):
+        return list(plan)
+    return []
+
+
+def _step_fields(entry: Any) -> tuple[str, str, str]:
+    """(name, goal, role) of one persisted plan entry, dict or object."""
+    if isinstance(entry, dict):
+        return (str(entry.get("name") or ""),
+                str(entry.get("goal") or ""),
+                str(entry.get("role") or ""))
+    return (str(getattr(entry, "name", "") or ""),
+            str(getattr(entry, "goal", "") or ""),
+            str(getattr(entry, "role", "") or ""))
+
+
+def mission_effect_outcome(mission: "Mission", *, db: Any = None
+                           ) -> MissionEffectOutcome:
+    """Compute the effect-outcome projection for one mission.
+
+    Computed on read from records that already persist (the mission
+    row, the idempotency table, the delegation tables, the artifacts
+    table) — deliberately NOT a stored column: a stored projection
+    could go stale against the records it summarises, and the steward
+    reads it at discovery/collection time, when fresh truth is the
+    whole point. Every source is best-effort: a source that cannot be
+    read contributes nothing (and is never guessed at). The verdict
+    rules, in order:
+
+    * the mission's own acceptance record decides first — a failed
+      verification is the mission's own statement that its intended
+      outcome was not met (``failed``); a passed one is its statement
+      that it was (``succeeded``);
+    * every planned step evidenced complete (recorded completions,
+      recorded outputs, or a completed step claim), no failed claim
+      outstanding, and no delegation contract open or refused →
+      ``succeeded``;
+    * a fully delegated mission (contracts, no plan steps) with every
+      contract settled and at least one completed → ``succeeded``;
+    * positive failure evidence (a failed step claim or a refused
+      contract) and NOTHING landed (no completed step, no artifact,
+      no completed contract) → ``failed``;
+    * anything landed but not everything → ``partial``;
+    * otherwise → ``unknown``.
+    """
+    state = mission.state or {}
+    out = MissionEffectOutcome(
+        mission_id=mission.id, status=mission.status,
+        failure_basis=mission_failure_basis(mission))
+
+    entries = real_plan_steps(_plan_entries(state))
+    planned: list[str] = []
+    for entry in entries:
+        name, _goal, _role = _step_fields(entry)
+        if name and name not in planned:
+            planned.append(name)
+    completed: set[str] = set()
+    for raw in state.get("completed_steps") or []:
+        completed.add(str(raw))
+    outputs = state.get("outputs") or {}
+    if isinstance(outputs, dict):
+        completed.update(str(k) for k in outputs)
+    out.steps_total = len(planned)
+    done_names = {n for n in planned if n in completed}
+    out.steps_completed = len(done_names) if planned else len(completed)
+
+    # Step claims: step idempotency keys are hashes scoped by the
+    # mission id, so the claims a mission's steps left are recomputed
+    # from its own persisted plan and read back — never enumerated by
+    # guessing at other missions' keys.
+    claim_done: set[str] = set()
+    if db is not None and entries:
+        try:
+            from .idempotency import IdempotencyStore, step_idempotency_key
+
+            idem = IdempotencyStore(db)
+            for entry in entries:
+                name, goal, role = _step_fields(entry)
+                if not name or name in completed:
+                    continue
+                record = idem.get(step_idempotency_key(
+                    mission.id,
+                    SimpleNamespace(name=name, goal=goal, role=role)))
+                if record is None:
+                    continue
+                if record.get("status") == "completed":
+                    claim_done.add(name)
+                    out.claims_completed += 1
+                elif record.get("status") == "failed":
+                    out.claims_failed += 1
+        except Exception:  # noqa: BLE001 - an unreadable source is no evidence
+            out.claims_completed = 0
+            out.claims_failed = 0
+            claim_done = set()
+    done_names |= claim_done
+    if planned:
+        out.steps_completed = len(done_names)
+
+    # Delegation contracts the mission carries (its contract
+    # evidence): settled contracts are the delegated work's own
+    # verdicts, reached under verifier sign-off.
+    if db is not None:
+        try:
+            from ..agents.delegation import DelegationStore
+
+            contracts = DelegationStore(db).contracts_for_mission(
+                mission.id)
+        except Exception:  # noqa: BLE001 - unreadable = no evidence
+            contracts = []
+        out.contracts_total = len(contracts)
+        for contract in contracts:
+            if contract.status == "completed":
+                out.contracts_completed += 1
+            elif contract.status == "waived":
+                out.contracts_waived += 1
+            elif contract.status == "refused":
+                out.contracts_refused += 1
+            else:
+                out.contracts_open += 1
+
+    verification = state.get("verification")
+    if isinstance(verification, dict) and "passed" in verification:
+        out.verification = "passed" if verification.get("passed") \
+            else "failed"
+
+    # Artifacts the mission produced (deliverables that exist).
+    if db is not None:
+        try:
+            from pathlib import Path
+
+            from ..storage.artifacts import ArtifactStore
+            from ..storage.blob import BlobStore
+
+            db_path = getattr(db, "path", None)
+            blob_dir = Path(db_path).parent / "blobs" if db_path \
+                else Path(tempfile.gettempdir()) / "nomorals-blobs"
+            out.artifacts = len(
+                ArtifactStore(db, BlobStore(db, blob_dir)).for_mission(
+                    mission.id))
+        except Exception:  # noqa: BLE001 - unreadable = no evidence
+            out.artifacts = 0
+
+    if planned or completed:
+        out.evidence.append({
+            "source": "missions.plan",
+            "summary": (f"plan records {out.steps_total} step(s); "
+                        f"{out.steps_completed} evidenced complete "
+                        "(recorded completions, outputs or completed "
+                        "step claims)")})
+    if out.claims_completed or out.claims_failed:
+        out.evidence.append({
+            "source": "missions.step_claims",
+            "summary": (f"step idempotency claims recomputed from the "
+                        f"plan: {out.claims_completed} completed, "
+                        f"{out.claims_failed} failed and never "
+                        "superseded by a completion")})
+    if out.contracts_total:
+        out.evidence.append({
+            "source": "missions.contracts",
+            "summary": (f"delegation contracts: {out.contracts_total} "
+                        f"total — {out.contracts_completed} completed, "
+                        f"{out.contracts_waived} waived, "
+                        f"{out.contracts_refused} refused, "
+                        f"{out.contracts_open} still open")})
+    if out.verification:
+        detail = ""
+        if isinstance(verification, dict):
+            failed = verification.get("required_criteria_failed") or []
+            if failed:
+                detail = ("; failed criteria: "
+                          + ", ".join(str(n) for n in failed))
+        out.evidence.append({
+            "source": "missions.verification",
+            "summary": (f"the mission's acceptance verification record "
+                        f"reads {out.verification}{detail}")})
+    if out.artifacts:
+        out.evidence.append({
+            "source": "missions.artifacts",
+            "summary": (f"{out.artifacts} artifact(s) recorded as "
+                        "produced by this mission")})
+
+    landed = out.steps_completed > 0 or out.artifacts > 0 \
+        or out.contracts_completed > 0
+    if out.verification == "failed":
+        out.effect = EFFECT_FAILED
+    elif out.verification == "passed":
+        out.effect = EFFECT_SUCCEEDED
+    elif planned and out.steps_completed == out.steps_total \
+            and out.claims_failed == 0 and out.contracts_refused == 0 \
+            and out.contracts_open == 0:
+        out.effect = EFFECT_SUCCEEDED
+    elif not planned and out.contracts_total > 0 \
+            and out.contracts_open == 0 and out.contracts_refused == 0 \
+            and out.contracts_completed > 0 \
+            and out.claims_failed == 0:
+        out.effect = EFFECT_SUCCEEDED
+    elif not landed and (out.claims_failed > 0
+                         or out.contracts_refused > 0):
+        out.effect = EFFECT_FAILED
+    elif landed or out.claims_failed > 0:
+        out.effect = EFFECT_PARTIAL
+    else:
+        out.effect = EFFECT_UNKNOWN
+    return out
+
+
 class MissionStore:
     """Persistence for missions and their checkpoints."""
 
@@ -878,6 +1173,20 @@ class MissionStore:
                      mission.id, reason)
         return {"mission_id": mission_id, "changed": True,
                 "status": MissionStatus.FAILED, "reason": reason}
+
+    def effect_outcome(self, mission_id: str) -> MissionEffectOutcome:
+        """The effect-outcome projection for one mission (doc 15 P5).
+
+        Beside :meth:`reconcile`, never inside it: reconcile owns
+        runner liveness and its FAILED verdict stands untouched. This
+        read model states what the mission's OWN records establish
+        about its effect — see :func:`mission_effect_outcome` for the
+        evidence sources and verdict rules. Computed on read; writes
+        nothing. Raises :class:`NotFound` for an unknown mission,
+        exactly like :meth:`reconcile`.
+        """
+        mission = self.get(mission_id)  # raises NotFound when unknown
+        return mission_effect_outcome(mission, db=self.db)
 
     def list(
         self,

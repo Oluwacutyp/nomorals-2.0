@@ -31,9 +31,21 @@ What the steward adds (and only this): durable outcome CASES
 discovery sweeps that open those cases from domain records, and
 evidence-gathering runs whose verdicts are either evidence-cited
 resolutions or an honest ``closed-unknown``. Domain adapters are
-READ-ONLY in P4 — they gather evidence from the domain's own records
-and never call a mutating domain path. P5 adds the remaining domains
-and the mission effect-outcome projection.
+READ-ONLY — they gather evidence from the domain's own records and
+never call a mutating domain path.
+
+P5 completes the domain set the records can honestly support —
+delegation contracts, the durable scheduler's persisted jobs and the
+chat outbox — and wires the mission effect-outcome projection
+(:meth:`MissionStore.effect_outcome`) into the missions adapter: a
+liveness failure whose effect the mission's own records establish no
+longer opens an unknown-outcome case, and a case that does exist
+cites the projection as its evidence. Four briefed domains are
+deliberately NOT adapted — browser runs, downloads/uploads, media
+render jobs, artifacts — because none of them keeps a durable record
+an honest discovery could read; :func:`adapter_health` names each
+absence and the missing record, on the record, instead of papering
+over it with a fabricated adapter.
 
 Runs are deterministic by design: deterministic read-back is
 sufficient evidence for the domains covered here, and no model call
@@ -45,6 +57,7 @@ run — never the worker's say-so.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -64,7 +77,11 @@ __all__ = [
     "EvidenceItem",
     "MissionsAdapter",
     "JobsAdapter",
+    "ContractsAdapter",
+    "SchedulerAdapter",
+    "OutboxAdapter",
     "OutcomeSteward",
+    "adapter_health",
     "run_stewardship_cycle",
     "ensure_outcome_steward_job",
     "inspect_case",
@@ -96,6 +113,20 @@ UNSEEN_RESULT_S = 600.0
 #: Hard cap on evidence items per run (the contract's step budget is
 #: the second bound; both are stated, neither is silent).
 MAX_EVIDENCE_PER_RUN = 6
+
+#: A delegation contract still open this long past creation, with no
+#: deadline to judge it by, is stalled (P5).
+CONTRACT_STALE_S = 7 * 24 * 3600.0
+#: An enabled scheduler job whose next firing is this far in the past
+#: was missed — the tick records every firing that happens, so a
+#: next_run this stale has no run record because it never ran (P5).
+SCHED_OVERDUE_S = 3600.0
+#: A one-shot scheduler job whose only firing failed this long ago,
+#: with nothing scheduled after it, is abandoned (P5).
+SCHED_ABANDONED_S = 3600.0
+#: An outbox send still queued — or leased with an expired lease —
+#: this long after submission was never confirmed delivered (P5).
+OUTBOX_STUCK_S = 3600.0
 
 
 @dataclass
@@ -150,15 +181,29 @@ class MissionsAdapter:
     Discovery: a RUNNING mission whose runner is gone (the shared
     ``mission_liveness`` probe says not alive) is ORPHANED — its
     effect outcome is exactly what reconcile() cannot say. A FAILED
-    mission carrying only the liveness marker is UNKNOWN-OUTCOME. A
-    PENDING mission unmoved for a day is STALLED. Nothing here calls
-    ``reconcile()`` or ``save()`` — observation only.
+    mission carrying only the liveness marker is UNKNOWN-OUTCOME —
+    unless the mission effect-outcome projection
+    (:meth:`MissionStore.effect_outcome`, P5) establishes the effect
+    from the mission's own records, in which case there is no unknown
+    to open a case about. A PENDING mission unmoved for a day is
+    STALLED. Nothing here calls ``reconcile()`` or ``save()`` —
+    observation only.
     """
 
     domain = "missions"
 
     def __init__(self, db: Any) -> None:
         self.store = MissionStore(db)
+
+    def _effect_projection(self, mission: Any) -> Any | None:
+        """The mission's effect-outcome projection, or None when it
+        cannot be computed — a projection that fails to read falls
+        back to P4 behaviour (discovery proceeds, collection gathers
+        the raw record), never to a guessed effect."""
+        try:
+            return self.store.effect_outcome(mission.id)
+        except Exception:  # noqa: BLE001 - unreadable = no projection
+            return None
 
     def discover(self, now: float) -> list[Candidate]:
         out: list[Candidate] = []
@@ -178,6 +223,14 @@ class MissionsAdapter:
         for mission in self.store.list(status=MissionStatus.FAILED,
                                        limit=200):
             if _is_liveness_failure(mission):
+                projection = self._effect_projection(mission)
+                if projection is not None \
+                        and projection.effect != "unknown":
+                    # The mission's own records establish the effect
+                    # (P5 projection) — the outcome is not unknown,
+                    # so no unknown-outcome case opens. The mission
+                    # status stays FAILED; both facts coexist.
+                    continue
                 out.append(Candidate(
                     domain=self.domain, kind="mission",
                     subject=mission.name or mission.goal[:60],
@@ -238,12 +291,33 @@ class MissionsAdapter:
                      "(liveness is context, never an outcome)")))
         if status == MissionStatus.FAILED \
                 and _is_liveness_failure(mission):
-            items.append(EvidenceItem(
-                source="missions.store",
-                summary=("the recorded failure rests on liveness "
-                         "evidence alone (reconcile marker); no step "
-                         "failure or effect record exists beside it, "
-                         "so the effect outcome is not established")))
+            projection = self._effect_projection(mission)
+            evidenced = projection is not None \
+                and projection.effect in RESOLVABLE_VERDICTS
+            if not evidenced:
+                items.append(EvidenceItem(
+                    source="missions.store",
+                    summary=("the recorded failure rests on liveness "
+                             "evidence alone (reconcile marker); no step "
+                             "failure or effect record exists beside it, "
+                             "so the effect outcome is not established")))
+            if projection is not None:
+                for entry in projection.evidence:
+                    items.append(EvidenceItem(
+                        source=entry["source"],
+                        summary=entry["summary"]))
+                if evidenced:
+                    items.append(EvidenceItem(
+                        source="missions.effect_outcome",
+                        summary=(
+                            "effect-outcome projection: the mission's "
+                            f"own records establish its effect as "
+                            f"{projection.effect} — the runner status "
+                            "stays FAILED (a liveness verdict about "
+                            "the runner); this is a verdict about the "
+                            "effect, resting on the records cited "
+                            "above"),
+                        establishes=projection.effect))
         try:
             history = self.store.checkpoint_history(mission_id, limit=5)
         except Exception:  # noqa: BLE001 - checkpoints are best-effort
@@ -336,6 +410,368 @@ class JobsAdapter:
                              establishes=establishes)]
 
 
+class ContractsAdapter:
+    """Read-only observation of delegation contract records (P5).
+
+    Discovery: a contract still open past its deadline is OVERDUE; a
+    contract that has spent its whole step budget without completing
+    is OVERDUE (the budget was its bound); a contract with no
+    deadline still open a week after creation is STALLED. The
+    adapter reads through the DelegationStore's own read paths and
+    never creates, completes, waives or refuses a contract — the
+    contracts it observes include the steward's own investigation
+    contracts, which complete inside their runs and so never
+    discover; one left open by a crashed run honestly would.
+    """
+
+    domain = "contracts"
+
+    def __init__(self, db: Any) -> None:
+        self.store = DelegationStore(db)
+
+    def discover(self, now: float) -> list[Candidate]:
+        out: list[Candidate] = []
+        for contract in self.store.open_contracts(""):
+            deadline = float(contract.deadline or 0.0)
+            budget_spent = bool(contract.step_budget) \
+                and contract.steps_used >= contract.step_budget
+            if deadline and now > deadline:
+                reason = "overdue"
+                basis = f"deadline passed {now - deadline:.0f}s ago"
+            elif budget_spent:
+                reason = "overdue"
+                basis = (f"step budget spent ({contract.steps_used}/"
+                         f"{contract.step_budget}) without completion")
+            elif now - float(contract.created_at or now) \
+                    > CONTRACT_STALE_S:
+                reason = "stalled"
+                basis = "open a week with no deadline to judge it by"
+            else:
+                continue
+            out.append(Candidate(
+                domain=self.domain, kind="contract",
+                subject=contract.title or contract.goal[:60],
+                subject_key=f"contract:{contract.id}",
+                reason=reason,
+                detail={"contract_id": contract.id,
+                        "status": contract.status,
+                        "worker": contract.worker,
+                        "basis": basis}))
+        return out
+
+    def collect(self, case: OutcomeCase, now: float) -> list[EvidenceItem]:
+        contract_id = str(case.detail.get("contract_id") or "")
+        contract = self.store.get_contract(contract_id)
+        if contract is None:
+            return [EvidenceItem(
+                source="delegation.contracts",
+                summary="the contract record no longer exists")]
+        establishes = ""
+        if contract.status == "completed":
+            establishes = "succeeded"
+        elif contract.status == "refused":
+            establishes = "failed"
+        elif contract.status == "waived":
+            establishes = "stopped"
+        summary = (f"contract status is {contract.status}; "
+                   f"steps {contract.steps_used}/"
+                   f"{contract.step_budget or 'unbounded'}; "
+                   f"worker {contract.worker}, verifier "
+                   f"{contract.verifier}")
+        if contract.refusal:
+            summary += f"; refusal recorded: {contract.refusal[:200]}"
+        if contract.completed_at:
+            summary += ("; completed "
+                        f"{max(0.0, now - float(contract.completed_at)):.0f}s ago")
+        items = [EvidenceItem(source="delegation.contracts",
+                              summary=summary,
+                              establishes=establishes)]
+        claims = self.store.claims(contract_id)
+        if claims:
+            kinds: dict[str, int] = {}
+            for claim in claims:
+                kinds[claim.kind] = kinds.get(claim.kind, 0) + 1
+            parts = ", ".join(f"{k} ×{n}"
+                              for k, n in sorted(kinds.items()))
+            items.append(EvidenceItem(
+                source="delegation.claims",
+                summary=(f"claim ledger holds {len(claims)} entr(ies) "
+                         f"for this contract ({parts}) — context for "
+                         "the contract record, never a verdict by "
+                         "itself")))
+        return items
+
+
+class SchedulerAdapter:
+    """Read-only observation of the durable scheduler's persisted
+    records — the ``schedule_jobs`` / ``schedule_runs`` tables the
+    agents Scheduler owns (P5).
+
+    Discovery: an enabled job whose next firing is far in the past is
+    OVERDUE — the scheduler journals every firing that happens, so a
+    stale ``next_run`` with no run row means the firing never ran. A
+    one-shot job whose only firing failed, with nothing scheduled
+    after it, is ABANDONED. The adapter reads the tables directly
+    (the scheduler's own receipt paths read the same rows) and never
+    constructs the Scheduler — building one runs its lazy schema
+    guards, and observation must write nothing.
+    """
+
+    domain = "scheduler"
+
+    def __init__(self, db: Any) -> None:
+        self.db = db
+
+    def _jobs(self) -> list[dict[str, Any]]:
+        try:
+            return [dict(r) for r in self.db.query(
+                "SELECT * FROM schedule_jobs")]
+        except Exception:  # noqa: BLE001 - no table = no records
+            return []
+
+    def _runs(self, job_id: str, *, limit: int = 3
+              ) -> list[dict[str, Any]]:
+        try:
+            return [dict(r) for r in self.db.query(
+                "SELECT * FROM schedule_runs WHERE job_id = ?"
+                " ORDER BY started_at DESC LIMIT ?",
+                (job_id, int(limit)))]
+        except Exception:  # noqa: BLE001 - no table = no records
+            return []
+
+    @staticmethod
+    def _run_state(row: dict[str, Any]) -> str:
+        """A run row's true state — mirrors the scheduler's AA-67
+        derivation: the stored status, or ran/failed from the ok bit
+        for legacy rows."""
+        status = str(row.get("status") or "").strip().lower()
+        if status:
+            return status
+        return "ran" if row.get("ok") else "failed"
+
+    def discover(self, now: float) -> list[Candidate]:
+        out: list[Candidate] = []
+        for job in self._jobs():
+            job_id = str(job.get("id") or "")
+            name = str(job.get("name") or "scheduled job")
+            next_run = job.get("next_run")
+            if job.get("enabled") and next_run \
+                    and now - float(next_run) > SCHED_OVERDUE_S:
+                out.append(Candidate(
+                    domain=self.domain, kind="scheduled job",
+                    subject=name,
+                    subject_key=f"schedjob:{job_id}",
+                    reason="overdue",
+                    detail={"job_id": job_id,
+                            "next_run": float(next_run),
+                            "last_run": job.get("last_run")}))
+                continue
+            if str(job.get("kind") or "") == "at" and not next_run:
+                runs = self._runs(job_id, limit=1)
+                if runs and self._run_state(runs[0]) == "failed" \
+                        and now - float(runs[0].get("finished_at")
+                                        or now) > SCHED_ABANDONED_S:
+                    out.append(Candidate(
+                        domain=self.domain, kind="scheduled job",
+                        subject=name,
+                        subject_key=f"schedjob:{job_id}",
+                        reason="abandoned",
+                        detail={"job_id": job_id,
+                                "last_run_state": "failed"}))
+        return out
+
+    def collect(self, case: OutcomeCase, now: float) -> list[EvidenceItem]:
+        job_id = str(case.detail.get("job_id") or "")
+        job = None
+        for row in self._jobs():
+            if str(row.get("id") or "") == job_id:
+                job = row
+                break
+        if job is None:
+            return [EvidenceItem(
+                source="scheduler.jobs",
+                summary="the job record no longer exists")]
+        items = [EvidenceItem(
+            source="scheduler.jobs",
+            summary=(f"job '{job.get('name')}' kind "
+                     f"{job.get('kind')}; enabled="
+                     f"{bool(job.get('enabled'))}; next_run="
+                     f"{job.get('next_run')}; last_run="
+                     f"{job.get('last_run')}"))]
+        runs = self._runs(job_id)
+        if runs:
+            latest = runs[0]
+            state = self._run_state(latest)
+            establishes = ""
+            if state == "ran" and latest.get("ok"):
+                establishes = "succeeded"
+            elif state == "failed":
+                establishes = "failed"
+            summary = (f"latest recorded run: {state} "
+                       f"(ok={bool(latest.get('ok'))}), "
+                       f"{max(0.0, now - float(latest.get('started_at') or now)):.0f}s ago")
+            result = str(latest.get("result") or "").strip()
+            if result:
+                summary += f"; result: {result[:200]}"
+            if state in ("missed", "skipped", "suppressed", "throttled"):
+                summary += ("; the firing never executed — a non-run "
+                            "establishes no outcome either way")
+            items.append(EvidenceItem(source="scheduler.runs",
+                                      summary=summary,
+                                      establishes=establishes))
+        else:
+            items.append(EvidenceItem(
+                source="scheduler.runs",
+                summary=("no run was ever recorded for this job — "
+                         "the scheduler journals every firing that "
+                         "happens, so nothing has run")))
+        return items
+
+
+class OutboxAdapter:
+    """Read-only observation of chat outbox sends (P5).
+
+    The outbox's rows live in the shared ``work_queue`` table under
+    per-chat topics (``chat_outbox:<platform>:<chat>``) — every
+    durable send is a row before it is a network call, and the row is
+    its receipt. Discovery: a send still ``ready`` long after
+    submission is OVERDUE (queued, never sent); a send still
+    ``leased`` with an expired lease is UNKNOWN-OUTCOME — the send
+    may or may not have happened, which is exactly the steward's
+    question. Collection re-reads the row: ``done`` establishes
+    ``delivered``, ``dead`` establishes ``failed``, ``cancelled``
+    establishes ``stopped``. The subject names the platform and the
+    message's own opening words — never the chat key, which can be a
+    phone number or JID.
+    """
+
+    domain = "outbox"
+    _TOPIC_PREFIX = "chat_outbox:"
+
+    def __init__(self, db: Any) -> None:
+        self.db = db
+
+    def _rows(self, where: str, params: tuple = (),
+              limit: int = 200) -> list[dict[str, Any]]:
+        try:
+            return [dict(r) for r in self.db.query(
+                "SELECT * FROM work_queue WHERE topic LIKE ? "
+                f"AND {where} ORDER BY created_at LIMIT ?",
+                (self._TOPIC_PREFIX + "%", *params, int(limit)))]
+        except Exception:  # noqa: BLE001 - no table = no records
+            return []
+
+    @staticmethod
+    def _subject(row: dict[str, Any]) -> str:
+        try:
+            payload = json.loads(row.get("payload") or "{}")
+        except (TypeError, ValueError):
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+        platform = str(payload.get("platform") or "chat")
+        text = str(payload.get("text") or "").strip()
+        if text:
+            return f"{platform} message: {text[:40]}"
+        if payload.get("media"):
+            return f"{platform} media send"
+        return f"{platform} queued send"
+
+    def discover(self, now: float) -> list[Candidate]:
+        out: list[Candidate] = []
+        for row in self._rows("status IN ('ready', 'leased')"):
+            created = float(row.get("created_at") or now)
+            age = now - created
+            if age <= OUTBOX_STUCK_S:
+                continue
+            status = str(row.get("status") or "")
+            lease_until = float(row.get("lease_until") or 0.0)
+            if status == "leased" and lease_until \
+                    and now <= lease_until:
+                continue  # a live lease — a send in flight, not stuck
+            reason = "unknown-outcome" if status == "leased" \
+                else "overdue"
+            out.append(Candidate(
+                domain=self.domain, kind="send",
+                subject=self._subject(row),
+                subject_key=f"outbox:{row.get('id')}",
+                reason=reason,
+                detail={"job_id": str(row.get("id") or ""),
+                        "queue_status": status,
+                        "attempts": int(row.get("attempts") or 0),
+                        "age_s": round(age, 1)}))
+        return out
+
+    def collect(self, case: OutcomeCase, now: float) -> list[EvidenceItem]:
+        job_id = str(case.detail.get("job_id") or "")
+        rows = self._rows("id = ?", (job_id,), limit=1)
+        if not rows:
+            return [EvidenceItem(
+                source="outbox.queue",
+                summary=("the send's queue row no longer exists "
+                         "(purged after completion, or never "
+                         "persisted) — delivery cannot be read back"))]
+        row = rows[0]
+        status = str(row.get("status") or "")
+        establishes = {"done": "delivered", "dead": "failed",
+                       "cancelled": "stopped"}.get(status, "")
+        summary = (f"send row status is {status}; attempts "
+                   f"{int(row.get('attempts') or 0)}/"
+                   f"{int(row.get('max_attempts') or 0)}; queued "
+                   f"{max(0.0, now - float(row.get('created_at') or now)):.0f}s ago")
+        error = str(row.get("last_error") or "").strip()
+        if error:
+            summary += f"; last error: {error[:200]}"
+        return [EvidenceItem(source="outbox.queue", summary=summary,
+                              establishes=establishes)]
+
+
+#: Adapter coverage, stated on the record: the domains the steward
+#: observes, and the briefed domains it deliberately does NOT —
+#: each with the durable record whose absence makes honest discovery
+#: impossible today. Surfaced by the tool's status action; no domain
+#: is ever silently missing.
+_WORKING_ADAPTERS: tuple[tuple[str, str], ...] = (
+    ("missions", "MissionStore records, incl. the effect-outcome "
+                 "projection"),
+    ("jobs", "core JobRegistry snapshots"),
+    ("contracts", "delegation contract records + claim ledger"),
+    ("scheduler", "the durable scheduler's schedule_jobs / "
+                  "schedule_runs records"),
+    ("outbox", "chat outbox rows in the shared work_queue"),
+)
+
+_UNAVAILABLE_ADAPTERS: tuple[tuple[str, str], ...] = (
+    ("browser", "no durable browser-run record exists — "
+                "BrowserJobManager keeps runs in memory only and "
+                "webnav journals none, so a crashed process leaves "
+                "nothing an honest discovery could read"),
+    ("transfers", "no transfer registry exists — the integrity "
+                  "ledger records completed downloads only, begun "
+                  "transfers leave no queryable record, and uploads "
+                  "keep no records at all"),
+    ("render", "no durable render-job registry exists — the media "
+               "JobManager is in-memory and render queues persist "
+               "per-caller sidecar files with no index; renders run "
+               "as missions are covered by the missions adapter"),
+    ("artifacts", "artifacts carry no delivery or publication "
+                  "record — nothing records whether an artifact was "
+                  "ever delivered, so 'awaiting publication' cannot "
+                  "be discovered honestly"),
+)
+
+
+def adapter_health() -> list[dict[str, str]]:
+    """Per-domain adapter health for the status surface: every
+    domain the steward was briefed on, named — working with its
+    record source, or unavailable with the missing record."""
+    rows = [{"domain": domain, "status": "working", "note": note}
+            for domain, note in _WORKING_ADAPTERS]
+    rows += [{"domain": domain, "status": "unavailable", "note": note}
+             for domain, note in _UNAVAILABLE_ADAPTERS]
+    return rows
+
+
 class OutcomeSteward:
     """Opens cases from domain records; investigates them under
     delegation contracts; resolves only on cited evidence."""
@@ -350,7 +786,9 @@ class OutcomeSteward:
         self.delegation = delegation if delegation is not None \
             else DelegationStore(db)
         if adapters is None:
-            adapters = [MissionsAdapter(db), JobsAdapter(registry)]
+            adapters = [MissionsAdapter(db), JobsAdapter(registry),
+                        ContractsAdapter(db), SchedulerAdapter(db),
+                        OutboxAdapter(db)]
         self.adapters = {a.domain: a for a in adapters}
         self._idempotency = idempotency
 
@@ -601,7 +1039,8 @@ def run_stewardship_cycle(db: Any, *, now: float | None = None,
     sweep = steward.sweep(now=now)
     runs = steward.run_pending(now=now)
     return {"sweep": sweep, "runs": runs,
-            "counts": steward.cases.counts()}
+            "counts": steward.cases.counts(),
+            "adapters": adapter_health()}
 
 
 # ── inspection read API (P6 puts chat/CLI clothes on this) ──────────────
@@ -691,17 +1130,20 @@ def register(registry: Any) -> None:
         "outcome_steward",
         description=(
             "Outcome stewardship for long-running or forgotten work: "
-            "sweeps missions and background jobs for operations whose "
-            "outcome is overdue, stalled, orphaned or unknown, opens "
-            "a reconciliation case for each, and investigates under "
-            "an accountable contract — a case resolves only on cited "
-            "evidence from the domain's own records; anything else "
-            "closes as honestly unknown with the checks recorded. "
-            "action=sweep runs one full cycle (this is what the "
-            "durable 'outcome steward sweep' job fires every 6h); "
-            "action=status reports case counts only. Call directly "
-            "when the owner asks what became of work that was left "
-            "running."
+            "sweeps missions, background jobs, delegation contracts, "
+            "scheduled jobs and queued chat sends for operations "
+            "whose outcome is overdue, stalled, orphaned or unknown, "
+            "opens a reconciliation case for each, and investigates "
+            "under an accountable contract — a case resolves only on "
+            "cited evidence from the domain's own records; anything "
+            "else closes as honestly unknown with the checks "
+            "recorded. action=sweep runs one full cycle (this is "
+            "what the durable 'outcome steward sweep' job fires "
+            "every 6h); action=status reports case counts and "
+            "per-domain adapter health (domains without a durable "
+            "record are named unavailable, never silently absent). "
+            "Call directly when the owner asks what became of work "
+            "that was left running."
         ),
         capability="memory.write",
         parameters={
@@ -717,7 +1159,8 @@ def register(registry: Any) -> None:
                              "steward has no records to keep"}
         if action == "status":
             return {"ok": True,
-                    "counts": OutcomeCaseStore(db).counts()}
+                    "counts": OutcomeCaseStore(db).counts(),
+                    "adapters": adapter_health()}
         if action == "sweep":
             report = run_stewardship_cycle(db)
             return {"ok": True, **report}
