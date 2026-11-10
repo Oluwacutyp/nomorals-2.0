@@ -274,6 +274,12 @@ class Notifier:
         #: passed explicitly (the runtime keeps it in context.extras).
         #: None in CLI contexts (delivery = persist only).
         self.gateway = gateway if gateway is not None else resolve_gateway(context)
+        #: Doc 15 Pass 1 — OBSERVE mode: every publish builds a
+        #: ReportCandidate and journals it beside the delivery path
+        #: (see .report_candidate / .alert_policy candidate journal).
+        #: Observation only — it never alters a delivery outcome;
+        #: Pass 2 turns the record into the mandatory decision.
+        self.observe_candidates = True
 
     #: identical (kind, title) within this window collapses to one alert
     DEDUPE_WINDOW_SECONDS = 600.0
@@ -352,6 +358,14 @@ class Notifier:
         formatted by the gateway like any dialect body.  A non-Doc
         ``doc`` is a producer bug: logged and ignored, never a lost
         alert.
+
+        Doc 15 Pass 1 (observe mode): every publish also builds a
+        :class:`~.report_candidate.ReportCandidate` from the call and
+        journals it (``candidate_journal()``), hinted or not, with
+        missing evidence marked — the record the mandatory decision
+        (Pass 2) will consume.  Observation changes no delivery
+        behaviour in this pass; disable per-instance with
+        ``observe_candidates = False``.
         """
         doc_json = ""
         if doc is not None:
@@ -370,6 +384,16 @@ class Notifier:
                 doc = None
             if doc is not None:
                 doc_json = self._serialize_doc(doc)
+        if self.observe_candidates and self.db is not None:
+            # Observe-mode candidate (Doc 15 P1): built from the
+            # producer's original call — before the policy block may
+            # append its decision line to the body — and journaled
+            # whatever the delivery outcome turns out to be.
+            self._observe_candidate(
+                kind=kind, title=title, body=body, force=force,
+                critical=critical, channels=channels,
+                alert_subject=alert_subject, alert_hints=alert_hints,
+                output_kind=output_kind, output_meta=output_meta)
         decision = None
         if alert_hints is not None and self.db is not None:
             from .alert_policy import AlertHints, AlertPolicy, \
@@ -529,6 +553,37 @@ class Notifier:
         ``channels``, ``alert_hints``, …) passes through.
         """
         return self.publish(kind, "", "", doc=doc, **kw)
+
+    def _observe_candidate(self, *, kind: str, title: str, body: str,
+                           force: bool, critical: bool,
+                           channels: list[str] | None,
+                           alert_subject: str, alert_hints: Any,
+                           output_kind: str | None,
+                           output_meta: dict[str, Any] | None) -> None:
+        """Build + journal the ReportCandidate for one publish.
+
+        Observe mode (Doc 15 P1): strictly read-only over the call —
+        it mutates nothing, returns nothing the delivery path uses,
+        and never raises (``publish`` never raises).  A candidate
+        with missing evidence is the expected state for most legacy
+        producers; the marks are the measurement, not an error.
+        """
+        try:
+            from .alert_policy import AlertPolicy
+            from .report_candidate import (
+                build_legacy_candidate,
+                caller_module,
+            )
+
+            candidate = build_legacy_candidate(
+                kind=kind, title=title, body=body, force=force,
+                critical=critical, channels=channels,
+                alert_subject=alert_subject, alert_hints=alert_hints,
+                output_kind=output_kind, output_meta=output_meta,
+                producer=caller_module())
+            AlertPolicy.record_candidate(self.db, candidate.to_dict())
+        except Exception as exc:  # noqa: BLE001 - observation never breaks delivery
+            record_failure("notifier.observe_candidate", exc)
 
     @staticmethod
     def _termux_attempt(title: str) -> dict[str, Any]:
@@ -1208,6 +1263,41 @@ class Notifier:
         except Exception as exc:  # noqa: BLE001
             record_failure("notifier.alert_journal", exc)
             return []
+
+    def candidate_journal(self, limit: int = 50, kind: str = "",
+                          producer_class: str = "") -> list[dict[str, Any]]:
+        """Recent ReportCandidate records (Doc 15 P1), newest first.
+
+        One row per publish — hinted AND unhinted — with the
+        candidate and its missing-evidence marks, beside the
+        decision-only :meth:`alert_journal`.  Never raises."""
+        if self.db is None:
+            return []
+        try:
+            from .alert_policy import AlertPolicy
+
+            return AlertPolicy.candidate_journal(
+                self.db, limit=limit, kind=kind,
+                producer_class=producer_class)
+        except Exception as exc:  # noqa: BLE001
+            record_failure("notifier.candidate_journal", exc)
+            return []
+
+    def candidate_coverage(self) -> dict[str, Any]:
+        """Candidate coverage over the retained journal: candidates
+        recorded, complete vs gapped, per class and per missing
+        field — the migration measurement for Doc 15 Pass 2."""
+        if self.db is None:
+            return {"candidates": 0, "complete": 0, "with_gaps": 0,
+                    "by_class": {}, "gap_fields": {}}
+        try:
+            from .alert_policy import AlertPolicy
+
+            return AlertPolicy.candidate_coverage(self.db)
+        except Exception as exc:  # noqa: BLE001
+            record_failure("notifier.candidate_coverage", exc)
+            return {"candidates": 0, "complete": 0, "with_gaps": 0,
+                    "by_class": {}, "gap_fields": {}}
 
     def dead_letters(self, limit: int = 10) -> list[dict[str, Any]]:
         """Dead-lettered notifications: delivery retries exhausted.

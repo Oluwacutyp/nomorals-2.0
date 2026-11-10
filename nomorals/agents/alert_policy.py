@@ -66,7 +66,7 @@ __all__ = [
     "TIER_PAGE", "TIER_DIGEST", "TIER_LOG",
     "AlertHints", "AlertDecision", "AlertPolicy",
     "DEFAULT_RECURRENCE_THRESHOLD", "DEFAULT_RECURRENCE_WINDOW_S",
-    "JOURNAL_KEY",
+    "JOURNAL_KEY", "CANDIDATE_JOURNAL_KEY", "CANDIDATE_JOURNAL_MAX_ROWS",
 ]
 
 #: the three paging tiers
@@ -85,6 +85,16 @@ JOURNAL_KEY = "alert_policy:journal:v1"
 #: bounded: the journal is an audit trail for recent paging decisions,
 #: not an archive.  Older rows prune on write.
 JOURNAL_MAX_ROWS = 500
+
+#: the candidate journal (Doc 15, Pass 1): one row per publish —
+#: hinted or not — carrying the ReportCandidate the legacy adapter
+#: built and its missing-evidence marks.  Same KV substrate and the
+#: same prune discipline as the decision journal, under its own key
+#: so the policy's recurrence counting (which reads the decision
+#: journal) is untouched.  This is what makes coverage measurable:
+#: before Pass 1, an unhinted publish left no record of *why* at all.
+CANDIDATE_JOURNAL_KEY = "alert_policy:candidates:v1"
+CANDIDATE_JOURNAL_MAX_ROWS = 500
 
 
 @dataclass
@@ -191,11 +201,11 @@ class AlertPolicy:
     # ── the journal ──────────────────────────────────────────────────
 
     @staticmethod
-    def _load_journal(db: Any) -> list[dict[str, Any]]:
+    def _load_journal(db: Any, key: str = JOURNAL_KEY) -> list[dict[str, Any]]:
         try:
             from ..storage.kv import KVStore
 
-            raw = KVStore(db).get_raw(JOURNAL_KEY)
+            raw = KVStore(db).get_raw(key)
             rows = json.loads(raw) if raw else []
             return rows if isinstance(rows, list) else []
         except Exception:  # noqa: BLE001 - journal is best-effort
@@ -203,15 +213,17 @@ class AlertPolicy:
 
     @staticmethod
     def _save_journal(db: Any, rows: list[dict[str, Any]],
-                      now: float, window_s: float) -> None:
+                      now: float, window_s: float,
+                      key: str = JOURNAL_KEY,
+                      max_rows: int = JOURNAL_MAX_ROWS) -> None:
         try:
             from ..storage.kv import KVStore
 
             keep_after = now - max(window_s * 4.0, 24 * 3600.0)
             rows = [r for r in rows
                     if float(r.get("ts") or 0) >= keep_after]
-            rows = rows[-JOURNAL_MAX_ROWS:]
-            KVStore(db).set_raw(JOURNAL_KEY, json.dumps(rows), "json")
+            rows = rows[-max_rows:]
+            KVStore(db).set_raw(key, json.dumps(rows), "json")
         except Exception:  # noqa: BLE001 - journal is best-effort
             _log.debug("alert policy: journal write failed", exc_info=True)
 
@@ -232,6 +244,81 @@ class AlertPolicy:
             if len(out) >= max(1, int(limit)):
                 break
         return out
+
+    # ── the candidate journal (Doc 15, Pass 1 — observe mode) ────
+
+    @staticmethod
+    def record_candidate(db: Any, candidate: dict[str, Any],
+                         now: float | None = None) -> None:
+        """Journal one ReportCandidate (observe mode — no decision
+        is taken on it in Pass 1).  Best-effort like the decision
+        journal: a journal failure never reaches the publish path."""
+        if db is None:
+            return
+        now = time.time() if now is None else now
+        rows = AlertPolicy._load_journal(db, CANDIDATE_JOURNAL_KEY)
+        rows.append({
+            "ts": now,
+            "kind": str(candidate.get("kind") or ""),
+            "subject": str(candidate.get("subject") or ""),
+            "event_id": str(candidate.get("event_id") or ""),
+            "producer": str(candidate.get("producer") or ""),
+            "producer_class": str(candidate.get("producer_class") or ""),
+            "complete": not candidate.get("evidence_gaps"),
+            "evidence_gaps": list(candidate.get("evidence_gaps") or []),
+            "candidate": candidate,
+        })
+        AlertPolicy._save_journal(
+            db, rows, now, DEFAULT_RECURRENCE_WINDOW_S,
+            key=CANDIDATE_JOURNAL_KEY,
+            max_rows=CANDIDATE_JOURNAL_MAX_ROWS)
+
+    @staticmethod
+    def candidate_journal(db: Any, *, limit: int = 50, kind: str = "",
+                          producer_class: str = ""
+                          ) -> list[dict[str, Any]]:
+        """Recent candidate records, newest first — the audit read
+        beside :meth:`journal` (which stays decision-only)."""
+        if db is None:
+            return []
+        rows = AlertPolicy._load_journal(db, CANDIDATE_JOURNAL_KEY)
+        out = []
+        for row in reversed(rows):
+            if kind and row.get("kind") != kind:
+                continue
+            if producer_class and \
+                    row.get("producer_class") != producer_class:
+                continue
+            out.append(row)
+            if len(out) >= max(1, int(limit)):
+                break
+        return out
+
+    @staticmethod
+    def candidate_coverage(db: Any) -> dict[str, Any]:
+        """Coverage over the retained candidate journal: how many
+        publishes left a candidate, how many were complete, and
+        which evidence fields the legacy population is missing —
+        the measurement Pass 2's migration works from."""
+        rows = (AlertPolicy._load_journal(db, CANDIDATE_JOURNAL_KEY)
+                if db is not None else [])
+        by_class: dict[str, int] = {}
+        gap_fields: dict[str, int] = {}
+        complete = 0
+        for row in rows:
+            cls = str(row.get("producer_class") or "(unregistered)")
+            by_class[cls] = by_class.get(cls, 0) + 1
+            if row.get("complete"):
+                complete += 1
+            for gap in row.get("evidence_gaps") or []:
+                gap_fields[str(gap)] = gap_fields.get(str(gap), 0) + 1
+        return {
+            "candidates": len(rows),
+            "complete": complete,
+            "with_gaps": len(rows) - complete,
+            "by_class": by_class,
+            "gap_fields": gap_fields,
+        }
 
     # ── the decision ─────────────────────────────────────────────────
 
