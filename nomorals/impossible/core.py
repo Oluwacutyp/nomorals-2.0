@@ -18,7 +18,7 @@ from . import prior_art as _prior_art
 from . import transfer as _transfer
 from .attempt import AttemptQueue
 from .charter import charter as _charter
-from .ledger import HonestyLedger
+from .ledger import HonestyLedger, earned_status_of
 
 
 class ImpossibleMadePossible:
@@ -99,10 +99,19 @@ class ImpossibleMadePossible:
         entry = self.ledger.get(claim_id)
         if entry is None:
             return {"ok": False, "error": f"No claim with id '{claim_id}'."}
-        return {"claim_id": entry["id"], "status": entry["status"],
-                "attempts": len(entry.get("attempts", [])),
-                "conflicts": entry.get("conflicts", []),
-                "falsifier": entry.get("falsifier", "")}
+        # PG2: readers surface the EARNED status, never a label a
+        # legacy write asserted by fiat. The recorded label rides
+        # along as a claim when it outruns the evidence.
+        earned = earned_status_of(entry)
+        out = {"claim_id": entry["id"], "status": earned,
+               "attempts": len(entry.get("attempts", [])),
+               "conflicts": entry.get("conflicts", []),
+               "falsifier": entry.get("falsifier", "")}
+        recorded = str(entry.get("status") or "")
+        if recorded != earned:
+            out["recorded_status"] = recorded
+            out["status_unverified"] = True
+        return out
 
     def charter(self) -> dict:
         return _charter()
