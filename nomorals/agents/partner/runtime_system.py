@@ -2872,6 +2872,274 @@ class RuntimeSystemMixin:
                 "[board] | coverage | intake <goal> | "
                 "status <field>")
 
+    # ── translation glossaries: /glossary ───────────────────────────
+    def _glossary_store(self) -> Any:
+        """The shipped glossary store, built the way the
+        translator's ticket path builds it (context db, else the
+        JSON document under <home>/translate/).  Built per call so
+        an edit is read fresh; tests inject a seeded store."""
+        store = getattr(self, "_glossary_store_instance", None)
+        if store is not None:
+            return store
+        import os
+
+        from ...llm.glossary import GlossaryStore
+
+        db = getattr(self.context, "db", None)
+        settings = getattr(self.context, "settings", None)
+        home = (getattr(settings, "home", "")
+                or os.path.expanduser("~/.nomorals"))
+        return GlossaryStore(db, home)
+
+    def _control_glossary(self, tail: str) -> str:
+        """/glossary — the translation glossary board (docs 19+21
+        T2's management surface over the shipped store).
+
+        /glossary             — the board: every glossary in the
+                                store, its entry count per scope
+                                (owner / domain / global — an empty
+                                scope is named empty), and where the
+                                entries live
+        /glossary list [glossary] [scope]
+                              — the entries themselves, term →
+                                translation, grouped by glossary and
+                                scope; a lone scope name lists that
+                                scope across every glossary
+        /glossary set <glossary> <scope> <term> = <translation>
+                              — add or replace one entry through
+                                the store's own write path
+        /glossary del <glossary> [scope] <term>
+                              — remove one entry through the store;
+                                an absent term answers in words
+
+        The store's own model, exactly: a glossary is a named set
+        (the translator enforces the one a ticket names); inside
+        it, a term sits at one scope, and when two rows name the
+        same term for a pair the owner scope beats domain beats
+        global.  Entries the surface writes apply to any language
+        pair.  Every mutation goes through the store — no parallel
+        file, no cache edits — and its reply names what changed,
+        including the honest consequence of an edit: the glossary's
+        fingerprint changes, so translations cached under the old
+        fingerprint stop matching and are translated fresh.
+
+        Owner-only via CONTROL_COMMANDS (never PUBLIC_COMMANDS).
+        Glossary entries are terms, not ids — nothing internal
+        prints.
+        """
+        store = self._glossary_store()
+        text = (tail or "").strip()
+        parts = text.split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        usage = ("usage: /glossary [list [glossary] [scope]] | "
+                 "set <glossary> <scope> <term> = <translation> | "
+                 "del <glossary> [scope] <term> — scope is one of "
+                 "owner, domain, global")
+        if verb in ("", "board"):
+            return self._glossary_board(store)
+        if verb == "list":
+            return self._glossary_list(store, rest)
+        if verb == "set":
+            return self._glossary_set(store, rest)
+        if verb == "del":
+            return self._glossary_del(store, rest)
+        return f"unknown /glossary verb {verb!r} — {usage}"
+
+    def _glossary_board(self, store: Any) -> str:
+        from ...llm.glossary import SCOPES
+
+        lines = ["📖 Translation glossaries",
+                 f"entries live in {store.describe_storage()}."]
+        ids = store.glossary_ids()
+        if not ids:
+            lines.append(
+                "no glossaries yet — the store is empty. Add the "
+                "first entry with /glossary set <glossary> <scope> "
+                "<term> = <translation>.")
+            return "\n".join(lines)
+        total = 0
+        for gid in ids:
+            rows = store.entries(gid)
+            total += len(rows)
+            counts = {scope: 0 for scope in SCOPES}
+            for row in rows:
+                counts[row.scope] = counts.get(row.scope, 0) + 1
+            per_scope = " · ".join(
+                f"{scope}: {counts[scope]}"
+                + (" (empty)" if counts[scope] == 0 else "")
+                for scope in ("owner", "domain", "global"))
+            noun = "entry" if len(rows) == 1 else "entries"
+            lines.append(f"\n{gid} — {len(rows)} {noun}\n  {per_scope}")
+        lines.append(
+            f"\n{len(ids)} "
+            + ("glossary" if len(ids) == 1 else "glossaries")
+            + f" · {total} "
+            + ("entry" if total == 1 else "entries")
+            + " in all. /glossary list shows every entry.")
+        return "\n".join(lines)
+
+    def _glossary_list(self, store: Any, rest: str) -> str:
+        from ...llm.glossary import SCOPES
+
+        want_glossary = ""
+        want_scope = ""
+        for token in rest.split():
+            if token.lower() in SCOPES and not want_scope:
+                want_scope = token.lower()
+            elif not want_glossary:
+                want_glossary = token
+            else:
+                return ("usage: /glossary list [glossary] [scope] "
+                        "— at most one glossary name and one scope")
+        ids = store.glossary_ids()
+        if want_glossary and want_glossary not in ids:
+            known = ", ".join(ids) if ids else "none yet"
+            return (f"no glossary named {want_glossary!r} — the "
+                    f"store holds: {known}")
+        groups: list[tuple[str, str, list[Any]]] = []
+        for gid in ids:
+            if want_glossary and gid != want_glossary:
+                continue
+            rows = store.entries(gid)
+            for scope in ("owner", "domain", "global"):
+                if want_scope and scope != want_scope:
+                    continue
+                scoped = [r for r in rows if r.scope == scope]
+                if scoped:
+                    groups.append((gid, scope, scoped))
+        if not groups:
+            if want_scope and want_glossary:
+                return (f"the {want_glossary} glossary has no "
+                        f"entries at {want_scope} scope — that "
+                        "scope is empty.")
+            if want_scope:
+                return (f"no entries at {want_scope} scope in any "
+                        "glossary — that scope is empty.")
+            if want_glossary:
+                return (f"the {want_glossary} glossary holds no "
+                        "entries yet.")
+            return ("no glossary entries yet — the store is empty. "
+                    "Add one with /glossary set <glossary> <scope> "
+                    "<term> = <translation>.")
+        lines = ["📖 Glossary entries"]
+        for gid, scope, rows in groups:
+            lines.append(f"\n{gid} · {scope} scope")
+            for row in rows:
+                pair = ""
+                if row.source_lang or row.target_lang:
+                    pair = (f"  ({row.source_lang or 'any'}→"
+                            f"{row.target_lang or 'any'})")
+                lines.append(
+                    f"  {row.source_term} → {row.target_term}{pair}")
+        return "\n".join(lines)
+
+    def _glossary_set(self, store: Any, rest: str) -> str:
+        from ...llm.glossary import SCOPES
+
+        left, sep, target = rest.partition("=")
+        target = target.strip()
+        tokens = left.split()
+        if not sep or len(tokens) < 3 or not target:
+            return ("usage: /glossary set <glossary> <scope> "
+                    "<term> = <translation> — for example: "
+                    "/glossary set legal owner bank = Banco "
+                    "Central")
+        gid, scope = tokens[0], tokens[1].lower()
+        term = " ".join(tokens[2:])
+        if scope not in SCOPES:
+            return (f"{tokens[1]!r} is not a glossary scope — the "
+                    "scopes are owner, domain and global (when two "
+                    "rows name the same term, owner beats domain "
+                    "beats global). Nothing was written.")
+        before = store.fingerprint(gid, "", "")
+        old = next((r for r in store.entries(gid)
+                    if r.source_term == term
+                    and not r.source_lang and not r.target_lang),
+                   None)
+        if not store.put_term(gid, term, target, scope=scope):
+            return (f"the glossary store did not save {term!r} — "
+                    "nothing was written and nothing changed.")
+        changed = store.fingerprint(gid, "", "") != before
+        if old is not None:
+            head = (f"replaced in the {gid} glossary ({scope} "
+                    f"scope): {term} → {target} (was "
+                    f"{old.target_term}, at {old.scope} scope)")
+        else:
+            head = (f"set in the {gid} glossary ({scope} scope): "
+                    f"{term} → {target}")
+        tail_note = (
+            " The glossary's fingerprint changed with this edit, "
+            "so translations cached under the old fingerprint stop "
+            "matching and will be translated fresh."
+            if changed else
+            " The resolved terms are unchanged, so cached "
+            "translations still match.")
+        return head + "." + tail_note
+
+    def _glossary_del(self, store: Any, rest: str) -> str:
+        from ...llm.glossary import SCOPES
+
+        tokens = rest.split()
+        if len(tokens) < 2:
+            return ("usage: /glossary del <glossary> [scope] "
+                    "<term> — for example: /glossary del legal "
+                    "owner bank")
+        gid = tokens[0]
+        scope = ""
+        if tokens[1].lower() in SCOPES:
+            scope = tokens[1].lower()
+            term_tokens = tokens[2:]
+        else:
+            term_tokens = tokens[1:]
+        if not term_tokens:
+            return ("usage: /glossary del <glossary> [scope] "
+                    "<term> — name the term to remove")
+        term = " ".join(term_tokens)
+        rows = [r for r in store.entries(gid)
+                if r.source_term == term]
+        if not rows:
+            return (f"there is no {term!r} in the {gid} glossary "
+                    "— nothing was removed.")
+        if scope and not any(r.scope == scope for r in rows):
+            present = ", ".join(sorted({r.scope for r in rows}))
+            return (f"{term!r} is in the {gid} glossary at "
+                    f"{present} scope, not {scope} — nothing was "
+                    "removed.")
+        any_pair = [r for r in rows
+                    if not r.source_lang and not r.target_lang]
+        if not any_pair:
+            pairs = ", ".join(sorted(
+                f"{r.source_lang or 'any'}→{r.target_lang or 'any'}"
+                for r in rows))
+            return (f"{term!r} in the {gid} glossary exists only "
+                    f"for specific language pairs ({pairs}) — "
+                    "/glossary del removes the any-pair entry, so "
+                    "nothing was removed.")
+        if scope and not any(r.scope == scope for r in any_pair):
+            present = ", ".join(sorted({r.scope for r in any_pair}))
+            return (f"the any-pair entry for {term!r} in the "
+                    f"{gid} glossary sits at {present} scope, not "
+                    f"{scope} — nothing was removed.")
+        before = store.fingerprint(gid, "", "")
+        removed = any_pair[0]
+        if not store.remove_term(gid, removed.source_term):
+            return (f"the glossary store did not remove {term!r} "
+                    "— nothing changed.")
+        changed = store.fingerprint(gid, "", "") != before
+        head = (f"removed from the {gid} glossary "
+                f"({removed.scope} scope): {removed.source_term} "
+                f"→ {removed.target_term} is gone")
+        tail_note = (
+            " The glossary's fingerprint changed with this "
+            "removal, so translations cached under the old "
+            "fingerprint stop matching and will be translated "
+            "fresh."
+            if changed else
+            " The resolved terms are unchanged, so cached "
+            "translations still match.")
+        return head + "." + tail_note
+
     def _craft_intake(self, goal_text: str, *, library: Any,
                       grants: Any) -> str:
         """Compose (never open) the intake preview for one goal.

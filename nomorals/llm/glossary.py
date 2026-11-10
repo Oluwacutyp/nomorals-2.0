@@ -263,6 +263,48 @@ class GlossaryStore:
             ensure_ascii=False, sort_keys=True)
         return hashlib.sha256(canon.encode("utf-8")).hexdigest()[:24]
 
+    # -- enumeration (the management surface's reads) ----------------
+    def describe_storage(self) -> str:
+        """Where this store's entries live, in owner's words."""
+        if self._db is not None:
+            return "the translate_glossary table in Devon's database"
+        if self._path is not None:
+            return "the file " + str(self._path)
+        return ("no store at all — neither a database nor a home "
+                "directory is configured, so nothing persists")
+
+    def glossary_ids(self) -> list[str]:
+        """Every glossary name the store holds, sorted.  A file
+        glossary whose last entry was removed still names itself
+        here (its key remains, holding no rows); a database
+        glossary exists exactly while it has rows.  Reads fail
+        open, like every read on this store."""
+        if self._db is not None:
+            try:
+                self._ensure_table()
+                rows = self._db.query(
+                    "SELECT DISTINCT glossary_id FROM "
+                    "translate_glossary ORDER BY glossary_id")
+                return [str(r["glossary_id"]) for r in rows
+                        if r["glossary_id"]]
+            except Exception as exc:  # noqa: BLE001 — reads fail open
+                record_failure("glossary.glossary_ids", exc)
+                return []
+        return sorted(self._load_file().keys())
+
+    def entries(self, glossary_id: str) -> list[GlossaryTerm]:
+        """Every stored row of one glossary, unresolved — all
+        scopes, all pairs — in display order (owner scope first,
+        then domain, then global; terms alphabetical inside a
+        scope).  This is what the management surface lists; the
+        translator's own read stays :meth:`terms_for`."""
+        rows = self._rows(glossary_id)
+        return sorted(
+            rows,
+            key=lambda t: (-_SCOPE_RANK.get(t.scope, 0),
+                           t.source_term.casefold(),
+                           t.source_lang, t.target_lang))
+
 
 # ----------------------------------------------------------------------
 # protect / restore

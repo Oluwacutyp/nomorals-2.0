@@ -7782,6 +7782,8 @@ class PartnerRuntime(
             return self._control_runs(command.tail or arg)
         if kind == "craft":
             return self._control_craft(command.tail or arg)
+        if kind == "glossary":
+            return self._control_glossary(command.tail or arg)
         if kind == "read":
             return self._control_read(command.tail or arg, chat_key=chat_key)
         if kind == "mission":
