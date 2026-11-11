@@ -1542,6 +1542,38 @@ _register(_S(
         "The native sqlite3 path serves the SQLite default."),
 ))
 
+_register(_S(
+    name="health-challenges", verdict="ported", kind="sqlite-file",
+    modules=("health/challenges.py",),
+    tables=("challenges", "challenge_members", "challenge_pbs", "squads",
+            "streaks", "streak_freezes", "completions", "proofs"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (B28, its own "
+        "lane): all eight tables are primary-keyed, so every one "
+        "routes through a RowTable in a namespaced "
+        "health-challenges__<table> collection whenever a store "
+        "is resolved, behind the unchanged ChallengeStore API; no "
+        "PK-less children and no AUTOINCREMENT ids exist to "
+        "allocate. challenge_members, completions and "
+        "challenge_pbs are composite-keyed, so their key parts "
+        "live only in the joined document id — point reads fetch "
+        "by that id, scoped reads (members, leaderboard) scan the "
+        "restored rows and filter in Python, and the leaderboard's "
+        "ORDER BY re-expresses as a Python sort. The streak "
+        "lifecycle is the domain pass its registry entry "
+        "reserved: check-in day arithmetic, freeze earn/consume "
+        "and the missed-day reset were already Python over the "
+        "rows, so they run unchanged over seam rows, driven by "
+        "checkin's own now= seam — a full lifecycle (create, "
+        "join, daily check-ins, the 7-day freeze milestone, a "
+        "freeze-covered gap, a freezeless reset, completion at "
+        "target with its personal best) is pinned identically on "
+        "both rungs in test_mongo_p5. The file's existing rows "
+        "are imported once, through the same mapping, at first "
+        "construction. The native sqlite3 path serves the SQLite "
+        "default byte-for-byte."),
+))
+
 
 # ── residue: contained domain file stores, classified, port queued ────────
 #
@@ -1572,12 +1604,6 @@ _residue("audio-fingerprints", "audio/fingerprint.py", ("hashes", "tracks"),
          "audio fingerprint hashes per track in fingerprints.db; "
          "hash rows are lookup-keyed blobs, document-shaped but "
          "bulk-binary in character.")
-_residue("health-challenges", "health/challenges.py",
-         ("challenges", "challenge_members", "challenge_pbs", "squads",
-          "streaks", "streak_freezes", "completions", "proofs"),
-         "health challenge groups, streaks and proofs — the "
-         "largest health sidecar, eight tables with cross-table "
-         "streak flows; its port wants the domain pass to itself.")
 _residue("household", "household/household.py",
          ("shared_assets", "shared_calendar", "shared_commitments",
           "household_audit"),

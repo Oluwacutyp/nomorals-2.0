@@ -48,6 +48,8 @@ P5 settles the stores that live BESIDE the central database:
   pattern below.
   The B9 lane (identity-documents, injected port, vault review
   recorded) follows the same pattern below.
+  The B28 lane (health-challenges, full streak-lifecycle
+  conformance) follows the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -258,7 +260,9 @@ class TestSidecarRegistry:
             # residue Batch 2, B10 lane:
             "immune-corpus",
             # residue Batch 2, B9 lane:
-            "identity-documents"}
+            "identity-documents",
+            # residue Batch 2, B28 lane:
+            "health-challenges"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -5408,3 +5412,192 @@ class TestIdentityDocumentsPort:
         mem.add(self._doc("mem", self.NOW + 5 * self.DAY), owner=True)
         assert mem.get("mem", owner=True).number_ref == \
             "vault:identity/mem/1"
+
+
+class TestHealthChallengesPort:
+    """health/challenges.py — the health-challenges port (residue
+    Batch 2, B28, its own lane): all eight tables are primary-keyed
+    (challenge_members, completions and challenge_pbs compositely),
+    so every one routes through a RowTable; the composite key parts
+    live only in the joined document id. The registry reserved this
+    store a domain pass of its own, so the scenario below is the
+    full streak lifecycle, not per-table CRUD: create → join →
+    workouts to completion (with personal bests and the board) →
+    daily check-ins through checkin's own now= seam → the 7-day
+    freeze milestone → a missed day the freeze covers → a missed
+    day that resets → at-risk reads — identical observables on
+    every rung."""
+
+    @staticmethod
+    def _noon(days_ago: float) -> float:
+        """Local noon, ``days_ago`` days before today — a timestamp
+        whose local calendar date is stable in every timezone."""
+        lt = time.localtime(time.time() - days_ago * 86400.0)
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                            12, 0, 0, 0, 0, -1))
+
+    def _scenario(self, cs) -> dict:
+        day = 86400.0
+        base = self._noon(0)
+        c = cs.create_challenge("Morning Miles", "workout-count", 30, 3,
+                                proof_method="honor", created_by="amy")
+        joined = (cs.join_challenge(c.id, "amy"),
+                  cs.join_challenge(c.id, "bob"))
+        logs = [cs.log_workout(c.id, "amy") for _ in range(3)]
+        proof = cs.submit_proof(c.id, "bob", "")
+        monthly = cs.monthly_challenge("distance", created_by="amy")
+        squad = cs.create_squad("Dawn Patrol", ["amy", "bob", "cy"])
+        # the streak lifecycle, driven through checkin's now= seam
+        amy_week = [cs.checkin("amy", now=base + i * day)
+                    for i in range(7)]
+        amy = {
+            "week": amy_week,
+            "freezes_after_week": cs.freezes("amy"),
+            "same_day": cs.checkin("amy", now=base + 6 * day + 3600),
+            "gap_covered": cs.checkin("amy", now=base + 8 * day),
+            "freezes_after_gap": cs.freezes("amy"),
+            "reset": cs.checkin("amy", now=base + 10 * day),
+        }
+        bob_seq = [cs.checkin("bob", now=base + i * day)
+                   for i in (0, 1, 2, 4, 5, 6)]
+        got = cs.get(c.id)
+        return {
+            "created": (c.name, c.type, c.target, c.duration_days,
+                        c.proof_method, c.created_by),
+            "got": (got.name, got.target, got.badge == f"challenge:{c.id}"),
+            "joined": joined,
+            "members": sorted(cs.members(c.id)),
+            "logs": logs,
+            "progress": (cs.progress(c.id, "amy"),
+                         cs.progress(c.id, "bob")),
+            "pb_amy": cs.personal_best(c.id, "amy"),
+            "board": cs.leaderboard(c.id),
+            "proof": (proof.verified, proof.verdict),
+            "monthly": (monthly.badge,
+                        cs.get(monthly.id).badge == monthly.badge),
+            "active_names": sorted(
+                ch.name for ch in cs.list_challenges()),
+            "squad": (squad.name, squad.members),
+            "squad_board": cs.squad_leaderboard(squad.id, c.id),
+            "amy": amy,
+            "bob_seq": bob_seq,
+            "streaks": (cs.streak("amy"), cs.streak("bob")),
+            "at_risk": cs.at_risk(now=base + 7 * day),
+            "nudge_bob": cs.risk_nudge("bob"),
+            "nudge_amy": cs.risk_nudge("amy"),
+        }
+
+    def test_scenario_matches_across_rungs(self, rung, tmp_path):
+        from nomorals.health.challenges import ChallengeStore
+
+        cs = ChallengeStore(db_path=str(tmp_path / "challenges.db"),
+                            store=rung.store)
+        month = time.strftime("%B")
+        assert self._scenario(cs) == {
+            "created": ("Morning Miles", "workout-count", 3, 30,
+                        "honor", "amy"),
+            "got": ("Morning Miles", 3, True),
+            "joined": (True, True),
+            "members": ["amy", "bob"],
+            "logs": [1, 2, 3],
+            "progress": ((3, 3), (1, 3)),
+            "pb_amy": 3,
+            "board": [("amy", 3, True), ("bob", 1, False)],
+            "proof": (True, "honor system — trusted "
+                             "(workout #1 logged)"),
+            "monthly": (f"monthly:{time.strftime('%Y-%m')}:distance",
+                        True),
+            "active_names": sorted(["Morning Miles",
+                                    f"{month} Distance Challenge"]),
+            "squad": ("Dawn Patrol", ["amy", "bob", "cy"]),
+            "squad_board": [("amy", 3), ("bob", 1), ("cy", 0)],
+            "amy": {"week": [1, 2, 3, 4, 5, 6, 7],
+                    "freezes_after_week": 1,
+                    "same_day": 7,
+                    "gap_covered": 8,
+                    "freezes_after_gap": 0,
+                    "reset": 1},
+            "bob_seq": [1, 2, 3, 1, 2, 3],
+            "streaks": (1, 3),
+            "at_risk": [("bob", 3)],
+            "nudge_bob": ("🔥 bob: your 3-day streak is at risk! "
+                          "Check in today to keep it alive."),
+            "nudge_amy": "",
+        }
+
+    def test_lazy_import_from_native_file(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.health.challenges import ChallengeStore
+
+        path = str(tmp_path / "challenges.db")
+        day = 86400.0
+        base = self._noon(0)
+        native = ChallengeStore(db_path=path)
+        c = native.create_challenge("Imported Miles", "workout-count",
+                                    30, 2, proof_method="honor")
+        native.join_challenge(c.id, "amy")
+        native.join_challenge(c.id, "bob")
+        native.log_workout(c.id, "amy")
+        for i in range(7):
+            native.checkin("amy", now=base + i * day)
+        squad = native.create_squad("Import Squad", ["amy", "bob", "cy"])
+        assert native.streak("amy") == 7 and native.freezes("amy") == 1
+
+        seam = ChallengeStore(db_path=path, store=rung.store)
+        assert seam.streak("amy") == 7
+        assert seam.freezes("amy") == 1
+        assert seam.progress(c.id, "amy") == (1, 2)
+        assert sorted(seam.members(c.id)) == ["amy", "bob"]
+        assert seam.get_squad(squad.id).members == ["amy", "bob", "cy"]
+        counts = {t: rung.store.count(f"health-challenges__{t}")
+                  for t in ("challenges", "challenge_members", "proofs",
+                            "completions", "streaks", "squads",
+                            "streak_freezes", "challenge_pbs")}
+        assert counts == {"challenges": 1, "challenge_members": 2,
+                          "proofs": 0, "completions": 2, "streaks": 1,
+                          "squads": 1, "streak_freezes": 1,
+                          "challenge_pbs": 1}
+        marker = rung.store.get("health-challenges__meta", "import")
+        assert marker is not None and marker["done"] is True
+        assert marker["tables"]["streaks"] == 1
+        # the lifecycle continues across the import boundary: the
+        # imported freeze covers the missed day 7, exactly as the
+        # native store would have spent it
+        assert seam.checkin("amy", now=base + 8 * day) == 8
+        assert seam.freezes("amy") == 0
+        # a second construction adopts — never re-imports
+        again = ChallengeStore(db_path=path, store=rung.store)
+        assert again.streak("amy") == 8
+        assert rung.store.count("health-challenges__streaks") == 1
+
+    def test_seam_shape(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.health.challenges import ChallengeStore
+
+        cs = ChallengeStore(db_path=str(tmp_path / "challenges.db"),
+                            store=rung.store)
+        c = cs.create_challenge("Shape Check", "workout-count", 30, 2,
+                                proof_method="honor")
+        cs.join_challenge(c.id, "amy")
+        cs.log_workout(c.id, "amy")
+        cs.submit_proof(c.id, "amy", "")
+        cs.checkin("amy", now=self._noon(0))
+        assert rung.store.count("health-challenges__challenges") == 1
+        assert rung.store.count("health-challenges__completions") == 1
+        assert rung.store.count("health-challenges__proofs") == 1
+        assert rung.store.count("health-challenges__streaks") == 1
+        doc = rung.store.get("health-challenges__challenges", c.id)
+        assert doc is not None and doc["_id"] == c.id
+        assert doc["name"] == "Shape Check" and doc["ctype"] == "workout-count"
+        # composite-keyed rows: the key parts live only in the joined
+        # document id, never in the body
+        comp = rung.store.get("health-challenges__completions",
+                              f"{c.id}\x1famy")
+        assert comp is not None and comp["_id"] == f"{c.id}\x1famy"
+        assert comp["count"] == 2 and comp["completed"] == 1
+        assert "challenge_id" not in comp and "member" not in comp
+        proof = rung.store.find("health-challenges__proofs")[0]
+        assert proof["verdict"] == "honor system — trusted"
+        assert proof["verified"] == 1

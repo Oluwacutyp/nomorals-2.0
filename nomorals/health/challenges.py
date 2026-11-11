@@ -149,64 +149,125 @@ def verify_proof_photo(photo_path: str, verifier=None) -> tuple[bool, str]:
 
 # ── stores ───────────────────────────────────────────────────────────
 
-def _connect(db_path: str):
-    db = sqlite3.connect(db_path)
-    db.row_factory = sqlite3.Row
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS challenges (
+_CHALLENGES_DDL = """CREATE TABLE IF NOT EXISTS challenges (
                id TEXT PRIMARY KEY, name TEXT, ctype TEXT,
                duration_days INTEGER, target INTEGER,
                proof_method TEXT, created_by TEXT,
-               created_at REAL, badge TEXT)""")
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS challenge_members (
+               created_at REAL, badge TEXT)"""
+
+_MEMBERS_DDL = """CREATE TABLE IF NOT EXISTS challenge_members (
                challenge_id TEXT, member TEXT,
                joined_at REAL,
-               PRIMARY KEY (challenge_id, member))""")
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS proofs (
+               PRIMARY KEY (challenge_id, member))"""
+
+_PROOFS_DDL = """CREATE TABLE IF NOT EXISTS proofs (
                id TEXT PRIMARY KEY, challenge_id TEXT, member TEXT,
                photo_path TEXT, verified INTEGER, verdict TEXT,
-               created_at REAL)""")
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS completions (
+               created_at REAL)"""
+
+_COMPLETIONS_DDL = """CREATE TABLE IF NOT EXISTS completions (
                challenge_id TEXT, member TEXT, count INTEGER,
                completed INTEGER DEFAULT 0,
-               PRIMARY KEY (challenge_id, member))""")
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS streaks (
+               PRIMARY KEY (challenge_id, member))"""
+
+_STREAKS_DDL = """CREATE TABLE IF NOT EXISTS streaks (
                member TEXT PRIMARY KEY, count INTEGER,
-               last_checkin REAL)""")
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS squads (
+               last_checkin REAL)"""
+
+_SQUADS_DDL = """CREATE TABLE IF NOT EXISTS squads (
                id TEXT PRIMARY KEY, name TEXT, members_json TEXT,
-               created_at REAL)""")
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS streak_freezes (
+               created_at REAL)"""
+
+_FREEZES_DDL = """CREATE TABLE IF NOT EXISTS streak_freezes (
                member TEXT PRIMARY KEY, freezes INTEGER DEFAULT 0,
-               updated_at REAL)""")
-    db.execute(
-        """CREATE TABLE IF NOT EXISTS challenge_pbs (
+               updated_at REAL)"""
+
+_PBS_DDL = """CREATE TABLE IF NOT EXISTS challenge_pbs (
                challenge_id TEXT, member TEXT, best INTEGER,
                achieved_at REAL,
-               PRIMARY KEY (challenge_id, member))""")
+               PRIMARY KEY (challenge_id, member))"""
+
+#: The store's tables, in registry order. All eight are primary-keyed
+#: (three compositely), so every one routes through a RowTable on the
+#: seam — no PK-less children, no AUTOINCREMENT ids to allocate.
+_TABLES = ("challenges", "challenge_members", "proofs", "completions",
+           "streaks", "squads", "streak_freezes", "challenge_pbs")
+
+#: The module DDL the native path executes — the same constant the
+#: seam's mappings derive from, so the two can never drift.
+_DDL = ";\n".join((_CHALLENGES_DDL, _MEMBERS_DDL, _PROOFS_DDL,
+                   _COMPLETIONS_DDL, _STREAKS_DDL, _SQUADS_DDL,
+                   _FREEZES_DDL, _PBS_DDL))
+
+
+def _connect(db_path: str):
+    db = sqlite3.connect(db_path)
+    db.row_factory = sqlite3.Row
+    db.executescript(_DDL)
     db.commit()
     return db
 
 
 class ChallengeStore:
-    """Challenges, proofs, completions, streaks, squads. Never raises."""
+    """Challenges, proofs, completions, streaks, squads. Never raises.
 
-    def __init__(self, db_path: str = "", verifier=None) -> None:
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as health-challenges):
+    all eight tables are documents in ``health-challenges__<table>``
+    collections. challenge_members, completions and challenge_pbs
+    are composite-keyed, so their key parts live only in the joined
+    document id — point reads fetch by that id and scoped reads scan
+    the restored rows. The streak lifecycle (check-in, freeze
+    earn/consume, reset) is Python in both arms; only the row access
+    branches. The file's existing rows are imported once, through
+    the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", verifier=None, *,
+                 store=None) -> None:
         self._db_path = db_path or _DEFAULT_DB
         self._verifier = verifier
+        self._db = None
+        self._port = None
         try:
             os.makedirs(os.path.dirname(self._db_path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("health-challenges", _DDL, _TABLES,
+                                self._db_path, store=store)
+            if port is not None:
+                def _writer(table):
+                    def write(rows):
+                        for row in rows:
+                            table.put(row)
+                        return len(rows)
+                    return write
+
+                port.ensure_imported({
+                    name: _writer(port.tables[name]) for name in _TABLES})
+                self._port = port
+                return
             self._db = _connect(self._db_path)
         except Exception:  # noqa: BLE001 — bad path → empty store
             _log.warning("challenges: db unavailable, running empty",
                          exc_info=True)
             self._db = None
+            self._port = None
+
+    @staticmethod
+    def _key(*parts) -> str:
+        """The joined document id of a composite-keyed row."""
+        return "\x1f".join(str(p) for p in parts)
+
+    @staticmethod
+    def _row_to_challenge(row) -> Challenge:
+        return Challenge(
+            challenge_id=row["id"], name=row["name"],
+            ctype=row["ctype"], duration_days=row["duration_days"],
+            target=row["target"], proof_method=row["proof_method"],
+            created_by=row["created_by"], created_at=row["created_at"],
+            badge=row["badge"])
 
     # — challenges —
 
@@ -225,6 +286,14 @@ class ChallengeStore:
                 target=target, proof_method=proof_method,
                 created_by=created_by or "owner")
             c.badge = f"challenge:{c.id}"
+            if self._port is not None:
+                self._port.tables["challenges"].put({
+                    "id": c.id, "name": c.name, "ctype": c.type,
+                    "duration_days": c.duration_days, "target": c.target,
+                    "proof_method": c.proof_method,
+                    "created_by": c.created_by, "created_at": c.created_at,
+                    "badge": c.badge})
+                return c
             self._db.execute(
                 "INSERT INTO challenges VALUES (?,?,?,?,?,?,?,?,?)",
                 (c.id, c.name, c.type, c.duration_days, c.target,
@@ -237,17 +306,15 @@ class ChallengeStore:
 
     def get(self, challenge_id: str) -> Challenge | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["challenges"].get(challenge_id)
+                return self._row_to_challenge(row) if row else None
             row = self._db.execute(
                 "SELECT * FROM challenges WHERE id = ?",
                 (challenge_id,)).fetchone()
             if row is None:
                 return None
-            return Challenge(
-                challenge_id=row["id"], name=row["name"],
-                ctype=row["ctype"], duration_days=row["duration_days"],
-                target=row["target"], proof_method=row["proof_method"],
-                created_by=row["created_by"], created_at=row["created_at"],
-                badge=row["badge"])
+            return self._row_to_challenge(row)
         except Exception as exc:  # noqa: BLE001
             record_failure("challenges.get", exc)
             return None
@@ -255,7 +322,10 @@ class ChallengeStore:
     def list_challenges(self, active_only: bool = True) -> list[Challenge]:
         try:
             out = []
-            for row in self._db.execute("SELECT * FROM challenges"):
+            rows = (self._port.tables["challenges"].all()
+                    if self._port is not None
+                    else self._db.execute("SELECT * FROM challenges"))
+            for row in rows:
                 c = self.get(row["id"])
                 if c is None:
                     continue
@@ -274,6 +344,14 @@ class ChallengeStore:
             member = (member or "").strip()[:80]
             if not member:
                 return False
+            if self._port is not None:
+                self._port.tables["challenge_members"].insert_ignore({
+                    "challenge_id": challenge_id, "member": member,
+                    "joined_at": time.time()})
+                self._port.tables["completions"].insert_ignore({
+                    "challenge_id": challenge_id, "member": member,
+                    "count": 0, "completed": 0})
+                return True
             self._db.execute(
                 "INSERT OR IGNORE INTO challenge_members VALUES (?,?,?)",
                 (challenge_id, member, time.time()))
@@ -288,6 +366,10 @@ class ChallengeStore:
 
     def members(self, challenge_id: str) -> list[str]:
         try:
+            if self._port is not None:
+                return [r["member"] for r in
+                        self._port.tables["challenge_members"].all()
+                        if r["challenge_id"] == challenge_id]
             return [r["member"] for r in self._db.execute(
                 "SELECT member FROM challenge_members WHERE challenge_id = ?",
                 (challenge_id,))]
@@ -312,6 +394,14 @@ class ChallengeStore:
             if not member:
                 return -1
             self.join_challenge(challenge_id, member)
+            if self._port is not None:
+                table = self._port.tables["completions"]
+                key = self._key(challenge_id, member)
+                count = (int(table.inc(key, "count", 1))
+                         if table.get(key) is not None else 0)
+                self._maybe_complete(c, member, count)
+                self._note_personal_best(challenge_id, member, count)
+                return count
             self._db.execute(
                 "UPDATE completions SET count = count + 1 "
                 "WHERE challenge_id = ? AND member = ?",
@@ -355,11 +445,18 @@ class ChallengeStore:
                 photo_path=photo_path or "",
                 verified=accepted and "unverified" not in verdict,
                 verdict=verdict)
-            self._db.execute(
-                "INSERT INTO proofs VALUES (?,?,?,?,?,?,?)",
-                (p.id, p.challenge_id, p.member, p.photo_path,
-                 int(p.verified), p.verdict, p.created_at))
-            self._db.commit()
+            if self._port is not None:
+                self._port.tables["proofs"].put({
+                    "id": p.id, "challenge_id": p.challenge_id,
+                    "member": p.member, "photo_path": p.photo_path,
+                    "verified": int(p.verified), "verdict": p.verdict,
+                    "created_at": p.created_at})
+            else:
+                self._db.execute(
+                    "INSERT INTO proofs VALUES (?,?,?,?,?,?,?)",
+                    (p.id, p.challenge_id, p.member, p.photo_path,
+                     int(p.verified), p.verdict, p.created_at))
+                self._db.commit()
             if accepted:
                 count = self.log_workout(challenge_id, member)
                 if count >= 0:
@@ -376,11 +473,15 @@ class ChallengeStore:
         try:
             if count < c.target:
                 return
-            self._db.execute(
-                "UPDATE completions SET completed = 1 "
-                "WHERE challenge_id = ? AND member = ?",
-                (c.id, member))
-            self._db.commit()
+            if self._port is not None:
+                self._port.tables["completions"].update(
+                    self._key(c.id, member), {"completed": 1})
+            else:
+                self._db.execute(
+                    "UPDATE completions SET completed = 1 "
+                    "WHERE challenge_id = ? AND member = ?",
+                    (c.id, member))
+                self._db.commit()
             try:
                 from ...games.achievements import unlock_achievement
                 from ...games.database import Database
@@ -397,6 +498,10 @@ class ChallengeStore:
             c = self.get(challenge_id)
             if c is None:
                 return (0, 0)
+            if self._port is not None:
+                row = self._port.tables["completions"].get(
+                    self._key(challenge_id, member))
+                return (int(row["count"]) if row else 0, c.target)
             row = self._db.execute(
                 "SELECT count FROM completions WHERE challenge_id = ? "
                 "AND member = ?",
@@ -410,6 +515,14 @@ class ChallengeStore:
                     limit: int = 10) -> list[tuple[str, int, bool]]:
         """Ranked (member, count, completed). Never raises."""
         try:
+            if self._port is not None:
+                rows = [r for r in self._port.tables["completions"].all()
+                        if r["challenge_id"] == challenge_id]
+                rows.sort(key=lambda r: (-int(r["completed"]),
+                                         -int(r["count"])))
+                rows = rows[:max(1, int(limit or 10))]
+                return [(r["member"], int(r["count"]), bool(r["completed"]))
+                        for r in rows]
             rows = self._db.execute(
                 "SELECT member, count, completed FROM completions "
                 "WHERE challenge_id = ? ORDER BY completed DESC, count DESC "
@@ -426,6 +539,10 @@ class ChallengeStore:
 
     def streak(self, member: str) -> int:
         try:
+            if self._port is not None:
+                row = self._port.tables["streaks"].get(
+                    (member or "").strip()[:80])
+                return int(row["count"]) if row else 0
             row = self._db.execute(
                 "SELECT count FROM streaks WHERE member = ?",
                 ((member or "").strip()[:80],)).fetchone()
@@ -440,7 +557,10 @@ class ChallengeStore:
             now = now if now is not None else time.time()
             today = time.strftime("%Y-%m-%d", time.localtime(now))
             out = []
-            for row in self._db.execute("SELECT * FROM streaks"):
+            rows = (self._port.tables["streaks"].all()
+                    if self._port is not None
+                    else self._db.execute("SELECT * FROM streaks"))
+            for row in rows:
                 last_day = time.strftime(
                     "%Y-%m-%d",
                     time.localtime(float(row["last_checkin"] or 0)))
@@ -467,6 +587,10 @@ class ChallengeStore:
     def freezes(self, member: str) -> int:
         """Freezes held. Never raises."""
         try:
+            if self._port is not None:
+                row = self._port.tables["streak_freezes"].get(
+                    (member or "").strip()[:80])
+                return int(row["freezes"]) if row else 0
             row = self._db.execute(
                 "SELECT freezes FROM streak_freezes WHERE member = ?",
                 ((member or "").strip()[:80],)).fetchone()
@@ -477,6 +601,12 @@ class ChallengeStore:
 
     def _set_freezes(self, member: str, n: int) -> None:
         try:
+            if self._port is not None:
+                self._port.tables["streak_freezes"].put({
+                    "member": member,
+                    "freezes": max(0, min(_MAX_FREEZES, n)),
+                    "updated_at": time.time()})
+                return
             self._db.execute(
                 "INSERT OR REPLACE INTO streak_freezes VALUES (?,?,?)",
                 (member, max(0, min(_MAX_FREEZES, n)), time.time()))
@@ -505,11 +635,18 @@ class ChallengeStore:
             if not member:
                 return 0
             now = now if now is not None else time.time()
-            row = self._db.execute(
-                "SELECT count, last_checkin FROM streaks WHERE member = ?",
-                (member,)).fetchone()
+            if self._port is not None:
+                row = self._port.tables["streaks"].get(member)
+            else:
+                row = self._db.execute(
+                    "SELECT count, last_checkin FROM streaks WHERE member = ?",
+                    (member,)).fetchone()
             today = time.strftime("%Y-%m-%d", time.localtime(now))
             if row is None:
+                if self._port is not None:
+                    self._port.tables["streaks"].put(
+                        {"member": member, "count": 1, "last_checkin": now})
+                    return 1
                 self._db.execute(
                     "INSERT INTO streaks VALUES (?,?,?)",
                     (member, 1, now))
@@ -529,11 +666,15 @@ class ChallengeStore:
                 count = int(row["count"]) + 1
             else:
                 count = 1
-            self._db.execute(
-                "UPDATE streaks SET count = ?, last_checkin = ? "
-                "WHERE member = ?",
-                (count, now, member))
-            self._db.commit()
+            if self._port is not None:
+                self._port.tables["streaks"].update(
+                    member, {"count": count, "last_checkin": now})
+            else:
+                self._db.execute(
+                    "UPDATE streaks SET count = ?, last_checkin = ? "
+                    "WHERE member = ?",
+                    (count, now, member))
+                self._db.commit()
             self._maybe_earn_freeze(member, count)
             return count
         except Exception:  # noqa: BLE001
@@ -561,10 +702,14 @@ class ChallengeStore:
             if c is not None:
                 c.badge = f"monthly:{time.strftime('%Y-%m')}:{_key}"
                 try:
-                    self._db.execute(
-                        "UPDATE challenges SET badge = ? WHERE id = ?",
-                        (c.badge, c.id))
-                    self._db.commit()
+                    if self._port is not None:
+                        self._port.tables["challenges"].update(
+                            c.id, {"badge": c.badge})
+                    else:
+                        self._db.execute(
+                            "UPDATE challenges SET badge = ? WHERE id = ?",
+                            (c.badge, c.id))
+                        self._db.commit()
                 except Exception as exc:  # noqa: BLE001
                     record_failure("challenges.monthly_badge_update", exc)
             return c
@@ -576,6 +721,10 @@ class ChallengeStore:
 
     def personal_best(self, challenge_id: str, member: str) -> int:
         try:
+            if self._port is not None:
+                row = self._port.tables["challenge_pbs"].get(
+                    self._key(challenge_id, (member or "").strip()[:80]))
+                return int(row["best"]) if row else 0
             row = self._db.execute(
                 "SELECT best FROM challenge_pbs WHERE challenge_id = ? "
                 "AND member = ?",
@@ -591,6 +740,11 @@ class ChallengeStore:
         try:
             prev = self.personal_best(challenge_id, member)
             if count > prev:
+                if self._port is not None:
+                    self._port.tables["challenge_pbs"].put({
+                        "challenge_id": challenge_id, "member": member,
+                        "best": count, "achieved_at": time.time()})
+                    return prev > 0  # a PB only counts once you've started
                 self._db.execute(
                     "INSERT OR REPLACE INTO challenge_pbs VALUES (?,?,?,?)",
                     (challenge_id, member, count, time.time()))
@@ -660,6 +814,12 @@ class ChallengeStore:
             import json as _json
             s = Squad(squad_id="sq_" + uuid.uuid4().hex[:8],
                       name=name, members=deduped)
+            if self._port is not None:
+                self._port.tables["squads"].put({
+                    "id": s.id, "name": s.name,
+                    "members_json": _json.dumps(s.members),
+                    "created_at": s.created_at})
+                return s
             self._db.execute(
                 "INSERT INTO squads VALUES (?,?,?,?)",
                 (s.id, s.name, _json.dumps(s.members), s.created_at))
@@ -672,6 +832,13 @@ class ChallengeStore:
     def get_squad(self, squad_id: str) -> Squad | None:
         try:
             import json as _json
+            if self._port is not None:
+                row = self._port.tables["squads"].get(squad_id)
+                if row is None:
+                    return None
+                return Squad(squad_id=row["id"], name=row["name"],
+                             members=_json.loads(row["members_json"] or "[]"),
+                             created_at=row["created_at"])
             row = self._db.execute(
                 "SELECT * FROM squads WHERE id = ?",
                 (squad_id,)).fetchone()
