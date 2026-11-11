@@ -280,6 +280,20 @@ class RuntimeExpressionMixin:
             emoji = pick_reaction(
                 context, platform=str(message.chat.platform or ""))
             if emoji:
+                # A celebration reaction lands BIG where the
+                # platform carries the big form (Telegram's
+                # is_big — the large animated reaction); the
+                # adapter degrades a refused big to normal
+                # size itself, and an adapter without the big
+                # form takes the plain call.
+                if str(message.chat.platform or "").startswith(
+                        "telegram"):
+                    try:
+                        fn(message.chat, str(message.message_id),
+                           emoji, big=True)
+                        return
+                    except TypeError:
+                        pass
                 fn(message.chat, str(message.message_id), emoji)
         except Exception:  # noqa: BLE001 - garnish only
             _log.debug("celebration reaction failed", exc_info=True)
@@ -813,6 +827,32 @@ class RuntimeExpressionMixin:
             faces = " ".join(entry.char for entry in hits)
             names = " · ".join(f"{entry.char} {entry.name}"
                                 for entry in hits[:3])
+            if len(hits) == 1 and message is not None:
+                # A single found emoji on Telegram goes out as
+                # its OWN message: exactly one emoji and nothing
+                # else is the only shape Telegram clients render
+                # as the big animated emoji — buried in the text
+                # answer it sits small and still (owner,
+                # 2026-11-11).  The name line follows as the
+                # reply.  Another platform, an adapter without
+                # the verb, or a failed lone send keeps the
+                # combined answer — the emoji is delivered
+                # honestly either way.
+                platform = str(getattr(message.chat, "platform",
+                                       "") or "")
+                if platform.startswith("telegram"):
+                    adapter = self._group_adapter(platform)
+                    send = getattr(adapter, "send", None) \
+                        if adapter is not None else None
+                    if send is not None:
+                        landed = None
+                        try:
+                            landed = send(message.chat, hits[0].char)
+                        except Exception:  # noqa: BLE001 - garnish
+                            _log.debug("lone emoji send failed",
+                                       exc_info=True)
+                        if getattr(landed, "ok", False):
+                            return names
             return f"{faces}\n{names}"
         return self._emoji_create_and_send(query, message)
 
@@ -836,12 +876,14 @@ class RuntimeExpressionMixin:
         design at 100×100, the piece joins her custom set
         (name → unicode fallback + art), and on a Telegram bot
         surface it registers in her own custom-emoji pack —
-        the pack hands back a real custom_emoji_id, and the
-        emoji is SENT as an emoji (entity-carried), not as a
-        sticker.  Surfaces that cannot register (WhatsApp has
-        no custom emoji at all — a platform wall) receive the
-        art as a sticker with the wall named.  Every failure
-        is a plain line; nothing is fabricated."""
+        ANIMATED (a .tgs from emoji_anim) wherever the design
+        fits Telegram's animated cap, the pack hands back a
+        real custom_emoji_id, and the emoji is SENT as an
+        emoji (entity-carried), not as a sticker.  Surfaces
+        that cannot register (WhatsApp has no custom emoji at
+        all — a platform wall) receive the art as a sticker
+        with the wall named.  Every failure is a plain line;
+        nothing is fabricated."""
         from ...social.chat import emoji_studio
 
         if message is None:
@@ -867,6 +909,23 @@ class RuntimeExpressionMixin:
         fallback = emoji_studio.fallback_char_for(spec)
         registry.add(name, unicode=fallback, image_path=str(png))
         library.save_custom_emoji(registry)
+        # The animated rung (owner, 2026-11-11: "still using
+        # still emoji's"): the design becomes a .tgs through
+        # emoji_anim and the pack registers it as "animated",
+        # so the emoji MOVES inline.  When a design cannot fit
+        # Telegram's 64 KB animated cap even at the leanest
+        # detail, the static PNG registers as "static" instead
+        # — and the registry records whichever format actually
+        # landed, never the one that was hoped for.
+        art_path, art_format = str(png), "static"
+        try:
+            from ...social.chat import emoji_anim
+
+            tgs = emoji_anim.animated_emoji_tgs(spec, out_dir,
+                                                name=name)
+            art_path, art_format = str(tgs), "animated"
+        except Exception as exc:  # noqa: BLE001 - static is the floor
+            record_failure("expression.emoji_create.animate", exc)
         platform = str(getattr(message.chat, "platform", "") or "")
         adapter = self._group_adapter(platform)
         custom_id = ""
@@ -878,12 +937,14 @@ class RuntimeExpressionMixin:
             if owners:
                 try:
                     made = adapter.create_or_extend_custom_emoji_pack(
-                        owners[0], name, f"Devon — {name}", str(png),
-                        fallback)
+                        owners[0], name, f"Devon — {name}", art_path,
+                        fallback, art_format)
                     custom_id = str(made.get("custom_emoji_id") or "")
                     if custom_id:
-                        registry.add(name, platform=platform,
-                                     ref=custom_id)
+                        registry.add(
+                            name, platform=platform, ref=custom_id,
+                            format=str(made.get("format")
+                                       or art_format))
                         library.save_custom_emoji(registry)
                 except Exception as exc:  # noqa: BLE001 - refused is a fact
                     record_failure(
@@ -899,10 +960,15 @@ class RuntimeExpressionMixin:
             sent = adapter.send_custom_emoji(
                 message.chat, fallback, custom_id)
             if getattr(sent, "ok", False):
+                landed = str((registry.get(name) or {})
+                             .get("format") or "")
+                motion = (" — and it MOVES: registered animated, "
+                          "not a still"
+                          if landed == "animated" else "")
                 return (f":{name}: is live — the one above is "
-                        f"mine, a real custom emoji now. Its "
-                        f"fallback face is {fallback}; it's in "
-                        f"/customemoji.")
+                        f"mine, a real custom emoji now{motion}. "
+                        f"Its fallback face is {fallback}; it's "
+                        f"in /customemoji.")
             record_failure(
                 "expression.emoji_create.send",
                 RuntimeError(str(getattr(sent, "error", ""))))
@@ -981,8 +1047,11 @@ class RuntimeExpressionMixin:
             lines = ["my custom emoji set:"]
             for name in names:
                 entry = registry.get(name) or {}
-                lines.append(f"  :{name}: {entry.get('unicode') or '—'}"
-                             f" (refs: {', '.join((entry.get('refs') or {}).keys()) or 'unicode only'})")
+                fmt = str(entry.get("format") or "")
+                lines.append(
+                    f"  :{name}: {entry.get('unicode') or '—'}"
+                    f" (refs: {', '.join((entry.get('refs') or {}).keys()) or 'unicode only'})"
+                    + (f" · {fmt}" if fmt else ""))
             return "\n".join(lines)
         if head == "show" and len(words) >= 2:
             platform = str(message.chat.platform or "") \

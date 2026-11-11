@@ -268,6 +268,7 @@ class _PackAdapter:
     def __init__(self):
         self.media_sent = []
         self.custom_sent = []
+        self.pack_calls = []
         self.owner_sender_ids = {"7"}
         self._bot_id = 4242
 
@@ -280,10 +281,13 @@ class _PackAdapter:
                                media_file_id="TGFILE1", error="")
 
     def create_or_extend_custom_emoji_pack(
-            self, user_id, slug, title, png_path, fallback):
-        assert Path(png_path).exists()
+            self, user_id, slug, title, art_path, fallback,
+            format="animated"):
+        assert Path(art_path).exists()
+        self.pack_calls.append(format)
         return {"pack": f"devon_{slug}_by_devonbot",
-                "custom_emoji_id": "CEID9", "created": True}
+                "custom_emoji_id": "CEID9", "created": True,
+                "format": format}
 
     def send_custom_emoji(self, chat, fallback, custom_emoji_id):
         self.custom_sent.append((fallback, custom_emoji_id))

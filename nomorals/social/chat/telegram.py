@@ -126,6 +126,8 @@ _MIME_HINTS = {
     ".amr": "audio/amr", ".3gp": "audio/3gpp",
     ".aiff": "audio/aiff", ".aif": "audio/aiff",
     ".pdf": "application/pdf", ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    # An animated custom emoji (.tgs) is gzipped Lottie JSON.
+    ".tgs": "application/gzip",
 }
 
 
@@ -6899,17 +6901,33 @@ class TelegramBotAdapter(ChatAdapter):
 
     def create_or_extend_custom_emoji_pack(
             self, user_id: str, slug: str, title: str,
-            png_path: str, fallback: str) -> dict[str, Any]:
+            art_path: str, fallback: str,
+            format: str = "animated") -> dict[str, Any]:
         """Create her custom-emoji pack (or add to it when it
-        already exists) with one new 100×100 PNG, and return
-        ``{"pack", "custom_emoji_id", "created"}`` — the id
-        read back from getStickerSet, never assumed.  Raises
-        ValidationError (the _api contract) on any refusal;
-        the caller reports it honestly and keeps the art."""
+        already exists) with one new emoji file, and return
+        ``{"pack", "custom_emoji_id", "created", "format"}``
+        — the id read back from getStickerSet, never assumed,
+        and the format the piece was actually registered
+        under, so the caller's registry records the truth.
+
+        ``format`` is the Bot API InputSticker format and it
+        decides whether the emoji MOVES: ``"animated"`` (a
+        .tgs Lottie file — the default since the owner's
+        2026-11-11 "still using still emoji's" correction),
+        ``"video"`` (.webm) or ``"static"`` (.png/.webp).
+        The art file must match the format — Telegram refuses
+        a mismatch, and that refusal is the API's own error.
+        Raises ValidationError (the _api contract) on any
+        refusal; the caller reports it honestly and keeps
+        the art."""
+        fmt = str(format or "animated").strip().lower()
+        if fmt not in ("static", "animated", "video"):
+            raise ValueError(
+                f"unknown custom-emoji format: {format!r}")
         name = self.custom_emoji_pack_name(slug)
         sticker = json.dumps([{
             "sticker": "attach://emoji_file",
-            "format": "static",
+            "format": fmt,
             "emoji_list": [str(fallback or "✨")],
         }], ensure_ascii=False)
         created = False
@@ -6920,18 +6938,18 @@ class TelegramBotAdapter(ChatAdapter):
                 "user_id": str(user_id), "name": name,
                 "title": str(title or "Devon's emoji"),
                 "stickers": sticker, "sticker_type": "custom_emoji",
-            }, "emoji_file", Path(png_path))
+            }, "emoji_file", Path(art_path))
             created = True
         if not created:
             one = json.dumps({
                 "sticker": "attach://emoji_file",
-                "format": "static",
+                "format": fmt,
                 "emoji_list": [str(fallback or "✨")],
             }, ensure_ascii=False)
             self._api_upload("addStickerToSet", {
                 "user_id": str(user_id), "name": name,
                 "sticker": one,
-            }, "emoji_file", Path(png_path))
+            }, "emoji_file", Path(art_path))
         pack = self._api("getStickerSet", name=name)
         stickers = pack.get("stickers") or []
         chosen = None
@@ -6941,7 +6959,7 @@ class TelegramBotAdapter(ChatAdapter):
                 break
         if chosen is None and stickers:
             chosen = stickers[-1]
-        return {"pack": name, "created": created,
+        return {"pack": name, "created": created, "format": fmt,
                 "custom_emoji_id": str(
                     (chosen or {}).get("custom_emoji_id") or "")}
 
@@ -7260,18 +7278,40 @@ class TelegramBotAdapter(ChatAdapter):
             _log.debug("telegram-bot: video-note caption follow-up "
                        "failed: %s", exc)
 
-    def react(self, chat: ChatRef, message_id: str, emoji: str) -> SendResult:
+    def react(self, chat: ChatRef, message_id: str, emoji: str,
+              *, big: bool = False) -> SendResult:
         """Place a reaction via ``setMessageReaction`` (§22). The
         Bot API only allows its standard reaction set for bots —
         ``expression.reaction_allowed`` is the pre-check; an
-        emoji outside it comes back as Telegram's own error."""
+        emoji outside it comes back as Telegram's own error.
+
+        ``big=True`` asks for the large animated reaction
+        (``is_big`` — the celebration form).  Not every chat
+        context accepts it; a refusal there is journaled and
+        the reaction still lands at normal size — degraded,
+        never dropped, never faked."""
         started = time.perf_counter()
+        reaction = json.dumps(
+            [{"type": "emoji", "emoji": str(emoji)}],
+            ensure_ascii=False)
+
+        def _place(with_big: bool) -> None:
+            params: dict[str, Any] = {
+                "chat_id": int(chat.chat_id),
+                "message_id": int(message_id),
+                "reaction": reaction}
+            if with_big:
+                params["is_big"] = True
+            self._api("setMessageReaction", **params)
+
         try:
-            reaction = json.dumps(
-                [{"type": "emoji", "emoji": str(emoji)}],
-                ensure_ascii=False)
-            self._api("setMessageReaction", chat_id=int(chat.chat_id),
-                      message_id=int(message_id), reaction=reaction)
+            try:
+                _place(big)
+            except Exception as exc:  # noqa: BLE001 - big refused
+                if not big:
+                    raise
+                record_failure("telegram.react.big", exc)
+                _place(False)
             self.stats["sent"] += 1
             return SendResult(ok=True, platform=self.name,
                               message_id=str(message_id),

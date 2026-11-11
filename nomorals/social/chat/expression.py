@@ -73,7 +73,7 @@ __all__ = [
     "EXPRESSION_COMMANDS",
     "EXPRESSION_DEFAULTS",
     "EmojiEntry", "emoji_table", "search_emoji", "emoji_info",
-    "confident_emoji_match", "describe_sequence",
+    "confident_emoji_match", "describe_sequence", "lone_emoji_char",
     "emoji_prompt_for", "EmojiCreateUnavailable",
     "create_emoji_sticker",
     "CustomEmojiRegistry",
@@ -520,6 +520,27 @@ def emoji_info(char: str) -> dict[str, Any] | None:
     }
 
 
+def lone_emoji_char(text: str) -> str:
+    """The one emoji a text consists of: when ``text`` is
+    EXACTLY one emoji grapheme (a ZWJ chain or a toned emoji
+    counts as one) and nothing else, return it — else "".
+
+    This is the shape Telegram clients animate: a message
+    holding a single emoji and nothing more renders as the
+    big animated emoji, while the same emoji inside a
+    sentence stays small and still forever.  A standalone
+    emoji moment therefore travels as its OWN message; a
+    sentence is never split to chase the effect."""
+    text = str(text or "").strip()
+    if not text:
+        return ""
+    clusters = _grapheme_clusters(text)
+    if len(clusters) != 1:
+        return ""
+    return clusters[0] if _find_entry(clusters[0]) is not None \
+        else ""
+
+
 def _word_scores(entry: EmojiEntry,
                  words: list[str]) -> list[int]:
     """Per-word scores of one entry against a query: exact name
@@ -721,7 +742,8 @@ class CustomEmojiRegistry:
 
     def add(self, name: str, *, unicode: str = "",
             platform: str = "", ref: str = "",
-            image_path: str = "") -> dict[str, Any]:
+            image_path: str = "",
+            format: str = "") -> dict[str, Any]:
         key = str(name or "").strip().lower()
         if not key:
             raise ValueError("a custom emoji needs a name")
@@ -734,6 +756,14 @@ class CustomEmojiRegistry:
             entry["refs"] = refs
         if image_path:
             entry["image_path"] = str(image_path)
+        if format:
+            # The format the piece is REGISTERED under on its
+            # pack — "animated" moves, "static" does not, and
+            # the record says which is true.  Entries written
+            # before the animated rung existed carry no format
+            # key at all: they were static-era, and nobody
+            # backfills them into a claim they never earned.
+            entry["format"] = str(format)
         entry.setdefault("unicode", "")
         self._data[key] = entry
         return dict(entry)
