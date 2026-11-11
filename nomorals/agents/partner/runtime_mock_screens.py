@@ -38,6 +38,8 @@ answers in chat text with the generated records.
 
 from __future__ import annotations
 
+import re
+
 from .failures import record_failure
 
 
@@ -138,6 +140,18 @@ class RuntimeMockScreensMixin:
         if message is None:
             return ("usage: /mock in a chat — the screen "
                     "needs somewhere to land.")
+        head = tail.split(None, 1)[0].lower()
+        if head == "make":
+            # Phase 6: natural-language authoring — a
+            # description becomes a structured model before
+            # it renders; questions and candidates come
+            # back as text, never a guessed screen.
+            return self._mock_make(tail[4:].strip(), message)
+        if head == "project":
+            # Phase 6: saved screen projects — a spec,
+            # reopened and revised, never baked pixels.
+            return self._mock_project(
+                tail[7:].strip(), message)
         try:
             screen, mode = parse_mock_tail(tail)
         except MockScreensError as exc:
@@ -266,3 +280,179 @@ class RuntimeMockScreensMixin:
             return ""
         return str(out.get("reason") or "no mock screen "
                                         "right now")
+
+    # ── Phase 6: NL authoring + saved projects ───────────
+
+    def _mock_project_store(self):  # type: ignore[no-untyped-def]
+        store = getattr(self, "_mock_projects_obj", None)
+        if store is not None:
+            return store
+        from ...social.chat.mock_screens.projects import (
+            ProjectStore,
+        )
+        store = ProjectStore(
+            getattr(getattr(self, "context", None), "db", None))
+        self._mock_projects_obj = store
+        return store
+
+    def _mock_render_nl_screen(self, screen, message,
+                               caption):  # type: ignore[no-untyped-def]
+        """Render an NL/project chat screen: resolve the
+        compact form's media tokens, refuse honestly when
+        a concrete media path is gone, deliver the PNG —
+        the picture WAS the reply."""
+        from ...social.chat.mock_screens.projects import (
+            missing_media,
+        )
+        media_error = self._mock_resolve_media(screen, message)
+        if media_error:
+            return media_error
+        gone = missing_media(screen)
+        if gone:
+            mid, ref = gone[0]
+            return ("that screen references media that is "
+                    "gone — message " + mid + " wants " + ref
+                    + " — re-attach it or revise the message")
+        service = self._mock_screens_service()
+        audience = self._makers_audience(message)
+        try:
+            out = service.render(
+                screen, audience=audience, caption=caption,
+                send=lambda ref, cap: self._expression_send(
+                    message, ref, caption=cap))
+        except Exception as exc:  # noqa: BLE001 - honest line
+            record_failure("mock_screens.render", exc)
+            return ("the mock screen render failed: "
+                    + str(exc)[:160])
+        if out.get("sent"):
+            return ""
+        return str(out.get("reason") or "no mock screen "
+                                        "right now")
+
+    def _mock_make(self, description,
+                   message):  # type: ignore[no-untyped-def]
+        """One /mock make: a description becomes a visible
+        structured model, then a rendered screen.  A
+        trailing ``save <name>`` also stores the project.
+        Questions and candidates come back as text."""
+        from ...social.chat.mock_screens.nl_authoring import (
+            MAKE_USAGE,
+            NLAuthoringError,
+            parse_nl_description,
+        )
+        from ...social.chat.mock_screens.projects import (
+            MockProject,
+        )
+        if not description:
+            return MAKE_USAGE
+        save_name = ""
+        save_match = re.search(
+            r"\s+save\s+([A-Za-z0-9][A-Za-z0-9 _\-]{0,63})\s*$",
+            description)
+        if save_match is not None:
+            save_name = save_match.group(1)
+            description = description[:save_match.start()].strip()
+        try:
+            result = parse_nl_description(description)
+        except NLAuthoringError as exc:
+            return str(exc)
+        if result.candidates:
+            return ("which platform — "
+                    + " or ".join(result.candidates)
+                    + "? say one of them and I will build it.")
+        if result.questions:
+            return "\n".join(result.questions)
+        screen = result.screen
+        caption = ("🖼 mock screen — " + screen.title + "\n"
+                   + result.summary)
+        reply = self._mock_render_nl_screen(
+            screen, message, caption)
+        if reply != "" or not save_name:
+            return reply
+        store = self._mock_project_store()
+        if store.exists(save_name):
+            return ("project " + save_name + " already exists "
+                    "— /mock project edit " + save_name
+                    + " <instruction> revises it, or delete "
+                    "it first")
+        if not store.save(MockProject(
+                name=save_name, screen=screen)):
+            return "could not save project " + save_name
+        return ""
+
+    def _mock_project(self, rest,
+                      message):  # type: ignore[no-untyped-def]
+        """One /mock project verb: list · show · edit ·
+        delete a saved screen project."""
+        from ...social.chat.mock_screens.nl_authoring import (
+            PROJECT_USAGE,
+            NLAuthoringError,
+            model_summary,
+            revise_screen,
+        )
+        from ...social.chat.mock_screens.projects import (
+            MockProject,
+        )
+        if not rest:
+            return PROJECT_USAGE
+        words = rest.split(None, 1)
+        verb = words[0].lower()
+        tail = words[1].strip() if len(words) > 1 else ""
+        store = self._mock_project_store()
+        if verb == "list":
+            names = store.list_names()
+            if not names:
+                return ("no saved mock projects yet — /mock "
+                        "make ... save <name>")
+            return "mock projects:\n" + "\n".join(
+                "· " + n for n in names)
+        if verb == "show":
+            if not tail:
+                return "usage: /mock project show <name>"
+            project = store.load(tail)
+            if project is None:
+                return "no mock project called " + tail
+            caption = ("🖼 mock screen — "
+                       + project.screen.title
+                       + " · project " + project.name
+                       + " · revision " + str(project.revision)
+                       + "\n"
+                       + model_summary(project.screen))
+            return self._mock_render_nl_screen(
+                project.screen, message, caption)
+        if verb == "edit":
+            parts = tail.split(None, 1)
+            if len(parts) < 2:
+                return ("usage: /mock project edit <name> "
+                        "<instruction>")
+            name, instruction = parts
+            project = store.load(name)
+            if project is None:
+                return "no mock project called " + name
+            try:
+                new_screen, change = revise_screen(
+                    project.screen, instruction)
+            except NLAuthoringError as exc:
+                return str(exc)
+            revised = MockProject(
+                name=name, screen=new_screen,
+                revision=project.revision + 1)
+            if not store.save(
+                    revised,
+                    expect_revision=project.revision):
+                return ("that project changed under you — "
+                        "open it again and retry the edit")
+            caption = ("🖼 mock screen — " + new_screen.title
+                       + " · project " + name
+                       + " · revision " + str(revised.revision)
+                       + " · " + change
+                       + "\n" + model_summary(new_screen))
+            return self._mock_render_nl_screen(
+                new_screen, message, caption)
+        if verb == "delete":
+            if not tail:
+                return "usage: /mock project delete <name>"
+            if store.delete(tail):
+                return "deleted mock project " + tail
+            return "no mock project called " + tail
+        return PROJECT_USAGE

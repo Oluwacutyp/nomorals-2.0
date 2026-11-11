@@ -108,6 +108,22 @@ from .designs import (
     STATUS_DESIGNS,
     STORY_BG_COLORS,
 )
+from .nl_authoring import (
+    MAKE_USAGE,
+    PROJECT_USAGE,
+    NLAuthoringError,
+    NLParseResult,
+    model_summary,
+    parse_nl_description,
+    revise_screen,
+)
+from .projects import (
+    MockProject,
+    ProjectError,
+    ProjectStore,
+    missing_media,
+    valid_project_name,
+)
 from .schema import (
     CALL_CONTROLS,
     CALL_STATES,
@@ -241,4 +257,16 @@ __all__ = [
     "bulk_status_views",
     "export_records",
     "shorten_count",
+    "MAKE_USAGE",
+    "MockProject",
+    "NLAuthoringError",
+    "NLParseResult",
+    "PROJECT_USAGE",
+    "ProjectError",
+    "ProjectStore",
+    "missing_media",
+    "model_summary",
+    "parse_nl_description",
+    "revise_screen",
+    "valid_project_name",
 ]
