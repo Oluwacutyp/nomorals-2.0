@@ -94,6 +94,20 @@ class AliasMapTests(unittest.TestCase):
                       "voice": ["stats"], "weather": ["now"],
                       # brain has a required subaction (ask/judge/status)
                       "brain": ["status"],
+                      # braineval has a required subaction too (run/last/
+                      # compare/status); without a dummy here the alias
+                      # parse fails on pristine base as well.
+                      "braineval": ["status"],
+                      # Eight more commands with required subactions had
+                      # no dummy either — every one of them fails the
+                      # alias parse on pristine base the same way, so
+                      # the map is completed here with read-only
+                      # subactions.
+                      "proxy": ["sources"], "maps": ["packs"],
+                      "outcomes": ["status"], "apk": ["status"],
+                      "re": ["status"], "desk": ["status"],
+                      "pump": ["status"], "fonts": ["list"],
+                      "sandbox": ["proof"],
                       "imggen": ["checkpoints"], "shorts": ["status"],
                       "video": ["list"], "audio": ["fx-list"],
                       "account": ["pending"]}

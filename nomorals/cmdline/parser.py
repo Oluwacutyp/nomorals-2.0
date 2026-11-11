@@ -43,6 +43,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "train": ["tr"],
     "benchmark": ["bm"],
     "braineval": ["be"],
+    "sandbox": ["sb"],
     "apps": ["ap"],
     "arena": ["ar"],
     "autonomy": ["auto"],
@@ -2088,6 +2089,15 @@ def _parser() -> argparse.ArgumentParser:
     be_cmp = be_sub.add_parser("compare", help="two runs side by side (default: the last two)")
     be_cmp.add_argument("run_a", nargs="?", default="")
     be_cmp.add_argument("run_b", nargs="?", default="")
+
+    sb_p = sub.add_parser("sandbox", aliases=CLI_ALIASES["sandbox"],
+        help="Sandbox live proof: hostile probes against the real sandbox backend",
+        description=("nm sandbox proof\n"
+                     "Run the hostile-probe battery against run_sandboxed and report, per probe,\n"
+                     "whether the backend enforces what its flags claim."),
+    )
+    sb_sub = sb_p.add_subparsers(dest="sandbox_action", required=True)
+    sb_sub.add_parser("proof", help="prove the sandbox backend enforces its claimed guarantees (namespace tier where available, rlimit floor plus honest flags elsewhere)")
     be_sub.add_parser("status", help="pack integrity + eval store + last run at a glance")
 
     re_p = sub.add_parser("re", aliases=CLI_ALIASES["re"],

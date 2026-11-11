@@ -8,6 +8,7 @@ from .backup import _cmd_backup
 from .benchmark import _BuildersBuildBackend, _cmd_benchmark
 from .bet import _cmd_bet
 from .braineval import _cmd_braineval
+from .sandbox import _cmd_sandbox
 from .book import _cmd_book
 from .books import _cmd_books
 from .account import _cmd_account
@@ -136,6 +137,7 @@ __all__ = [
     "_cmd_benchmark",
     "_cmd_bet",
     "_cmd_braineval",
+    "_cmd_sandbox",
     "_cmd_book",
     "_cmd_account",
     "_cmd_briefing",

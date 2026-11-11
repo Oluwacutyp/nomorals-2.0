@@ -16,6 +16,7 @@ from .commands.backup import _cmd_backup
 from .commands.benchmark import _cmd_benchmark
 from .commands.bet import _cmd_bet
 from .commands.braineval import _cmd_braineval
+from .commands.sandbox import _cmd_sandbox
 from .commands.apk import _cmd_apk
 from .commands.re import _cmd_re
 from .commands.repair import _cmd_repair
@@ -399,6 +400,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "account": _CommandSpec(_cmd_account),
     "bet": _CommandSpec(_cmd_bet),
     "braineval": _CommandSpec(_cmd_braineval),
+    "sandbox": _CommandSpec(_cmd_sandbox),
     "apk": _CommandSpec(_cmd_apk),
     "re": _CommandSpec(_cmd_re),
     "desk": _CommandSpec(_cmd_desk),
