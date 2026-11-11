@@ -11,6 +11,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from nomorals.browser import BrowserError, BrowserService, RenderedTab
@@ -129,11 +130,33 @@ class _Base(unittest.TestCase):
         _Handler.received = []
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.svc = BrowserService(data_dir=os.path.join(self.tmp, "data"))
+        self.estate = _tmp_estate(self.tmp)
+        self.svc = BrowserService(
+            data_dir=os.path.join(self.tmp, "data"),
+            cookie_estate=self.estate)
 
     def _session(self, **kw):
         kw.setdefault("respect_robots", False)
+        kw.setdefault("cookie_estate", self.estate)
         return BrowserSession(name="t", session_dir=self.tmp, **kw)
+
+
+def _tmp_estate(tmp: str) -> Any:
+    """One isolated cookie estate per test (never the home
+    estate): since Navigator A6 a service seeds its tabs from
+    the estate, so a test that counts cookies must start from
+    an empty one."""
+    from nomorals.storage.cookie_estate import CookieEstate
+    from nomorals.storage.db import open_database
+
+    db, _, _ = open_database(os.path.join(tmp, "estate.sqlite3"))
+    estate = CookieEstate(db, legacy_roots={
+        "profile_dir": os.path.join(tmp, "profile"),
+        "service_data_dir": os.path.join(tmp, "data"),
+        "sessions_dir": os.path.join(tmp, "sessions"),
+        "solved_dir": os.path.join(tmp, "solved")})
+    estate.ensure()
+    return estate
 
 
 # ── multipart uploads ────────────────────────────────────────────────────
@@ -359,7 +382,9 @@ class TestCookies(_Base):
         self.assertTrue(Path(out).is_file())
         self.assertIn("sess", Path(out).read_text())
 
-        svc2 = BrowserService(data_dir=os.path.join(self.tmp, "data2"))
+        svc2 = BrowserService(
+            data_dir=os.path.join(self.tmp, "data2"),
+            cookie_estate=self.estate)
         svc2.open_session("s2").open_tab()  # tab needed as import target
         imported = svc2.import_cookies("s2", out, format="netscape")
         self.assertEqual(imported["imported"], 1)
@@ -375,7 +400,9 @@ class TestCookies(_Base):
         payload = json.loads(Path(out).read_text())
         self.assertEqual(payload[0]["name"], "sess")
 
-        svc2 = BrowserService(data_dir=os.path.join(self.tmp, "data2"))
+        svc2 = BrowserService(
+            data_dir=os.path.join(self.tmp, "data2"),
+            cookie_estate=self.estate)
         svc2.open_session("s2").open_tab()
         imported = svc2.import_cookies("s2", out, format="json")
         self.assertEqual(imported["imported"], 1)
@@ -475,7 +502,8 @@ class TestDownloads(_Base):
     def test_registry_persists(self):
         self.svc.download(self.base + "/file.bin")
         self.assertTrue((Path(self.svc.data_dir) / "downloads.json").is_file())
-        svc2 = BrowserService(data_dir=self.svc.data_dir)
+        svc2 = BrowserService(data_dir=self.svc.data_dir,
+                              cookie_estate=self.estate)
         self.assertEqual(len(svc2.list_downloads()), 1)
 
     def test_mime_category(self):
@@ -655,7 +683,10 @@ class TestRenderedInteraction(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.svc = BrowserService(data_dir=os.path.join(self.tmp, "data"))
+        self.estate = _tmp_estate(self.tmp)
+        self.svc = BrowserService(
+            data_dir=os.path.join(self.tmp, "data"),
+            cookie_estate=self.estate)
 
     def _open(self, page, url="https://example.com/"):
         with _mocked_rplaywright(page):

@@ -157,6 +157,13 @@ class Recipe:
     consecutive_successes: int = 0
     unmatched_approvals: list[dict[str, Any]] = field(default_factory=list)
     last_error: str = ""
+    #: The run that earned this recipe was authenticated on
+    #: the site — a replay needs the estate to hold a live
+    #: session for the site, and fails loudly before the
+    #: first step when it does not (Navigator A6).  The
+    #: session itself is never stored in the recipe: the
+    #: replay reuses the estate, it does not embed secrets.
+    needs_session: bool = False
 
     @property
     def trusted(self) -> bool:
@@ -178,7 +185,8 @@ class Recipe:
                 "consecutive_successes": self.consecutive_successes,
                 "unmatched_approvals": [dict(a) for a in
                                         self.unmatched_approvals],
-                "last_error": self.last_error}
+                "last_error": self.last_error,
+                "needs_session": bool(self.needs_session)}
 
     @classmethod
     def from_dict(cls, raw: dict[str, Any]) -> "Recipe":
@@ -202,7 +210,8 @@ class Recipe:
                    unmatched_approvals=[dict(a) for a in
                                         raw.get("unmatched_approvals", [])
                                         or []],
-                   last_error=str(raw.get("last_error", "") or ""))
+                   last_error=str(raw.get("last_error", "") or ""),
+                   needs_session=bool(raw.get("needs_session", False)))
 
     def bump_version(self) -> str:
         """Patch-level bump on self-heal: 1.0.0 -> 1.0.1."""
@@ -324,11 +333,55 @@ def _mark_consequential(steps: list[RecipeStep],
     return remaining
 
 
+#: A cookie value shorter than this cannot be told apart
+#: from an ordinary typed word (``"en"``, ``"1"``, ``"true"``),
+#: so the secret scan below only covers values at least this
+#: long — a session token is.  Fill/select values are stripped
+#: by :func:`_parameterize` regardless of length; the scan
+#: covers the paths parameterization does not reach (goto URLs,
+#: other payloads, assertions).
+_SECRET_MIN_LEN = 16
+
+
+def _recipe_secret_hit(recipe: Recipe, secrets: set[str]
+                       ) -> tuple[int, str] | None:
+    """First stored literal that carries a cookie value, as
+    (step index, step kind) — or None.  Slot references
+    (``{{name}}``) are not literals and never match.  The
+    VALUE is never returned: a hit is named by step, never
+    by secret."""
+    long_secrets = [s for s in secrets if len(s) >= _SECRET_MIN_LEN]
+    if not long_secrets:
+        return None
+
+    def _hit(text: str) -> bool:
+        if not text or SLOT_REF.match(text):
+            return False
+        return any(secret in text for secret in long_secrets)
+
+    for i, step in enumerate(recipe.steps or []):
+        if _hit(step.target) or _hit(step.label):
+            return (i, step.kind)
+        for value in (step.payload or {}).values():
+            if _hit(str(value or "")):
+                return (i, step.kind)
+        for value in (step.assertion or {}).values():
+            if isinstance(value, str) and _hit(value):
+                return (i, step.kind)
+    for text in (recipe.goal, recipe.url_pattern, recipe.site,
+                 recipe.origin, *recipe.element_labels):
+        if _hit(str(text or "")):
+            return (-1, "recipe")
+    return None
+
+
 def compile_recipe(*, name: str, goal: str, trace: list[dict[str, Any]],
                    site: str = "", url_pattern: str = "",
                    element_labels: list[str] | None = None,
                    start_url: str = "",
-                   approvals: list[dict[str, Any]] | None = None
+                   approvals: list[dict[str, Any]] | None = None,
+                   needs_session: bool = False,
+                   cookie_estate: Any = None,
                    ) -> Recipe:
     """Compile an exploratory agent trace into a deterministic recipe.
 
@@ -337,8 +390,16 @@ def compile_recipe(*, name: str, goal: str, trace: list[dict[str, Any]],
     compile synthesises step 0 (a replay must start by navigating
     there). ``approvals`` is the run's consequential-approval list
     (``job.approvals`` / the runner's ``consequential_approvals``);
-    each entry lands on the step it approved. Raises ValueError on
-    an empty trace or a trace with no verified step.
+    each entry lands on the step it approved. ``needs_session``
+    declares the run was authenticated on the site (set by the
+    caller from the estate — a replay then fails loudly when the
+    session is gone). ``cookie_estate`` is the unified cookie
+    estate: when given, the compiled recipe is scanned against
+    its live cookie values and the compile FAILS (ValueError)
+    rather than store a recipe that carries a secret — a recipe
+    never embeds session material, it reuses the estate at
+    replay time. Raises ValueError on an empty trace or a trace
+    with no verified step.
     """
     if not trace:
         raise ValueError("cannot compile a recipe from an empty trace")
@@ -363,10 +424,25 @@ def compile_recipe(*, name: str, goal: str, trace: list[dict[str, Any]],
     for step in steps:
         if step.label and step.label not in labels:
             labels.append(step.label)
-    return Recipe(name=name, goal=goal, site=site or origin,
-                  steps=steps, url_pattern=url_pattern or site or origin,
-                  element_labels=labels, slots=slots, origin=origin,
-                  unmatched_approvals=unmatched)
+    recipe = Recipe(name=name, goal=goal, site=site or origin,
+                    steps=steps, url_pattern=url_pattern or site or origin,
+                    element_labels=labels, slots=slots, origin=origin,
+                    unmatched_approvals=unmatched,
+                    needs_session=bool(needs_session))
+    if cookie_estate is not None:
+        try:
+            secrets = cookie_estate.secret_values()
+        except Exception:  # noqa: BLE001 - an unreadable
+            secrets = set()  # estate never blocks a compile
+        hit = _recipe_secret_hit(recipe, secrets) if secrets else None
+        if hit is not None:
+            step_index, kind = hit
+            raise ValueError(
+                f"cannot compile recipe {name!r}: step {step_index + 1} "
+                f"({kind}) carries a live session value — a recipe "
+                "never stores cookie material, it reuses the cookie "
+                "estate at replay time")
+    return recipe
 
 
 def layout_similarity(recipe: Recipe, *, url: str,

@@ -123,7 +123,8 @@ def replay_recipe(recipe: Recipe, *, driver: Any,
                   on_progress: Callable[[dict[str, Any]], None] | None = None,
                   cancel_requested: Callable[[], bool] | None = None,
                   store: Any = None,
-                  match_threshold: float = MATCH_THRESHOLD
+                  match_threshold: float = MATCH_THRESHOLD,
+                  cookie_estate: Any = None,
                   ) -> dict[str, Any]:
     """Replay ``recipe`` on the live page through ``driver``.
 
@@ -131,7 +132,13 @@ def replay_recipe(recipe: Recipe, *, driver: Any,
     ``slots`` supplies the recipe's parameters; ``store`` (a
     :class:`recipes.DurableRecipeStore`, optional) is where a
     mismatch marks the recipe stale and a success records trust.
-    Raises :class:`RecipeReplayError` on a page mismatch or a step
+    ``cookie_estate`` is the unified cookie estate: when the
+    recipe declares ``needs_session``, the replay fails loudly
+    BEFORE the first fetch when the estate holds no live
+    session for the recipe's site — a logged-out replay is a
+    wrong replay, and the owner is told to sign in first
+    instead of watching it fail mid-run.  Raises
+    :class:`RecipeReplayError` on a page mismatch or a step
     failure; an approval refusal instead stops the replay honestly
     (``stopped_reason`` set, trace kept) like the loop's own denial.
     """
@@ -141,6 +148,36 @@ def replay_recipe(recipe: Recipe, *, driver: Any,
         raise RecipeReplayError(
             f"recipe {recipe.name!r} has no steps to replay",
             step_index=-1, stale=False)
+    if getattr(recipe, "needs_session", False):
+        # The session guard runs before the first fetch: no page
+        # load is spent on a replay that cannot be authenticated.
+        estate = cookie_estate
+        if estate is None:
+            try:
+                from ..storage.cookie_estate import home_estate
+
+                estate = home_estate()
+            except Exception:  # noqa: BLE001 - an unreachable
+                estate = None  # estate never blocks a replay
+        if estate is not None:
+            from urllib.parse import urlsplit
+
+            site = str(getattr(recipe, "site", "") or ""
+                       or getattr(recipe, "origin", "") or ""
+                       or getattr(recipe, "url_pattern", "") or "")
+            host = urlsplit(site).netloc if "://" in site else site
+            host = (host or "").strip().lower()
+            try:
+                has_session = estate.has_domain(host) if host else False
+            except Exception:  # noqa: BLE001 - guard best effort
+                has_session = True
+            if not has_session:
+                raise RecipeReplayError(
+                    f"recipe {recipe.name!r} needs a logged-in session "
+                    f"for {site or 'its site'} and the cookie estate "
+                    "holds none — sign in once in the browser, then "
+                    "replay again",
+                    step_index=-1, stale=False)
     first = steps[0]
     start_url = first.target if first.kind == "goto" and first.target \
         else recipe.url_pattern or recipe.site

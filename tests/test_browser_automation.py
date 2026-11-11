@@ -148,12 +148,16 @@ class _FakeContext:
         self.kwargs = {}
         self.init_scripts = []
         self.saved_path = None
+        self.added_cookies = []
 
     def new_page(self):
         return self._page
 
     def add_init_script(self, script):
         self.init_scripts.append(script)
+
+    def add_cookies(self, cookies):
+        self.added_cookies.extend(cookies)
 
     def storage_state(self, path=None):
         self.saved_path = path
@@ -589,22 +593,48 @@ class StealthTests(unittest.TestCase):
 
     def test_storage_state_survives_restart(self):
         """Sessions survive restarts: cookies AND localStorage ride in the
-        storage_state file, which the next service loads into its context."""
+        storage_state file, which the next service loads into its context.
+        Navigator A6: the file keeps origins only — its cookies are
+        imported into the unified estate at open, the context gets an
+        origins-only dict, and the estate seeds the cookie back onto
+        the fresh context."""
         data = os.path.join(self.tmp, "data")
         state_path = os.path.join(data, "cookies", "sess",
                                   "playwright-storage.json")
         os.makedirs(os.path.dirname(state_path), exist_ok=True)
         Path(state_path).write_text(
-            '{"cookies": [{"name": "sess", "value": "abc"}], '
+            '{"cookies": [{"name": "sess", "value": "abc", '
+            '"domain": ".example.com", "path": "/", '
+            '"expires": 1999999999}], '
             '"origins": [{"origin": "https://example.com", '
             '"localStorage": [{"name": "token", "value": "xyz"}]}]}')
+        from nomorals.storage.cookie_estate import CookieEstate
+        from nomorals.storage.db import open_database
+
+        estate_db, _, _ = open_database(
+            os.path.join(self.tmp, "estate.sqlite3"))
+        estate = CookieEstate(estate_db, legacy_roots={
+            "profile_dir": os.path.join(self.tmp, "profile"),
+            "service_data_dir": data,
+            "sessions_dir": os.path.join(self.tmp, "sessions"),
+            "solved_dir": os.path.join(self.tmp, "solved")})
+        estate.ensure()
         page = _FakePage()
         with _mocked_playwright(page) as (pw, context, browser, chromium):
-            svc = BrowserService(data_dir=data)
+            svc = BrowserService(data_dir=data, cookie_estate=estate)
             tab = svc.open_rendered_tab("sess")
             tab.navigate("https://example.com/")
-            self.assertEqual(state_path,
-                             browser.context_kwargs.get("storage_state"))
+            self.assertEqual(
+                browser.context_kwargs.get("storage_state"),
+                {"cookies": [],
+                 "origins": [{"origin": "https://example.com",
+                              "localStorage": [{"name": "token",
+                                                "value": "xyz"}]}]})
+            self.assertEqual(
+                [r["value"] for r in estate.cookies_for("example.com")],
+                ["abc"])
+            self.assertEqual(
+                [c["name"] for c in context.added_cookies], ["sess"])
             svc.close_rendered_tab(tab.tab_id)
 
 

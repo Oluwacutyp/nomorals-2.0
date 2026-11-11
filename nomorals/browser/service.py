@@ -50,6 +50,7 @@ from .errors import (
 from .pacing import Pacing, pacing_from_env
 from ..tools.browser import (
     BrowserSession,
+    record_from_cookie,
     dom_forms,
     dom_headings,
     dom_meta,
@@ -710,6 +711,7 @@ class RenderedTab:
         stealth: dict[str, Any] | None = None,
         shot_on_error: bool = True,
         retries: int = 2,
+        cookie_estate: Any = None,
     ) -> None:
         self.tab_id = tab_id
         self.session_name = session_name
@@ -751,6 +753,11 @@ class RenderedTab:
         #: ref -> playwright selector from the last snapshot() call, so
         #: click/fill/hover accept "ref:e7" targets.
         self._snap_refs: dict[str, str] = {}
+        #: The unified cookie estate (Navigator A6), injected
+        #: by the service; None = opened lazily from the home
+        #: DB on first use (failure cached, file fallback).
+        self._cookie_estate = cookie_estate
+        self._estate_failed = False
         self._browser: Any = None
         self._context: Any = None
         self._page: Any = None
@@ -878,6 +885,69 @@ class RenderedTab:
         return page is not None and callable(getattr(page, "evaluate", None))
 
     # -- browser lifecycle ---------------------------------------------------
+    def _estate(self) -> Any:
+        """The tab's cookie estate, or None when the home DB
+        cannot be opened.  Never raises — the storage-state
+        file is the fallback, never a launch failure."""
+        if self._cookie_estate is not None:
+            return self._cookie_estate
+        if self._estate_failed:
+            return None
+        try:
+            from ..storage.cookie_estate import home_estate
+
+            # <service data dir>/cookies/<session>/playwright-storage.json
+            data_dir = self._storage_state_path.parent.parent.parent
+            self._cookie_estate = home_estate(
+                legacy_roots={"service_data_dir": str(data_dir)})
+            return self._cookie_estate
+        except Exception:  # noqa: BLE001 - estate is an enhancement
+            self._estate_failed = True
+            return None
+
+    def _origins_only_state(self) -> dict[str, Any] | None:
+        """The saved storage state with its cookies STRIPPED —
+        origins (localStorage) only.  Cookies live in the
+        unified estate since A6; the file is no longer a
+        cookie store, and a stale file cookie must never
+        resurrect a cleared login.  None when no state
+        file exists or it cannot be read."""
+        if not self._storage_state_path.is_file():
+            return None
+        try:
+            payload = json.loads(
+                self._storage_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        return {"cookies": [], "origins": payload.get("origins") or []}
+
+    def _seed_estate_cookies(self) -> None:
+        """Seed the fresh context from the unified estate (all
+        domains — the browser itself scopes cookies per
+        domain, so a webnav login is live in a rendered tab
+        with no per-site wiring).  Best-effort: a seeding
+        failure leaves the tab working logged-out, never a
+        launch failure."""
+        if self._context is None:
+            return
+        estate = self._estate()
+        if estate is None:
+            return
+        try:
+            from ..storage.cookie_estate import playwright_cookie_payload
+
+            records = estate.cookies_for()
+            if not records:
+                return
+            add = getattr(self._context, "add_cookies", None)
+            if callable(add):
+                add(playwright_cookie_payload(records))
+        except Exception as exc:  # noqa: BLE001 - seeding best effort
+            _log.debug("rendered tab %s: estate cookie seed failed: %s",
+                       self.tab_id, exc)
+
     def _ensure_page(self) -> Any:
         """Launch this tab's browser (once) and return the page. Fail fast:
         a launch failure raises BrowserError, never None."""
@@ -892,8 +962,16 @@ class RenderedTab:
                 launch_kwargs["proxy"] = proxy_cfg
             self._browser = self._playwright.chromium.launch(**launch_kwargs)
             ctx_kwargs: dict[str, Any] = {}
-            state = str(self._storage_state_path)
-            if self._storage_state_path.is_file():
+            state = self._origins_only_state()
+            if state is not None and self._estate() is None:
+                # Estate unreachable: the file stays the cookie
+                # store for this tab (the legacy fallback), so a
+                # login earned earlier is not dropped.
+                ctx_kwargs["storage_state"] = str(
+                    self._storage_state_path)
+            elif state is not None:
+                # Origins only — cookies arrive from the estate
+                # via _seed_estate_cookies below.
                 ctx_kwargs["storage_state"] = state
             if self._stealth.get("enabled"):
                 ctx_kwargs.update({
@@ -903,6 +981,7 @@ class RenderedTab:
                     "timezone_id": self._stealth["timezone_id"],
                 })
             self._context = self._browser.new_context(**ctx_kwargs)
+            self._seed_estate_cookies()
             add_init = getattr(self._context, "add_init_script", None)
             if callable(add_init) and self._stealth.get("enabled"):
                 # Every stealth script is a passive property stub that
@@ -1079,19 +1158,69 @@ class RenderedTab:
                + f": {typed}{where}")
         return typed.with_message(msg)
 
-    def persist(self) -> dict[str, Any]:
-        """Flush cookies AND localStorage to the session's storage file
-        right now (close() also does this). Returns the path written."""
+    def _persist_state(self) -> dict[str, Any]:
+        """Write the session's state: cookies land in the
+        unified estate, the storage file keeps origins only
+        (it is no longer a cookie store).  When the estate
+        cannot be reached, the file keeps the full state —
+        the legacy fallback — so the login is never dropped.
+        Drivers that only honour the path form of
+        ``storage_state`` keep the legacy call shape.
+        Returns the path plus how many cookies were
+        harvested into the estate."""
         if self._context is None:
             raise BrowserError("rendered tab has no browser context yet — "
                                "navigate first")
         self._storage_state_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            self._context.storage_state(path=str(self._storage_state_path))
+            state = self._context.storage_state()
         except Exception as exc:  # noqa: BLE001 - persistence errors opaque
             raise BrowserError(
                 f"could not persist rendered session state: {exc}") from exc
-        return {"path": str(self._storage_state_path)}
+        if not isinstance(state, dict):
+            # The driver did not return a state dict (a fake
+            # that only records the path call): keep the
+            # legacy call shape so its contract holds.
+            try:
+                self._context.storage_state(
+                    path=str(self._storage_state_path))
+            except Exception as exc:  # noqa: BLE001 - opaque
+                raise BrowserError(
+                    f"could not persist rendered session state: {exc}"
+                ) from exc
+            return {"path": str(self._storage_state_path),
+                    "harvested": False, "cookies": 0}
+        cookies = state.get("cookies") or []
+        origins = state.get("origins") or []
+        harvested = False
+        if cookies:
+            estate = self._estate()
+            if estate is not None:
+                try:
+                    from ..storage.cookie_estate import SOURCE_SERVICE
+
+                    estate.upsert(cookies, source=SOURCE_SERVICE)
+                    harvested = True
+                except Exception as exc:  # noqa: BLE001 - estate
+                    # failure falls back to the file below
+                    _log.debug("rendered tab %s: estate harvest failed: %s",
+                               self.tab_id, exc)
+        payload = {"cookies": [] if harvested else cookies,
+                   "origins": origins}
+        try:
+            self._storage_state_path.write_text(
+                json.dumps(payload), encoding="utf-8")
+        except Exception as exc:  # noqa: BLE001 - persistence errors opaque
+            raise BrowserError(
+                f"could not persist rendered session state: {exc}") from exc
+        return {"path": str(self._storage_state_path),
+                "harvested": harvested,
+                "cookies": len(cookies)}
+
+    def persist(self) -> dict[str, Any]:
+        """Flush cookies AND localStorage to the session's storage file
+        right now (close() also does this). Returns the path written."""
+        return self._persist_state()
 
     # -- navigation ----------------------------------------------------------
     def navigate(self, url: str, *, wait_until: str = "domcontentloaded",
@@ -3056,9 +3185,7 @@ class RenderedTab:
         browser down. A state-save failure is logged, never masks teardown."""
         if self._context is not None:
             try:
-                self._storage_state_path.parent.mkdir(parents=True,
-                                                      exist_ok=True)
-                self._context.storage_state(path=str(self._storage_state_path))
+                self._persist_state()
             except Exception as exc:  # noqa: BLE001 - persistence best effort
                 _log.warning("rendered tab %s: could not persist cookies: %s",
                              self.tab_id, exc)
@@ -3302,12 +3429,18 @@ class BrowserService:
         artifact_store: Any = None,
         mission_id: str = "",
         stealth: dict[str, Any] | None = None,
+        cookie_estate: Any = None,
     ) -> None:
         self.data_dir = Path(
             data_dir if data_dir is not None
             else Path.home() / ".nomorals" / "browser-service"
         ).expanduser()
         self.data_dir.mkdir(parents=True, exist_ok=True)
+        #: The unified cookie estate (Navigator A6), injected
+        #: by the caller; None = opened lazily from the home
+        #: DB on first use (failure cached, legacy jars).
+        self._cookie_estate = cookie_estate
+        self._estate_failed = False
         self._sessions: dict[str, SessionHandle] = {}
         self._rendered_tabs: dict[str, RenderedTab] = {}
         #: playwright driver for rendered tabs: started once, lazily, and
@@ -3350,6 +3483,28 @@ class BrowserService:
     def pacing(self) -> Pacing:
         """The pacing shared by this service's tabs."""
         return self._pacing
+
+    @property
+    def cookie_estate(self) -> Any:
+        """The service's unified cookie estate (Navigator A6),
+        or None when the home DB cannot be opened.  The
+        estate is opened lazily so a service that never
+        touches cookies never touches the home DB; the
+        failure is cached and every tab falls back to its
+        legacy jar instead of raising."""
+        if self._cookie_estate is not None:
+            return self._cookie_estate
+        if self._estate_failed:
+            return None
+        try:
+            from ..storage.cookie_estate import home_estate
+
+            self._cookie_estate = home_estate(
+                legacy_roots={"service_data_dir": str(self.data_dir)})
+            return self._cookie_estate
+        except Exception:  # noqa: BLE001 - estate is an enhancement
+            self._estate_failed = True
+            return None
 
     def set_pacing(self, pacing: Pacing | None = None, *,
                    enabled: bool | None = None,
@@ -3591,6 +3746,7 @@ class BrowserService:
         session = BrowserSession(
             name=f"{handle.name}:{tab_id}",
             session_dir=self._cookie_dir(handle.name),
+            cookie_estate=self.cookie_estate,
         )
         # new tabs inherit the session's proxy (rotation applies live)
         proxy = self._session_proxies.get(handle.name, "")
@@ -3704,6 +3860,7 @@ class BrowserService:
             stealth=_merge_stealth(self._stealth, stealth),
             shot_on_error=shot_on_error,
             retries=retries,
+            cookie_estate=self.cookie_estate,
         )
         # Wire the tab into the service: shared pacing, the download
         # auto-capture sink, and the per-session active tab.
@@ -3729,7 +3886,8 @@ class BrowserService:
         dir. Solved sessions persist per-site under
         ``data_dir/takeover/solved_sessions/``."""
         from .solved_sessions import SolvedSessionStore
-        return SolvedSessionStore(self.data_dir / "takeover")
+        return SolvedSessionStore(self.data_dir / "takeover",
+                                  cookie_estate=self.cookie_estate)
 
     def takeover_manager(self, *, config: Any | None = None,
                          notifier: Any | None = None,
@@ -4375,6 +4533,23 @@ class BrowserService:
             for cookie in cookies:
                 tab.session.cookie_jar.set_cookie(cookie)
             tab.session._save_cookies()
+        # The file is owner-handed, so the estate records it
+        # as imported (sticky) — a later harvest refresh must
+        # not un-import it, and /cookies clear [all] must
+        # still find it.  The tab saves above land as
+        # service-source; this upsert stamps the import.
+        estate = self.cookie_estate
+        if estate is not None and cookies:
+            try:
+                from ..storage.cookie_estate import SOURCE_IMPORTED
+
+                estate.upsert(
+                    [r for r in (record_from_cookie(c) for c in cookies)
+                     if r is not None],
+                    source=SOURCE_IMPORTED)
+            except Exception as exc:  # noqa: BLE001 - the tab
+                # saves already landed; the stamp is bookkeeping
+                _log.debug("cookie import estate stamp failed: %s", exc)
         _emit("browser.cookies.imported", {
             "session": session_name, "path": str(src), "format": fmt,
             "cookies": len(cookies)})

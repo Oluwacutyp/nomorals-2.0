@@ -54,6 +54,25 @@ class FakeTab:
 
 # -- 1: escalation ping carries the link -------------------------------------
 
+def _store(tmp_path):
+    """An isolated solved-session store (see
+    test_browser_solved_sessions.py): the store reads the
+    estate since Navigator A6."""
+    from pathlib import Path as _Path
+
+    from nomorals.storage.cookie_estate import CookieEstate
+    from nomorals.storage.db import open_database
+
+    db, _, _ = open_database(str(_Path(tmp_path) / "estate.sqlite3"))
+    estate = CookieEstate(db, legacy_roots={
+        "profile_dir": _Path(tmp_path) / "profile",
+        "service_data_dir": _Path(tmp_path) / "service",
+        "sessions_dir": _Path(tmp_path) / "sessions",
+        "solved_dir": _Path(tmp_path) / "solved_sessions"})
+    estate.ensure()
+    return SolvedSessionStore(tmp_path, cookie_estate=estate)
+
+
 def test_wall_escalated_ping_carries_takeover_link():
     sent: list[str] = []
     job = BrowserRunJob(job_id="br-link1", url=URL, goal="browse",
@@ -81,7 +100,7 @@ def test_wall_escalated_ping_without_link_still_sends():
 
 def test_concurrent_same_site_saves_use_distinct_tmp_files(tmp_path,
                                                            monkeypatch):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     seen: list[str] = []
     lock = threading.Lock()
     orig_write_text = Path.write_text
@@ -113,7 +132,7 @@ def test_concurrent_same_site_saves_use_distinct_tmp_files(tmp_path,
 
 
 def test_concurrent_same_site_saves_leave_valid_record(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
 
     def worker(n: int) -> None:
         for i in range(25):

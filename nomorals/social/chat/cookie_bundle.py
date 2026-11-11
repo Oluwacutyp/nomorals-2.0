@@ -13,14 +13,18 @@ two real exporter shapes —
   storage-state file (``{"cookies": [...]}``) —
 
 normalizes them to one record shape, and merges them into
-the persistent browser profile's imported-cookie sidecar
-(the webnav seam applies it at every session start, and to
-live sessions immediately).
+the unified cookie estate (``storage/cookie_estate.py``) —
+the one store every browser surface reads and writes since
+Navigator A6.  The old profile sidecar
+(``imported_cookies.json``) is the legacy location: its
+contents were imported once into the estate and it is never
+written again; the webnav seam still applies the estate at
+every session start, and to live sessions immediately.
 
 Secret discipline is the organ's hard law: cookie VALUES
-are credentials.  They are stored in the profile sidecar
-(0600) and nowhere else — never in a chat reply, never in a
-log line, never in a journal row.  The journal records
+are credentials.  They are stored in the estate (the home
+database) and nowhere else — never in a chat reply, never in
+a log line, never in a journal row.  The journal records
 domains, counts, the expired-dropped count and a SHA-256
 fingerprint of the bundle bytes.  The uploaded bundle file
 is deleted after the import attempt, success or failure.
@@ -36,6 +40,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ...storage.cookie_estate import (
+    SOURCE_IMPORTED,
+    CookieEstate,
+    home_estate,
+)
 from . import webnav
 
 __all__ = [
@@ -270,21 +279,12 @@ def bundle_fingerprint(data: bytes) -> str:
 
 
 # ── the profile's imported set ───────────────────────────
-
-def _cookie_key(rec: dict[str, Any]) -> tuple[str, str, str]:
-    return (str(rec.get("domain") or "").lower(),
-            str(rec.get("name") or ""),
-            str(rec.get("path") or "/"))
-
-
-def _domain_matches(cookie_domain: str, target: str) -> bool:
-    """A clear for ``google.com`` takes ``.google.com``,
-    ``google.com`` and ``mail.google.com`` — the site and
-    its subdomains, nothing else."""
-    host = str(cookie_domain or "").lower().lstrip(".")
-    want = target.strip().lower().lstrip(".")
-    return bool(want) and (host == want
-                           or host.endswith("." + want))
+#
+# The set lives in the unified estate now
+# (storage/cookie_estate.py); this class is the bundle
+# organ's view onto it.  The old sidecar-merge helpers are
+# gone with the sidecar — dedupe/newest-wins is the estate's
+# upsert.
 
 
 @dataclass
@@ -295,80 +295,73 @@ class DomainStat:
 
 
 class ImportedCookiesStore:
-    """The imported-cookie set of one browser profile,
-    persisted as the webnav sidecar inside the profile
-    dir.  Merge overwrites the same (domain, name, path)
-    and preserves everything else in the profile."""
+    """The imported-cookie set — the owner's bundles, held in
+    the unified cookie estate (Navigator A6), not in a
+    per-profile file.  ``profile_dir`` is kept as the legacy
+    migration root (the old sidecar's home) and as the key
+    live sessions are registered under; the records themselves
+    live in the estate.  An explicit *db* (tests) or *estate*
+    pins the backing store; otherwise the home estate is
+    opened lazily."""
 
-    def __init__(self, profile_dir: str | Path) -> None:
+    def __init__(self, profile_dir: str | Path, *,
+                 db: Any = None,
+                 estate: CookieEstate | None = None) -> None:
         self.profile_dir = Path(profile_dir)
+        self._db = db
+        self._estate = estate
+
+    def _store(self) -> CookieEstate:
+        if self._estate is None:
+            self._estate = home_estate(
+                db=self._db,
+                legacy_roots={"profile_dir": self.profile_dir})
+        return self._estate
 
     @property
     def path(self) -> Path:
+        """The legacy sidecar's path (migration source and
+        diagnostics only — never written since A6)."""
         return webnav.imported_cookies_path(self.profile_dir)
 
     def load(self) -> list[dict[str, Any]]:
-        return webnav.read_imported_cookie_records(
-            self.profile_dir)
+        return self._store().cookies_for()
 
     def save(self, records: list[dict[str, Any]]) -> None:
-        self.profile_dir.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(
-            {"cookies": records}, indent=1),
-            encoding="utf-8")
-        tmp.replace(self.path)
+        """Replace the imported set with *records* (the old
+        sidecar write, re-homed: the estate is the store
+        now).  Only the imported flag is touched — the
+        sessions Devon earned herself are never cleared by
+        an import."""
+        store = self._store()
+        store.clear("all", only_imported=True)
+        store.upsert(records, source=SOURCE_IMPORTED)
 
     def merge(self, records: list[dict[str, Any]]) -> tuple[int, int]:
         """Fold new records in.  Returns (added, replaced)."""
-        held = {_cookie_key(r): r for r in self.load()}
-        added = replaced = 0
-        for rec in records:
-            key = _cookie_key(rec)
-            if key in held:
-                replaced += 1
-            else:
-                added += 1
-            held[key] = rec
-        self.save(list(held.values()))
-        return added, replaced
+        result = self._store().upsert(
+            records, source=SOURCE_IMPORTED)
+        return int(result["added"]), int(result["replaced"])
 
     def status(self) -> list[DomainStat]:
-        by_domain: dict[str, list[dict[str, Any]]] = {}
-        for rec in self.load():
-            by_domain.setdefault(
-                str(rec.get("domain") or ""), []).append(rec)
         out: list[DomainStat] = []
-        for domain in sorted(by_domain):
-            rows = by_domain[domain]
-            dated = [float(r["expires"]) for r in rows
-                     if float(r.get("expires") or 0) > 0]
+        for row in self._store().status():
             out.append(DomainStat(
-                domain=domain, count=len(rows),
-                nearest_expiry=min(dated) if dated else None))
+                domain=str(row["domain"]),
+                count=int(row["count"]),
+                nearest_expiry=(float(row["nearest_expiry"])
+                                if row["nearest_expiry"] is not None
+                                else None)))
         return out
 
     def clear(self, target: str) -> tuple[int, list[str]]:
         """Remove one domain's imported cookies (or every
-        imported cookie for ``all``).  Returns (removed,
-        affected domains)."""
-        rows = self.load()
-        if target.strip().lower() == "all":
-            affected = sorted({str(r.get("domain") or "")
-                               for r in rows})
-            if rows:
-                self.save([])
-            return len(rows), affected
-        kept = [r for r in rows
-                if not _domain_matches(
-                    str(r.get("domain") or ""), target)]
-        removed = len(rows) - len(kept)
-        if removed:
-            self.save(kept)
-        affected = sorted({str(r.get("domain") or "")
-                           for r in rows} - {str(r.get("domain") or "")
-                                             for r in kept})
-        return removed, affected
+        imported cookie for ``all``).  Only the imported set
+        goes — the sessions Devon earned herself survive,
+        exactly as the old sidecar clear left the profile's
+        own sessions alone.  Returns (removed, affected
+        domains)."""
+        return self._store().clear(target, only_imported=True)
 
 
 # ── journal ──────────────────────────────────────────────
@@ -396,12 +389,15 @@ def _append_journal(journal_path: Path | None,
 def import_bundle_file(path: str | Path,
                        profile_dir: str | Path, *,
                        journal_path: str | Path | None = None,
-                       now: float | None = None) -> ImportOutcome:
-    """Read one uploaded bundle, merge it into the
-    profile, apply it to any live capture session, delete
-    the uploaded file, and journal the outcome.  Never
-    raises for an unreadable or malformed bundle — the
-    outcome carries a plain sentence instead."""
+                       now: float | None = None,
+                       db: Any = None,
+                       estate: CookieEstate | None = None
+                       ) -> ImportOutcome:
+    """Read one uploaded bundle, merge it into the estate,
+    apply it to any live capture session, delete the
+    uploaded file, and journal the outcome.  Never raises
+    for an unreadable or malformed bundle — the outcome
+    carries a plain sentence instead."""
     src = Path(path)
     profile = Path(profile_dir)
     outcome = ImportOutcome()
@@ -417,7 +413,8 @@ def import_bundle_file(path: str | Path,
         outcome.fingerprint = bundle_fingerprint(data)
         try:
             result = parse_bundle(data, now=now)
-            store = ImportedCookiesStore(profile)
+            store = ImportedCookiesStore(
+                profile, db=db, estate=estate)
             store.merge(result.cookies)
             outcome.live_sessions = \
                 webnav.apply_cookies_to_live(
@@ -487,7 +484,7 @@ def render_import_reply(outcome: ImportOutcome) -> str:
     parts = [
         f"🍪 imported {_plural(outcome.count, 'cookie')} "
         f"across {_plural(len(outcome.domains), 'domain')} "
-        "into my browser profile"]
+        "into my browser sessions"]
     if outcome.dropped_expired:
         parts.append(
             f"{_plural(outcome.dropped_expired, 'expired one')} "
@@ -510,15 +507,17 @@ def _expiry_phrase(stat: DomainStat) -> str:
     return f"nearest expiry {when}"
 
 
-def render_status(profile_dir: str | Path) -> str:
-    stats = ImportedCookiesStore(profile_dir).status()
+def render_status(profile_dir: str | Path, *,
+                  db: Any = None,
+                  estate: CookieEstate | None = None) -> str:
+    stats = ImportedCookiesStore(
+        profile_dir, db=db, estate=estate).status()
     if not stats:
-        return ("🍪 no imported cookies in my browser "
-                "profile yet — send a bundle with /cookies "
-                "import and your signed-in sessions ride my "
-                "captures.")
+        return ("🍪 no imported cookies yet — send a bundle "
+                "with /cookies import and your signed-in "
+                "sessions ride my captures.")
     total = sum(s.count for s in stats)
-    lines = [f"🍪 imported cookies in my browser profile "
+    lines = [f"🍪 imported cookies in my browser sessions "
              f"— {_plural(len(stats), 'domain')}, "
              f"{_plural(total, 'cookie')}:"]
     for stat in stats:
@@ -531,13 +530,16 @@ def render_status(profile_dir: str | Path) -> str:
 
 
 def clear_imported(profile_dir: str | Path, target: str, *,
-                   journal_path: str | Path | None = None
+                   journal_path: str | Path | None = None,
+                   db: Any = None,
+                   estate: CookieEstate | None = None
                    ) -> str:
     """Clear one domain (or all) from the imported set,
     journal it, ask live sessions to drop them too, and
-    render the answer."""
+    render the answer.  Only the imported set goes — the
+    sessions Devon earned herself are left alone."""
     profile = Path(profile_dir)
-    store = ImportedCookiesStore(profile)
+    store = ImportedCookiesStore(profile, db=db, estate=estate)
     removed, affected = store.clear(target)
     if affected:
         webnav.clear_cookies_from_live(profile, affected)
@@ -550,11 +552,11 @@ def clear_imported(profile_dir: str | Path, target: str, *,
     if target.strip().lower() == "all":
         if not removed:
             return ("🍪 there were no imported cookies to "
-                    "clear — the profile holds only its own "
-                    "sessions.")
+                    "clear — my browser sessions hold only "
+                    "their own logins.")
         return (f"🍪 removed all {_plural(removed, 'imported cookie')} "
-                "— my browser profile is back to its own "
-                "sessions only.")
+                "— my browser sessions are back to their own "
+                "logins only.")
     if not removed:
         return (f"🍪 no imported cookies matched {target} "
                 "— nothing was removed.")

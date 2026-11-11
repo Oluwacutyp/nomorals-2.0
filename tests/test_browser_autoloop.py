@@ -176,7 +176,22 @@ class FakeNotifier:
 
 
 def _store(tmp: str) -> SolvedSessionStore:
-    return SolvedSessionStore(f"{tmp}/takeover")
+    """An isolated solved-session store (see
+    test_browser_solved_sessions.py): the store reads the
+    estate since Navigator A6."""
+    from pathlib import Path as _Path
+
+    from nomorals.storage.cookie_estate import CookieEstate
+    from nomorals.storage.db import open_database
+
+    db, _, _ = open_database(str(_Path(tmp) / "estate.sqlite3"))
+    estate = CookieEstate(db, legacy_roots={
+        "profile_dir": _Path(tmp) / "profile",
+        "service_data_dir": _Path(tmp) / "service",
+        "sessions_dir": _Path(tmp) / "sessions",
+        "solved_dir": _Path(tmp) / "solved_sessions"})
+    estate.ensure()
+    return SolvedSessionStore(f"{tmp}/takeover", cookie_estate=estate)
 
 
 def _approve_benign(decision: Any, _obs: Any) -> bool:

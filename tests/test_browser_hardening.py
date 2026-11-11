@@ -738,9 +738,23 @@ class TabSessionTests(unittest.TestCase):
         self.assertIsNone(svc.active_rendered_tab("sess"))
 
     def test_cookie_jar_survives_restart(self):
+        from nomorals.storage.cookie_estate import CookieEstate
+        from nomorals.storage.db import open_database
         from nomorals.tools.browser import BrowserSession
 
-        svc, tmp = self._svc()
+        # Navigator A6: the cookie survives a restart through
+        # the unified estate, not the legacy per-session jar
+        # file — so this test runs over an isolated estate.
+        tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, tmp, ignore_errors=True)
+        db, _, _ = open_database(os.path.join(tmp, "estate.sqlite3"))
+        estate = CookieEstate(db, legacy_roots={
+            "profile_dir": os.path.join(tmp, "profile"),
+            "service_data_dir": tmp,
+            "sessions_dir": os.path.join(tmp, "sessions"),
+            "solved_dir": os.path.join(tmp, "solved")})
+        estate.ensure()
+        svc = BrowserService(data_dir=tmp, cookie_estate=estate)
         handle = svc.open_session("profile1")
         tab = handle.open_tab()
         cookie = http.cookiejar.Cookie(
@@ -754,11 +768,17 @@ class TabSessionTests(unittest.TestCase):
         cookie_file = os.path.join(
             svc._cookie_dir("profile1"), "profile1_" + tab.tab_id + ".json")
         # note: tab_id contains ":" which the saver sanitizes to "_"
-        self.assertTrue(os.path.isfile(cookie_file),
-                        f"cookie file not persisted: {cookie_file}")
-        # a fresh process reopens the same profile cookie file by name
+        # the legacy jar file is never written after cutover
+        self.assertFalse(os.path.isfile(cookie_file),
+                         f"legacy cookie file written: {cookie_file}")
+        self.assertEqual(
+            [r["value"] for r in estate.cookies_for("example.com")],
+            ["abc123"])
+        # a fresh process reopens the same profile's cookies
+        # from the estate
         fresh = BrowserSession(name=tab.session.name,
-                               session_dir=svc._cookie_dir("profile1"))
+                               session_dir=svc._cookie_dir("profile1"),
+                               cookie_estate=estate)
         names = {c.name: c.value for c in fresh.cookie_jar}
         self.assertEqual("abc123", names.get("sessionid"))
 

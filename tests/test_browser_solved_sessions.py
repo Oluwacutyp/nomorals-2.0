@@ -26,6 +26,26 @@ CF_HTML = (
 )
 CLEAN_HTML = "<html><head><title>Home</title></head><body>hello</body></html>"
 
+def _store(tmp_path):
+    """A solved-session store over an isolated tmp estate
+    (never the home estate): since Navigator A6 a store's
+    load() reads the estate, so a test that asserts on a
+    site must start from an empty one."""
+    from pathlib import Path as _Path
+
+    from nomorals.storage.cookie_estate import CookieEstate
+    from nomorals.storage.db import open_database
+
+    db, _, _ = open_database(str(_Path(tmp_path) / "estate.sqlite3"))
+    estate = CookieEstate(db, legacy_roots={
+        "profile_dir": _Path(tmp_path) / "profile",
+        "service_data_dir": _Path(tmp_path) / "service",
+        "sessions_dir": _Path(tmp_path) / "sessions",
+        "solved_dir": _Path(tmp_path) / "solved_sessions"})
+    estate.ensure()
+    return SolvedSessionStore(tmp_path, cookie_estate=estate)
+
+
 SITE = "https://example.test/login"
 OTHER_SITE = "https://other.test/login"
 CLEARANCE = {
@@ -111,7 +131,7 @@ class FakeTab:
 # -- store -------------------------------------------------------------------
 
 def test_store_save_load_roundtrip(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     store.save(SITE, SITE, [CLEARANCE], origins=[])
     loaded = store.load(SITE)
     assert loaded is not None
@@ -119,11 +139,16 @@ def test_store_save_load_roundtrip(tmp_path):
     assert loaded["site"] == "example.test"
     files = list((tmp_path / "solved_sessions").glob("*.json"))
     assert len(files) == 1
-    assert "SECRET-CLEARANCE-VALUE" in files[0].read_text(encoding="utf-8")
+    # Navigator A6: the file keeps origins + metadata only —
+    # the cookie value lives in the estate, never in the file.
+    assert "SECRET-CLEARANCE-VALUE" not in files[0].read_text(
+        encoding="utf-8")
+    assert json.loads(files[0].read_text(
+        encoding="utf-8"))["cookies"] == []
 
 
 def test_store_drops_expired_cookies_on_load(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     stale = dict(CLEARANCE, expires=1)  # long expired
     store.save(SITE, SITE, [stale, CLEARANCE])
     loaded = store.load(SITE)
@@ -134,7 +159,7 @@ def test_store_drops_expired_cookies_on_load(tmp_path):
 
 
 def test_store_never_leaks_across_sites(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     store.save(SITE, SITE, [CLEARANCE])
     assert store.load(OTHER_SITE) is None
     assert store.has(SITE) is True
@@ -144,7 +169,7 @@ def test_store_never_leaks_across_sites(tmp_path):
 # -- save on solve -----------------------------------------------------------
 
 def test_solver_saves_cookies_on_self_solve(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     tab = FakeTab(CF_HTML)
     tab.jar = [dict(CLEARANCE)]
 
@@ -165,7 +190,7 @@ def test_solver_saves_cookies_on_self_solve(tmp_path):
 
 
 def test_solver_saves_nothing_when_still_blocked(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     tab = FakeTab(CF_HTML)
     tab.jar = [dict(CLEARANCE)]
     solver = ChallengeSolver(wait_s=0, session_store=store)
@@ -177,7 +202,7 @@ def test_solver_saves_nothing_when_still_blocked(tmp_path):
 
 
 def test_solver_restores_saved_session_before_ladder(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     store.save(SITE, SITE, [CLEARANCE])
     tab = FakeTab(CF_HTML)  # fresh tab, empty jar, wall up
     solver = ChallengeSolver(wait_s=0, session_store=store)
@@ -191,7 +216,7 @@ def test_solver_restores_saved_session_before_ladder(tmp_path):
 
 
 def test_solver_does_not_restore_other_site_cookies(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     store.save(SITE, SITE, [CLEARANCE])
     tab = FakeTab(CF_HTML, url=OTHER_SITE)
     solver = ChallengeSolver(wait_s=0, session_store=store)
@@ -202,7 +227,7 @@ def test_solver_does_not_restore_other_site_cookies(tmp_path):
 
 
 def test_save_helper_prefers_storage_state_with_origins(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     tab = FakeTab(CLEAN_HTML)
     tab.jar = [dict(CLEARANCE)]
     saved = save_solved_session(tab, SITE, store, cleared_via="retry")
@@ -213,7 +238,7 @@ def test_save_helper_prefers_storage_state_with_origins(tmp_path):
 
 
 def test_restore_helper_returns_zero_without_adder(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     store.save(SITE, SITE, [CLEARANCE])
 
     class BareTab:
@@ -228,7 +253,7 @@ def test_restore_helper_returns_zero_without_adder(tmp_path):
 # -- takeover path: save on clear, nothing on still-blocked ------------------
 
 def test_takeover_resolution_saves_and_audits_without_values(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     mgr = TakeoverManager(TakeoverConfig(wait_timeout_s=30),
                           data_dir=tmp_path, session_store=store)
     tab = FakeTab(CF_HTML)
@@ -258,7 +283,7 @@ def test_takeover_resolution_saves_and_audits_without_values(tmp_path):
 
 
 def test_takeover_still_blocked_saves_nothing(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
     mgr = TakeoverManager(TakeoverConfig(wait_timeout_s=1),
                           data_dir=tmp_path, session_store=store)
     tab = FakeTab(CF_HTML)
@@ -293,7 +318,7 @@ def test_browser_service_solved_session_store_factory(tmp_path):
 
 
 def test_save_is_best_effort_never_breaks_resume(tmp_path):
-    store = SolvedSessionStore(tmp_path)
+    store = _store(tmp_path)
 
     class BrokenTab:
         url = SITE

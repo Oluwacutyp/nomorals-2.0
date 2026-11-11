@@ -223,6 +223,64 @@ _COOKIE_STATE_FIELDS = frozenset({
 })
 
 
+def _cookie_state_from_record(rec: dict[str, Any]) -> dict[str, Any]:
+    """A canonical estate record → a ``Cookie.__getstate__``
+    dict, so :func:`cookies_from_payload` can rebuild the
+    jar entry.  ``sameSite`` has no cookiejar field and is
+    dropped on this side (urllib never sends it); the
+    estate keeps it for the Playwright sides."""
+    expires = rec.get("expires")
+    try:
+        exp = float(expires) if expires is not None else None
+    except (TypeError, ValueError):
+        exp = None
+    if exp is not None and exp <= 0:
+        exp = None
+    domain = str(rec.get("domain") or "")
+    return {
+        "version": 0,
+        "name": str(rec.get("name") or ""),
+        "value": str(rec.get("value") or ""),
+        "port": None,
+        "port_specified": False,
+        "domain": domain,
+        "domain_specified": True,
+        "domain_initial_dot": domain.startswith("."),
+        "path": str(rec.get("path") or "/") or "/",
+        "path_specified": True,
+        "secure": bool(rec.get("secure")),
+        "expires": exp,
+        "discard": exp is None,
+        "comment": None,
+        "comment_url": None,
+        "rest": {"HttpOnly": None} if rec.get("httpOnly") else {},
+        "rfc2109": False,
+    }
+
+
+def record_from_cookie(cookie: Any) -> dict[str, Any] | None:
+    """A live jar ``Cookie`` → a canonical estate record.
+    ``None`` when the entry is unusable."""
+    name = str(getattr(cookie, "name", "") or "")
+    domain = str(getattr(cookie, "domain", "") or "")
+    if not name or not domain:
+        return None
+    expires = getattr(cookie, "expires", None)
+    rest = getattr(cookie, "rest", None) or {}
+    if not isinstance(rest, dict):
+        rest = {}
+    return {
+        "name": name,
+        "value": str(getattr(cookie, "value", "") or ""),
+        "domain": domain,
+        "path": str(getattr(cookie, "path", "") or "/") or "/",
+        "expires": (float(expires) if expires is not None else -1.0),
+        "secure": bool(getattr(cookie, "secure", False)),
+        "httpOnly": "HttpOnly" in rest,
+        "sameSite": str(rest.get("SameSite") or ""),
+    }
+
+
 def cookies_from_payload(payload: Any) -> list[Any]:
     """Rebuild ``http.cookiejar.Cookie`` objects from a persisted
     session payload (list of ``Cookie.__getstate__`` dicts).
@@ -259,6 +317,7 @@ class BrowserSession:
         session_dir: str = "",
         retries: int = 2,
         max_task_steps: int = 12,
+        cookie_estate: Any = None,
     ) -> None:
         self.name = name
         self.user_agent = user_agent
@@ -282,8 +341,17 @@ class BrowserSession:
         self.max_task_steps = max(1, int(max_task_steps))
         #: wave 86: when set, cookies are persisted here across runs
         #: (data/browser/sessions/<name>.json) — a task that logs in once
-        #: keeps the login next time.
+        #: keeps the login next time.  Since Navigator A6 that file
+        #: is the LEGACY jar: the live store is the unified cookie
+        #: estate, and the file is only read/written when the
+        #: estate cannot be opened (its contents were imported
+        #: once into the estate).
         self.session_dir = str(session_dir or "").strip()
+        #: The unified cookie estate (Navigator A6), injected by
+        #: callers that hold one (tests, the browser service);
+        #: None = opened lazily from the home DB on first use.
+        self._cookie_estate = cookie_estate
+        self._estate_failed = False
         self.cookie_jar = http.cookiejar.CookieJar()
         self._load_cookies()
         self.proxy_url = (proxy_url or "").strip()
@@ -1184,12 +1252,60 @@ class BrowserSession:
         safe = re.sub(r"[^A-Za-z0-9_.-]", "_", self.name or "default")
         return os.path.join(self.session_dir, f"{safe}.json")
 
+    def _estate(self) -> Any:
+        """The session's cookie estate, or None when the home
+        DB cannot be opened.  Only persistent sessions
+        (``session_dir`` set) join the estate — an ephemeral
+        session keeps its old empty jar, exactly as before.
+        Never raises — the JSON jar is the fallback, never
+        a crash."""
+        if self._cookie_estate is not None:
+            return self._cookie_estate
+        if self._estate_failed or not self.session_dir:
+            return None
+        try:
+            from ..storage.cookie_estate import home_estate
+
+            roots: dict[str, Any] = {}
+            if self.session_dir:
+                roots["sessions_dir"] = self.session_dir
+            self._cookie_estate = home_estate(
+                legacy_roots=roots or None)
+            return self._cookie_estate
+        except Exception:  # noqa: BLE001 - the estate is an
+            self._estate_failed = True  # enhancement, never
+            return None  # a fetch failure
+
     def _save_cookies(self) -> None:
         path = self._session_file()
         if not path:
             return
+        # The session dir exists whether or not the jar holds
+        # anything — callers (and the restore round-trip) treat
+        # its presence as the session's cookie space.  The
+        # estate branch below must not skip this.
         try:
             os.makedirs(self.session_dir, exist_ok=True)
+        except OSError as exc:  # noqa: BLE001 - persistence best-effort
+            _log.debug("cookie save failed for session %r: %s", self.name, exc)
+            return
+        estate = self._estate()
+        if estate is not None:
+            try:
+                from ..storage.cookie_estate import SOURCE_SERVICE
+
+                records = [record_from_cookie(c)
+                           for c in self.cookie_jar]
+                estate.upsert(
+                    [r for r in records if r is not None],
+                    source=SOURCE_SERVICE)
+                return
+            except Exception as exc:  # noqa: BLE001 - the
+                # estate failing mid-save falls back to the
+                # legacy jar below, never drops the login
+                _log.debug("cookie estate save failed for "
+                           "session %r: %s", self.name, exc)
+        try:
             # __getstate__ is the canonical cookie field dump — immune to
             # constructor signature drift between Python versions.
             payload = [c.__getstate__() for c in self.cookie_jar]
@@ -1201,6 +1317,24 @@ class BrowserSession:
             _log.debug("cookie save failed for session %r: %s", self.name, exc)
 
     def _load_cookies(self) -> None:
+        estate = self._estate()
+        if estate is not None:
+            try:
+                count = 0
+                for cookie in cookies_from_payload(
+                        [_cookie_state_from_record(r)
+                         for r in estate.cookies_for()]):
+                    self.cookie_jar.set_cookie(cookie)
+                    count += 1
+                if count:
+                    _log.info("browser session %r: restored %d "
+                              "persisted cookie(s) from the "
+                              "unified estate", self.name, count)
+                return
+            except Exception as exc:  # noqa: BLE001 - a bad
+                # estate read falls back to the legacy jar
+                _log.debug("cookie estate load failed for "
+                           "session %r: %s", self.name, exc)
         path = self._session_file()
         if not path or not os.path.isfile(path):
             return

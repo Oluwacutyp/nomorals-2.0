@@ -669,11 +669,32 @@ class BrowserJobManager:
             if not isinstance(approvals, list):
                 approvals = []
             name = recipe_name_for(job.url, job.goal)
+            # Navigator A6: the recipe declares whether the run
+            # was authenticated, from the estate — and the compile
+            # is scanned against the estate's live cookie values
+            # so a recipe can never carry session material.  Both
+            # are fail-open: an unreachable estate leaves the
+            # recipe unflagged and unscanned, never uncompiled.
+            estate: Any = None
+            needs_session = False
+            try:
+                from urllib.parse import urlsplit
+
+                from ..storage.cookie_estate import home_estate
+
+                estate = home_estate()
+                host = urlsplit(str(job.url or "")).netloc or ""
+                needs_session = bool(host) and estate.has_domain(host)
+            except Exception:  # noqa: BLE001 - estate is advisory
+                estate = None
+                needs_session = False
             recipe = compile_recipe(
                 name=name, goal=job.goal, trace=trace,
                 start_url=job.url,
                 approvals=[dict(a) for a in approvals
-                           if isinstance(a, dict)])
+                           if isinstance(a, dict)],
+                needs_session=needs_session,
+                cookie_estate=estate)
             store.save(recipe)
         except Exception as exc:  # noqa: BLE001 - compile never gates
             record_failure("browser.jobs.recipe_compile", exc)

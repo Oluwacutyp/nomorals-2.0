@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
 
 from nomorals.browser import (
@@ -65,6 +66,24 @@ def _make_store(tmpdir):
     return ArtifactStore(db, blobs), db
 
 
+def _tmp_estate(tmp: str) -> Any:
+    """One isolated cookie estate per test (never the home
+    estate): since Navigator A6 a service seeds its tabs from
+    the estate, so a test that restores sessions must start
+    from an empty one."""
+    from nomorals.storage.cookie_estate import CookieEstate
+    from nomorals.storage.db import open_database
+
+    db, _, _ = open_database(os.path.join(tmp, "estate.sqlite3"))
+    estate = CookieEstate(db, legacy_roots={
+        "profile_dir": os.path.join(tmp, "profile"),
+        "service_data_dir": os.path.join(tmp, "data"),
+        "sessions_dir": os.path.join(tmp, "sessions"),
+        "solved_dir": os.path.join(tmp, "solved")})
+    estate.ensure()
+    return estate
+
+
 class TestBrowserService(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -84,7 +103,10 @@ class TestBrowserService(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.svc = BrowserService(data_dir=os.path.join(self.tmp, "data"))
+        self.estate = _tmp_estate(self.tmp)
+        self.svc = BrowserService(
+            data_dir=os.path.join(self.tmp, "data"),
+            cookie_estate=self.estate)
 
     # -- sessions & tabs ------------------------------------------------------
     def test_open_session_open_tab_navigate(self):
@@ -199,6 +221,7 @@ class TestBrowserService(unittest.TestCase):
         store, db = _make_store(self.tmp)
         self.addCleanup(db.close)
         svc = BrowserService(data_dir=os.path.join(self.tmp, "dl"),
+                               cookie_estate=self.estate,
                              artifact_store=store, mission_id="m1")
         handle = svc.open_session("dl-sess")
         tab = handle.open_tab(f"{self.base}/")
@@ -236,7 +259,8 @@ class TestBrowserService(unittest.TestCase):
     # -- persistence --------------------------------------------------------------
     def test_save_restore_round_trip(self):
         data_dir = os.path.join(self.tmp, "persist")
-        svc1 = BrowserService(data_dir=data_dir)
+        svc1 = BrowserService(data_dir=data_dir,
+                              cookie_estate=self.estate)
         handle = svc1.open_session("work")
         t1 = handle.open_tab(f"{self.base}/")
         t1.navigate(f"{self.base}/page2")
@@ -246,7 +270,8 @@ class TestBrowserService(unittest.TestCase):
         self.assertTrue(Path(path).is_file())
         self.assertIn("sessions.json", path)
 
-        svc2 = BrowserService(data_dir=data_dir)
+        svc2 = BrowserService(data_dir=data_dir,
+                              cookie_estate=self.estate)
         restored = svc2.restore()
         self.assertEqual(restored, 1)
         self.assertEqual(svc2.list_sessions(), ["work"])
@@ -264,11 +289,13 @@ class TestBrowserService(unittest.TestCase):
                          [f"{self.base}/", f"{self.base}/page2", f"{self.base}/"])
 
     def test_restore_without_save_is_noop(self):
-        svc = BrowserService(data_dir=os.path.join(self.tmp, "nosave"))
+        svc = BrowserService(data_dir=os.path.join(self.tmp, "nosave"),
+                              cookie_estate=self.estate)
         self.assertEqual(svc.restore(), 0)
 
     def test_close_session_saves_and_removes(self):
-        svc = BrowserService(data_dir=os.path.join(self.tmp, "close"))
+        svc = BrowserService(data_dir=os.path.join(self.tmp, "close"),
+                              cookie_estate=self.estate)
         handle = svc.open_session("gone")
         handle.open_tab(f"{self.base}/")
         svc.close_session("gone")
@@ -437,7 +464,10 @@ class TestRenderedTabs(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.addCleanup(shutil.rmtree, self.tmp, ignore_errors=True)
-        self.svc = BrowserService(data_dir=os.path.join(self.tmp, "data"))
+        self.estate = _tmp_estate(self.tmp)
+        self.svc = BrowserService(
+            data_dir=os.path.join(self.tmp, "data"),
+            cookie_estate=self.estate)
 
     def test_open_rendered_tab_fail_fast_without_playwright(self):
         with mock.patch("importlib.util.find_spec", return_value=None), \
@@ -514,15 +544,40 @@ class TestRenderedTabs(unittest.TestCase):
             self.assertEqual(context.saved_path, expected)
             self.assertTrue(browser.closed)
             # a NEW service (fresh driver, same data dir) loads the persisted
-            # state into its session context
+            # state into its session context.  Navigator A6: the file
+            # keeps origins only — cookies ride in the unified estate,
+            # so the context gets an origins-only dict and the file's
+            # cookie is imported into the estate at open.
             Path(expected).parent.mkdir(parents=True, exist_ok=True)
-            Path(expected).write_text('{"cookies": []}')
-        svc2 = BrowserService(data_dir=os.path.join(self.tmp, "data"))
+            Path(expected).write_text(
+                '{"cookies": [{"name": "sess", "value": "abc", '
+                '"domain": ".example.com", "path": "/", '
+                '"expires": 1999999999}], "origins": []}')
+        from nomorals.storage.cookie_estate import CookieEstate
+        from nomorals.storage.db import open_database
+
+        # A NEW estate database (fresh driver, same data dir):
+        # the migration re-runs against this DB and imports
+        # the file's cookie — the first half's estate already
+        # recorded its own one-time migration on its DB.
+        estate_db, _, _ = open_database(
+            os.path.join(self.tmp, "estate2.sqlite3"))
+        estate = CookieEstate(estate_db, legacy_roots={
+            "profile_dir": os.path.join(self.tmp, "profile"),
+            "service_data_dir": os.path.join(self.tmp, "data"),
+            "sessions_dir": os.path.join(self.tmp, "sessions"),
+            "solved_dir": os.path.join(self.tmp, "solved")})
+        estate.ensure()
+        svc2 = BrowserService(data_dir=os.path.join(self.tmp, "data"),
+                              cookie_estate=estate)
         with _mocked_playwright(_FakePage()) as (i2, context2, browser2, c2):
             tab2 = svc2.open_rendered_tab("sessA")
             tab2.navigate("https://example.com/")
             self.assertEqual(browser2.context_kwargs.get("storage_state"),
-                             expected)
+                             {"cookies": [], "origins": []})
+            self.assertEqual(
+                [r["value"] for r in estate.cookies_for("example.com")],
+                ["abc"])
             svc2.close_rendered_tab(tab2.tab_id)
 
     def test_driver_started_once_and_shared(self):

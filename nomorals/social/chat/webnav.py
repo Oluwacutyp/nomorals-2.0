@@ -1161,15 +1161,21 @@ def _profile_lock(profile_dir: Path) -> threading.Lock:
 # The owner hands Devon his logged-in sessions as a cookie
 # bundle (cookies.txt / JSON export — Android Chrome cannot
 # export, so the bundle is how a phone's sessions reach her).
-# The imported set is kept as a sidecar of normalized cookie
-# records INSIDE the profile dir: every NavSession over the
-# profile applies it at start (so captures begin signed-in),
-# and an import that lands while a session is live applies
-# to that session's context too.  The write side (parsing,
-# merging, clearing, journaling) lives in cookie_bundle.py;
-# this seam owns only the profile-side mechanics.  Cookie
-# VALUES are credentials: nothing in this seam logs, prints
-# or journals them — records move as data, never as text.
+# Since Navigator A6 the imported set lives in the UNIFIED
+# cookie estate (storage/cookie_estate.py), the one store
+# every browser surface reads and writes: every NavSession
+# over the profile applies the estate at start (so captures
+# begin signed-in), and an import that lands while a session
+# is live applies to that session's context too.  The old
+# sidecar (imported_cookies.json in the profile dir) is the
+# legacy location — its contents were imported once into the
+# estate and it is never written again; it is read only as a
+# fallback when the estate cannot be opened, and as a
+# migration source.  The write side (parsing, merging,
+# clearing, journaling) lives in cookie_bundle.py; this seam
+# owns only the profile-side mechanics.  Cookie VALUES are
+# credentials: nothing in this seam logs, prints or journals
+# them — records move as data, never as text.
 
 #: Sidecar filename inside the browser profile dir.
 IMPORTED_COOKIES_FILENAME = "imported_cookies.json"
@@ -1183,7 +1189,10 @@ def read_imported_cookie_records(
         profile_dir: Path) -> list[dict[str, Any]]:
     """The stored imported-cookie records for a profile
     (normalized dicts: name/value/domain/path/expires/
-    httpOnly/secure/sameSite).  A missing or unreadable
+    httpOnly/secure/sameSite).  LEGACY read since Navigator
+    A6: the estate holds the live set; this reads the old
+    sidecar — the migration source and the fallback when
+    the estate cannot be opened.  A missing or unreadable
     sidecar reads as no imports — the profile simply starts
     without them.  Never raises."""
     try:
@@ -1201,10 +1210,11 @@ def read_imported_cookie_records(
 
 def playwright_cookie_payload(
         records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Stored records → ``add_cookies`` arguments.  Session
-    cookies (expires <= 0) go out with no expires key at
-    all — the driver's word for a session cookie is the
-    absence of one."""
+    """Stored records → ``add_cookies`` arguments — the
+    canonical rendering, owned by the estate (Navigator A6).
+    Session cookies (expires <= 0) go out with no expires
+    key at all — the driver's word for a session cookie is
+    the absence of one."""
     out: list[dict[str, Any]] = []
     for rec in records:
         item: dict[str, Any] = {
@@ -1378,12 +1388,18 @@ class NavSession:
     def __init__(self, *, profile_dir: Path | None = None,
                  device: dict[str, Any] | None = None,
                  scheme: str = "light",
-                 record_dir: Path | None = None) -> None:
+                 record_dir: Path | None = None,
+                 cookie_estate: Any = None) -> None:
         self._profile_dir = profile_dir
         self._device = dict(
             device or PRESENTATIONS[DEFAULT_PRESENTATION])
         self._scheme = scheme
         self._record_dir = record_dir
+        #: The unified cookie estate (Navigator A6), injected
+        #: by callers that hold one (tests); None = opened
+        #: lazily from the home DB on first use.
+        self._cookie_estate = cookie_estate
+        self._estate_failed = False
         self._pw: Any = None
         self._browser: Any = None
         self._context: Any = None
@@ -1392,6 +1408,25 @@ class NavSession:
         self._started_at: float | None = None
         self._slot_held = False
         self.probe: _PlaywrightProbe | None = None
+
+    def _estate(self) -> Any:
+        """The session's cookie estate, or None when the home
+        DB cannot be opened — the session then starts
+        logged-out and harvests nothing, exactly as a
+        missing sidecar behaves today.  Never raises."""
+        if self._cookie_estate is not None:
+            return self._cookie_estate
+        if self._estate_failed:
+            return None
+        try:
+            from ...storage.cookie_estate import home_estate
+
+            self._cookie_estate = home_estate(
+                legacy_roots={"profile_dir": self._profile_dir})
+            return self._cookie_estate
+        except Exception:  # noqa: BLE001 - the estate is an
+            self._estate_failed = True  # enhancement, never
+            return None  # a capture failure
 
     # -- lifecycle --
     def _acquire_slot(self) -> None:
@@ -1509,23 +1544,55 @@ class NavSession:
                  "userAgentMetadata": dict(hints)})
 
     def _apply_imported_cookies(self) -> None:
-        """Start this session signed-in: the profile's
-        imported cookie records (owner cookie bundles) go
-        onto the fresh context before the first navigation,
-        so a gate cleared by identity stays cleared and a
-        signed-in page renders as the owner's view.
-        Best-effort in the file's idiom — a context that
-        refuses the records leaves the session working
-        logged-out, and the profile keeps them for the
-        next start."""
+        """Start this session signed-in: the unified estate's
+        records go onto the fresh context before the first
+        navigation, so a gate cleared by identity stays
+        cleared and a signed-in page renders as the owner's
+        view.  Best-effort in the file's idiom — a context
+        that refuses the records leaves the session working
+        logged-out, and the estate keeps them for the next
+        start.  When the estate cannot be opened, the legacy
+        sidecar is read instead (read-only — it is never
+        written again)."""
         if self._profile_dir is None \
                 or self._context is None:
             return
-        payload = playwright_cookie_payload(
-            read_imported_cookie_records(self._profile_dir))
+        records: list[dict[str, Any]] | None = None
+        estate = self._estate()
+        if estate is not None:
+            with suppress(Exception):
+                records = estate.cookies_for()
+        if records is None:
+            records = read_imported_cookie_records(
+                self._profile_dir)
+        payload = playwright_cookie_payload(records)
         if payload:
             with suppress(Exception):
                 self._context.add_cookies(payload)
+
+    def _harvest_cookies(self) -> None:
+        """Land this session's cookies in the unified estate,
+        so a login earned during a capture counts for the
+        next drive, replay and download — the half of the
+        unification the old profile never had (its Chromium
+        DB was a dead end no other surface could read).
+        Best-effort: a harvest failure never fails the
+        capture that just ran."""
+        if self._profile_dir is None \
+                or self._context is None:
+            return
+        estate = self._estate()
+        if estate is None:
+            return
+        getter = getattr(self._context, "cookies", None)
+        if not callable(getter):
+            return
+        with suppress(Exception):
+            from ...storage.cookie_estate import SOURCE_WEBNAV
+
+            cookies = getter()
+            if cookies:
+                estate.upsert(cookies, source=SOURCE_WEBNAV)
 
     def _teardown(self) -> None:
         if self._profile_dir is not None \
@@ -1549,6 +1616,7 @@ class NavSession:
         self._release_slot()
 
     def __exit__(self, *exc: Any) -> None:
+        self._harvest_cookies()
         self._teardown()
 
     @property

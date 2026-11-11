@@ -320,10 +320,22 @@ def _cookie_state(domain=".tiktok.com", name="sessionid", value="abc"):
 class BrowserCookieExportTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
+        # The media export reads the unified cookie estate
+        # (Navigator A6) — point the home at tmp so the export
+        # sees only this test's cookies, never the shared home.
+        self._old_nm_home = os.environ.get("NM_HOME")
+        os.environ["NM_HOME"] = os.path.join(self.tmp, "home")
+        self.addCleanup(self._restore_nm_home)
         self.sessions = Path(self.tmp) / "sessions"
         self.sessions.mkdir(parents=True)
         (self.sessions / "default.json").write_text(json.dumps(
             [_cookie_state(), _cookie_state(".youtube.com", "SID", "y")]))
+
+    def _restore_nm_home(self):
+        if self._old_nm_home is None:
+            os.environ.pop("NM_HOME", None)
+        else:
+            os.environ["NM_HOME"] = self._old_nm_home
 
     def test_export_merges_sessions_to_netscape(self):
         from nomorals.media.cookies import export_browser_cookies

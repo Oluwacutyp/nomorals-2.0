@@ -1003,7 +1003,8 @@ class RuntimeReachMixin:
                 approve=approver, slots=params, goal=goal,
                 on_progress=job.note_progress,
                 cancel_requested=job.cancel_requested,
-                store=self._browser_recipe_store())
+                store=self._browser_recipe_store(),
+                cookie_estate=service.cookie_estate)
             _attach_approval_receipt(result, approver)
             return result
 
@@ -1075,7 +1076,10 @@ class RuntimeReachMixin:
         driver is thread-bound to whichever thread opened the first
         tab, and a background job runs on its own thread. Each job
         also gets its own session name (``browser-run-<job>``), so two
-        jobs never share one tab's cookie space.
+        jobs never share one tab's cookie space. (Navigator A6: the
+        COOKIES are shared through the unified estate — domain-scoped,
+        so a login earned by one job is live for another job on the
+        same site, and never leaks to another site.)
         """
         from ...browser.service import BrowserService
 

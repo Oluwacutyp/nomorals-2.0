@@ -132,11 +132,29 @@ def find_cookies_file() -> str | None:
 # Devon's own browser profile: a login she earned there (TikTok,
 # Instagram, …) should serve downloads too, instead of the downloader
 # asking the owner to "sign in once in the browser" and then never
-# using the result.  These helpers export the persisted jars to the
-# Netscape format yt-dlp reads.
+# using the result.  Since Navigator A6 those jars are one view of
+# the unified cookie estate: these helpers export the ESTATE to the
+# Netscape format yt-dlp reads.  The jar merge below survives only
+# as the fallback for when the estate cannot be opened.
 
 #: Export filename, written inside the sessions dir it came from.
 BROWSER_COOKIES_NAME = "browser-cookies.txt"
+
+
+def _estate(session_dir: str = "") -> Any | None:
+    """The unified cookie estate, or None when the home DB
+    cannot be opened.  Never raises — the jar merge is the
+    fallback, never a crash."""
+    try:
+        from ..storage.cookie_estate import home_estate
+
+        roots: dict[str, Any] = {}
+        if session_dir:
+            roots["sessions_dir"] = str(
+                Path(session_dir).expanduser())
+        return home_estate(legacy_roots=roots or None)
+    except Exception:  # noqa: BLE001 - estate is an enhancement
+        return None
 
 
 def _data_home() -> Path:
@@ -193,15 +211,31 @@ def _netscape_line(entry: dict[str, Any]) -> str | None:
                       name, value])
 
 
-def export_browser_cookies(session_dir: str = "") -> str | None:
-    """Merge all persisted browser-session cookies into one Netscape
-    cookies file for yt-dlp.  Returns its path, or None when the
-    browser profile holds no cookies.
+def export_browser_cookies(session_dir: str = "",
+                           *, cookie_estate: Any = None
+                           ) -> str | None:
+    """Merge the unified cookie estate into one Netscape
+    cookies file for yt-dlp.  Returns its path, or None when
+    the estate holds no cookies.
 
-    The export is cached: it is rewritten only when a session file is
-    newer than the export.  Never raises.
+    The export is a DERIVATION, regenerated from the estate
+    on every call (a delete must never leave a stale cookie
+    in the file) — never a source, never read back.  When
+    the estate cannot be opened, the legacy jar merge below
+    runs instead (the pre-A6 behaviour).  Never raises.
     """
     try:
+        estate = cookie_estate if cookie_estate is not None \
+            else _estate(session_dir)
+        if estate is not None:
+            try:
+                directories = browser_session_dirs(session_dir)
+                if directories and estate.cookies_for():
+                    export = directories[0] / BROWSER_COOKIES_NAME
+                    estate.export_netscape(export)
+                    return str(export)
+            except Exception:  # noqa: BLE001 - fall through
+                pass  # to the jar merge below
         for directory in browser_session_dirs(session_dir):
             try:
                 files = sorted(directory.glob("*.json"))

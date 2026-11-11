@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -45,6 +46,34 @@ PAST = NOW - 30 * 86400
 #: source never carries a credential-shaped literal.
 SECRET = "leak" + "-probe-" + "value" + "-9911"
 SECRET2 = "second" + "-probe-" + "value" + "-7731"
+
+#: One isolated estate per test (never the home estate):
+#: the store is estate-backed since Navigator A6, so a test
+#: that reads the home estate would see every other test's
+#: cookies.  Keyed by tmp dir (+ tag for a second estate).
+_ESTATES: dict[str, Any] = {}
+
+
+def _estate_for(tmp_path: Path, *, tag: str = "") -> Any:
+    from nomorals.storage.cookie_estate import CookieEstate
+    from nomorals.storage.db import open_database
+
+    key = str(tmp_path) + tag
+    if key not in _ESTATES:
+        db, _, _ = open_database(
+            str(tmp_path / f"estate{tag or ''}.sqlite3"))
+        estate = CookieEstate(db, legacy_roots={
+            "profile_dir": tmp_path,
+            "service_data_dir": tmp_path / "service",
+            "sessions_dir": tmp_path / "sessions",
+            "solved_dir": tmp_path / "solved"})
+        estate.ensure()
+        _ESTATES[key] = estate
+    return _ESTATES[key]
+
+
+def _store(profile: Path, tmp_path: Path) -> ImportedCookiesStore:
+    return ImportedCookiesStore(profile, estate=_estate_for(tmp_path))
 
 
 def netscape(rows: list[str]) -> bytes:
@@ -168,7 +197,7 @@ def _rec(name, value, domain, path="/", expires=FUTURE):
 
 
 def test_merge_overwrites_same_key_preserves_rest(tmp_path):
-    store = ImportedCookiesStore(tmp_path)
+    store = _store(tmp_path, tmp_path)
     added, replaced = store.merge([
         _rec("SID", SECRET, ".google.com"),
         _rec("auth", SECRET2, ".x.com"),
@@ -180,14 +209,14 @@ def test_merge_overwrites_same_key_preserves_rest(tmp_path):
     ])
     assert (added, replaced) == (1, 1)
     held = {(r["domain"], r["name"], r["path"]): r["value"]
-            for r in ImportedCookiesStore(tmp_path).load()}
+            for r in _store(tmp_path, tmp_path).load()}
     assert held[(".google.com", "SID", "/")] == SECRET2
     assert held[(".x.com", "auth", "/")] == SECRET2
     assert held[(".google.com", "SID", "/a")] == SECRET
 
 
 def test_status_groups_counts_and_nearest_expiry(tmp_path):
-    store = ImportedCookiesStore(tmp_path)
+    store = _store(tmp_path, tmp_path)
     store.merge([
         _rec("A", SECRET, ".google.com", expires=FUTURE),
         _rec("B", SECRET2, ".google.com", expires=FUTURE + 5000),
@@ -198,11 +227,15 @@ def test_status_groups_counts_and_nearest_expiry(tmp_path):
     assert stats[".google.com"].nearest_expiry == FUTURE
     assert stats[".x.com"].count == 1
     assert stats[".x.com"].nearest_expiry is None
-    assert ImportedCookiesStore(tmp_path / "nope").status() == []
+    # The profile dir no longer scopes the store: status is
+    # estate-wide, so a fresh dir sees the same cookies.
+    assert {s.domain for s in _store(
+        tmp_path / "nope", tmp_path).status()} == {
+        ".google.com", ".x.com"}
 
 
 def test_clear_one_domain_and_all(tmp_path):
-    store = ImportedCookiesStore(tmp_path)
+    store = _store(tmp_path, tmp_path)
     store.merge([
         _rec("A", SECRET, ".google.com"),
         _rec("B", SECRET2, "mail.google.com"),
@@ -234,11 +267,13 @@ class FakeContext:
 
 
 def test_session_start_applies_imported_cookies(tmp_path):
-    ImportedCookiesStore(tmp_path).merge([
+    _store(tmp_path, tmp_path).merge([
         _rec("SID", SECRET, ".google.com"),
         _rec("auth", SECRET2, ".x.com", expires=-1),
     ])
-    session = webnav.NavSession(profile_dir=tmp_path)
+    session = webnav.NavSession(
+        profile_dir=tmp_path,
+        cookie_estate=_estate_for(tmp_path))
     fake = FakeContext()
     session._context = fake          # the seam, driven directly
     session._apply_imported_cookies()
@@ -285,7 +320,8 @@ def test_import_end_to_end(tmp_path, caplog):
     try:
         with caplog.at_level(logging.INFO):
             outcome = import_bundle_file(
-                src, profile, journal_path=journal, now=NOW)
+                src, profile, journal_path=journal, now=NOW,
+                estate=_estate_for(tmp_path))
     finally:
         webnav._unregister_live_context(profile, fake)
     assert outcome.ok
@@ -296,7 +332,7 @@ def test_import_end_to_end(tmp_path, caplog):
     assert outcome.file_deleted and not src.exists()
     assert len(fake.added) == 1
     # the store holds them for the next session start
-    held = ImportedCookiesStore(profile).load()
+    held = _store(profile, tmp_path).load()
     assert {r["name"] for r in held} == {"SID", "auth"}
     # ── the secrecy law ──
     reply = render_import_reply(outcome)
@@ -311,7 +347,8 @@ def test_import_end_to_end(tmp_path, caplog):
     for surface in (reply, journal_text, caplog.text):
         assert SECRET not in surface
         assert SECRET2 not in surface
-    status_text = render_status(profile)
+    status_text = render_status(profile,
+                                estate=_estate_for(tmp_path))
     assert "google.com" in status_text
     assert SECRET not in status_text
 
@@ -322,7 +359,8 @@ def test_import_malformed_deletes_file_and_journals(tmp_path):
     src = _bundle_file(
         tmp_path, f"junk junk {SECRET} junk".encode())
     outcome = import_bundle_file(
-        src, profile, journal_path=journal, now=NOW)
+        src, profile, journal_path=journal, now=NOW,
+        estate=_estate_for(tmp_path))
     assert not outcome.ok
     assert SECRET not in outcome.error
     assert outcome.file_deleted and not src.exists()
@@ -330,7 +368,7 @@ def test_import_malformed_deletes_file_and_journals(tmp_path):
     assert row_out["ok"] is False
     assert row_out["error_kind"] == "format"
     assert SECRET not in json.dumps(row_out)
-    assert ImportedCookiesStore(profile).load() == []
+    assert _store(profile, tmp_path).load() == []
 
 
 def test_import_missing_file_is_a_sentence(tmp_path):
@@ -346,7 +384,8 @@ def test_import_all_expired_imports_nothing(tmp_path):
     src = _bundle_file(tmp_path, netscape([
         row(".google.com", "OLD", SECRET, expires=int(PAST)),
     ]))
-    outcome = import_bundle_file(src, profile, now=NOW)
+    outcome = import_bundle_file(src, profile, now=NOW,
+                                 estate=_estate_for(tmp_path))
     assert outcome.ok and outcome.count == 0
     assert outcome.dropped_expired == 1
     reply = render_import_reply(outcome)
@@ -357,27 +396,31 @@ def test_import_all_expired_imports_nothing(tmp_path):
 def test_clear_replies_and_journal_carry_no_values(tmp_path):
     profile = tmp_path / "browser_profile"
     journal = tmp_path / "personal" / "journal.jsonl"
-    ImportedCookiesStore(profile).merge([
+    _store(profile, tmp_path).merge([
         _rec("SID", SECRET, ".google.com"),
         _rec("auth", SECRET2, ".x.com"),
     ])
     text = clear_imported(profile, "google.com",
-                          journal_path=journal)
+                          journal_path=journal,
+                          estate=_estate_for(tmp_path))
     assert "removed 1 imported cookie" in text
     assert SECRET not in text and SECRET2 not in text
     assert [r["domain"] for r in
-            ImportedCookiesStore(profile).load()] == [".x.com"]
+            _store(profile, tmp_path).load()] == [".x.com"]
     row_out = json.loads(journal.read_text(encoding="utf-8"))
     assert row_out["kind"] == "cookies_clear"
     assert row_out["removed"] == 1
-    text = clear_imported(profile, "all", journal_path=journal)
+    text = clear_imported(profile, "all", journal_path=journal,
+                          estate=_estate_for(tmp_path))
     assert "removed all 1 imported cookie" in text
-    text = clear_imported(profile, "all")
+    text = clear_imported(profile, "all",
+                          estate=_estate_for(tmp_path))
     assert "no imported cookies" in text
 
 
 def test_status_empty_profile_is_honest(tmp_path):
-    text = render_status(tmp_path / "fresh")
+    text = render_status(tmp_path / "fresh",
+                          estate=_estate_for(tmp_path, tag="-fresh"))
     assert "no imported cookies" in text
 
 
