@@ -234,6 +234,7 @@ class EasyGamesTests(unittest.TestCase):
         engine, chat = self.engine, "telegram:1"
         engine.start(chat, "numberguess", ADA)
         engine.move(chat, "50", ADA)  # pick my secret
+        shown: list[str] = []
         for _ in range(40):
             live = engine.live(chat)
             if live is None or live.status != "active":
@@ -241,9 +242,14 @@ class EasyGamesTests(unittest.TestCase):
             cur = live.current
             if cur is None or cur.is_ai:
                 raise AssertionError(f"stuck on {cur}")
-            engine.move(chat, str((live.state["a_lo"] +
-                                   live.state["a_hi"]) // 2), cur)
-        self.assertTrue(any("🏁" in m for m in self.sent))
+            shown.extend(engine.move(chat, str((live.state["a_lo"] +
+                                                live.state["a_hi"]) // 2),
+                                     cur))
+        # delivery contract (audit r12): a synchronous move RETURNS its
+        # messages and the caller sends them; the send callback carries
+        # engine-initiated traffic (timeouts, idle closes). The finish
+        # card must reach the player on one path or the other.
+        self.assertTrue(any("🏁" in m for m in shown + self.sent))
 
     def test_two_truths_three_rounds(self):
         def responder(r, state):
@@ -269,6 +275,7 @@ class EasyGamesTests(unittest.TestCase):
     def test_spy_bluffs_with_the_associate(self):
         engine, chat = self.engine, "telegram:1"
         engine.start(chat, "spy", ADA)
+        shown: list[str] = []
         for _ in range(12):
             live = engine.live(chat)
             if live is None or live.status != "active":
@@ -276,8 +283,11 @@ class EasyGamesTests(unittest.TestCase):
             cur = live.current
             if cur is None or cur.is_ai:
                 raise AssertionError(f"stuck on {cur}")
-            engine.move(chat, live.state["current_assoc"], cur)
-        self.assertTrue(any("🏁" in m for m in self.sent))
+            shown.extend(engine.move(chat, live.state["current_assoc"],
+                                     cur))
+        # finish card: move() return path and/or the send callback
+        # (see test_numberguess_bisection_ends_cleanly)
+        self.assertTrue(any("🏁" in m for m in shown + self.sent))
 
     def test_auction_three_lots(self):
         def responder(r, state):
@@ -451,6 +461,7 @@ class MediumGamesTests(unittest.TestCase):
             return "skip"
 
         done = False
+        shown: list[str] = []
         for _ in range(80):
             live = engine.live(chat)
             if live is None or live.status != "active":
@@ -459,10 +470,12 @@ class MediumGamesTests(unittest.TestCase):
             cur = live.current
             if cur is None or cur.is_ai:
                 raise AssertionError(f"stuck on {cur}")
-            engine.move(chat, responder(live, live.state), cur)
+            shown.extend(engine.move(chat, responder(live, live.state),
+                                     cur))
         self.assertTrue(done, "mafia did not finish")
-        self.assertTrue(any("🏁" in m for m in self.sent))
-        self.assertTrue(any("🏁" in m for m in self.sent))
+        # finish card: move() return path and/or the send callback
+        # (see test_numberguess_bisection_ends_cleanly)
+        self.assertTrue(any("🏁" in m for m in shown + self.sent))
 
     def test_political_three_elections(self):
         engine = self.engine
