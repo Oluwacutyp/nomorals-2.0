@@ -8,9 +8,12 @@ with a ranked assembly under a real token budget:
   rank 2 — 1-hop import neighbors (ast-parsed, stdlib only)
   rank 3 — symbol-search hits for task keywords (injected callable)
 
-Files fill top-down until the token budget is spent; everything cut is
-recorded in the metadata (included_files, dropped_files, budget_tokens,
-used_tokens) so the accounting is visible, never silent.
+Within a rank, files whose stem names a task keyword fill first (the
+task's own words are the cheapest relevance signal there is); the rest
+keep discovery order.  Files fill top-down until the token budget is
+spent; everything cut is recorded in the metadata (included_files,
+dropped_files, budget_tokens, used_tokens) so the accounting is
+visible, never silent.
 """
 
 from __future__ import annotations
@@ -34,7 +37,11 @@ CHARS_PER_TOKEN = 4
 DEFAULT_BUDGET_TOKENS = 12000
 
 _SKIP_DIRS = {".git", "__pycache__", "node_modules", ".venv", ".hg",
-              ".svn", "__snapshots__"}
+              ".svn", "__snapshots__",
+              # build-output trees duplicate every module under
+              # build/lib/... — candidates from them are debris, never
+              # the repo's real source (Phase D ranking fix).
+              "build", "dist"}
 
 _STOPWORDS = frozenset(
     "the a an and or of to in on for with is are was were be been by "
@@ -243,8 +250,8 @@ def rank_context(
     for t in targets:
         for f in import_neighbors(root_p, t):
             add(f, 2)
+    keywords = extract_keywords(task)
     if symbol_search is not None:
-        keywords = extract_keywords(task)
         hits_by_kw: dict[str, list[str]] = {}
         search_many = getattr(symbol_search, "search_many", None)
         if search_many is not None and len(keywords) > 1:
@@ -265,9 +272,19 @@ def rank_context(
                 if (root_p / h).is_file():
                     add(h, 3)
 
-    # stable order: rank first, then discovery order
+    # stable order: rank first; within a rank, files whose stem names a
+    # task keyword fill before keyword-free files (relevance within the
+    # class — alphabetical/discovery order alone starved the very files
+    # the task names once a target's neighborhood grew); then discovery.
+    keyword_set = {k.lower() for k in keywords}
+
+    def _keyword_hits(rel: str) -> int:
+        stem_words = re.split(r"[_\-.]+", Path(rel).stem.lower())
+        return len(keyword_set.intersection(stem_words))
+
     discovery = {r: i for i, r in enumerate(ordered)}
-    ordered.sort(key=lambda r: (ranked[r], discovery[r]))
+    ordered.sort(key=lambda r: (ranked[r], -_keyword_hits(r),
+                                discovery[r]))
 
     ctx = RankedContext(budget_tokens=budget_tokens)
     ctx.structure = "\n".join(sorted(

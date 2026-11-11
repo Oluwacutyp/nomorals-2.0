@@ -60,6 +60,16 @@ def _json_block(payload):
     return "```json\n" + json.dumps(payload) + "\n```"
 
 
+def _brief_block(objective):
+    """Pass #67: every CodingAgent run opens with ONE BriefAgent model
+    call structuring the ask (chat_json over the same router), so each
+    script below opens with a brief-shaped reply carrying an objective
+    — exactly what a real model brief returns."""
+    return _json_block({"objective": objective, "constraints": [],
+                        "success_criteria": [], "steps": [],
+                        "persona": "", "tool_hints": []})
+
+
 class StubDB:
     """coding_log + skills tables; dict rows like the real Database."""
 
@@ -261,10 +271,16 @@ class RealRepoRankingTests(unittest.TestCase):
     its edit loop, and the registry near the top."""
 
     def test_real_repo_coding_task_ranks_core_modules(self):
+        # Budget note: at this suite's birth (dfd0aef2) coding.py was
+        # 42k chars and registry.py 18k — the whole candidate set cost
+        # ~35k tokens against this budget.  The repo has since grown
+        # ~5x (coding.py 184k chars, registry.py 97k; the full set now
+        # costs ~225k tokens), so the budget is sized to keep these
+        # assertions testing the RANKING, not the repo's growth curve.
         ctx = rank_context(
             REPO, "fix the coding agent edit loop",
             targets=["nomorals/agents/coding.py"],
-            budget_tokens=150000,
+            budget_tokens=400000,
             symbol_search=lambda q, lim: ["nomorals/tools/registry.py"])
         self.assertEqual(ctx.included_files[0],
                          "nomorals/agents/coding.py")
@@ -431,6 +447,8 @@ class BackgroundLoopIntegrationTests(unittest.TestCase):
             "    time.sleep(3)\n"
             "    assert add(2, 3) == 5\n")
         router = ScriptedRouter([
+            # Pass #67: the brief call heads every run (see _brief_block).
+            _brief_block("Fix add() to add"),
             _json_block({"files": [
                 {"path": "calc.py", "why": "fix add", "new_file": False}]}),
             _json_block({"edits": [

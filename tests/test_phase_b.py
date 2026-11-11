@@ -78,6 +78,16 @@ def _json_block(payload):
     return "```json\n" + json.dumps(payload) + "\n```"
 
 
+def _brief_block(objective):
+    """Pass #67: every CodingAgent run opens with ONE BriefAgent model
+    call structuring the ask (chat_json over the same router), so each
+    script below opens with a brief-shaped reply carrying an objective
+    — exactly what a real model brief returns."""
+    return _json_block({"objective": objective, "constraints": [],
+                        "success_criteria": [], "steps": [],
+                        "persona": "", "tool_hints": []})
+
+
 def _hash(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
@@ -128,8 +138,10 @@ class ThreeFileFixTests(unittest.TestCase):
         # carries a clean reviewer verdict after each edit response and
         # one for the gate.  (Pre-#63 the reviewer was gated off under
         # reasoning_mode="off", so the script needed none.)
+        # Pass #67: the brief call heads every run (see _brief_block).
         verdict = _json_block({"passed": True, "flaws": []})
         router = ScriptedRouter([
+            _brief_block("Fix the offset and total bugs"),
             _json_block({"files": [
                 {"path": "a.py", "why": "OFFSET is wrong", "new_file": False},
                 {"path": "b.py", "why": "total formula is wrong", "new_file": False},
@@ -203,8 +215,10 @@ class LintGateTests(unittest.TestCase):
         # Pass #63: reviewer verdicts interleave the edit responses —
         # the diff reviewer now runs on every applied diff and at the
         # gate even with reasoning_mode="off" (see ThreeFileFixTests).
+        # Pass #67: the brief call heads every run (see _brief_block).
         verdict = _json_block({"passed": True, "flaws": []})
         router = ScriptedRouter([
+            _brief_block("Fix the value"),
             _json_block({"files": [
                 {"path": "fix.py", "why": "wrong value", "new_file": False}]}),
             # round 1: fixes the value but leaves the unused import
@@ -260,6 +274,8 @@ class ReviewEveryDiffTests(unittest.TestCase):
         # never go green and the loop exhausts its budget failing loudly.
         self.fx.write("main.py", "print('ready')\n")
         router = ScriptedRouter([
+            # Pass #67: the brief call heads every run (see _brief_block).
+            _brief_block("Bump both constants"),
             _json_block({"files": [
                 {"path": "one.py", "why": "bump A", "new_file": False},
                 {"path": "two.py", "why": "bump B", "new_file": False},

@@ -53,6 +53,16 @@ def _json_block(payload):
     return "```json\n" + json.dumps(payload) + "\n```"
 
 
+def _brief_block(objective):
+    """Pass #67: every CodingAgent run opens with ONE BriefAgent model
+    call structuring the ask (chat_json over the same router), so each
+    script below opens with a brief-shaped reply carrying an objective
+    — exactly what a real model brief returns."""
+    return _json_block({"objective": objective, "constraints": [],
+                        "success_criteria": [], "steps": [],
+                        "persona": "", "tool_hints": []})
+
+
 class StubDB:
     """coding_log + skills tables; dict rows like the real Database."""
 
@@ -138,6 +148,8 @@ class RoleAllowlistTests(unittest.TestCase):
         self.fx = FixtureRepo()
         self.addCleanup(self.fx.cleanup)
         router = ScriptedRouter([
+            # Pass #67: the brief call heads every run (see _brief_block).
+            _brief_block("Create the main module"),
             _json_block({"files": []}),  # plan -> default single file
             "```python\nX = 1\nprint(X)\n```\n",  # new-file draft (must produce output for accept gate)
         ])
@@ -244,6 +256,8 @@ class CriticGateTests(unittest.TestCase):
         self.addCleanup(self.fx.cleanup)
         self.fx.write("calc.py", "def add(a, b):\n    return a - b\n")
         router = ScriptedRouter([
+            # Pass #67: the brief call heads every run (see _brief_block).
+            _brief_block("Fix add() to add"),
             _json_block({"files": [
                 {"path": "calc.py", "why": "fix add", "new_file": False}]}),
             # round 1: wrong fix (still not addition) — tests are absent
@@ -297,6 +311,8 @@ class CriticBoundTests(unittest.TestCase):
         self.addCleanup(self.fx.cleanup)
         self.fx.write("f.py", "V = 1\n")
         router = ScriptedRouter([
+            # Pass #67: the brief call heads every run (see _brief_block).
+            _brief_block("Bump V"),
             _json_block({"files": [
                 {"path": "f.py", "why": "bump", "new_file": False}]}),
             _json_block({"edits": [
@@ -322,8 +338,9 @@ class CriticBoundTests(unittest.TestCase):
         self.assertFalse(result.review["passed"])
         self.assertEqual(result.review["rounds"], 2)
         self.assertGreaterEqual(len(result.review["objections"]), 2)
-        # plan + round-1 edits + round-2 (rework) edits: no third rework
-        self.assertEqual(self.router.calls, 3)
+        # brief (pass #67) + plan + round-1 edits + round-2 (rework)
+        # edits: no third rework
+        self.assertEqual(self.router.calls, 4)
 
 
 class CodeReviewCLITests(unittest.TestCase):
