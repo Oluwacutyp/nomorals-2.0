@@ -34,6 +34,9 @@ P5 settles the stores that live BESIDE the central database:
   its registry entry demands: no split disposition, fts_available
   honest on the seam, search served by a document scan whose result
   set matches the FTS5 rung's.
+  The residue Batch 2 slice-5 ports (marketing-briefs,
+  marketing-competitor, marketing-guardrails, commerce-cart-recovery)
+  follow the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -230,7 +233,10 @@ class TestSidecarRegistry:
             # residue Batch 1, A16 catch-up:
             "travel-itinerary",
             # residue Batch 2, slice 6:
-            "matching-batches", "os-timeline", "planning-route"}
+            "matching-batches", "os-timeline", "planning-route",
+            # residue Batch 2, slice 5:
+            "marketing-briefs", "marketing-competitor",
+            "marketing-guardrails", "commerce-cart-recovery"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -3639,3 +3645,329 @@ class TestPlanningRoutePort:
         again = CostModel(path, store=rung.store)
         assert rung.store.count("planning-route__route_actuals") == 1
         assert again.stats()["recorded_trips"] == 2
+
+
+class TestMarketingBriefsPort:
+    """marketing/briefs.py — BriefStore port (residue Batch 2,
+    slice 5): briefs + drafts behind the unchanged never-raises
+    API; the PK-less score_feedback log rides put_raw with
+    caller-shaped <draft_id>:<ordinal> ids."""
+
+    @staticmethod
+    def _search(topic):
+        return [{"title": "solar power guide",
+                 "snippet": "solar panels save money on bills",
+                 "text": "how do solar panels work in practice",
+                 "url": "https://example.invalid/solar"}]
+
+    def _scenario(self, store_) -> dict:
+        brief = store_.build_brief("solar panels",
+                                   search_fn=self._search)
+        assert brief is not None
+        draft = store_.draft_from_brief(brief)
+        assert draft is not None and draft.score > 0
+        got = store_.get_brief(brief.brief_id)
+        latest = store_.latest_brief("solar")
+        got_draft = store_.get_draft(draft.draft_id)
+        found = store_.find_by_content(draft.content)
+        for _ in range(5):
+            assert store_.record_outcome(
+                draft.draft_id, {"engagement_score": 60}) is True
+        return {
+            "brief_topic": got.topic if got else None,
+            "latest_topic": latest.topic if latest else None,
+            "draft_ok": got_draft is not None
+                        and got_draft.brief_id == brief.brief_id,
+            "found": len(found),
+            "calibration": store_._calibration() is not None,
+            "stale": len(store_.stale_drafts(days=30)),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.marketing.briefs import BriefStore
+
+        store_ = BriefStore(str(tmp_path / "briefs.db"),
+                            store=rung.store)
+        assert self._scenario(store_) == {
+            "brief_topic": "solar panels",
+            "latest_topic": "solar panels",
+            "draft_ok": True,
+            "found": 1,
+            "calibration": True,
+            "stale": 0,
+        }
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.marketing.briefs import BriefStore
+
+        path = str(tmp_path / "briefs.db")
+        native = BriefStore(path)
+        self._scenario(native)
+
+        seam = BriefStore(path, store=rung.store)
+        assert rung.store.count("marketing-briefs__briefs") == 1
+        assert rung.store.count("marketing-briefs__drafts") == 1
+        assert rung.store.count("marketing-briefs__score_feedback") == 5
+        doc = rung.store.find("marketing-briefs__briefs")[0]
+        assert doc["topic"] == "solar panels"
+        assert "term_bands" in doc
+        draft_id = rung.store.find("marketing-briefs__drafts")[0]["_id"]
+        fb_ids = sorted(d["_id"] for d in
+                        rung.store.find("marketing-briefs__score_feedback"))
+        assert fb_ids == [f"{draft_id}:{n}" for n in range(1, 6)]
+        # a second construction adopts — never re-imports — and the
+        # per-draft feedback ordinal continues on the seam
+        again = BriefStore(path, store=rung.store)
+        assert rung.store.count("marketing-briefs__score_feedback") == 5
+        assert again.record_outcome(
+            draft_id, {"engagement_score": 42}) is True
+        assert rung.store.count("marketing-briefs__score_feedback") == 6
+        assert rung.store.get("marketing-briefs__score_feedback",
+                              f"{draft_id}:6") is not None
+        assert seam.get_brief(doc["_id"]) is not None
+
+
+class TestMarketingCompetitorPort:
+    """marketing/competitor.py — CompetitorStore port (residue
+    Batch 2, slice 5): tracked's composite (account, platform)
+    key lives only in the joined document id; snapshots are
+    append documents behind the unchanged never-raises API."""
+
+    @staticmethod
+    def _posts(n, likes):
+        from nomorals.marketing.competitor import Post
+
+        return [Post(platform="instagram", account="rival",
+                     post_id=f"p{i}", text="new video drop",
+                     format="video", likes=likes, comments=2,
+                     shares=1)
+                for i in range(n)]
+
+    def _scenario(self, store_) -> dict:
+        assert store_.track("Rival", "instagram") is True
+        assert store_.track("rival", "instagram") is True  # dup ignored
+        first = store_.analyze(
+            "rival", "instagram",
+            scrape_fn=lambda a, p: self._posts(2, 10))
+        second = store_.analyze(
+            "rival", "instagram",
+            scrape_fn=lambda a, p: self._posts(4, 40))
+        return {
+            "tracked": [(t["account"], t["platform"])
+                        for t in store_.list_tracked()],
+            "posts": (first.post_count, second.post_count),
+            "digest": "competitor digest" in store_.digest(
+                "rival", "instagram"),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.marketing.competitor import CompetitorStore
+
+        store_ = CompetitorStore(str(tmp_path / "competitor.db"),
+                                 store=rung.store)
+        assert self._scenario(store_) == {
+            "tracked": [("rival", "instagram")],
+            "posts": (2, 4),
+            "digest": True,
+        }
+        assert store_.untrack("rival") is True
+        assert store_.list_tracked() == []
+        assert store_.untrack("rival") is False
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.marketing.competitor import CompetitorStore
+
+        path = str(tmp_path / "competitor.db")
+        native = CompetitorStore(path)
+        self._scenario(native)
+
+        seam = CompetitorStore(path, store=rung.store)
+        assert rung.store.count("marketing-competitor__tracked") == 1
+        assert rung.store.count("marketing-competitor__snapshots") == 2
+        # the composite key lives only in the joined document id
+        doc = rung.store.get("marketing-competitor__tracked",
+                             "rival\x1finstagram")
+        assert doc is not None
+        assert "account" not in doc and "platform" not in doc
+        assert seam.list_tracked()[0]["account"] == "rival"
+        # a second construction adopts — never re-imports
+        again = CompetitorStore(path, store=rung.store)
+        assert rung.store.count("marketing-competitor__tracked") == 1
+        assert again.untrack("rival", "instagram") is True
+        assert rung.store.count("marketing-competitor__tracked") == 0
+
+
+class TestMarketingGuardrailsPort:
+    """marketing/guardrails.py — GuardrailStore port (residue
+    Batch 2, slice 5): rules behind the unchanged never-raises
+    API; the AUTOINCREMENT audit log rides put_raw with ids from
+    the port's atomic counter, seeded from the imported maximum,
+    and PK-less metric_history rides <adset_id>:<counter> ids."""
+
+    def _scenario(self, store_) -> dict:
+        from nomorals.marketing.guardrails import (
+            FiredAction,
+            fatigue_signal,
+            parse_rule,
+            record_metrics,
+        )
+
+        rule = parse_rule(
+            "pause if cpa > ₦50000 for 3 days on adset123 via meta")
+        assert rule is not None
+        rule = store_.add_rule(rule)
+        assert rule is not None and rule.rule_id
+        got = store_.get_rule(rule.rule_id)
+        for ts, detail in ((1000.0, "first"), (2000.0, "second")):
+            assert store_.log_audit(FiredAction(
+                rule_id=rule.rule_id, adset_id="adset123",
+                action="pause", detail=detail, ok=True,
+                ts=ts)) is True
+        for ctr, freq in ((10.0, 1.0), (10.0, 1.0),
+                          (5.0, 3.0), (5.0, 3.0)):
+            assert record_metrics(
+                store_, "adset123",
+                {"ctr": ctr, "frequency": freq}) is True
+        sig = fatigue_signal(store_, "adset123")
+        return {
+            "metric": got.metric, "threshold": got.threshold,
+            "days": got.days, "action": got.action,
+            "audit": [(a["detail"], a["ts"])
+                      for a in store_.audit_log(10)],
+            "listed": len(store_.list_rules()),
+            "fatigued": sig["fatigued"],
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.marketing.guardrails import GuardrailStore
+
+        store_ = GuardrailStore(str(tmp_path / "guardrails.db"),
+                                store=rung.store)
+        assert self._scenario(store_) == {
+            "metric": "cpa", "threshold": 50000 * 100,
+            "days": 3, "action": "pause",
+            "audit": [("second", 2000.0), ("first", 1000.0)],
+            "listed": 1,
+            "fatigued": True,
+        }
+
+    def test_seam_shape_and_counter_continuity(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.marketing.guardrails import FiredAction, GuardrailStore, record_metrics
+
+        path = str(tmp_path / "guardrails.db")
+        native = GuardrailStore(path)
+        self._scenario(native)
+
+        seam = GuardrailStore(path, store=rung.store)
+        assert rung.store.count("marketing-guardrails__rules") == 1
+        audit_ids = sorted(d["_id"] for d in
+                           rung.store.find("marketing-guardrails__audit"))
+        assert audit_ids == ["1", "2"]
+        assert rung.store.count(
+            "marketing-guardrails__metric_history") == 4
+        # the audit counter continues past the imported maximum
+        rules = seam.list_rules()
+        assert seam.log_audit(FiredAction(
+            rule_id=rules[0].rule_id, adset_id="adset123",
+            action="pause", detail="third", ok=True,
+            ts=3000.0)) is True
+        assert rung.store.get("marketing-guardrails__audit",
+                              "3") is not None
+        assert record_metrics(seam, "adset123",
+                              {"ctr": 4.0, "frequency": 3.5}) is True
+        assert rung.store.count(
+            "marketing-guardrails__metric_history") == 5
+        # a second construction adopts — never re-imports
+        again = GuardrailStore(path, store=rung.store)
+        assert rung.store.count("marketing-guardrails__audit") == 3
+        assert len(again.audit_log(10)) == 3
+
+
+class TestCommerceCartRecoveryPort:
+    """commerce/cart_recovery.py — CartRecovery port (residue
+    Batch 2, slice 5): carts + recoveries behind the unchanged
+    API; cart_steps are child rows on put_raw under
+    <cart_id>:<step> ids, and the SQL rollups re-express as
+    finds plus Python rollups."""
+
+    @staticmethod
+    def _engine(path, clock, store=None):
+        from nomorals.commerce.cart_recovery import CartRecovery
+
+        return CartRecovery(str(path),
+                            sender=lambda phone, text: True,
+                            now=lambda: clock[0], store=store)
+
+    def _scenario(self, engine, clock) -> dict:
+        cart = engine.cart_abandoned(
+            "c1", "+2348000000000", [{"name": "shoes", "qty": 1}],
+            50000, True, store="shop")
+        clock[0] += 73 * 3600  # past every step's delay
+        sent = engine.run_due_steps()
+        assert engine.mark_recovered("c1",
+                                     recovered_kobo=50000) is True
+        stats = engine.stats()
+        return {
+            "cart": cart.cart_id,
+            "sent": sent,
+            "recovered": stats["recovered_7d"],
+            "kobo": stats["recovered_kobo_7d"],
+            "sent_msgs": stats["messages_sent"],
+            "via": stats["recovered_via_step_7d"],
+            "weekly": "recovered" in engine.weekly_report(),
+            "funnel": "recovered" in engine.funnel_report(),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        clock = [1_700_000_000.0]
+        engine = self._engine(tmp_path / "carts.db", clock,
+                              store=rung.store)
+        assert self._scenario(engine, clock) == {
+            "cart": "c1",
+            "sent": 3,
+            "recovered": 1,
+            "kobo": 50000,
+            "sent_msgs": 3,
+            "via": {"3": 1},
+            "weekly": True,
+            "funnel": True,
+        }
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        path = tmp_path / "carts.db"
+        clock = [1_700_000_000.0]
+        native = self._engine(path, clock)
+        native.cart_abandoned(
+            "c1", "+2348000000000", [{"name": "shoes", "qty": 1}],
+            50000, True, store="shop")
+
+        seam = self._engine(path, clock, store=rung.store)
+        assert rung.store.count("commerce-cart-recovery__carts") == 1
+        assert rung.store.count(
+            "commerce-cart-recovery__recoveries") == 0
+        step_ids = sorted(
+            d["_id"] for d in rung.store.find(
+                "commerce-cart-recovery__cart_steps"))
+        assert step_ids == ["c1:1", "c1:2", "c1:3"]
+        # the imported sequence runs on the seam
+        clock[0] += 73 * 3600
+        assert seam.run_due_steps() == 3
+        assert seam.mark_recovered("c1",
+                                   recovered_kobo=50000) is True
+        assert rung.store.count(
+            "commerce-cart-recovery__recoveries") == 1
+        doc = rung.store.get("commerce-cart-recovery__recoveries",
+                             "c1")
+        assert doc is not None and doc["recovered_via_step"] == 3
+        # a second construction adopts — never re-imports
+        again = self._engine(path, clock, store=rung.store)
+        assert rung.store.count("commerce-cart-recovery__carts") == 1
+        assert again.stats()["recovered_7d"] == 1

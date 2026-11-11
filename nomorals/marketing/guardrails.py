@@ -137,38 +137,126 @@ def _now() -> float:
 
 # ── store ─────────────────────────────────────────────────────────────────
 
-class GuardrailStore:
-    """SQLite store: rules, metric streaks, audit log. Never raises."""
+#: The store's own DDL, in the rules table's FINAL shape (the
+#: columns the in-file ALTERs add are included) — the native path
+#: executes it and the seam mapping is derived from it, so the two
+#: can never drift. The native path still runs its ALTER block for
+#: files created before those columns existed.
+_RULES_AUDIT_DDL = (
+    "CREATE TABLE IF NOT EXISTS rules ("
+    " rule_id TEXT PRIMARY KEY, label TEXT, adset_id TEXT,"
+    " platform TEXT, metric TEXT, op TEXT, threshold REAL,"
+    " threshold_raw TEXT, days INTEGER, action TEXT,"
+    " action_param REAL, action_text TEXT, max_delta_kobo INTEGER,"
+    " cooldown_s INTEGER, streak INTEGER, last_fired_at REAL,"
+    " active INTEGER, created_at REAL,"
+    " conditions_json TEXT DEFAULT '[]', cond_op TEXT DEFAULT 'and',"
+    " min_spend_kobo INTEGER DEFAULT 0);"
+    "CREATE TABLE IF NOT EXISTS audit ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL,"
+    " rule_id TEXT, adset_id TEXT, action TEXT,"
+    " detail TEXT, ok INTEGER, reason TEXT, override INTEGER)")
+_METRIC_DDL = (
+    "CREATE TABLE IF NOT EXISTS metric_history ("
+    "adset_id TEXT, ts REAL, metrics_json TEXT)")
+_METRIC_INDEX_DDL = (
+    "CREATE INDEX IF NOT EXISTS idx_mh_adset_ts ON "
+    "metric_history(adset_id, ts)")
+_DDL = (_RULES_AUDIT_DDL + "; " + _METRIC_DDL + "; "
+        + _METRIC_INDEX_DDL)
 
-    def __init__(self, db_path: str = "") -> None:
+
+class GuardrailStore:
+    """SQLite store: rules, metric streaks, audit log. Never raises.
+
+    Native path: a SQLite file at ``db_path``. When a document store
+    is resolved (Mongo program P5 — an explicit ``store`` or the boot
+    ambient), the same API runs over the seam instead (registered in
+    storage.sidecars as marketing-guardrails): rules are documents
+    in ``marketing-guardrails__rules``; the AUTOINCREMENT audit log
+    rides ``put_raw`` with ids from the port's atomic counter,
+    seeded from the imported maximum; PK-less metric_history rides
+    ``put_raw`` with ``<adset_id>:<counter>`` ids. The file's
+    existing rows are imported once, through the same mapping, at
+    first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
+        self._imported_max_audit = 0
+        self._imported_metric_rows = 0
         try:
             path = _expand(db_path or _DEFAULT_DB)
             import os
             if path != ":memory:":
                 os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+            port = sidecar_port(
+                "marketing-guardrails", _DDL, ("rules",),
+                None if path == ":memory:" else path, store=store)
+            if port is not None:
+                self._import_into(port)
+                self._port = port
+                return
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
             self._init()
         except Exception as e:
             record_failure("guardrails.GuardrailStore.__init__", e)
             self._db = None
+            self._port = None
+
+    def _import_into(self, port: Any) -> None:
+        """The one-time lazy file import (see SidecarPort): rules go
+        through their RowTable; audit rows keep their file ids via
+        put_raw and the id counter is seeded from the imported
+        maximum; metric_history rows get ``<adset_id>:<n>`` ids in
+        rowid order and their counter is seeded from the row count,
+        so seam-allocated ids continue both sequences."""
+
+        def write_rules(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["rules"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        def write_audit(rows: list[dict[str, Any]]) -> int:
+            for row in rows:
+                aid = int(row["id"])
+                self._imported_max_audit = max(
+                    self._imported_max_audit, aid)
+                port.put_raw("audit", str(aid), dict(row))
+            return len(rows)
+
+        def write_metrics(rows: list[dict[str, Any]]) -> int:
+            for row in rows:
+                self._imported_metric_rows += 1
+                port.put_raw(
+                    "metric_history",
+                    f"{row['adset_id']}:{self._imported_metric_rows}",
+                    dict(row))
+            return len(rows)
+
+        def seed_counters(_counts: dict[str, int]) -> None:
+            doc = port.store.get(port.meta_collection, "counters") or {}
+            merged = dict(doc)
+            if int(doc.get("audit") or 0) < self._imported_max_audit:
+                merged["audit"] = self._imported_max_audit
+            if int(doc.get("metric_history") or 0) \
+                    < self._imported_metric_rows:
+                merged["metric_history"] = self._imported_metric_rows
+            if merged != doc:
+                port.store.put(port.meta_collection, "counters", merged)
+
+        port.ensure_imported(
+            {"rules": write_rules, "audit": write_audit,
+             "metric_history": write_metrics},
+            after_import=seed_counters)
 
     def _init(self) -> None:
         assert self._db is not None
-        self._db.executescript("""
-            CREATE TABLE IF NOT EXISTS rules (
-                rule_id TEXT PRIMARY KEY, label TEXT, adset_id TEXT,
-                platform TEXT, metric TEXT, op TEXT, threshold REAL,
-                threshold_raw TEXT, days INTEGER, action TEXT,
-                action_param REAL, action_text TEXT, max_delta_kobo INTEGER,
-                cooldown_s INTEGER, streak INTEGER, last_fired_at REAL,
-                active INTEGER, created_at REAL);
-            CREATE TABLE IF NOT EXISTS audit (
-                id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL,
-                rule_id TEXT, adset_id TEXT, action TEXT,
-                detail TEXT, ok INTEGER, reason TEXT, override INTEGER);
-        """)
+        self._db.executescript(_RULES_AUDIT_DDL)
         self._db.commit()
         # Migrations for tables created before newer columns existed.
         try:
@@ -186,12 +274,8 @@ class GuardrailStore:
             record_failure("guardrails.GuardrailStore._init", e)
         # Metric snapshots for creative-fatigue detection.
         try:
-            self._db.execute(
-                "CREATE TABLE IF NOT EXISTS metric_history ("
-                "adset_id TEXT, ts REAL, metrics_json TEXT)")
-            self._db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_mh_adset_ts ON "
-                "metric_history(adset_id, ts)")
+            self._db.execute(_METRIC_DDL)
+            self._db.execute(_METRIC_INDEX_DDL)
             self._db.commit()
         except Exception as e:
             record_failure("guardrails.GuardrailStore._init", e)
@@ -199,11 +283,33 @@ class GuardrailStore:
     # — rules —
     def add_rule(self, rule: Rule) -> Rule | None:
         try:
-            if self._db is None or not rule.adset_id or rule.action not in _ACTIONS:
+            port = getattr(self, "_port", None)
+            if (self._db is None and port is None) \
+                    or not rule.adset_id or rule.action not in _ACTIONS:
                 return None
             import json as _json
             rule.rule_id = rule.rule_id or ("gr_" + uuid.uuid4().hex[:8])
             rule.created_at = rule.created_at or _now()
+            if port is not None:
+                port.tables["rules"].put({
+                    "rule_id": rule.rule_id, "label": rule.label,
+                    "adset_id": rule.adset_id, "platform": rule.platform,
+                    "metric": rule.metric, "op": rule.op,
+                    "threshold": rule.threshold,
+                    "threshold_raw": rule.threshold_raw,
+                    "days": rule.days, "action": rule.action,
+                    "action_param": rule.action_param,
+                    "action_text": rule.action_text,
+                    "max_delta_kobo": rule.max_delta_kobo,
+                    "cooldown_s": rule.cooldown_s, "streak": rule.streak,
+                    "last_fired_at": rule.last_fired_at,
+                    "active": 1 if rule.active else 0,
+                    "created_at": rule.created_at,
+                    "conditions_json": _json.dumps(
+                        list(rule.conditions or [])),
+                    "cond_op": rule.cond_op or "and",
+                    "min_spend_kobo": int(rule.min_spend_kobo or 0)})
+                return rule
             cols = {r["name"] for r in
                     self._db.execute("PRAGMA table_info(rules)")}
             has_new = {"conditions_json", "cond_op", "min_spend_kobo"} <= cols
@@ -233,6 +339,9 @@ class GuardrailStore:
 
     def get_rule(self, rule_id: str) -> Rule | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["rules"].get(rule_id)
+                return _row_to_rule(row) if row else None
             if self._db is None:
                 return None
             row = self._db.execute("SELECT * FROM rules WHERE rule_id = ?",
@@ -244,6 +353,12 @@ class GuardrailStore:
 
     def list_rules(self, active_only: bool = False) -> list[Rule]:
         try:
+            if self._port is not None:
+                table = self._port.tables["rules"]
+                rows = table.find({"active": 1}) if active_only \
+                    else table.find()
+                rows.sort(key=lambda r: r["created_at"] or 0)
+                return [_row_to_rule(r) for r in rows]
             if self._db is None:
                 return []
             q = "SELECT * FROM rules" + (" WHERE active = 1" if active_only else "") + " ORDER BY created_at"
@@ -254,6 +369,9 @@ class GuardrailStore:
 
     def set_active(self, rule_id: str, active: bool) -> bool:
         try:
+            if self._port is not None:
+                return self._port.tables["rules"].update(
+                    rule_id, {"active": 1 if active else 0})
             if self._db is None:
                 return False
             cur = self._db.execute("UPDATE rules SET active = ? WHERE rule_id = ?",
@@ -266,6 +384,8 @@ class GuardrailStore:
 
     def remove_rule(self, rule_id: str) -> bool:
         try:
+            if self._port is not None:
+                return self._port.tables["rules"].delete(rule_id)
             if self._db is None:
                 return False
             cur = self._db.execute("DELETE FROM rules WHERE rule_id = ?", (rule_id,))
@@ -277,6 +397,10 @@ class GuardrailStore:
 
     def update_streak(self, rule_id: str, streak: int) -> bool:
         try:
+            if self._port is not None:
+                self._port.tables["rules"].update(
+                    rule_id, {"streak": streak})
+                return True
             if self._db is None:
                 return False
             self._db.execute("UPDATE rules SET streak = ? WHERE rule_id = ?",
@@ -289,6 +413,11 @@ class GuardrailStore:
 
     def mark_fired(self, rule_id: str, label: str) -> bool:
         try:
+            if self._port is not None:
+                self._port.tables["rules"].update(
+                    rule_id, {"last_fired_at": _now(), "streak": 0,
+                              "label": label})
+                return True
             if self._db is None:
                 return False
             self._db.execute(
@@ -303,6 +432,15 @@ class GuardrailStore:
     # — audit —
     def log_audit(self, fired: FiredAction) -> bool:
         try:
+            if self._port is not None:
+                aid = self._port.next_id("audit")
+                self._port.put_raw("audit", str(aid), {
+                    "id": aid, "ts": fired.ts or _now(),
+                    "rule_id": fired.rule_id, "adset_id": fired.adset_id,
+                    "action": fired.action, "detail": fired.detail,
+                    "ok": 1 if fired.ok else 0, "reason": fired.reason,
+                    "override": 1 if fired.override else 0})
+                return True
             if self._db is None:
                 return False
             self._db.execute(
@@ -319,6 +457,13 @@ class GuardrailStore:
 
     def audit_log(self, limit: int = 20) -> list[dict[str, Any]]:
         try:
+            if self._port is not None:
+                docs = self._port.find_raw("audit")
+                docs.sort(key=lambda d: (d.get("ts") or 0,
+                                         d.get("id") or 0),
+                          reverse=True)
+                return [{k: v for k, v in d.items() if k != "_id"}
+                        for d in docs[:limit]]
             if self._db is None:
                 return []
             rows = self._db.execute(
@@ -326,6 +471,60 @@ class GuardrailStore:
             return [dict(r) for r in rows]
         except Exception as e:
             record_failure("guardrails.GuardrailStore.audit_log", e)
+            return []
+
+    # — metric history (the seam the module-level fatigue readers use) —
+    def add_metric_snapshot(self, adset_id: str,
+                            metrics_json: str) -> bool:
+        """Append one metric snapshot + prune rows older than 60
+        days, on whichever rung serves. Never raises."""
+        try:
+            if self._port is not None:
+                seq = self._port.next_id("metric_history")
+                self._port.put_raw(
+                    "metric_history", f"{adset_id}:{seq}", {
+                        "adset_id": adset_id, "ts": _now(),
+                        "metrics_json": metrics_json})
+                cutoff = _now() - 60 * 86400.0
+                collection = f"{self._port.store_name}__metric_history"
+                for doc in self._port.find_raw("metric_history"):
+                    if (doc.get("ts") or 0) < cutoff:
+                        self._port.store.delete(collection, doc["_id"])
+                return True
+            if self._db is None:
+                return False
+            self._db.execute(
+                "INSERT INTO metric_history (adset_id, ts, metrics_json)"
+                " VALUES (?, ?, ?)",
+                (adset_id, _now(), metrics_json))
+            self._db.execute("DELETE FROM metric_history WHERE ts < ?",
+                             (_now() - 60 * 86400.0,))
+            self._db.commit()
+            return True
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.add_metric_snapshot", e)
+            return False
+
+    def metric_history_json(self, adset_id: str,
+                            since: float) -> list[str]:
+        """One adset's metrics_json snapshots at/after ``since``,
+        oldest first, on whichever rung serves. Never raises."""
+        try:
+            if self._port is not None:
+                docs = [d for d in self._port.find_raw(
+                    "metric_history", {"adset_id": adset_id})
+                    if (d.get("ts") or 0) >= since]
+                docs.sort(key=lambda d: d.get("ts") or 0)
+                return [d["metrics_json"] for d in docs]
+            if self._db is None:
+                return []
+            rows = self._db.execute(
+                "SELECT metrics_json FROM metric_history WHERE adset_id = ?"
+                " AND ts >= ? ORDER BY ts",
+                (adset_id, since)).fetchall()
+            return [r["metrics_json"] for r in rows]
+        except Exception as e:
+            record_failure("guardrails.GuardrailStore.metric_history_json", e)
             return []
 
 
@@ -591,20 +790,15 @@ def record_metrics(store: GuardrailStore, adset_id: str,
                    metrics: dict | None) -> bool:
     """Snapshot an ad set's metrics for fatigue detection. Never raises."""
     try:
-        if store is None or getattr(store, "_db", None) is None:
+        if store is None or (getattr(store, "_db", None) is None
+                             and getattr(store, "_port", None) is None):
             return False
         adset_id = (adset_id or "").strip()
         if not adset_id:
             return False
         import json as _json
-        store._db.execute(
-            "INSERT INTO metric_history (adset_id, ts, metrics_json)"
-            " VALUES (?, ?, ?)",
-            (adset_id, _now(), _json.dumps(dict(metrics or {}))))
-        store._db.execute("DELETE FROM metric_history WHERE ts < ?",
-                          (_now() - 60 * 86400.0,))
-        store._db.commit()
-        return True
+        return store.add_metric_snapshot(
+            adset_id, _json.dumps(dict(metrics or {})))
     except Exception as e:
         record_failure("guardrails.record_metrics", e)
         return False
@@ -617,18 +811,17 @@ def fatigue_signal(store: GuardrailStore, adset_id: str,
     out: dict = {"fatigued": False, "ctr_drop_pct": 0.0,
                  "freq_trend": "flat", "reason": "not enough history"}
     try:
-        if store is None or getattr(store, "_db", None) is None:
+        if store is None or (getattr(store, "_db", None) is None
+                             and getattr(store, "_port", None) is None):
             return out
-        rows = store._db.execute(
-            "SELECT metrics_json FROM metric_history WHERE adset_id = ?"
-            " AND ts >= ? ORDER BY ts",
-            ((adset_id or "").strip(), _now() - max(2, int(window_days or 7)) * 86400.0)
-        ).fetchall()
+        snapshots = store.metric_history_json(
+            (adset_id or "").strip(),
+            _now() - max(2, int(window_days or 7)) * 86400.0)
         import json as _json
         pts: list[tuple[float, float]] = []
-        for r in rows:
+        for metrics_json in snapshots:
             try:
-                m = _json.loads(r["metrics_json"] or "{}")
+                m = _json.loads(metrics_json or "{}")
                 pts.append((float(m.get("ctr", 0) or 0),
                             float(m.get("frequency", 0) or 0)))
             except Exception as e:

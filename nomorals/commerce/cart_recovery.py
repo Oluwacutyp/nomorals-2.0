@@ -148,6 +148,44 @@ def default_whatsapp_sender(phone: str, text: str) -> bool:
         return False
 
 
+#: The store's own DDL, in each table's FINAL shape (the columns
+#: the in-file ALTER migrations add are included) — the native
+#: path executes it and the seam mapping is derived from it, so
+#: the two can never drift. The native path still runs its ALTER
+#: loop for files created before those columns existed.
+_DDL = (
+    "CREATE TABLE IF NOT EXISTS carts ("
+    " cart_id TEXT PRIMARY KEY,"
+    " phone TEXT NOT NULL,"
+    " items_json TEXT NOT NULL DEFAULT '[]',"
+    " total_kobo INTEGER NOT NULL DEFAULT 0,"
+    " opted_in INTEGER NOT NULL DEFAULT 0,"
+    " status TEXT NOT NULL DEFAULT 'abandoned',"
+    " store TEXT NOT NULL DEFAULT 'unknown',"
+    " customer_name TEXT NOT NULL DEFAULT '',"
+    " checkout_link TEXT NOT NULL DEFAULT '',"
+    " created_at REAL NOT NULL,"
+    " opt_in_source TEXT NOT NULL DEFAULT '',"
+    " coupon_code TEXT NOT NULL DEFAULT '',"
+    " discount_pct INTEGER NOT NULL DEFAULT 0);"
+    "CREATE TABLE IF NOT EXISTS cart_steps ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " cart_id TEXT NOT NULL,"
+    " step INTEGER NOT NULL,"
+    " run_at REAL NOT NULL,"
+    " sent_at REAL NOT NULL DEFAULT 0,"
+    " status TEXT NOT NULL DEFAULT 'pending',"
+    " attempts INTEGER NOT NULL DEFAULT 0,"
+    " incentive_code TEXT NOT NULL DEFAULT '',"
+    " UNIQUE(cart_id, step));"
+    "CREATE TABLE IF NOT EXISTS recoveries ("
+    " cart_id TEXT PRIMARY KEY,"
+    " recovered_kobo INTEGER NOT NULL,"
+    " recovered_at REAL NOT NULL,"
+    " store TEXT NOT NULL DEFAULT 'unknown',"
+    " recovered_via_step INTEGER NOT NULL DEFAULT 0)")
+
+
 class CartRecovery:
     """Abandoned-cart recovery engine.
 
@@ -166,6 +204,14 @@ class CartRecovery:
         opt_out_text: appended to marketing steps so recipients can reply
             STOP (reduces Meta spam reports). Empty string disables.
         now: injectable clock for tests.
+        store: a resolved document store (Mongo program P5) — when
+            given (or the boot ambient resolves one), carts and
+            recoveries are documents in
+            ``commerce-cart-recovery__carts`` / ``__recoveries`` and
+            cart_steps ride ``put_raw`` under caller-shaped
+            ``<cart_id>:<step>`` ids (registered in storage.sidecars
+            as commerce-cart-recovery). The file's existing rows are
+            imported once, through the same mapping, at construction.
     """
 
     def __init__(
@@ -178,6 +224,7 @@ class CartRecovery:
         coupon_fn: Callable[[Cart], str | None] | None = None,
         opt_out_text: str = "Reply STOP to opt out.",
         now: Callable[[], float] | None = None,
+        store: Any = None,
     ) -> None:
         self.db_path = db_path
         self.sender = sender or default_whatsapp_sender
@@ -186,40 +233,52 @@ class CartRecovery:
         self.coupon_fn = coupon_fn
         self.opt_out_text = opt_out_text
         self._now = now or time.time
+        self._port: Any = None
+        from ..storage.sidecars import sidecar_port
+        port = sidecar_port(
+            "commerce-cart-recovery", _DDL, ("carts", "recoveries"),
+            None if db_path == ":memory:" else db_path, store=store)
+        if port is not None:
+            self._db: sqlite3.Connection | None = None
+            self._import_into(port)
+            self._port = port
+            return
         self._db = sqlite3.connect(db_path)
         self._db.row_factory = sqlite3.Row
         self._init_schema()
 
+    def _import_into(self, port: Any) -> None:
+        """The one-time lazy file import (see SidecarPort): carts and
+        recoveries go through their RowTables; cart_steps are child
+        rows addressed by (cart_id, step), so they ride put_raw with
+        caller-shaped ``<cart_id>:<step>`` ids (the file's
+        AUTOINCREMENT id is never read and is not carried)."""
+
+        def write_carts(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["carts"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        def write_steps(rows: list[dict[str, Any]]) -> int:
+            for row in rows:
+                body = {k: v for k, v in row.items() if k != "id"}
+                port.put_raw(
+                    "cart_steps", f"{row['cart_id']}:{row['step']}", body)
+            return len(rows)
+
+        def write_recoveries(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["recoveries"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        port.ensure_imported({"carts": write_carts,
+                              "cart_steps": write_steps,
+                              "recoveries": write_recoveries})
+
     def _init_schema(self) -> None:
-        self._db.executescript("""
-            CREATE TABLE IF NOT EXISTS carts (
-                cart_id TEXT PRIMARY KEY,
-                phone TEXT NOT NULL,
-                items_json TEXT NOT NULL DEFAULT '[]',
-                total_kobo INTEGER NOT NULL DEFAULT 0,
-                opted_in INTEGER NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'abandoned',
-                store TEXT NOT NULL DEFAULT 'unknown',
-                customer_name TEXT NOT NULL DEFAULT '',
-                checkout_link TEXT NOT NULL DEFAULT '',
-                created_at REAL NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS cart_steps (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                cart_id TEXT NOT NULL,
-                step INTEGER NOT NULL,
-                run_at REAL NOT NULL,
-                sent_at REAL NOT NULL DEFAULT 0,
-                status TEXT NOT NULL DEFAULT 'pending',
-                UNIQUE(cart_id, step)
-            );
-            CREATE TABLE IF NOT EXISTS recoveries (
-                cart_id TEXT PRIMARY KEY,
-                recovered_kobo INTEGER NOT NULL,
-                recovered_at REAL NOT NULL,
-                store TEXT NOT NULL DEFAULT 'unknown'
-            );
-        """)
+        self._db.executescript(_DDL)
         # Migrate older DBs forward (new columns since the first version).
         for table, col, ddl in (
             ("carts", "opt_in_source", "TEXT NOT NULL DEFAULT ''"),
@@ -235,6 +294,95 @@ class CartRecovery:
             except sqlite3.OperationalError as exc:
                 _log.debug("cart_recovery._init_schema failed", exc_info=True)
         self._db.commit()
+
+    # ── rung helpers (native sqlite / document seam) ─────────────────
+
+    def _commit(self) -> None:
+        if self._db is not None:
+            self._db.commit()
+
+    def _cart_row(self, cart_id: str) -> dict[str, Any] | None:
+        """One cart as a plain dict, from whichever rung serves."""
+        if self._port is not None:
+            return self._port.tables["carts"].get(cart_id)
+        row = self._db.execute(
+            "SELECT * FROM carts WHERE cart_id = ?", (cart_id,)
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def _step_docs(self, cart_id: str = "") -> list[dict[str, Any]]:
+        """cart_steps rows as plain dicts (seam docs keep ``_id``)."""
+        if self._port is not None:
+            docs = self._port.find_raw("cart_steps")
+            if cart_id:
+                docs = [d for d in docs if d.get("cart_id") == cart_id]
+            return docs
+        if cart_id:
+            rows = self._db.execute(
+                "SELECT * FROM cart_steps WHERE cart_id = ?",
+                (cart_id,)).fetchall()
+        else:
+            rows = self._db.execute(
+                "SELECT * FROM cart_steps").fetchall()
+        return [dict(r) for r in rows]
+
+    def _step_row(self, cart_id: str, step: int) -> dict[str, Any] | None:
+        for doc in self._step_docs(cart_id):
+            if doc.get("step") == step:
+                return doc
+        return None
+
+    def _put_step(self, fields: dict[str, Any]) -> None:
+        """INSERT OR REPLACE one cart_steps row (full-row write)."""
+        if self._port is not None:
+            body = {"cart_id": fields["cart_id"], "step": fields["step"],
+                    "run_at": fields["run_at"],
+                    "sent_at": fields.get("sent_at", 0),
+                    "status": fields.get("status", "pending"),
+                    "attempts": fields.get("attempts", 0),
+                    "incentive_code": fields.get("incentive_code", "")}
+            self._port.put_raw(
+                "cart_steps", f"{fields['cart_id']}:{fields['step']}",
+                body)
+            return
+        self._db.execute(
+            """INSERT OR REPLACE INTO cart_steps
+               (cart_id, step, run_at, sent_at, status, attempts,
+                incentive_code)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (fields["cart_id"], fields["step"], fields["run_at"],
+             fields.get("sent_at", 0), fields.get("status", "pending"),
+             fields.get("attempts", 0), fields.get("incentive_code", "")),
+        )
+
+    def _update_step(self, cart_id: str, step: int,
+                     **fields: Any) -> None:
+        """Targeted cart_steps UPDATE by (cart_id, step)."""
+        if self._port is not None:
+            doc = self._step_row(cart_id, step)
+            if doc is None:
+                return
+            body = {k: v for k, v in doc.items()
+                    if k not in ("id", "_id")}
+            body.update(fields)
+            self._port.put_raw("cart_steps", doc["_id"], body)
+            return
+        cols = ", ".join(f"{name} = ?" for name in fields)
+        self._db.execute(
+            f"UPDATE cart_steps SET {cols} WHERE cart_id = ? AND step = ?",
+            (*fields.values(), cart_id, step),
+        )
+
+    def _update_cart(self, cart_id: str, **fields: Any) -> None:
+        """Targeted carts UPDATE by cart_id."""
+        if self._port is not None:
+            self._port.tables["carts"].update(cart_id, fields)
+            return
+        cols = ", ".join(f"{name} = ?" for name in fields)
+        self._db.execute(
+            f"UPDATE carts SET {cols} WHERE cart_id = ?",
+            (*fields.values(), cart_id),
+        )
 
     # ── intake ──────────────────────────────────────────────────────────
 
@@ -274,29 +422,51 @@ class CartRecovery:
                 discount_pct=int(discount_pct or 0),
                 created_at=now,
             )
-            self._db.execute(
-                """INSERT OR REPLACE INTO carts
-                   (cart_id, phone, items_json, total_kobo, opted_in,
-                    opt_in_source, status, store, customer_name,
-                    checkout_link, coupon_code, discount_pct, created_at)
-                   VALUES (?, ?, ?, ?, ?, ?, 'abandoned', ?, ?, ?, ?, ?, ?)""",
-                (cart_id, phone, json.dumps(items), cart.total_kobo,
-                 1 if cart.opted_in else 0, cart.opt_in_source,
-                 store, customer_name, checkout_link,
-                 cart.coupon_code, cart.discount_pct, now),
-            )
+            if self._port is not None:
+                self._port.tables["carts"].put({
+                    "cart_id": cart_id, "phone": phone,
+                    "items_json": json.dumps(items),
+                    "total_kobo": cart.total_kobo,
+                    "opted_in": 1 if cart.opted_in else 0,
+                    "opt_in_source": cart.opt_in_source,
+                    "status": "abandoned", "store": store,
+                    "customer_name": customer_name,
+                    "checkout_link": checkout_link,
+                    "coupon_code": cart.coupon_code,
+                    "discount_pct": cart.discount_pct,
+                    "created_at": now})
+            else:
+                self._db.execute(
+                    """INSERT OR REPLACE INTO carts
+                       (cart_id, phone, items_json, total_kobo, opted_in,
+                        opt_in_source, status, store, customer_name,
+                        checkout_link, coupon_code, discount_pct, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, 'abandoned', ?, ?, ?, ?, ?, ?)""",
+                    (cart_id, phone, json.dumps(items), cart.total_kobo,
+                     1 if cart.opted_in else 0, cart.opt_in_source,
+                     store, customer_name, checkout_link,
+                     cart.coupon_code, cart.discount_pct, now),
+                )
             if cart.opted_in:
                 incentive = self._reserve_incentive(cart)
                 last_step_no = max(n for n, _d, _t in self.steps)
                 for step_no, delay, _template in self.steps:
                     run_at = now + delay
-                    self._db.execute(
-                        """INSERT OR REPLACE INTO cart_steps
-                           (cart_id, step, run_at, status, incentive_code)
-                           VALUES (?, ?, ?, 'pending', ?)""",
-                        (cart_id, step_no, run_at,
-                         incentive if step_no == last_step_no else ""),
-                    )
+                    if self._port is not None:
+                        self._put_step({
+                            "cart_id": cart_id, "step": step_no,
+                            "run_at": run_at, "status": "pending",
+                            "incentive_code":
+                                incentive if step_no == last_step_no
+                                else ""})
+                    else:
+                        self._db.execute(
+                            """INSERT OR REPLACE INTO cart_steps
+                               (cart_id, step, run_at, status, incentive_code)
+                               VALUES (?, ?, ?, 'pending', ?)""",
+                            (cart_id, step_no, run_at,
+                             incentive if step_no == last_step_no else ""),
+                        )
                     if self.schedule_fn is not None:
                         try:
                             self.schedule_fn(
@@ -306,7 +476,7 @@ class CartRecovery:
                             )
                         except Exception:  # noqa: BLE001 — scheduling is best-effort
                             _log.debug("schedule_fn failed", exc_info=True)
-            self._db.commit()
+            self._commit()
             return cart
         except Exception:  # noqa: BLE001 — intake never raises
             _log.debug("cart_abandoned failed", exc_info=True)
@@ -360,9 +530,7 @@ class CartRecovery:
         Failed sends retry once after a backoff (never raise).
         """
         try:
-            row = self._db.execute(
-                "SELECT * FROM carts WHERE cart_id = ?", (cart_id,)
-            ).fetchone()
+            row = self._cart_row(cart_id)
             if row is None or row["status"] != "abandoned" or not row["opted_in"]:
                 self._cancel_step(cart_id, step)
                 return False
@@ -371,11 +539,7 @@ class CartRecovery:
             )
             if template_key is None:
                 return False
-            step_row = self._db.execute(
-                """SELECT status, attempts, incentive_code FROM cart_steps
-                   WHERE cart_id = ? AND step = ?""",
-                (cart_id, step),
-            ).fetchone()
+            step_row = self._step_row(cart_id, step)
             attempts = int(step_row["attempts"] or 0) if step_row else 0
             incentive = (step_row["incentive_code"] or "") if step_row else ""
             cart = self._row_to_cart(row)
@@ -389,32 +553,20 @@ class CartRecovery:
                 ok = False
             now = self._now()
             if ok:
-                self._db.execute(
-                    """UPDATE cart_steps
-                       SET sent_at = ?, status = 'sent', attempts = ?
-                       WHERE cart_id = ? AND step = ?""",
-                    (now, attempts + 1, cart_id, step),
-                )
+                self._update_step(cart_id, step, sent_at=now,
+                                  status="sent", attempts=attempts + 1)
             else:
                 attempts += 1
                 if attempts < MAX_RETRIES:
                     # Retry once after a backoff — a flapping bridge
                     # shouldn't cost the whole sequence.
-                    self._db.execute(
-                        """UPDATE cart_steps
-                           SET status = 'failed', attempts = ?,
-                               run_at = ?
-                           WHERE cart_id = ? AND step = ?""",
-                        (attempts, now + RETRY_BACKOFF_S, cart_id, step),
-                    )
+                    self._update_step(cart_id, step, status="failed",
+                                      attempts=attempts,
+                                      run_at=now + RETRY_BACKOFF_S)
                 else:
-                    self._db.execute(
-                        """UPDATE cart_steps
-                           SET status = 'failed', attempts = ?
-                           WHERE cart_id = ? AND step = ?""",
-                        (attempts, cart_id, step),
-                    )
-            self._db.commit()
+                    self._update_step(cart_id, step, status="failed",
+                                      attempts=attempts)
+            self._commit()
             return ok
         except Exception:  # noqa: BLE001 — steps never raise
             _log.debug("run_step failed", exc_info=True)
@@ -427,12 +579,18 @@ class CartRecovery:
         """
         try:
             now = self._now()
-            rows = self._db.execute(
-                """SELECT cart_id, step FROM cart_steps
-                   WHERE status IN ('pending', 'failed')
-                     AND attempts < ? AND run_at <= ?""",
-                (MAX_RETRIES, now),
-            ).fetchall()
+            if self._port is not None:
+                rows = [d for d in self._step_docs()
+                        if d["status"] in ("pending", "failed")
+                        and (d["attempts"] or 0) < MAX_RETRIES
+                        and d["run_at"] <= now]
+            else:
+                rows = self._db.execute(
+                    """SELECT cart_id, step FROM cart_steps
+                       WHERE status IN ('pending', 'failed')
+                         AND attempts < ? AND run_at <= ?""",
+                    (MAX_RETRIES, now),
+                ).fetchall()
             sent = 0
             for row in rows:
                 if self.run_step(row["cart_id"], row["step"]):
@@ -451,14 +609,26 @@ class CartRecovery:
         sent before recovery (0 when recovery happened with no message).
         """
         try:
-            row = self._db.execute(
-                "SELECT * FROM carts WHERE cart_id = ?", (cart_id,)
-            ).fetchone()
+            row = self._cart_row(cart_id)
             if row is None:
                 return False
             now = self._now()
             amount = int(recovered_kobo) if recovered_kobo is not None \
                 else int(row["total_kobo"] or 0)
+            if self._port is not None:
+                sent_steps = [d["step"] for d in self._step_docs(cart_id)
+                              if d["status"] == "sent"]
+                via = max(sent_steps) if sent_steps else 0
+                self._update_cart(cart_id, status="recovered")
+                for doc in self._step_docs(cart_id):
+                    if doc["status"] in ("pending", "failed"):
+                        self._update_step(cart_id, doc["step"],
+                                          status="cancelled")
+                self._port.tables["recoveries"].put({
+                    "cart_id": cart_id, "recovered_kobo": amount,
+                    "recovered_at": now, "store": row["store"],
+                    "recovered_via_step": int(via or 0)})
+                return True
             via = self._db.execute(
                 """SELECT COALESCE(MAX(step), 0) AS m FROM cart_steps
                    WHERE cart_id = ? AND status = 'sent'""",
@@ -489,24 +659,25 @@ class CartRecovery:
     def mark_expired(self, cart_id: str) -> bool:
         """Age a dead cart out of the funnel (never recovered, sequence done)."""
         try:
-            row = self._db.execute(
-                "SELECT status FROM carts WHERE cart_id = ?", (cart_id,)
-            ).fetchone()
+            row = self._cart_row(cart_id)
             if row is None or row["status"] != "abandoned":
                 return False
-            open_steps = self._db.execute(
-                """SELECT COUNT(*) AS n FROM cart_steps
-                   WHERE cart_id = ? AND status IN ('pending', 'failed')
-                     AND attempts < ?""",
-                (cart_id, MAX_RETRIES),
-            ).fetchone()["n"]
+            if self._port is not None:
+                open_steps = sum(
+                    1 for d in self._step_docs(cart_id)
+                    if d["status"] in ("pending", "failed")
+                    and (d["attempts"] or 0) < MAX_RETRIES)
+            else:
+                open_steps = self._db.execute(
+                    """SELECT COUNT(*) AS n FROM cart_steps
+                       WHERE cart_id = ? AND status IN ('pending', 'failed')
+                         AND attempts < ?""",
+                    (cart_id, MAX_RETRIES),
+                ).fetchone()["n"]
             if open_steps:
                 return False  # sequence still has life
-            self._db.execute(
-                "UPDATE carts SET status = 'expired' WHERE cart_id = ?",
-                (cart_id,),
-            )
-            self._db.commit()
+            self._update_cart(cart_id, status="expired")
+            self._commit()
             return True
         except Exception:  # noqa: BLE001
             _log.debug("mark_expired failed", exc_info=True)
@@ -516,11 +687,16 @@ class CartRecovery:
         """Expire abandoned carts whose whole sequence finished long ago."""
         try:
             cutoff = self._now() - grace_days * 86400
-            rows = self._db.execute(
-                """SELECT cart_id FROM carts
-                   WHERE status = 'abandoned' AND created_at < ?""",
-                (cutoff,),
-            ).fetchall()
+            if self._port is not None:
+                rows = [r for r in self._port.tables["carts"].find()
+                        if r["status"] == "abandoned"
+                        and r["created_at"] < cutoff]
+            else:
+                rows = self._db.execute(
+                    """SELECT cart_id FROM carts
+                       WHERE status = 'abandoned' AND created_at < ?""",
+                    (cutoff,),
+                ).fetchall()
             expired = sum(1 for r in rows
                           if self.mark_expired(r["cart_id"]))
             return expired
@@ -534,12 +710,18 @@ class CartRecovery:
         """White-label revenue report: 'Devon recovered ₦X for you.'"""
         try:
             since = self._now() - 7 * 86400
-            row = self._db.execute(
-                """SELECT COUNT(*) AS n, COALESCE(SUM(recovered_kobo), 0) AS total
-                   FROM recoveries WHERE recovered_at >= ?""",
-                (since,),
-            ).fetchone()
-            n, total = int(row["n"] or 0), int(row["total"] or 0)
+            if self._port is not None:
+                recs = [r for r in self._port.tables["recoveries"].find()
+                        if r["recovered_at"] >= since]
+                n = len(recs)
+                total = sum(int(r["recovered_kobo"] or 0) for r in recs)
+            else:
+                row = self._db.execute(
+                    """SELECT COUNT(*) AS n, COALESCE(SUM(recovered_kobo), 0) AS total
+                       FROM recoveries WHERE recovered_at >= ?""",
+                    (since,),
+                ).fetchone()
+                n, total = int(row["n"] or 0), int(row["total"] or 0)
             if n == 0:
                 return "No carts recovered this week yet — the sequence is watching. 👀"
             return (
@@ -554,20 +736,30 @@ class CartRecovery:
         """Funnel: abandoned → recovered | expired, with rate vs benchmark."""
         try:
             since = self._now() - days * 86400
-            counts = dict(self._db.execute(
-                """SELECT status, COUNT(*) AS n FROM carts
-                   WHERE created_at >= ? GROUP BY status""",
-                (since,),
-            ).fetchall() or [])
+            if self._port is not None:
+                counts: dict[str, int] = {}
+                for r in self._port.tables["carts"].find():
+                    if r["created_at"] >= since:
+                        counts[r["status"]] = counts.get(r["status"], 0) + 1
+                total = sum(
+                    int(r["recovered_kobo"] or 0)
+                    for r in self._port.tables["recoveries"].find()
+                    if r["recovered_at"] >= since)
+            else:
+                counts = dict(self._db.execute(
+                    """SELECT status, COUNT(*) AS n FROM carts
+                       WHERE created_at >= ? GROUP BY status""",
+                    (since,),
+                ).fetchall() or [])
+                rec = self._db.execute(
+                    """SELECT COALESCE(SUM(recovered_kobo), 0) AS t
+                       FROM recoveries WHERE recovered_at >= ?""",
+                    (since,),
+                ).fetchone()
+                total = int(rec["t"] or 0)
             abandoned = sum(int(v or 0) for v in counts.values())
             recovered = int(counts.get("recovered") or 0)
             rate = (100.0 * recovered / abandoned) if abandoned else 0.0
-            rec = self._db.execute(
-                """SELECT COALESCE(SUM(recovered_kobo), 0) AS t
-                   FROM recoveries WHERE recovered_at >= ?""",
-                (since,),
-            ).fetchone()
-            total = int(rec["t"] or 0)
             # Klaviyo benchmark: 5-15% cart recovery rate is healthy.
             verdict = ("🟢 above" if rate >= 5 else "🟡 below") + \
                 " the 5-15% industry benchmark"
@@ -585,6 +777,39 @@ class CartRecovery:
         """Raw numbers for dashboards/tools."""
         try:
             since = self._now() - 7 * 86400
+            if self._port is not None:
+                carts = sum(
+                    1 for r in self._port.tables["carts"].find()
+                    if r["created_at"] >= since)
+                recs = [r for r in self._port.tables["recoveries"].find()
+                        if r["recovered_at"] >= since]
+                rec = {"n": len(recs),
+                       "t": sum(int(r["recovered_kobo"] or 0)
+                                for r in recs)}
+                steps = self._step_docs()
+                sent = sum(1 for d in steps if d["status"] == "sent")
+                failed = sum(1 for d in steps if d["status"] == "failed")
+                expired = sum(
+                    1 for r in self._port.tables["carts"].find()
+                    if r["status"] == "expired"
+                    and r["created_at"] >= since)
+                per_step: dict[str, int] = {}
+                for r in recs:
+                    key = str(r["recovered_via_step"])
+                    per_step[key] = per_step.get(key, 0) + 1
+                recovered_n = int(rec["n"] or 0)
+                return {
+                    "abandoned_7d": int(carts or 0),
+                    "recovered_7d": recovered_n,
+                    "recovered_kobo_7d": int(rec["t"] or 0),
+                    "messages_sent": int(sent or 0),
+                    "messages_failed": int(failed or 0),
+                    "expired_7d": int(expired or 0),
+                    "recovered_via_step_7d": per_step,
+                    "revenue_per_recipient_kobo_7d": (
+                        int(rec["t"] // recovered_n) if recovered_n else 0
+                    ),
+                }
             carts = self._db.execute(
                 "SELECT COUNT(*) AS n FROM carts WHERE created_at >= ?",
                 (since,),
@@ -634,6 +859,12 @@ class CartRecovery:
 
     def _cancel_step(self, cart_id: str, step: int) -> None:
         try:
+            if self._port is not None:
+                doc = self._step_row(cart_id, step)
+                if doc is not None \
+                        and doc["status"] in ("pending", "failed"):
+                    self._update_step(cart_id, step, status="cancelled")
+                return
             self._db.execute(
                 """UPDATE cart_steps SET status = 'cancelled'
                    WHERE cart_id = ? AND step = ?

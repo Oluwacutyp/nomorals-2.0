@@ -1214,6 +1214,84 @@ _register(_S(
 ))
 
 _register(_S(
+    name="marketing-briefs", verdict="ported", kind="sqlite-file",
+    modules=("marketing/briefs.py",),
+    tables=("briefs", "drafts", "score_feedback"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 5): "
+        "BriefStore's briefs and drafts route through the seam "
+        "(marketing-briefs__briefs / __drafts) whenever a store is "
+        "resolved, behind its unchanged never-raises API; the "
+        "PK-less score_feedback log rides put_raw with "
+        "caller-shaped <draft_id>:<ordinal> ids, allocated per "
+        "draft in rowid order at import and by count at write. "
+        "The in-file term_bands ALTER stays a native-path "
+        "concern — the seam DDL carries the final shape. This "
+        "store's drafts table is unrelated to the ported "
+        "social-drafts store: separate file, separate store. "
+        "The native sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="marketing-competitor", verdict="ported", kind="sqlite-file",
+    modules=("marketing/competitor.py",),
+    tables=("tracked", "snapshots"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 5): "
+        "CompetitorStore's two tables route through the seam "
+        "(marketing-competitor__tracked / __snapshots) whenever "
+        "a store is resolved, behind its unchanged never-raises "
+        "API; tracked's composite (account, platform) key lives "
+        "only in the joined document id — reads fetch by the "
+        "joined id, never find() on the key fields — and "
+        "digest's dynamic WHERE re-expresses as find-all plus a "
+        "Python filter/sort. Snapshots are append documents per "
+        "tracked entity. The native sqlite3 path serves the "
+        "SQLite default."),
+))
+
+_register(_S(
+    name="marketing-guardrails", verdict="ported", kind="sqlite-file",
+    modules=("marketing/guardrails.py",),
+    tables=("rules", "audit", "metric_history"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 5): "
+        "GuardrailStore's rules route through the seam "
+        "(marketing-guardrails__rules) whenever a store is "
+        "resolved, behind its unchanged never-raises API; the "
+        "AUTOINCREMENT audit log rides put_raw with ids from "
+        "the port's atomic counter, seeded from the imported "
+        "maximum, and PK-less metric_history rides put_raw "
+        "with <adset_id>:<counter> ids seeded from the imported "
+        "row count. The module-level record_metrics / "
+        "fatigue_signal readers route through the store on both "
+        "rungs — no fossil reads of the native file. The "
+        "in-file rules ALTERs stay native-path concerns — the "
+        "seam DDL carries the final 21-column shape. The "
+        "native sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="commerce-cart-recovery", verdict="ported", kind="sqlite-file",
+    modules=("commerce/cart_recovery.py",),
+    tables=("carts", "cart_steps", "recoveries"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 5): "
+        "CartRecovery's carts and recoveries route through the "
+        "seam (commerce-cart-recovery__carts / __recoveries) "
+        "whenever a store is resolved, behind its unchanged "
+        "API; cart_steps are child rows addressed by "
+        "(cart_id, step) — they ride put_raw with "
+        "caller-shaped <cart_id>:<step> ids and the file's "
+        "AUTOINCREMENT id (never read anywhere) is not carried. "
+        "The funnel / stats / weekly SQL rollups re-express as "
+        "finds plus Python rollups. The in-file ALTER "
+        "migrations stay native-path concerns — the seam DDL "
+        "carries the final shapes. The native sqlite3 path "
+        "serves the SQLite default."),
+))
+
+_register(_S(
     name="health-timeline", verdict="residue", kind="database-file",
     modules=("health/timeline.py",),
     anchors=(("health/timeline.py", "timeline.db"),),
@@ -1253,9 +1331,6 @@ _residue("audio-fingerprints", "audio/fingerprint.py", ("hashes", "tracks"),
          "audio fingerprint hashes per track in fingerprints.db; "
          "hash rows are lookup-keyed blobs, document-shaped but "
          "bulk-binary in character.")
-_residue("commerce-cart-recovery", "commerce/cart_recovery.py",
-         ("carts", "cart_steps", "recoveries"),
-         "abandoned-cart recovery flows and their step state.")
 _residue("health-challenges", "health/challenges.py",
          ("challenges", "challenge_members", "challenge_pbs", "squads",
           "streaks", "streak_freezes", "completions", "proofs"),
@@ -1282,15 +1357,6 @@ _residue("immune-corpus", "immune/corpus.py", (),
          "CorpusStore. Its only sqlite touch is a read-only "
          "harvest of the pinned incident journal's verified "
          "fixes.", kind="json-file")
-_residue("marketing-briefs", "marketing/briefs.py",
-         ("briefs", "drafts", "score_feedback"),
-         "marketing briefs, their drafts and score feedback.")
-_residue("marketing-competitor", "marketing/competitor.py",
-         ("tracked", "snapshots"),
-         "competitor tracking and snapshots.")
-_residue("marketing-guardrails", "marketing/guardrails.py",
-         ("rules", "audit", "metric_history"),
-         "marketing guardrail rules with their audit trail.")
 _residue("marketing-send", "marketing/send.py",
          ("send_queue", "send_log", "send_providers", "send_templates",
           "send_variants", "send_suppressions", "send_blocklist",

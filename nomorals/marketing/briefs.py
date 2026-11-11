@@ -28,6 +28,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 from .failures import record_failure
 
 _log = logging.getLogger("nomorals.marketing.briefs")
@@ -434,11 +435,41 @@ def _default_search(topic: str) -> list[dict]:
     return []
 
 
-class BriefStore:
-    """SQLite store for briefs and brief-pipeline drafts. Never raises."""
+#: The store's own DDL, in the briefs table's FINAL shape (the
+#: term_bands column included) — the native path executes it and
+#: the seam mapping is derived from it, so the two can never
+#: drift. The native path still runs its tolerate-missing-column
+#: ALTER for files created before term_bands existed.
+_DDL = (
+    "CREATE TABLE IF NOT EXISTS briefs("
+    " brief_id TEXT PRIMARY KEY, topic TEXT, keywords TEXT,"
+    " questions TEXT, angles TEXT, outline TEXT, created_at REAL,"
+    " term_bands TEXT DEFAULT '{}');"
+    "CREATE TABLE IF NOT EXISTS drafts("
+    " draft_id TEXT PRIMARY KEY, topic TEXT, content TEXT,"
+    " brief_id TEXT, platform TEXT, score REAL,"
+    " predicted_engagement REAL, scheduled_for REAL,"
+    " published_at REAL, outcome_metrics TEXT, created_at REAL);"
+    "CREATE TABLE IF NOT EXISTS score_feedback("
+    " draft_id TEXT, score REAL, outcome REAL, ts REAL)")
 
-    def __init__(self, db_path: str = "") -> None:
+
+class BriefStore:
+    """SQLite store for briefs and brief-pipeline drafts. Never raises.
+
+    Native path: a SQLite file at ``db_path``. When a document store
+    is resolved (Mongo program P5 — an explicit ``store`` or the boot
+    ambient), the same API runs over the seam instead (registered in
+    storage.sidecars as marketing-briefs): briefs and drafts are
+    documents in ``marketing-briefs__briefs`` / ``__drafts``; the
+    PK-less score_feedback log rides ``put_raw`` with caller-shaped
+    ``<draft_id>:<ordinal>`` ids. The file's existing rows are
+    imported once, through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             import os
 
@@ -446,22 +477,17 @@ class BriefStore:
                 "~/.nomorals/marketing/briefs.db")
             if path != ":memory:":
                 os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+            port = sidecar_port(
+                "marketing-briefs", _DDL, ("briefs", "drafts"),
+                None if path == ":memory:" else path, store=store)
+            if port is not None:
+                self._import_into(port)
+                self._port = port
+                return
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
-            self._db.executescript(
-                """
-                CREATE TABLE IF NOT EXISTS briefs(
-                  brief_id TEXT PRIMARY KEY, topic TEXT, keywords TEXT,
-                  questions TEXT, angles TEXT, outline TEXT, created_at REAL);
-                CREATE TABLE IF NOT EXISTS drafts(
-                  draft_id TEXT PRIMARY KEY, topic TEXT, content TEXT,
-                  brief_id TEXT, platform TEXT, score REAL,
-                  predicted_engagement REAL, scheduled_for REAL,
-                  published_at REAL, outcome_metrics TEXT, created_at REAL);
-                CREATE TABLE IF NOT EXISTS score_feedback(
-                  draft_id TEXT, score REAL, outcome REAL, ts REAL);
-                """
-            )
+            self._db.executescript(_DDL)
             # sweep migration: term frequency bands on older brief tables
             try:
                 cols = {r["name"] for r in
@@ -475,6 +501,39 @@ class BriefStore:
         except Exception as exc:  # noqa: BLE001
             record_failure("briefs.BriefStore.__init__", exc)
             self._db = None
+            self._port = None
+
+    def _import_into(self, port: Any) -> None:
+        """The one-time lazy file import (see SidecarPort): briefs and
+        drafts go through their RowTables; PK-less score_feedback rows
+        keep their per-draft order via caller-shaped
+        ``<draft_id>:<ordinal>`` ids in rowid order."""
+
+        def write_briefs(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["briefs"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        def write_drafts(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["drafts"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        def write_feedback(rows: list[dict[str, Any]]) -> int:
+            seen: dict[str, int] = {}
+            for row in rows:
+                n = seen.get(row["draft_id"], 0) + 1
+                seen[row["draft_id"]] = n
+                port.put_raw("score_feedback", f"{row['draft_id']}:{n}", {
+                    "draft_id": row["draft_id"], "score": row["score"],
+                    "outcome": row["outcome"], "ts": row["ts"]})
+            return len(rows)
+
+        port.ensure_imported({"briefs": write_briefs,
+                              "drafts": write_drafts,
+                              "score_feedback": write_feedback})
 
     # ── briefs ──
 
@@ -517,7 +576,18 @@ class BriefStore:
                 angles=angles, outline=outline, term_bands=bands,
                 created_at=time.time(),
             )
-            if self._db is not None:
+            if self._port is not None:
+                import json
+
+                self._port.tables["briefs"].put({
+                    "brief_id": brief.brief_id, "topic": brief.topic,
+                    "keywords": json.dumps(brief.keywords),
+                    "questions": json.dumps(brief.questions),
+                    "angles": json.dumps(brief.angles),
+                    "outline": json.dumps(brief.outline),
+                    "term_bands": json.dumps(bands),
+                    "created_at": brief.created_at})
+            elif self._db is not None:
                 import json
 
                 try:
@@ -575,10 +645,15 @@ class BriefStore:
 
     def get_brief(self, brief_id: str) -> ContentBrief | None:
         try:
-            if self._db is None or not brief_id:
+            if not brief_id:
                 return None
-            row = self._db.execute(
-                "SELECT * FROM briefs WHERE brief_id = ?", (brief_id,)).fetchone()
+            if self._port is not None:
+                row = self._port.tables["briefs"].get(brief_id)
+            elif self._db is None:
+                return None
+            else:
+                row = self._db.execute(
+                    "SELECT * FROM briefs WHERE brief_id = ?", (brief_id,)).fetchone()
             if not row:
                 return None
             return self._brief_from_row(row)
@@ -588,6 +663,17 @@ class BriefStore:
 
     def latest_brief(self, topic: str = "") -> ContentBrief | None:
         try:
+            if self._port is not None:
+                rows = self._port.tables["briefs"].find()
+                if topic:
+                    needle = topic.lower()
+                    rows = [r for r in rows
+                            if needle in (r["topic"] or "").lower()]
+                if not rows:
+                    return None
+                rows.sort(key=lambda r: r["created_at"] or 0,
+                          reverse=True)
+                return self._brief_from_row(rows[0])
             if self._db is None:
                 return None
             if topic:
@@ -703,10 +789,13 @@ class BriefStore:
     def _calibration(self) -> float | None:
         """Feedback-loop multiplier: predicted vs actual outcomes."""
         try:
-            if self._db is None:
+            if self._port is not None:
+                rows = self._port.find_raw("score_feedback")
+            elif self._db is None:
                 return None
-            rows = self._db.execute(
-                "SELECT score, outcome FROM score_feedback").fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT score, outcome FROM score_feedback").fetchall()
             if len(rows) < 5:
                 return None
             # ratio of actual engagement to score-implied engagement
@@ -765,6 +854,20 @@ class BriefStore:
 
     def _save_draft(self, draft: BriefDraft) -> None:
         try:
+            if self._port is not None:
+                import json
+
+                self._port.tables["drafts"].put({
+                    "draft_id": draft.draft_id, "topic": draft.topic,
+                    "content": draft.content, "brief_id": draft.brief_id,
+                    "platform": draft.platform, "score": draft.score,
+                    "predicted_engagement": draft.predicted_engagement,
+                    "scheduled_for": draft.scheduled_for,
+                    "published_at": draft.published_at,
+                    "outcome_metrics": json.dumps(
+                        draft.outcome_metrics or {}),
+                    "created_at": draft.created_at})
+                return
             if self._db is None:
                 return
             import json
@@ -782,12 +885,17 @@ class BriefStore:
 
     def get_draft(self, draft_id: str) -> BriefDraft | None:
         try:
-            if self._db is None or not draft_id:
+            if not draft_id:
                 return None
             import json
 
-            row = self._db.execute(
-                "SELECT * FROM drafts WHERE draft_id = ?", (draft_id,)).fetchone()
+            if self._port is not None:
+                row = self._port.tables["drafts"].get(draft_id)
+            elif self._db is None:
+                return None
+            else:
+                row = self._db.execute(
+                    "SELECT * FROM drafts WHERE draft_id = ?", (draft_id,)).fetchone()
             if not row:
                 return None
             return BriefDraft(
@@ -815,11 +923,17 @@ class BriefStore:
         other than exactly one match as unlinkable. Never raises.
         """
         try:
-            if self._db is None or not content:
+            if not content:
                 return []
             import json
 
-            if platform:
+            if self._port is not None:
+                rows = self._port.tables["drafts"].find(
+                    {"content": content, "platform": platform}
+                    if platform else {"content": content})
+            elif self._db is None:
+                return []
+            elif platform:
                 rows = self._db.execute(
                     "SELECT * FROM drafts WHERE content = ? AND platform = ?",
                     (content, platform)).fetchall()
@@ -938,7 +1052,17 @@ class BriefStore:
             draft.outcome_metrics = metrics
             draft.published_at = time.time()
             self._save_draft(draft)
-            if self._db is not None:
+            if self._port is not None:
+                outcome = float(metrics.get("engagement_score",
+                                            metrics.get("score", 0)) or 0)
+                ordinal = 1 + sum(
+                    1 for r in self._port.find_raw("score_feedback")
+                    if r.get("draft_id") == draft_id)
+                self._port.put_raw(
+                    "score_feedback", f"{draft_id}:{ordinal}", {
+                        "draft_id": draft_id, "score": draft.score,
+                        "outcome": outcome, "ts": time.time()})
+            elif self._db is not None:
                 outcome = float(metrics.get("engagement_score",
                                             metrics.get("score", 0)) or 0)
                 self._db.execute(
@@ -956,13 +1080,16 @@ class BriefStore:
         """Drafts going stale: unscheduled and aging, or published with poor
         outcomes. Proposes refreshes — humans approve. Never raises."""
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
             cutoff = time.time() - max(1, int(days or 30)) * 86400.0
-            rows = self._db.execute(
-                "SELECT draft_id, topic, platform, score, predicted_engagement,"
-                " scheduled_for, published_at, outcome_metrics, created_at"
-                " FROM drafts").fetchall()
+            if self._port is not None:
+                rows = self._port.tables["drafts"].find()
+            else:
+                rows = self._db.execute(
+                    "SELECT draft_id, topic, platform, score, predicted_engagement,"
+                    " scheduled_for, published_at, outcome_metrics, created_at"
+                    " FROM drafts").fetchall()
             stale: list[dict] = []
             import json
             for r in rows:
@@ -1043,6 +1170,17 @@ class BriefStore:
     def calendar(self, limit: int = 10) -> list[dict]:
         """Upcoming scheduled drafts. Never raises."""
         try:
+            if self._port is not None:
+                now = time.time()
+                rows = [r for r in self._port.tables["drafts"].find()
+                        if (r["scheduled_for"] or 0) > now]
+                rows.sort(key=lambda r: r["scheduled_for"] or 0)
+                return [{
+                    "draft_id": r["draft_id"], "topic": r["topic"],
+                    "platform": r["platform"],
+                    "predicted_engagement": r["predicted_engagement"],
+                    "scheduled_for": r["scheduled_for"]}
+                    for r in rows[:max(1, int(limit or 10))]]
             if self._db is None:
                 return []
             rows = self._db.execute(

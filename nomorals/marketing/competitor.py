@@ -521,13 +521,47 @@ def _resolve_db(db_path: str = "") -> str:
     return p
 
 
-class CompetitorStore:
-    """Tracks public accounts; snapshots windows for delta digests."""
+#: The store's own DDL — the seam mapping is derived from it and
+#: the native path executes the same statements, so the two can
+#: never drift.
+_DDL = (
+    "CREATE TABLE IF NOT EXISTS tracked ("
+    " account TEXT, platform TEXT, added_at REAL,"
+    " PRIMARY KEY (account, platform));"
+    "CREATE TABLE IF NOT EXISTS snapshots ("
+    " snap_id TEXT PRIMARY KEY, account TEXT, platform TEXT,"
+    " created_at REAL, post_count INTEGER, posts_per_week REAL,"
+    " video_per_week REAL, avg_likes REAL, avg_comments REAL,"
+    " avg_shares REAL)")
 
-    def __init__(self, db_path: str = "") -> None:
+
+class CompetitorStore:
+    """Tracks public accounts; snapshots windows for delta digests.
+
+    Native path: a SQLite file at ``db_path``. When a document store
+    is resolved (Mongo program P5 — an explicit ``store`` or the boot
+    ambient), the same API runs over the seam instead (registered in
+    storage.sidecars as marketing-competitor): both tables are
+    documents in ``marketing-competitor__tracked`` / ``__snapshots``;
+    tracked's composite (account, platform) key lives only in the
+    joined document id. The file's existing rows are imported once,
+    through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             self._path = _resolve_db(db_path)
+            from ..storage.sidecars import sidecar_port
+            port = sidecar_port(
+                "marketing-competitor", _DDL, ("tracked", "snapshots"),
+                None if self._path == ":memory:" else self._path,
+                store=store)
+            if port is not None:
+                self._import_into(port)
+                self._port = port
+                return
             self._db = sqlite3.connect(self._path)
             self._db.row_factory = sqlite3.Row
             self._db.execute(
@@ -545,6 +579,26 @@ class CompetitorStore:
         except Exception as e:
             record_failure("competitor.CompetitorStore.__init__", e)
             self._db = None
+            self._port = None
+
+    def _import_into(self, port: Any) -> None:
+        """The one-time lazy file import (see SidecarPort): both
+        tables go through their RowTables."""
+
+        def write_tracked(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["tracked"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        def write_snapshots(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["snapshots"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        port.ensure_imported({"tracked": write_tracked,
+                              "snapshots": write_snapshots})
 
     # -- tracking ------------------------------------------------------
 
@@ -555,6 +609,11 @@ class CompetitorStore:
             platform = (platform or "instagram").strip().lower()
             if not account or platform not in _PLATFORMS:
                 return False
+            if self._port is not None:
+                self._port.tables["tracked"].insert_ignore({
+                    "account": account, "platform": platform,
+                    "added_at": time.time()})
+                return True
             if self._db is None:
                 return False
             self._db.execute(
@@ -569,7 +628,18 @@ class CompetitorStore:
     def untrack(self, account: str, platform: str = "") -> bool:
         try:
             account = (account or "").strip().lstrip("@").lower()
-            if not account or self._db is None:
+            if not account:
+                return False
+            if self._port is not None:
+                plat = platform.strip().lower() if platform else ""
+                table = self._port.tables["tracked"]
+                rows = [r for r in table.find()
+                        if r["account"] == account
+                        and (not plat or r["platform"] == plat)]
+                for r in rows:
+                    table.delete(f"{r['account']}\x1f{r['platform']}")
+                return len(rows) > 0
+            if self._db is None:
                 return False
             if platform:
                 cur = self._db.execute(
@@ -586,6 +656,10 @@ class CompetitorStore:
 
     def list_tracked(self) -> list[dict[str, Any]]:
         try:
+            if self._port is not None:
+                rows = self._port.tables["tracked"].find()
+                rows.sort(key=lambda r: r["added_at"] or 0)
+                return rows
             if self._db is None:
                 return []
             return [dict(r) for r in self._db.execute(
@@ -632,10 +706,24 @@ class CompetitorStore:
 
     def _snapshot(self, report: CompetitorReport) -> None:
         try:
-            if self._db is None or report.post_count == 0:
+            if report.post_count == 0:
                 return
             c = report.cadence
             e = report.engagement
+            if self._port is not None:
+                self._port.tables["snapshots"].put({
+                    "snap_id": "snap_" + uuid.uuid4().hex[:8],
+                    "account": report.account, "platform": report.platform,
+                    "created_at": report.created_at,
+                    "post_count": report.post_count,
+                    "posts_per_week": c.posts_per_week,
+                    "video_per_week": c.by_format.get("video", 0.0),
+                    "avg_likes": e.avg_likes,
+                    "avg_comments": e.avg_comments,
+                    "avg_shares": e.avg_shares})
+                return
+            if self._db is None:
+                return
             self._db.execute(
                 "INSERT INTO snapshots VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 ("snap_" + uuid.uuid4().hex[:8], report.account,
@@ -652,19 +740,31 @@ class CompetitorStore:
         """Latest window vs previous: 'posted 3x more video this week…'.
         Never raises."""
         try:
-            if self._db is None:
+            if self._port is not None:
+                rows = self._port.tables["snapshots"].find()
+                if account:
+                    want_a = account.strip().lstrip("@").lower()
+                    rows = [r for r in rows if r["account"] == want_a]
+                if platform:
+                    want_p = platform.strip().lower()
+                    rows = [r for r in rows if r["platform"] == want_p]
+                rows.sort(key=lambda r: r["created_at"] or 0,
+                          reverse=True)
+                rows = rows[:2]
+            elif self._db is None:
                 return "no competitor history yet."
-            q = ("SELECT * FROM snapshots "
-                 + ("WHERE account=? " if account else "")
-                 + ("AND platform=? " if platform and account else
-                    ("WHERE platform=? " if platform and not account else ""))
-                 + "ORDER BY created_at DESC LIMIT 2")
-            params: list[Any] = []
-            if account:
-                params.append(account.strip().lstrip("@").lower())
-            if platform:
-                params.append(platform.strip().lower())
-            rows = [dict(r) for r in self._db.execute(q, params)]
+            else:
+                q = ("SELECT * FROM snapshots "
+                     + ("WHERE account=? " if account else "")
+                     + ("AND platform=? " if platform and account else
+                        ("WHERE platform=? " if platform and not account else ""))
+                     + "ORDER BY created_at DESC LIMIT 2")
+                params: list[Any] = []
+                if account:
+                    params.append(account.strip().lstrip("@").lower())
+                if platform:
+                    params.append(platform.strip().lower())
+                rows = [dict(r) for r in self._db.execute(q, params)]
             if len(rows) < 2:
                 return ("not enough history for a digest yet — "
                         "track an account and re-run after the next window.")
