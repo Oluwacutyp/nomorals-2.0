@@ -864,31 +864,165 @@ class RuntimeChatOpsMixin:
         every chatop; reading his own vault back to his own
         chat is not an act on the account, so no surface stop
         applies — but an empty vault answers honestly, naming
-        whether capture is even on."""
+        whether capture is even on.
+
+        Per-account (multi-account completion): captures are
+        keyed by the account that received them — the vault row
+        has carried its account since the capture half shipped —
+        and the reveal reads ONE account's captures, never a
+        merged pool where one account's media could surface in
+        another's list or index space.  The account resolves the
+        way the system's other surfaces resolve one: an explicit
+        account token in the tail (the /pair saved [id] ·
+        /pair journal [account] precedent — the account's id,
+        its number, or a unique tail of its id, in any token
+        position; a number of ≤3 digits is the capture index,
+        the /pair journal token rule), else the chat's own
+        account (the seat platform's ONLY paired account — the
+        one case the seat alone can name), else the configured
+        default (resolve_account: the /pair use primary, else
+        the earliest linked, else the earliest registered).
+        When more than one personal account exists the reply
+        NAMES the account it acted for — a resolution the owner
+        did not spell out is visible, never silent.  With
+        exactly one personal account every reply is
+        byte-identical to the single-account surface.  A row
+        whose account was never recorded attributes to the
+        resolved account ONLY when it is the registry's only
+        personal account — with one account there is nothing
+        else the row could have come from; with several, no
+        scoped view claims it (it stays visible in /pair saved)
+        rather than guessing an owner for it."""
         from datetime import datetime
         from pathlib import Path
 
+        from ...social.pairing import resolve_account
+
         svc = self._pairing_personal()
         vault = svc["personal"].vault
-        entries = [r for r in vault.saved_entries()
-                   if r.get("kind") == "view_once"]
-        entries.reverse()          # journal is oldest-first
+        registry = svc["registry"]
+        personal_recs = [r for r in registry.all()
+                         if r.platform in ("whatsapp", "telegram")]
+        multi = len(personal_recs) > 1
+        reply_to = str(getattr(message, "reply_to", "") or "")
+        supervisor = svc.get("supervisor")
+
+        def _find(tok: str) -> Any:
+            if supervisor is None:
+                return None
+            found = self._pair_find(supervisor, tok)
+            if found is None or found.platform not in (
+                    "whatsapp", "telegram"):
+                return None
+            return found
+
+        # ── the tail's tokens (any order — /pair journal) ──
+        index: int | None = None
+        want_list = False
+        selector = None
+        bad_tail = False
+        for tok in tail.split():
+            if tok.lower() == "list":
+                if want_list:
+                    bad_tail = True
+                    break
+                want_list = True
+                continue
+            digits = tok.lstrip("-")
+            if digits.isdigit() and len(digits) <= 3:
+                if index is not None:
+                    bad_tail = True
+                    break
+                index = int(tok)
+                continue
+            if selector is not None:
+                bad_tail = True
+                break
+            selector = _find(tok)
+            if selector is None:
+                bad_tail = True
+                break
+        usage = ("usage: /viewonce · /viewonce N · "
+                 "/viewonce list · or reply to the "
+                 "view-once message with /viewonce")
+        if multi:
+            usage += (" · /viewonce ACCOUNT [N|list] names "
+                      "the account (its number or id)")
+        if reply_to:
+            # The shipped reply form never read the tail — a
+            # reply names its capture and stray words change
+            # nothing — except that a valid account token
+            # still scopes the lookup.
+            bad_tail = False
+            index = None
+            want_list = False
+            if selector is None:
+                for tok in tail.split():
+                    selector = _find(tok)
+                    if selector is not None:
+                        break
+        if bad_tail:
+            # A usage error is not a reveal attempt (shipped
+            # pin): it answers and journals nothing.
+            return usage
+
+        # ── resolve: selector → the chat's own → default ──
+        resolved = selector
+        if resolved is None:
+            seat_platform = str(getattr(message.chat, "platform",
+                                        "") or "")
+            if seat_platform.startswith("whatsapp"):
+                seat_platform = "whatsapp"
+            elif seat_platform.startswith("telegram"):
+                seat_platform = "telegram"
+            else:
+                seat_platform = ""
+            if seat_platform:
+                seat_recs = [r for r in personal_recs
+                             if r.platform == seat_platform]
+                if len(seat_recs) == 1:
+                    resolved = seat_recs[0]
+            if resolved is None:
+                for platform in (seat_platform, "whatsapp",
+                                 "telegram"):
+                    if not platform:
+                        continue
+                    resolved = resolve_account(registry, platform)
+                    if resolved is not None:
+                        break
+        label = (str(resolved.label or resolved.id)
+                 if resolved is not None else "")
+
+        # ── this account's captures, newest first ──
+        all_entries = [r for r in vault.saved_entries()
+                       if r.get("kind") == "view_once"]
+        all_entries.reverse()      # journal is oldest-first
+        if resolved is None:
+            entries = all_entries
+        else:
+            sole = len(personal_recs) == 1
+            entries = [
+                r for r in all_entries
+                if str(r.get("account") or "") == resolved.id
+                or (sole and not str(r.get("account") or ""))]
 
         # The account a rowless attempt (empty vault, reply
-        # miss) is recorded against: the vault's own first
-        # capture's account, else the first personal record —
-        # so the attempt lands in that account's journal view
-        # instead of an accountless limbo no /pair journal
-        # filter would ever show.
+        # miss) is recorded against: the resolved account —
+        # else, as before, the vault's own first capture's
+        # account, else the first personal record — so the
+        # attempt lands in that account's journal view instead
+        # of an accountless limbo no /pair journal filter
+        # would ever show.
         fallback_account = ""
-        if entries:
+        if resolved is not None:
+            fallback_account = resolved.id
+        elif entries:
             fallback_account = str(entries[0].get("account")
                                    or "")
         else:
-            for rec in svc["registry"].all():
-                if rec.platform in ("whatsapp", "telegram"):
-                    fallback_account = rec.id
-                    break
+            for rec in personal_recs:
+                fallback_account = rec.id
+                break
 
         def _note_reveal(outcome: str, form: str,
                          row: dict | None = None) -> None:
@@ -925,19 +1059,53 @@ class RuntimeChatOpsMixin:
             mk = str(row.get("media_kind") or "media")
             return f"  {i}. {_when(row)} · {who} · {mk}"
 
+        def _others() -> str:
+            """The other accounts' holdings, when more than one
+            account exists: scoping must never read as absence —
+            what this account's view leaves out is named, with
+            the door to it."""
+            if not multi or resolved is None:
+                return ""
+            parts = []
+            for rec in personal_recs:
+                if rec.id == resolved.id:
+                    continue
+                n = sum(1 for r in all_entries
+                        if str(r.get("account") or "") == rec.id)
+                if n:
+                    parts.append(
+                        f"{str(rec.label or rec.id)} "
+                        f"({n} capture{'s' if n != 1 else ''})")
+            if not parts:
+                return ""
+            return ("\nother accounts: " + " · ".join(parts)
+                    + " — add the account's number or id to "
+                      "/viewonce to open theirs.")
+
+        form = ("reply" if reply_to else
+                "index" if index is not None else
+                "list" if want_list else "bare")
+
         if not entries:
-            _note_reveal(
-                "empty",
-                "reply" if str(getattr(message, "reply_to", "")
-                               or "") else
-                "list" if tail.lower() == "list" else
-                "index" if tail else "bare")
+            _note_reveal("empty", form)
+            if multi:
+                state = ("ON" if resolved.toggle("view_once")
+                         else "OFF")
+                return (
+                    f"no view-once captures yet on {label} — "
+                    f"capture is {state} for that account. When "
+                    f"it's on, view-once media sent to {label} "
+                    f"is kept in your vault before it vanishes, "
+                    f"and /viewonce shows it back."
+                    + _others()
+                    + ("" if state == "ON" else
+                       f" Turn it on with /pair toggle "
+                       f"{resolved.id} view_once on."))
             states = []
-            for rec in svc["registry"].all():
-                if rec.platform in ("whatsapp", "telegram"):
-                    states.append(
-                        f"{rec.id}: capture "
-                        f"{'ON' if rec.toggle('view_once') else 'OFF'}")
+            for rec in personal_recs:
+                states.append(
+                    f"{rec.id}: capture "
+                    f"{'ON' if rec.toggle('view_once') else 'OFF'}")
             state = ("; ".join(states) if states else
                      "no paired personal account")
             return ("no view-once captures yet — when the "
@@ -954,7 +1122,6 @@ class RuntimeChatOpsMixin:
 
         target = None
         note = ""
-        reply_to = str(getattr(message, "reply_to", "") or "")
         if reply_to:
             # Scoped resolution (truth build): the reply means
             # the capture taken in THIS conversation — message
@@ -962,18 +1129,29 @@ class RuntimeChatOpsMixin:
             # resolves a reply across them.  The seat's account
             # joins the scope when the platform has exactly one
             # paired account (the only case where the seat's
-            # account is knowable from the message alone).
-            seat_platform = str(getattr(message.chat, "platform",
-                                        "") or "")
-            seat_accounts = [rec.id for rec in
-                             svc["registry"].all()
-                             if rec.platform == seat_platform]
+            # account is knowable from the message alone) —
+            # under per-account resolution the resolved account
+            # scopes it the same way, so one account's capture
+            # can never be handed back under another's ask.
             target = _scoped_reply_target(
                 entries, message, reply_to,
-                account_id=(seat_accounts[0]
-                            if len(seat_accounts) == 1 else ""))
+                account_id=(resolved.id if resolved is not None
+                            else ""))
             if target is None:
                 _note_reveal("miss", "reply")
+                if multi:
+                    return (
+                        "that message has no view-once capture "
+                        f"from this chat in {label}'s vault — a "
+                        "reply only ever opens the capture taken "
+                        "in the chat you're replying in, because "
+                        "message ids repeat across chats. It "
+                        "may have arrived with capture off, "
+                        "never reached the surface, or live in "
+                        "another chat — /viewonce N opens one "
+                        f"by number. Captures I do hold on "
+                        f"{label}:\n{listing}{more}"
+                        + _others())
                 return ("that message has no view-once capture "
                         "from this chat in the vault — a reply "
                         "only ever opens the capture taken in "
@@ -984,33 +1162,43 @@ class RuntimeChatOpsMixin:
                         "another chat — /viewonce N opens one "
                         f"by number. Captures I do hold:\n"
                         f"{listing}{more}")
-        elif tail.lower() == "list":
-            return (f"👁️ view-once captures (newest first) — "
-                    f"/viewonce N opens one:\n{listing}{more}")
-        elif tail:
-            try:
-                idx = int(tail.split()[0])
-            except (ValueError, IndexError):
-                return ("usage: /viewonce · /viewonce N · "
-                        "/viewonce list · or reply to the "
-                        "view-once message with /viewonce")
-            if not 1 <= idx <= len(entries):
+        elif index is not None:
+            if not 1 <= index <= len(entries):
                 _note_reveal("miss", "index")
+                if multi:
+                    return (f"there are {len(entries)} capture"
+                            f"{'s' if len(entries) != 1 else ''} "
+                            f"on {label} — pick "
+                            f"1–{len(entries)}:\n{listing}{more}"
+                            + _others())
                 return (f"there are {len(entries)} capture"
                         f"{'s' if len(entries) != 1 else ''} — "
                         f"pick 1–{len(entries)}:\n{listing}{more}")
-            target = entries[idx - 1]
+            target = entries[index - 1]
+        elif want_list:
+            if multi:
+                return (f"👁️ view-once captures on {label} "
+                        f"(newest first) — /viewonce N opens "
+                        f"one:\n{listing}{more}" + _others())
+            return (f"👁️ view-once captures (newest first) — "
+                    f"/viewonce N opens one:\n{listing}{more}")
         else:
             target = entries[0]
             if len(entries) > 1:
                 note = (f"\nthe rest:\n{listing}{more}\n"
                         f"/viewonce N opens another.")
+                if multi:
+                    note += _others()
         path = str(target.get("path") or "")
         who = str(target.get("poster_name") or "someone")
-        form = ("reply" if reply_to else
-                "index" if tail else "bare")
         if not path or not Path(path).exists():
             _note_reveal("file_gone", form, target)
+            if multi:
+                return (f"the capture from {who} "
+                        f"({_when(target)}) on {label} is in "
+                        f"the record but its file is gone from "
+                        f"the vault — nothing left to show. "
+                        f"/pair saved holds the record.")
             return (f"the capture from {who} ({_when(target)}) "
                     f"is in the record but its file is gone from "
                     f"the vault — nothing left to show. "
@@ -1019,15 +1207,23 @@ class RuntimeChatOpsMixin:
         send_file = getattr(gateway, "send_file", None)
         if gateway is None or send_file is None:
             _note_reveal("send_failed", form, target)
+            if multi:
+                return (f"the capture from {who} is safe in "
+                        f"{label}'s vault, but this surface "
+                        f"can't carry media back — ask again "
+                        f"from a chat that can.")
             return (f"the capture from {who} is safe in the "
                     f"vault, but this surface can't carry media "
                     f"back — ask again from a chat that can.")
+        caption = (f"👁️ view-once from {who} · "
+                   f"{_when(target)} — kept in your vault "
+                   f"before it could vanish")
+        if multi:
+            caption += f" · {label}"
         result = send_file(
             str(getattr(message.chat, "platform", "") or ""),
             message.chat, path,
-            caption=(f"👁️ view-once from {who} · "
-                     f"{_when(target)} — kept in your vault "
-                     f"before it could vanish"),
+            caption=caption,
             # The record's own media kind (truth build): without
             # it the gateway defaults the reveal to a document
             # and a photo lands as an attachment instead of a
@@ -1037,10 +1233,19 @@ class RuntimeChatOpsMixin:
             kind=str(target.get("media_kind") or ""))
         if not getattr(result, "ok", False):
             _note_reveal("send_failed", form, target)
+            if multi:
+                return (f"the capture from {who} is in "
+                        f"{label}'s vault but sending it back "
+                        f"failed: "
+                        f"{getattr(result, 'error', '') or 'send refused'}")
             return (f"the capture from {who} is in the vault "
                     f"but sending it back failed: "
                     f"{getattr(result, 'error', '') or 'send refused'}")
         _note_reveal("found", form, target)
+        if multi:
+            return (f"👁️ that's the view-once from {who} "
+                    f"({_when(target)}), straight from your "
+                    f"vault ({label}).{note}")
         return (f"👁️ that's the view-once from {who} "
                 f"({_when(target)}), straight from your vault."
                 f"{note}")
