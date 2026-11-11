@@ -1679,7 +1679,8 @@ class RuntimeGroupMixin:
             on = w[1] == "on"
             self._expression_update(surface, key, ban_theatre=on)
             return (f"ban theatre {'on' if on else 'off'} — "
-                    "warnings stay dry either way.")
+                    "mutes, kicks and warnings carry their "
+                    "moments too.")
         if len(w) == 2 and w[0] == "collect" \
                 and w[1] in ("on", "off"):
             on = w[1] == "on"
@@ -3184,8 +3185,8 @@ class RuntimeGroupMixin:
                 f" · auto-collect "
                 f"{'on' if expr.get('auto_collect', False) else 'off'}"
                 f"{lib_n}",
-                "warnings stay dry at every setting — a warning "
-                "is a record, not a show",
+                "warnings carry a moment like the rest of the "
+                "moderation voice (owner, 2026-11-11)",
             ], title="Expression")
             # Reputation block (§32): this group's warning mode +
             # the live shape of the book and its queue here.
@@ -6057,7 +6058,7 @@ class RuntimeGroupMixin:
                 f"passively, when on (claimed rooms only)",
                 "moments: welcome · quest complete · jackpot · "
                 "season podium · duel wins · estate milestones · "
-                "bans (theatre) — warnings stay dry, always",
+                "bans · mutes · kicks · warnings (theatre)",
             ])
             gif_cycle = {"off": "low", "low": "normal",
                          "normal": "off"}
@@ -10450,6 +10451,13 @@ class RuntimeGroupMixin:
             self._settle_ask_card(
                 surface, key, message, pending_ask,
                 f"✅ settled — {label} muted {span}")
+        # A typed mute lands with theatre (§21), like the
+        # rest of her moderation voice — the expression mixin
+        # owns the firing; the getattr guard keeps bare group
+        # rigs (tests) whole.
+        fire = getattr(self, "_fire_expression", None)
+        if fire is not None:
+            fire(message, "mute")
         return f"🔇 {label} muted {span}" + \
             (f" — {reason}" if reason else "")
 
@@ -10500,6 +10508,13 @@ class RuntimeGroupMixin:
         if not self._mod_run(surface, key, message, "ban", user_id,
                              call):
             return "the ban didn't go through — the platform refused it (it's in /glog)."
+        # A TYPED ban lands with the same theatre the automod
+        # path fires (§21) — until 2026-11-11 only sensor bans
+        # reached the moment, and an admin's own /ban went out
+        # bare.  One act, one voice, whichever path lands it.
+        fire = getattr(self, "_fire_expression", None)
+        if fire is not None:
+            fire(message, "ban")
         return f"🔨 {label} is banned" + \
             (f" — {rest}" if rest.strip() else "")
 
@@ -10556,6 +10571,11 @@ class RuntimeGroupMixin:
         if not self._mod_run(surface, key, message, "kick",
                              user_id, call):
             return "the kick didn't go through — the platform refused it (it's in /glog)."
+        # Theatre, same as the rest (§21): a kick is a
+        # moderation act with her voice on it, not a bare line.
+        fire = getattr(self, "_fire_expression", None)
+        if fire is not None:
+            fire(message, "kick")
         return f"👢 {label} is out" + \
             (f" — {rest}" if rest.strip() else "") + \
             " (they can rejoin)."
@@ -10588,6 +10608,15 @@ class RuntimeGroupMixin:
         nxt = esc.next_step(count - 1)
         denom = int(nxt["at"]) if nxt else esc.warn_limit
         if step is None:
+            # A plain warning carries its moment too (owner,
+            # 2026-11-11 — the "warnings stay dry" line was
+            # pass-era text, never his order; §21 has her
+            # expressive on every surface).  A warn that lands
+            # on a ladder step speaks through the step's own
+            # §31 notice instead — one act, one voice.
+            fire = getattr(self, "_fire_expression", None)
+            if fire is not None:
+                fire(message, "warn")
             return (f"⚠️ {label} — warning {count}/{denom}"
                     + (f": {reason}" if reason else ""))
         ok, phrase, paid = self._fire_warn_step(

@@ -250,8 +250,9 @@ def _default_settings() -> dict[str, Any]:
                                         # moments on/off, gif
                                         # frequency, welcome
                                         # media, ban theatre —
-                                        # warnings stay dry at
-                                        # every setting
+                                        # warnings carry a
+                                        # moment too (owner,
+                                        # 2026-11-11)
         "reputation": copy.deepcopy(REPUTATION_DEFAULTS),
                                         # cross-group reputation
                                         # (§32): what this group

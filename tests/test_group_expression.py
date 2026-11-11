@@ -370,8 +370,20 @@ def test_gif_command_uses_the_library(tmp_path):
     _stock(rt, tmp_path, tags=("celebration", "dance"))
     out = rt._control_gif("dance", _Msg(chat))
     assert out == "" and len(adapter.media_sent) == 1
+    # An ask the library has never heard of no longer earns
+    # the old refusal (owner, 2026-11-11: /gif could only
+    # replay what an anime-fed library held): with the live
+    # rungs muted, her studio floor CREATES the GIF, sends it
+    # as an animation, and shelves it under the ask's words.
+    service = rt._expression_service()
+    service.providers = []
+    service.pool_client = None
     out = rt._control_gif("underwater basketweaving", _Msg(chat))
-    assert "nothing in my library" in str(out)
+    assert out == "" and len(adapter.media_sent) == 2
+    assert adapter.media_sent[1].kind == "animation"
+    created = rt._expression_library().search(
+        "underwater basketweaving")
+    assert created and created[0]["source"] == "self:render"
 
 
 def test_customemoji_command_roundtrip(tmp_path):

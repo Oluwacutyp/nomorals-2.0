@@ -2128,8 +2128,8 @@ class RuntimeMediaMixin:
         that earns one — fire the expression organ's celebration for
         the room when its own settings allow.  DM rooms carry no
         group settings, so the organ's defaults apply; failures never
-        reach here (warnings stay dry at every setting).  Best
-        effort: a celebration must never break a delivery."""
+        reach here.  Best effort: a celebration must never break
+        a delivery."""
         try:
             service = self._expression_service()
             if service is None:

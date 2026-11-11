@@ -75,12 +75,53 @@ class RuntimeExpressionMixin:
         giphy = str(getattr(settings, "giphy_api_key", "")
                     or os.environ.get("NM_GIPHY_API_KEY", "") or "")
         extra = getattr(settings, "gif_providers", None) or ()
+        # Her source registry: ONE source list for the whole
+        # media family — the settings providers and the
+        # runtime-registered sources ride the same chain the
+        # pool walks read.  A registry problem sheds the rung,
+        # never the service.
+        registry = None
+        try:
+            from ...anime.registered_sources import open_registry
+
+            home_hint = str(
+                getattr(settings, "home_path", "") or "") \
+                or str(getattr(settings, "workspace_dir", "")
+                       or "")
+            registry = open_registry(home_hint or None)
+        except Exception as exc:  # noqa: BLE001 - a rung sheds
+            record_failure("expression.registry", exc)
+        # The unified pool, wired for /gif: the same client
+        # the picture commands draw from (seeds + registry +
+        # her studio), with the studio rendering into her
+        # expression media dir.
+        pool_client = None
+        try:
+            from ...anime.sources import ImagePoolClient
+            from ...anime.transport import core_http_transport
+
+            media_dir = root / "expression_media"
+
+            def _pool_studio(kind: str) -> str:
+                from ...social.chat import emoji_studio
+
+                return str(emoji_studio.mood_animation(
+                    kind, media_dir, name=f"pool_{kind}"))
+
+            pool_client = ImagePoolClient(
+                core_http_transport(), generator=_pool_studio,
+                tenor_key=tenor, giphy_key=giphy,
+                registry=registry)
+        except Exception as exc:  # noqa: BLE001 - a rung sheds
+            record_failure("expression.pool", exc)
         service = ExpressionService(
             library,
             providers=default_providers(tenor_key=tenor,
                                         giphy_key=giphy,
-                                        extra=extra),
-            media_dir=root / "expression_media")
+                                        extra=extra,
+                                        registry=registry),
+            media_dir=root / "expression_media",
+            pool_client=pool_client)
         self._expression_service_obj = service
         return service
 

@@ -15,10 +15,15 @@ was the visible gap.  This organ is that layer, in one place:
   own button emoji after this.
 - **Moments**: welcome / quest completion / jackpot / season
   podium / duel wins / estate milestones / a ban landing get a
-  GIF or sticker from her library; a warning stays dry, by
-  design.  Selection is by mood/tag with no immediate repeats
-  per room and a per-room cooldown, so she reads as a member of
-  the room, not a printer attached to it.
+  GIF or sticker from her library — and since the owner's
+  2026-11-11 correction, the typed moderation commands ride
+  the same theatre: mute, kick and warn carry moments too
+  (the old "warnings stay dry" line was expression-pass text,
+  never an owner order — §21 orders her expressive on every
+  surface, and §31's only dry note is commiseration on bans).
+  Selection is by mood/tag with no immediate repeats per room
+  and a per-room cooldown, so she reads as a member of the
+  room, not a printer attached to it.
 - **The library**: stolen + made + provider-fetched media,
   indexed by tag/mood with provenance, persisted beside the
   group store with the S3 atomic + quarantine pattern.  On
@@ -81,6 +86,7 @@ __all__ = [
     "CaptureError", "capture_library_sticker",
     "AUTO_COLLECT_ROOM_CAP", "auto_collected_from",
     "ProviderHealth", "TenorProvider", "GiphyProvider",
+    "CataasSearchProvider", "RegisteredSearchProvider",
     "default_providers", "download_to_library",
     "WaifuPicsProvider", "NekosBestProvider",
     "REACTION_GIFS", "REACTION_GIF_COMMANDS",
@@ -1285,17 +1291,229 @@ class GiphyProvider:
         return out
 
 
+class CataasSearchProvider:
+    """cataas.com tag search — the keyless general seed
+    (verified live 2026-11-11: ``/api/cats?tags=<word>``
+    answers JSON rows, the GIF rows carry
+    ``mimetype: image/gif``, and ``/cat/<id>`` serves the
+    real GIF bytes).  Real-life content, no key, no account:
+    the query's words are cataas tags, and only rows the
+    catalogue itself marks as GIFs are offered — a still
+    never rides this chain.  Sparse by nature (most cat
+    photos don't move), so it sits last in the chain: the
+    honest general rung before her own studio floor."""
+
+    name = "cataas"
+
+    def __init__(self, *,
+                 fetcher: Callable[[str], Any] | None = None
+                 ) -> None:
+        self._fetch = fetcher or _http_json
+
+    def search(self, query: str, *, limit: int = 4
+               ) -> list[dict[str, Any]]:
+        words = [w for w in re.split(
+            r"[^a-z0-9]+", str(query or "").lower()) if w]
+        candidates: list[str] = []
+        if len(words) > 1:
+            candidates.append(" ".join(words))
+        candidates.extend(words)
+        seen: set[str] = set()
+        for tag in candidates:
+            if tag in seen:
+                continue
+            seen.add(tag)
+            url = ("https://cataas.com/api/cats?"
+                   + urllib.parse.urlencode(
+                       {"tags": tag, "limit": 50}))
+            data = self._fetch(url)
+            rows = data if isinstance(data, list) else []
+            out: list[dict[str, Any]] = []
+            for row in rows:
+                if not isinstance(row, dict) or not row.get("id"):
+                    continue
+                if row.get("mimetype") != "image/gif":
+                    continue
+                title = " ".join(
+                    str(t) for t in row.get("tags") or []) or query
+                out.append({
+                    "url": f"https://cataas.com/cat/{row['id']}",
+                    "title": title, "kind": "gif"})
+            if out:
+                return out[:max(1, int(limit))]
+        return []
+
+    def fetch(self, category: str) -> dict[str, Any]:
+        hits = self.search(str(category), limit=1)
+        if hits:
+            return hits[0]
+        return {"url": "", "title": str(category), "kind": "gif"}
+
+
+class RegisteredSearchProvider:
+    """One runtime-registered source (her source registry,
+    ``anime/registered_sources``) wearing the provider shape:
+    the spec's URL template + declared response shape, read
+    live.  Outcomes are reported back through ``note`` (the
+    registry's journal) when the chain builder wired one —
+    a registered source that keeps failing is stood down
+    and disabled THERE, not just in this process."""
+
+    def __init__(self, spec: dict[str, Any], *,
+                 keys: dict[str, str] | None = None,
+                 fetcher: Callable[[str], Any] | None = None,
+                 note: Callable[..., None] | None = None) -> None:
+        self.spec = dict(spec or {})
+        self.name = str(self.spec.get("name") or "registered")
+        self._keys = {str(k): str(v)
+                      for k, v in (keys or {}).items()}
+        self._fetch = fetcher or _http_json
+        self._note = note
+
+    @property
+    def registry_name(self) -> str:
+        return self.name
+
+    def _url_for(self, query: str, limit: int) -> str:
+        url = str(self.spec.get("url") or "")
+        if "{query}" in url:
+            return url.replace(
+                "{query}", urllib.parse.quote(str(query or "")))
+        shape = str(self.spec.get("shape") or "")
+        key = str(self.spec.get("key") or "")
+        keyval = self._keys.get(key, "")
+        params: dict[str, Any] = {}
+        if shape == "tenor":
+            params = {"q": query, "key": keyval,
+                      "limit": max(1, limit),
+                      "media_filter": "mp4,gif",
+                      "contentfilter": "medium"}
+        elif shape == "giphy":
+            params = {"api_key": keyval, "q": query,
+                      "limit": max(1, limit), "rating": "pg-13"}
+        elif shape == "cataas":
+            words = [w for w in re.split(
+                r"[^a-z0-9]+", str(query or "").lower()) if w]
+            params = {"tags": words[0] if words else str(query),
+                      "limit": 50}
+        else:
+            params = {"q": query}
+            if key and keyval:
+                params[str(self.spec.get("key_param") or "key")] \
+                    = keyval
+        sep = "&" if "?" in url else "?"
+        return url + sep + urllib.parse.urlencode(params)
+
+    def _extract(self, data: Any, query: str
+                 ) -> list[dict[str, Any]]:
+        shape = str(self.spec.get("shape") or "")
+        out: list[dict[str, Any]] = []
+
+        def add(url: Any, title: Any = "") -> None:
+            if isinstance(url, str) and url:
+                out.append({"url": url,
+                            "title": str(title or query),
+                            "kind": "gif"})
+
+        if shape == "tenor":
+            for row in (data or {}).get("results") or [] \
+                    if isinstance(data, dict) else []:
+                formats = row.get("media_formats") or {}
+                pick = formats.get("tinymp4") or formats.get("mp4") \
+                    or formats.get("gif") or {}
+                add(pick.get("url"), row.get("title"))
+        elif shape == "giphy":
+            for row in (data or {}).get("data") or [] \
+                    if isinstance(data, dict) else []:
+                images = row.get("images") or {}
+                pick = images.get("fixed_height") \
+                    or images.get("original") or {}
+                add(pick.get("mp4") or pick.get("url"),
+                    row.get("title"))
+        elif shape == "cataas":
+            for row in data if isinstance(data, list) else []:
+                if isinstance(row, dict) and row.get("id") \
+                        and row.get("mimetype") == "image/gif":
+                    add(f"https://cataas.com/cat/{row['id']}",
+                        " ".join(str(t)
+                                 for t in row.get("tags") or []))
+        elif shape == "nekosapi":
+            for row in data if isinstance(data, list) else []:
+                if isinstance(row, dict) \
+                        and str(row.get("rating") or "") == "safe":
+                    add(row.get("url"))
+        elif shape in ("nekos.best", "results-url"):
+            for row in (data or {}).get("results") or [] \
+                    if isinstance(data, dict) else []:
+                if isinstance(row, dict):
+                    add(row.get("url"),
+                        row.get("anime_name") or row.get("title"))
+        elif shape == "randomfox":
+            if isinstance(data, dict):
+                add(data.get("image"))
+        elif shape == "url-list":
+            for row in data if isinstance(data, list) else []:
+                if isinstance(row, str):
+                    add(row)
+                elif isinstance(row, dict):
+                    add(row.get("url"), row.get("title"))
+        else:  # waifu.pics and any single-{"url"} answer
+            if isinstance(data, dict):
+                add(data.get("url"), data.get("title"))
+        return out
+
+    def search(self, query: str, *, limit: int = 4
+               ) -> list[dict[str, Any]]:
+        key = str(self.spec.get("key") or "")
+        if key and not self._keys.get(key):
+            return []
+        try:
+            data = self._fetch(self._url_for(query, limit))
+        except Exception as exc:  # noqa: BLE001 - noted, re-raised
+            if self._note is not None:
+                self._note(self.name, False, error=str(exc))
+            raise
+        out = self._extract(data, query)
+        if out and self._note is not None:
+            self._note(self.name, True)
+        return out[:max(1, int(limit))]
+
+    def fetch(self, category: str) -> dict[str, Any]:
+        hits = self.search(str(category), limit=1)
+        if hits:
+            return hits[0]
+        return {"url": "", "title": str(category), "kind": "gif"}
+
+
 def default_providers(*, tenor_key: str = "", giphy_key: str = "",
-                      extra: Any = ()) -> list[Any]:
-    """The seed chain: keyed providers that are configured,
-    plus any caller-supplied sources (settings grow the list —
-    the open-sources law; nothing here is a closed list)."""
+                      extra: Any = (),
+                      registry: Any = None,
+                      registry_keys: dict[str, str] | None = None
+                      ) -> list[Any]:
+    """The seed chain, ONE list for every search-shaped GIF
+    surface (/gif, the moments, the reactions' general rung):
+    keyed providers that are configured, caller-supplied
+    sources (the settings hook), the runtime source
+    registry's gif-chain specs, and the keyless general seed
+    (cataas).  The registry is read at build time — a source
+    registered at runtime joins the next chain built, beside
+    the settings entries, never as a second list."""
     out: list[Any] = []
     if tenor_key:
         out.append(TenorProvider(tenor_key))
     if giphy_key:
         out.append(GiphyProvider(giphy_key))
     out.extend(extra or ())
+    if registry is not None:
+        keys = {"tenor": str(tenor_key or ""),
+                "giphy": str(giphy_key or "")}
+        keys.update({str(k): str(v)
+                     for k, v in (registry_keys or {}).items()})
+        note = getattr(registry, "note_result", None)
+        for spec in registry.specs("gif"):
+            out.append(RegisteredSearchProvider(
+                spec, keys=keys, note=note))
+    out.append(CataasSearchProvider())
     return out
 
 
@@ -1371,10 +1589,15 @@ class NekosBestProvider:
 
 
 def default_reaction_providers() -> list[Any]:
-    """The keyless reaction chain, in seed order.  Settings
-    may grow it later; the two seeds are never a closed list
-    in spirit — the health breaker sheds a dead one and the
-    library floor stays."""
+    """The keyless reaction chain, in seed order.  The two
+    seeds are ANIME by table — the per-emotion categories
+    only exist there — and they are not the whole chain:
+    ``reaction_gif`` walks this chain first, then the
+    service's general provider chain (``default_providers``:
+    keyed Tenor/Giphy, registered sources, the keyless
+    cataas seed), then the library, then her studio floor.
+    The health breaker sheds a dead seed and the floors
+    stay."""
     return [WaifuPicsProvider(), NekosBestProvider()]
 
 
@@ -1621,13 +1844,29 @@ MOMENT_TAGS: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
                          ("celebrate",)),
     "ban": (("ban", "hammer", "goodbye", "justice"),
             ("strict",)),
+    "mute": (("mute", "quiet", "silence", "shush"),
+             ("strict",)),
+    "kick": (("kick", "boot", "goodbye", "out"),
+             ("strict",)),
+    "warn": (("warn", "warning", "careful", "watch out"),
+             ("strict",)),
     "celebration": (("celebration", "party", "win"),
                     ("celebrate",)),
 }
 
-#: Moments that NEVER carry media, at any setting: a warning
-#: is a record, not a show (§31 tone discipline).
-DRY_MOMENTS = frozenset({"warn", "warning"})
+#: Moments that NEVER carry media, at any setting.  EMPTY —
+#: and the emptiness is a recorded decision, not an omission.
+#: The expression pass put warn here ("a warning is a
+#: record, not a show", citing §31 tone discipline), but
+#: that line was pass-era text: §31 quotes the owner only
+#: that COMMISERATION ON BANS stays text, and §21 — his own
+#: order — has her expressive on every surface.  On
+#: 2026-11-11 he named the dry moderation commands himself
+#: ("mute ban and the rest got no stickers nor gifs not even
+#: images"), and the latest explicit word wins: warn fires
+#: like the rest.  The mechanism stays for any moment a
+#: future owner order names dry.
+DRY_MOMENTS = frozenset()
 
 _CELEBRATION_MOMENTS = frozenset({
     "quest_complete", "jackpot", "season_podium", "duel_win",
@@ -1667,11 +1906,17 @@ class ExpressionService:
                  clock: Callable[[], float] = time.time,
                  cooldown_s: float = DEFAULT_COOLDOWN_S,
                  reaction_providers: Any = None,
-                 bytes_fetcher: Callable[[str], bytes] | None = None
+                 bytes_fetcher: Callable[[str], bytes] | None = None,
+                 pool_client: Any = None
                  ) -> None:
         self.library = library
         self.providers = list(providers or ())
         self.media_dir = Path(media_dir) if media_dir else None
+        # The unified picture pool (anime/sources), when the
+        # runtime wires one: /gif walks its "gif" kind as a
+        # rung — the same seeds + registry the picture
+        # commands draw from, instead of a GIF-only island.
+        self.pool_client = pool_client
         self.health = health or ProviderHealth()
         self.rng = rng or random.Random()
         self.clock = clock
@@ -1897,11 +2142,85 @@ class ExpressionService:
                 "item_id": item.get("id"),
                 "via": "file_id" if file_id else "upload"}
 
+    def _fetch_from_pool(self, words: tuple[str, ...]
+                         ) -> dict[str, Any] | None:
+        """The unified pool's "gif" kind as a /gif rung: the
+        same walk the picture commands use — keyed search,
+        verified keyless sources, runtime-registered sources,
+        the pool's own studio.  A URL hit is downloaded into
+        the library under the ask's words (the floor grows);
+        a local hit is her render, shelved the same way."""
+        if self.pool_client is None or self.media_dir is None:
+            return None
+        try:
+            hit = self.pool_client.fetch_media(
+                "gif", rng=self.rng)
+        except Exception as exc:  # noqa: BLE001 - a rung sheds
+            _log.debug("gif pool walk failed: %s", exc)
+            return None
+        tags = words or ("gif",)
+        local = str(getattr(hit, "local_path", "") or "")
+        if local:
+            return self.library.add_item(
+                kind="animation", path=local, tags=tags,
+                source="self:render")
+        url = str(getattr(hit, "url", "") or "")
+        if not url:
+            return None
+        try:
+            path = download_to_library(url, self.media_dir)
+        except Exception as exc:  # noqa: BLE001
+            _log.debug("gif pool download failed: %s", exc)
+            return None
+        return self.library.add_item(
+            kind="gif", path=str(path), tags=tags,
+            source=f"provider:{getattr(hit, 'source', 'pool')}")
+
+    def _self_create_gif(self, query: str,
+                         words: tuple[str, ...]
+                         ) -> dict[str, Any] | None:
+        """The /gif floor (owner, 2026-11-11: /gif served
+        ONLY what an anime-fed library happened to hold —
+        with no keys its chain was empty and it had no hand
+        of its own): she renders the ask herself, the same
+        studio generator the moments use
+        (``emoji_studio.mood_animation``).  The piece is a
+        REAL animated GIF, joins the library under the ask's
+        words with ``self:render`` provenance, and is
+        delivered as an animation — never a still wearing a
+        GIF's name."""
+        if self.media_dir is None:
+            return None
+        try:
+            from . import emoji_studio
+
+            default = emoji_studio.mood_design("")
+            mood = ""
+            for word in words:
+                if emoji_studio.mood_design(word) != default:
+                    mood = word
+                    break
+            if not mood:
+                mood = words[0] if words else "celebration"
+            slug = "_".join(words[:3]) or "gif"
+            path = emoji_studio.mood_animation(
+                mood, self.media_dir, name=f"gif_{slug}")
+            return self.library.add_item(
+                kind="animation", path=str(path),
+                tags=words or ("gif",), moods=(mood,),
+                source="self:render")
+        except Exception as exc:  # noqa: BLE001 - degrade to text
+            _log.debug("gif self-create failed: %s", exc)
+            return None
+
     def gif_for(self, query: str, *, room: str = "",
                 platform: str = "",
                 send: Callable[[Any], Any]) -> dict[str, Any]:
-        """/gif: an explicit ask — library first (the words are
-        tags), then the provider chain on the raw query."""
+        """/gif: an explicit ask — library first (the words
+        are tags), then the provider chain on the raw query,
+        then the unified pool's gif kind, then her own hand:
+        the same floor the moments have, so an empty chain
+        and an empty library no longer mean silence."""
         words = tuple(w for w in re.split(
             r"[^a-z0-9]+", str(query or "").lower()) if w)
         item = None
@@ -1910,6 +2229,10 @@ class ExpressionService:
             item = self.rng.choice(hits)
         if item is None and words:
             item = self._fetch_from_providers(words)
+        if item is None:
+            item = self._fetch_from_pool(words)
+        if item is None:
+            item = self._self_create_gif(str(query or ""), words)
         if item is None:
             return {"sent": False,
                     "reason": "nothing in my library for that yet"}

@@ -12,9 +12,12 @@ Pinned here, at the organ level (transport-free):
   sticker art next, the unicode face everywhere else;
 - the library: dedupe, per-room no-immediate-repeat rotation,
   file_id capture after a first send and reuse by handle;
-- moments: warnings stay DRY at every setting, ban theatre
-  obeys the frequency ladder, an empty world ships text-only
-  (sent=False with a reason — never a fake send);
+- moments: warnings carry media like the rest since the
+  owner's 2026-11-11 correction (the "warnings stay dry" line
+  was expression-pass text, never his order — §31 quotes him
+  only on commiseration), ban theatre obeys the frequency
+  ladder, an empty world ships text-only (sent=False with a
+  reason — never a fake send);
 - providers: the health breaker stands a failing source down
   after 3 failures and a fetched GIF JOINS the library;
 - conversions ride the house ffmpeg seam (fake runner for the
@@ -193,16 +196,25 @@ def test_moment_rotation_has_no_immediate_repeats(tmp_path):
     assert seen[0] != seen[1] and seen[1] != seen[2]
 
 
-def test_warning_is_dry_at_every_setting(tmp_path):
-    lib, _items = _stock(tmp_path)
+def test_warning_carries_media_since_owner_correction(tmp_path):
+    # The dry-warning pin stood until 2026-11-11, when the
+    # owner named the dry moderation commands himself; the
+    # "dry by design" line traced to pass-era text, not to
+    # any order of his (§31 quotes him only that commiseration
+    # on bans stays text).  Warn now fires like every other
+    # moderation moment.
+    from nomorals.social.chat.expression import DRY_MOMENTS
+
+    assert "warn" not in DRY_MOMENTS
+    assert "warning" not in DRY_MOMENTS
+    lib, _items = _stock(tmp_path, tags=("warn",))
     svc = ExpressionService(lib, cooldown_s=0)
     captured: list = []
     out = svc.fire("warn", room="r1", platform="discord",
                    settings={"enabled": True, "gifs": "normal"},
                    send=_ok_send(captured))
-    assert out["sent"] is False
-    assert out["reason"] == "dry by design"
-    assert captured == []
+    assert out["sent"] is True
+    assert captured
 
 
 def test_ban_theatre_obeys_the_frequency_ladder(tmp_path):

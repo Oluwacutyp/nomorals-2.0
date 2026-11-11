@@ -94,13 +94,27 @@ class RuntimeAnimeMixin:
                     or os.environ.get("NM_TENOR_API_KEY", "") or "")
         giphy = str(getattr(settings, "giphy_api_key", "")
                     or os.environ.get("NM_GIPHY_API_KEY", "") or "")
+        # Her source registry rides the pool too: sources
+        # registered at runtime join these walks beside the
+        # tabled seeds (the same file the expression family
+        # reads — one source list for the whole house).
+        registry = None
+        try:
+            from ...anime.registered_sources import open_registry
+
+            registry = open_registry(
+                str(getattr(settings, "home_path", "") or "")
+                or None)
+        except Exception:  # noqa: BLE001 - a rung sheds
+            registry = None
         svc = AnimeService(
             anilist=AniListClient(transport),
             jikan=JikanClient(transport),
             quotes=QuoteClient(transport),
             images=ImagePoolClient(
                 transport, generator=self._anime_pool_generator(),
-                tenor_key=tenor, giphy_key=giphy),
+                tenor_key=tenor, giphy_key=giphy,
+                registry=registry),
             trace=TraceMoeClient(transport),
             favorites=FavoritesStore(db),
         )

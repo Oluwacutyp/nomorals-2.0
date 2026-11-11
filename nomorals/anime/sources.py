@@ -10,6 +10,7 @@ trail, exactly the /play resolver discipline.
 from __future__ import annotations
 
 import time
+import urllib.parse
 from dataclasses import dataclass
 from typing import Any
 
@@ -588,6 +589,22 @@ IMAGE_POOLS: dict[str, list[_PoolSource]] = {
         # pair-shaped studio floor below the chain.
         _studio(),
     ],
+    # The GIF kind (2026-11-11, expression repair F2): /gif
+    # used to live entirely outside this organ, replaying a
+    # library that started empty.  Its chain is the general
+    # GIF-search class (keyed Tenor/Giphy), one verified
+    # keyless animated source (cataas GIF cats — real-life
+    # class, the same diversifier the neko chain carries),
+    # whatever the source registry adds at runtime, and her
+    # studio as the floor.
+    "gif": [
+        *_keyed("gif"),
+        _PoolSource("cataas-gif",
+                    "https://cataas.com/cat/gif?json=true",
+                    "cataas", source_class=CLASS_ANIMALS, weight=2,
+                    animated=True),
+        _studio(),
+    ],
 }
 
 
@@ -596,6 +613,29 @@ def pool_classes(pool: str) -> set[str]:
     (keyed and studio rungs included — what the chain CAN
     serve when fully configured)."""
     return {src.source_class for src in IMAGE_POOLS.get(pool) or []}
+
+
+def _pool_source_from_spec(spec: dict[str, Any]) -> _PoolSource | None:
+    """One registered-source spec (see registered_sources.py)
+    as a pool source, or None when its shape is not one this
+    walk can read.  The returned source carries its registry
+    name so the walk can journal the outcome back."""
+    shape = str(spec.get("shape") or "")
+    if shape not in ("waifu.pics", "nekos.best", "results-url",
+                     "nekosapi", "cataas", "randomfox", "tenor",
+                     "giphy", "url-list"):
+        return None
+    src = _PoolSource(
+        str(spec.get("name") or ""), str(spec.get("url") or ""),
+        shape,
+        source_class=str(spec.get("source_class") or CLASS_GENERAL),
+        weight=int(spec.get("weight") or 1),
+        animated=bool(spec.get("animated", True)),
+        key=str(spec.get("key") or ""),
+        query=str(spec.get("query") or ""))
+    src._registry_name = str(spec.get("name") or "")  # type: ignore[attr-defined]
+    src._key_param = str(spec.get("key_param") or "")  # type: ignore[attr-defined]
+    return src
 
 
 def direct_source_url(name: str, *, rng: Any) -> str:
@@ -631,7 +671,9 @@ class ImagePoolClient:
     def __init__(self, transport: Transport, *,
                  pools: dict[str, list[_PoolSource]] | None = None,
                  generator: Any = None,
-                 tenor_key: str = "", giphy_key: str = "") -> None:
+                 tenor_key: str = "", giphy_key: str = "",
+                 registry: Any = None,
+                 extra_keys: dict[str, str] | None = None) -> None:
         self._t = transport
         self._pools = pools if pools is not None else IMAGE_POOLS
         # generator: callable(pool_kind) -> local file path of a
@@ -639,6 +681,25 @@ class ImagePoolClient:
         self._generator = generator
         self._keys = {"tenor": str(tenor_key or ""),
                       "giphy": str(giphy_key or "")}
+        for slot, value in (extra_keys or {}).items():
+            self._keys[str(slot)] = str(value or "")
+        # registry: her runtime source registry
+        # (registered_sources.SourceRegistry) — its specs join
+        # every walk beside the tabled seeds, and the walk
+        # journals each registered source's outcome back into
+        # it.  Read fresh per walk: a source registered at
+        # runtime joins the NEXT walk, no restart.
+        self._registry = registry
+
+    def _registered_sources(self, pool: str) -> list[_PoolSource]:
+        if self._registry is None:
+            return []
+        out: list[_PoolSource] = []
+        for spec in self._registry.specs(pool):
+            src = _pool_source_from_spec(spec)
+            if src is not None:
+                out.append(src)
+        return out
 
     # -- introspection ------------------------------------------
     def available_classes(self, pool: str) -> set[str]:
@@ -647,7 +708,8 @@ class ImagePoolClient:
         count only with their key configured, the studio only
         with a generator wired."""
         out: set[str] = set()
-        for src in self._pools.get(pool) or []:
+        for src in list(self._pools.get(pool) or []) \
+                + self._registered_sources(pool):
             if src.key and not self._keys.get(src.key):
                 continue
             if src.shape == "studio" and self._generator is None:
@@ -661,7 +723,8 @@ class ImagePoolClient:
         """One picture from ``pool`` — walks the chain and
         returns the first source that serves, with its class.
         Raises SourceFailure with the full attempts trail."""
-        sources = list(self._pools.get(pool) or [])
+        sources = list(self._pools.get(pool) or []) \
+            + self._registered_sources(pool)
         if not sources:
             raise SourceFailure("image pools", f"unknown pool {pool!r}")
         network: list[_PoolSource] = []
@@ -682,7 +745,22 @@ class ImagePoolClient:
                 else plan + studio
         attempts: list[str] = []
         for src in plan:
+            before = len(attempts)
             hit = self._try_source(src, pool, rng, attempts)
+            reg_name = str(getattr(src, "_registry_name", "") or "")
+            if reg_name and self._registry is not None:
+                # A registered source's outcome is JOURNALED
+                # back into the registry: failures accumulate
+                # toward stand-down/disable there, so a dead
+                # registration is skipped by later walks
+                # instead of retried forever.
+                if hit is not None:
+                    self._registry.note_result(reg_name, True)
+                else:
+                    self._registry.note_result(
+                        reg_name, False,
+                        error=attempts[-1] if len(attempts) > before
+                        else "no answer")
             if hit is not None:
                 return hit
         raise SourceFailure(
@@ -740,12 +818,31 @@ class ImagePoolClient:
             attempts.append(f"{src.name}: HTTP {result.status}")
             return None
         if src.shape == "tenor":
-            params = {"q": src.query, "key": self._keys["tenor"],
+            params = {"q": src.query,
+                      "key": self._keys.get(src.key or "tenor", ""),
                       "limit": 8, "media_filter": "gif",
                       "contentfilter": "medium"}
         elif src.shape == "giphy":
-            params = {"api_key": self._keys["giphy"], "q": src.query,
+            params = {"api_key": self._keys.get(
+                          src.key or "giphy", ""),
+                      "q": src.query,
                       "limit": 8, "rating": "pg-13"}
+        elif getattr(src, "_registry_name", ""):
+            # A registered source: its URL template may carry
+            # {query}; its key (when the slot is filled) rides
+            # as a query param under its declared name; a
+            # search-shaped source takes its text as ``q``.
+            if "{query}" in url:
+                url = url.replace(
+                    "{query}", urllib.parse.quote(src.query or ""))
+            params = {}
+            if src.key and self._keys.get(src.key):
+                params[str(getattr(src, "_key_param", "")
+                           or "key")] = self._keys[src.key]
+            if src.query and src.shape in ("results-url", "url-list"):
+                params["q"] = src.query
+            if not params:
+                params = None
         try:
             result = self._t.request("GET", url, params=params,
                                      timeout=DEFAULT_TIMEOUT)
@@ -781,13 +878,34 @@ class ImagePoolClient:
                         return row["url"]
             return ""
         if src.shape == "cataas":
-            # {"url": …} — relative on older answers, absolute
-            # on newer; both are real shapes it serves.
+            # Two real answers: the single-cat {"url": …}
+            # (relative on older answers, absolute on newer)
+            # and the /api/cats row list a registered search
+            # spec reads — GIF rows only, addressed by id.
+            if isinstance(data, list):
+                urls = [f"https://cataas.com/cat/{row['id']}"
+                        for row in data
+                        if isinstance(row, dict) and row.get("id")
+                        and row.get("mimetype") == "image/gif"]
+                return rng.choice(urls) if urls else ""
             if isinstance(data, dict):
                 url = str(data.get("url") or "")
                 if url.startswith("/"):
                     url = "https://cataas.com" + url
                 return url
+            return ""
+        if src.shape == "url-list":
+            # A bare JSON list: URL strings, or {"url": …}
+            # rows — the simplest shape a source can serve.
+            if isinstance(data, list):
+                urls = [str(x) for x in data
+                        if isinstance(x, str)
+                        and x.startswith("http")]
+                urls += [str(x["url"]) for x in data
+                         if isinstance(x, dict)
+                         and isinstance(x.get("url"), str)
+                         and x["url"]]
+                return rng.choice(urls) if urls else ""
             return ""
         if src.shape == "randomfox":
             if isinstance(data, dict) \
