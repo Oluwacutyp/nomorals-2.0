@@ -78,12 +78,53 @@ class TravelClient:
         return self.cost_client or self.id
 
 
-class TravelClientStore:
-    """SQLite registry of white-label travel clients. Never raises."""
+#: The store's final-shape DDL — the seam mapping is derived from
+#: it, so the two can never drift. The native path reaches the same
+#: shape via its CREATE + the channels/languages ALTERs below; those
+#: ALTERs stay native-path concerns, and pre-ALTER file rows import
+#: with the mapping's defaults for the columns they lack.
+_DDL = (
+    "CREATE TABLE IF NOT EXISTS travel_clients ("
+    " id TEXT PRIMARY KEY, name TEXT, whatsapp_number TEXT,"
+    " branding_json TEXT, cost_client TEXT,"
+    " created_at REAL, active INTEGER DEFAULT 1,"
+    " channels_json TEXT, languages_json TEXT);"
+    "CREATE TABLE IF NOT EXISTS client_events ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " client_id TEXT NOT NULL, at REAL NOT NULL,"
+    " kind TEXT NOT NULL, meta_json TEXT DEFAULT '{}');"
+    "CREATE INDEX IF NOT EXISTS idx_ce_client "
+    "ON client_events (client_id, at)"
+)
 
-    def __init__(self, db_path: str = "") -> None:
+
+class TravelClientStore:
+    """SQLite registry of white-label travel clients. Never raises.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as travel-whitelabel):
+    clients are documents in ``travel-whitelabel__travel_clients``;
+    the AUTOINCREMENT event log rides ``put_raw`` with ids allocated
+    by the port's atomic counter. The file's existing rows are
+    imported once, through the same mapping, at first construction.
+    The per-client knowledge files are a separate DocumentIndex-owned
+    surface and are not part of this store on either rung.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         path = db_path or _DEFAULT_DB
         os.makedirs(os.path.dirname(path), exist_ok=True)
+        self._db: sqlite3.Connection | None = None
+        self._port: Any = None
+        self._imported_max_event = 0
+        from ..storage.sidecars import sidecar_port
+        port = sidecar_port("travel-whitelabel", _DDL,
+                            ("travel_clients",), path, store=store)
+        if port is not None:
+            self._import_into(port)
+            self._port = port
+            return
         self._db = sqlite3.connect(path)
         self._db.row_factory = sqlite3.Row
         self._db.execute(
@@ -113,8 +154,41 @@ class TravelClientStore:
         )
         self._db.commit()
 
+    def _import_into(self, port: Any) -> None:
+        """The one-time lazy file import (see SidecarPort): clients go
+        through their RowTable; event rows keep their file ids via
+        put_raw, and the id counter is seeded from the imported
+        maximum so seam-allocated ids continue the file's sequence."""
+
+        def write_clients(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["travel_clients"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        def write_events(rows: list[dict[str, Any]]) -> int:
+            for row in rows:
+                eid = int(row["id"])
+                self._imported_max_event = max(self._imported_max_event, eid)
+                port.put_raw("client_events", str(eid), {
+                    "id": eid, "client_id": row["client_id"],
+                    "at": row["at"], "kind": row["kind"],
+                    "meta_json": row["meta_json"]})
+            return len(rows)
+
+        def seed_counter(_counts: dict[str, int]) -> None:
+            doc = port.store.get(port.meta_collection, "counters") or {}
+            if int(doc.get("client_events") or 0) < self._imported_max_event:
+                port.store.put(port.meta_collection, "counters", {
+                    **doc, "client_events": self._imported_max_event})
+
+        port.ensure_imported(
+            {"travel_clients": write_clients,
+             "client_events": write_events},
+            after_import=seed_counter)
+
     @staticmethod
-    def _row_to_client(row: sqlite3.Row) -> TravelClient:
+    def _row_to_client(row: Any) -> TravelClient:
         import json
         cols = set(row.keys())
         return TravelClient(
@@ -149,6 +223,16 @@ class TravelClientStore:
             languages=list(languages or ["en"]),
         )
         try:
+            if self._port is not None:
+                self._port.tables["travel_clients"].put({
+                    "id": client.id, "name": client.name,
+                    "whatsapp_number": client.whatsapp_number,
+                    "branding_json": json.dumps(client.branding),
+                    "cost_client": client.cost_client,
+                    "created_at": client.created_at, "active": 1,
+                    "channels_json": json.dumps(client.channels),
+                    "languages_json": json.dumps(client.languages)})
+                return client
             self._db.execute(
                 "INSERT INTO travel_clients (id, name, whatsapp_number,"
                 " branding_json, cost_client, created_at, active,"
@@ -167,6 +251,9 @@ class TravelClientStore:
 
     def get(self, client_id: str) -> TravelClient | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["travel_clients"].get(client_id)
+                return self._row_to_client(row) if row else None
             row = self._db.execute(
                 "SELECT * FROM travel_clients WHERE id = ?",
                 (client_id,)).fetchone()
@@ -178,6 +265,13 @@ class TravelClientStore:
 
     def list(self, *, active_only: bool = True) -> list[TravelClient]:
         try:
+            if self._port is not None:
+                rows = self._port.tables["travel_clients"].find()
+                if active_only:
+                    rows = [r for r in rows if int(r["active"] or 0) == 1]
+                rows.sort(key=lambda r: r["created_at"] or 0,
+                          reverse=True)
+                return [self._row_to_client(r) for r in rows]
             q = "SELECT * FROM travel_clients"
             if active_only:
                 q += " WHERE active = 1"
@@ -188,6 +282,11 @@ class TravelClientStore:
 
     def deactivate(self, client_id: str) -> bool:
         try:
+            if self._port is not None:
+                table = self._port.tables["travel_clients"]
+                if table.get(client_id) is None:
+                    return False
+                return table.update(client_id, {"active": 0})
             cur = self._db.execute(
                 "UPDATE travel_clients SET active = 0 WHERE id = ?",
                 (client_id,))
@@ -195,6 +294,42 @@ class TravelClientStore:
             return cur.rowcount > 0
         except Exception:  # noqa: BLE001
             return False
+
+    # ── client events (the analytics feed) ──────────────────────────
+
+    def log_event(self, client_id: str, kind: str,
+                  meta: dict | None = None) -> None:
+        """Append one event row. Raises on failure — the module-level
+        wrapper owns the never-raises contract, as it does natively."""
+        import json
+        if self._port is not None:
+            eid = self._port.next_id("client_events")
+            self._port.put_raw("client_events", str(eid), {
+                "id": eid, "client_id": client_id, "at": time.time(),
+                "kind": kind, "meta_json": json.dumps(meta or {})})
+            return
+        self._db.execute(
+            "INSERT INTO client_events (client_id, at, kind, meta_json)"
+            " VALUES (?, ?, ?, ?)",
+            (client_id, time.time(), kind, json.dumps(meta or {})))
+        self._db.commit()
+
+    def event_counts(self, client_id: str,
+                     cutoff: float) -> dict[str, int]:
+        """{kind: count} for one client since ``cutoff`` — the
+        analytics GROUP BY, re-expressed over finds on the seam."""
+        if self._port is not None:
+            counts: dict[str, int] = {}
+            for r in self._port.find_raw(
+                    "client_events", {"client_id": client_id}):
+                if float(r["at"]) >= cutoff:
+                    counts[r["kind"]] = counts.get(r["kind"], 0) + 1
+            return counts
+        rows = self._db.execute(
+            "SELECT kind, COUNT(*) AS n FROM client_events"
+            " WHERE client_id = ? AND at >= ? GROUP BY kind",
+            (client_id, cutoff)).fetchall()
+        return {r["kind"]: r["n"] for r in rows}
 
 
 # ── per-client knowledge (structural isolation) ─────────────────────────────
@@ -313,14 +448,9 @@ def log_client_event(client_id: str, kind: str,
                      meta: dict | None = None, *,
                      db_path: str = "") -> bool:
     """Record one client event. Never raises."""
-    import json
     try:
         store = TravelClientStore(db_path)
-        store._db.execute(
-            "INSERT INTO client_events (client_id, at, kind, meta_json)"
-            " VALUES (?, ?, ?, ?)",
-            (client_id, time.time(), kind, json.dumps(meta or {})))
-        store._db.commit()
+        store.log_event(client_id, kind, meta)
         return True
     except Exception:  # noqa: BLE001
         _log.debug("client event log failed", exc_info=True)
@@ -330,17 +460,12 @@ def log_client_event(client_id: str, kind: str,
 def client_analytics(client_id: str, *, days: int = 30,
                      db_path: str = "") -> str:
     """Queries, bookings, escalations, knowledge grounding, spend — one view."""
-    import json
     try:
         store = TravelClientStore(db_path)
         cutoff = time.time() - days * 86400
-        rows = store._db.execute(
-            "SELECT kind, COUNT(*) AS n FROM client_events"
-            " WHERE client_id = ? AND at >= ? GROUP BY kind",
-            (client_id, cutoff)).fetchall()
+        counts = store.event_counts(client_id, cutoff)
     except Exception:  # noqa: BLE001
         return f"no analytics for {client_id}."
-    counts = {r["kind"]: r["n"] for r in rows}
     queries = counts.get(EVENT_QUERY, 0)
     hits = counts.get(EVENT_KNOWLEDGE_HIT, 0)
     misses = counts.get(EVENT_KNOWLEDGE_MISS, 0)

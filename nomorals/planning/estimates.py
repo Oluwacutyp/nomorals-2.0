@@ -113,36 +113,77 @@ def _fmt_clock(epoch: float) -> str:
         return "--:--"
 
 
-class EstimateStore:
-    """Per-task-type learned bands. SQLite. Never raises."""
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+#: ema_ratio: actual/predicted EMA — the learned bias correction.
+_STATS_DDL = (
+    "CREATE TABLE IF NOT EXISTS estimate_stats ("
+    " task_type TEXT PRIMARY KEY,"
+    " n INTEGER DEFAULT 0,"
+    " misses INTEGER DEFAULT 0,"
+    " ema_ratio REAL DEFAULT 1.0)")
+_SEGMENTS_DDL = (
+    "CREATE TABLE IF NOT EXISTS estimate_segments ("
+    " task_type TEXT, segment TEXT,"
+    " n INTEGER DEFAULT 0,"
+    " ema_minutes REAL DEFAULT 0.0,"
+    " ema_abs_err REAL DEFAULT 0.0,"
+    " PRIMARY KEY (task_type, segment))")
+_DDL = _STATS_DDL + "; " + _SEGMENTS_DDL
 
-    def __init__(self, db_path: str = "") -> None:
+
+class EstimateStore:
+    """Per-task-type learned bands. SQLite. Never raises.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as planning-estimates):
+    both tables are documents in ``planning-estimates__estimate_stats``
+    / ``__estimate_segments``, ported as-is — the stats table is a
+    stored rollup, the file's history, never re-derived on the seam.
+    The file's existing rows are imported once, through the same
+    mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             path = db_path or _default_db()
             if path != ":memory:":
                 os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+            port = sidecar_port("planning-estimates", _DDL,
+                                ("estimate_stats", "estimate_segments"),
+                                None if path == ":memory:" else path,
+                                store=store)
+            if port is not None:
+                def write_stats(rows: list[dict[str, Any]]) -> int:
+                    table = port.tables["estimate_stats"]
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                def write_segments(rows: list[dict[str, Any]]) -> int:
+                    table = port.tables["estimate_segments"]
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"estimate_stats": write_stats,
+                                      "estimate_segments": write_segments})
+                self._port = port
+                return
             self._db = sqlite3.connect(path)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS estimate_stats (
-                       task_type TEXT PRIMARY KEY,
-                       n INTEGER DEFAULT 0,
-                       misses INTEGER DEFAULT 0,
-                       ema_ratio REAL DEFAULT 1.0)""")
-            # ema_ratio: actual/predicted EMA — the learned bias correction.
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS estimate_segments (
-                       task_type TEXT, segment TEXT,
-                       n INTEGER DEFAULT 0,
-                       ema_minutes REAL DEFAULT 0.0,
-                       ema_abs_err REAL DEFAULT 0.0,
-                       PRIMARY KEY (task_type, segment))""")
+            self._db.execute(_STATS_DDL)
+            self._db.execute(_SEGMENTS_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001 — bad DB path → empty store
             _log.warning("estimates: db unavailable, running empty",
                          exc_info=True)
             self._db = None
+            self._port = None
 
     # ── estimation ────────────────────────────────────────────────
 
@@ -215,18 +256,32 @@ class EstimateStore:
             pass
         return out
 
+    def _segment_row(self, task_type: str,
+                     name: str) -> dict[str, Any] | None:
+        """One segment's learned row, from whichever rung serves."""
+        if self._port is not None:
+            # composite PK: the pair lives in the joined document id
+            # (the carry mapping keeps PK columns out of the stored
+            # fields — the calendar port's joined-id read)
+            return self._port.tables["estimate_segments"].get(
+                f"{task_type}\x1f{name}")
+        if self._db is None:
+            return None
+        row = self._db.execute(
+            "SELECT n, ema_minutes, ema_abs_err FROM estimate_segments "
+            "WHERE task_type = ? AND segment = ?",
+            (task_type, name)).fetchone()
+        return dict(row) if row else None
+
     def _segment_band(self, task_type: str, name: str, minutes: float,
                       widen: float) -> tuple[float, float, float, bool]:
         """One segment → (point, low, high, learned)."""
         learned = False
         point = minutes
-        if self._db is not None and minutes <= 0:
+        if (self._db is not None or self._port is not None) and minutes <= 0:
             # No caller guess — use the learned segment average if we have one.
             try:
-                row = self._db.execute(
-                    "SELECT ema_minutes, n FROM estimate_segments "
-                    "WHERE task_type = ? AND segment = ?",
-                    (task_type, name)).fetchone()
+                row = self._segment_row(task_type, name)
                 if row and row["n"] >= 2 and row["ema_minutes"] > 0:
                     point = float(row["ema_minutes"])
                     learned = True
@@ -234,12 +289,9 @@ class EstimateStore:
                 pass
         # Half-width: learned absolute error when we have it, else ±25%.
         half = point * _BASE_HALF_WIDTH
-        if self._db is not None:
+        if self._db is not None or self._port is not None:
             try:
-                row = self._db.execute(
-                    "SELECT ema_abs_err, n FROM estimate_segments "
-                    "WHERE task_type = ? AND segment = ?",
-                    (task_type, name)).fetchone()
+                row = self._segment_row(task_type, name)
                 if row and row["n"] >= 2 and row["ema_abs_err"] > 0:
                     half = float(row["ema_abs_err"])
                     learned = True
@@ -252,18 +304,37 @@ class EstimateStore:
 
     def _stats(self, task_type: str) -> dict:
         base = {"n": 0, "misses": 0, "ema_ratio": 1.0}
-        if self._db is None:
+        if self._db is None and self._port is None:
             return base
         try:
-            row = self._db.execute(
-                "SELECT n, misses, ema_ratio FROM estimate_stats "
-                "WHERE task_type = ?", (task_type,)).fetchone()
+            if self._port is not None:
+                row = self._port.tables["estimate_stats"].get(task_type)
+            else:
+                raw = self._db.execute(
+                    "SELECT n, misses, ema_ratio FROM estimate_stats "
+                    "WHERE task_type = ?", (task_type,)).fetchone()
+                row = dict(raw) if raw else None
             if row:
                 base.update(n=row["n"], misses=row["misses"],
                             ema_ratio=row["ema_ratio"] or 1.0)
         except Exception:  # noqa: BLE001
             pass
         return base
+
+    def calibration_rows(self) -> list[dict[str, Any]]:
+        """estimate_stats rows with n >= 3, most runs first — the
+        module-level calibration reader's rows, from whichever rung
+        serves. [] when the store is unavailable."""
+        if self._port is not None:
+            rows = [r for r in self._port.tables["estimate_stats"].find()
+                    if int(r["n"] or 0) >= 3]
+            rows.sort(key=lambda r: int(r["n"] or 0), reverse=True)
+            return rows
+        if self._db is None:
+            return []
+        return [dict(r) for r in self._db.execute(
+            "SELECT task_type, n, misses FROM estimate_stats "
+            "WHERE n >= 3 ORDER BY n DESC").fetchall()]
 
     def _confidence(self, stats: dict) -> float:
         n, misses = stats["n"], stats["misses"]
@@ -282,7 +353,7 @@ class EstimateStore:
             task_type = (task_type or "generic").strip().lower()[:80] or "generic"
             predicted = max(0.1, float(predicted))
             actual = max(0.0, float(actual))
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return False
             stats = self._stats(task_type)
             # A miss = the actual landed outside the band we would have
@@ -294,12 +365,17 @@ class EstimateStore:
             ratio = actual / predicted
             ema = stats["ema_ratio"] * 0.8 + ratio * 0.2
             ema = min(3.0, max(0.33, ema))  # keep the bias correction sane
-            self._db.execute(
-                "INSERT INTO estimate_stats (task_type, n, misses, ema_ratio) "
-                "VALUES (?, ?, ?, ?) "
-                "ON CONFLICT(task_type) DO UPDATE SET n=excluded.n, "
-                "misses=excluded.misses, ema_ratio=excluded.ema_ratio",
-                (task_type, n, misses, ema))
+            if self._port is not None:
+                self._port.tables["estimate_stats"].put({
+                    "task_type": task_type, "n": n, "misses": misses,
+                    "ema_ratio": ema})
+            else:
+                self._db.execute(
+                    "INSERT INTO estimate_stats (task_type, n, misses, ema_ratio) "
+                    "VALUES (?, ?, ?, ?) "
+                    "ON CONFLICT(task_type) DO UPDATE SET n=excluded.n, "
+                    "misses=excluded.misses, ema_ratio=excluded.ema_ratio",
+                    (task_type, n, misses, ema))
             # Per-segment absolute-error learning.
             for name, seg_actual in (segments or {}).items():
                 try:
@@ -307,26 +383,35 @@ class EstimateStore:
                 except (TypeError, ValueError):
                     continue
                 name = str(name)[:40]
-                row = self._db.execute(
-                    "SELECT n, ema_minutes, ema_abs_err FROM estimate_segments "
-                    "WHERE task_type = ? AND segment = ?", (task_type, name)).fetchone()
+                row = self._segment_row(task_type, name)
                 if row:
                     nn = row["n"] + 1
                     em = row["ema_minutes"] * 0.8 + seg_actual * 0.2
                     # Error vs the segment's own EMA.
                     err = abs(seg_actual - row["ema_minutes"])
                     ea = row["ema_abs_err"] * 0.8 + err * 0.2
-                    self._db.execute(
-                        "UPDATE estimate_segments SET n=?, ema_minutes=?, "
-                        "ema_abs_err=? WHERE task_type=? AND segment=?",
-                        (nn, em, ea, task_type, name))
+                    if self._port is not None:
+                        self._port.tables["estimate_segments"].put({
+                            "task_type": task_type, "segment": name,
+                            "n": nn, "ema_minutes": em,
+                            "ema_abs_err": ea})
+                    else:
+                        self._db.execute(
+                            "UPDATE estimate_segments SET n=?, ema_minutes=?, "
+                            "ema_abs_err=? WHERE task_type=? AND segment=?",
+                            (nn, em, ea, task_type, name))
+                elif self._port is not None:
+                    self._port.tables["estimate_segments"].put({
+                        "task_type": task_type, "segment": name, "n": 1,
+                        "ema_minutes": seg_actual, "ema_abs_err": 0.0})
                 else:
                     self._db.execute(
                         "INSERT INTO estimate_segments "
                         "(task_type, segment, n, ema_minutes, ema_abs_err) "
                         "VALUES (?, ?, 1, ?, 0.0)",
                         (task_type, name, seg_actual))
-            self._db.commit()
+            if self._db is not None:
+                self._db.commit()
             return True
         except Exception:  # noqa: BLE001
             _log.warning("estimates: record_actual failed", exc_info=True)
@@ -796,11 +881,9 @@ def calibration(db_path: str = "") -> list[dict[str, Any]]:
     """
     try:
         store = get_store(db_path)
-        if store._db is None:
+        if store._db is None and store._port is None:
             return []
-        rows = store._db.execute(
-            "SELECT task_type, n, misses FROM estimate_stats "
-            "WHERE n >= 3 ORDER BY n DESC").fetchall()
+        rows = store.calibration_rows()
         out = []
         for r in rows:
             n, misses = int(r["n"] or 0), int(r["misses"] or 0)

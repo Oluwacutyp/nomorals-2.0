@@ -127,6 +127,26 @@ def _rate_for(category: str) -> int:
 
 # ── CostTracker ───────────────────────────────────────────────────────────
 
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_DDL = """
+    CREATE TABLE IF NOT EXISTS wa_costs (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone TEXT NOT NULL DEFAULT '',
+        category TEXT NOT NULL DEFAULT 'service',
+        cost_kobo INTEGER NOT NULL DEFAULT 0,
+        client TEXT NOT NULL DEFAULT 'default',
+        purpose TEXT NOT NULL DEFAULT '',
+        ts REAL NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS wa_budgets (
+        client TEXT PRIMARY KEY,
+        amount_kobo INTEGER NOT NULL,
+        hard INTEGER NOT NULL DEFAULT 1,
+        updated_at REAL NOT NULL
+    );
+"""
+
 
 class CostTracker:
     """Per-message WhatsApp accounting.
@@ -137,6 +157,14 @@ class CostTracker:
 
     A budget is *hard* by default — exceeding it blocks sends. Pass
     ``hard=False`` for a soft budget that warns instead of blocking.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as social-whatsapp-cost):
+    budgets are documents in ``social-whatsapp-cost__wa_budgets``; the
+    AUTOINCREMENT cost ledger rides ``put_raw`` with ids allocated by
+    the port's atomic counter. The file's existing rows are imported
+    once, through the same mapping, at first construction.
     """
 
     def __init__(
@@ -144,6 +172,7 @@ class CostTracker:
         db_path: str = "",
         *,
         now: Callable[[], float] | None = None,
+        store: Any = None,
     ) -> None:
         import os
         path = db_path or os.path.expanduser("~/.nomorals/whatsapp_cost.db")
@@ -153,29 +182,56 @@ class CostTracker:
             pass
         self.db_path = path
         self._now = now or time.time
+        self._db: sqlite3.Connection | None = None
+        self._port: Any = None
+        self._imported_max_cost = 0
+        from ..storage.sidecars import sidecar_port
+        port = sidecar_port("social-whatsapp-cost", _DDL, ("wa_budgets",),
+                            path, store=store)
+        if port is not None:
+            self._import_into(port)
+            self._port = port
+            return
         self._db = sqlite3.connect(path)
         self._db.row_factory = sqlite3.Row
         self._init_schema()
 
+    def _import_into(self, port: Any) -> None:
+        """The one-time lazy file import (see SidecarPort): budgets go
+        through their RowTable; cost rows keep their file ids via
+        put_raw, and the id counter is seeded from the imported
+        maximum so seam-allocated ids continue the file's sequence."""
+
+        def write_budgets(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["wa_budgets"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        def write_costs(rows: list[dict[str, Any]]) -> int:
+            for row in rows:
+                cid = int(row["id"])
+                self._imported_max_cost = max(self._imported_max_cost, cid)
+                port.put_raw("wa_costs", str(cid), {
+                    "id": cid, "phone": row["phone"],
+                    "category": row["category"],
+                    "cost_kobo": row["cost_kobo"], "client": row["client"],
+                    "purpose": row["purpose"], "ts": row["ts"]})
+            return len(rows)
+
+        def seed_counter(_counts: dict[str, int]) -> None:
+            doc = port.store.get(port.meta_collection, "counters") or {}
+            if int(doc.get("wa_costs") or 0) < self._imported_max_cost:
+                port.store.put(port.meta_collection, "counters", {
+                    **doc, "wa_costs": self._imported_max_cost})
+
+        port.ensure_imported(
+            {"wa_budgets": write_budgets, "wa_costs": write_costs},
+            after_import=seed_counter)
+
     def _init_schema(self) -> None:
         try:
-            self._db.executescript("""
-                CREATE TABLE IF NOT EXISTS wa_costs (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    phone TEXT NOT NULL DEFAULT '',
-                    category TEXT NOT NULL DEFAULT 'service',
-                    cost_kobo INTEGER NOT NULL DEFAULT 0,
-                    client TEXT NOT NULL DEFAULT 'default',
-                    purpose TEXT NOT NULL DEFAULT '',
-                    ts REAL NOT NULL
-                );
-                CREATE TABLE IF NOT EXISTS wa_budgets (
-                    client TEXT PRIMARY KEY,
-                    amount_kobo INTEGER NOT NULL,
-                    hard INTEGER NOT NULL DEFAULT 1,
-                    updated_at REAL NOT NULL
-                );
-            """)
+            self._db.executescript(_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001 — accounting must never break sends
             _log.debug("cost schema init failed", exc_info=True)
@@ -196,6 +252,14 @@ class CostTracker:
         "no spend". Never raises."""
         try:
             cost = _rate_for(category)
+            if self._port is not None:
+                cid = self._port.next_id("wa_costs")
+                self._port.put_raw("wa_costs", str(cid), {
+                    "id": cid, "phone": phone or "",
+                    "category": (category or "service").lower(),
+                    "cost_kobo": cost, "client": client or "default",
+                    "purpose": purpose or "", "ts": self._now()})
+                return cost
             self._db.execute(
                 """INSERT INTO wa_costs
                    (phone, category, cost_kobo, client, purpose, ts)
@@ -219,6 +283,11 @@ class CostTracker:
         None when the cost ledger can't be read.
         """
         try:
+            if self._port is not None:
+                rows = self._port.find_raw(
+                    "wa_costs", {"client": client or "default"})
+                return sum(int(r["cost_kobo"] or 0) for r in rows
+                           if float(r["ts"]) >= since)
             row = self._db.execute(
                 """SELECT COALESCE(SUM(cost_kobo), 0) AS t FROM wa_costs
                    WHERE ts >= ? AND client = ?""",
@@ -277,6 +346,11 @@ class CostTracker:
         None when the cost ledger can't be read.
         """
         try:
+            if self._port is not None:
+                since = self._now() - 7 * 86400
+                rows = self._port.find_raw(
+                    "wa_costs", {"client": client or "default"})
+                return sum(1 for r in rows if float(r["ts"]) >= since)
             row = self._db.execute(
                 """SELECT COUNT(*) AS n FROM wa_costs
                    WHERE ts >= ? AND client = ?""",
@@ -294,6 +368,12 @@ class CostTracker:
     ) -> None:
         """Set a weekly budget for a client. Never raises."""
         try:
+            if self._port is not None:
+                self._port.tables["wa_budgets"].put({
+                    "client": client or "default",
+                    "amount_kobo": int(amount_kobo or 0),
+                    "hard": 1 if hard else 0, "updated_at": self._now()})
+                return
             self._db.execute(
                 """INSERT OR REPLACE INTO wa_budgets
                    (client, amount_kobo, hard, updated_at)
@@ -308,6 +388,16 @@ class CostTracker:
     def get_budget(self, client: str = "default") -> dict[str, Any] | None:
         """The budget row, or None when no budget is set. Never raises."""
         try:
+            if self._port is not None:
+                row = self._port.tables["wa_budgets"].get(
+                    client or "default")
+                if row is None:
+                    return None
+                return {
+                    "client": row["client"],
+                    "amount_kobo": int(row["amount_kobo"] or 0),
+                    "hard": bool(row["hard"]),
+                }
             row = self._db.execute(
                 "SELECT * FROM wa_budgets WHERE client = ?",
                 (client or "default",),

@@ -24,7 +24,11 @@ P5 settles the stores that live BESIDE the central database:
   Batch 2 ports: workspace-inbox, health-nutrition and
   commerce-medusa (slice 1), and the B2 port (shopping-deals) is the shared-file shape: two
   engines over one Database handle, six tables, one shared port —
-  with the legacy price_snapshots adoption cases on the seam.
+  with the legacy price_snapshots adoption cases on the seam. The
+  residue Batch 2 slice-3 ports (email-integration,
+  travel-whitelabel, social-whatsapp-cost, planning-estimates)
+  follow the same pattern below — email with the cursor-continuity
+  case its registry entry demands.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -211,7 +215,10 @@ class TestSidecarRegistry:
             # residue Batch 2, slice 1:
             "workspace-inbox", "health-nutrition", "commerce-medusa",
             # residue Batch 2, B2 (the shared-file group):
-            "shopping-deals"}
+            "shopping-deals",
+            # residue Batch 2, slice 3:
+            "email-integration", "travel-whitelabel",
+            "social-whatsapp-cost", "planning-estimates"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -2342,3 +2349,313 @@ class TestMedusaStorePort:
         again = StoreManager(path, store=rung.store, now=lambda: 0.0)
         assert again.get("store_0123456789abcdef").name == "Suya Place"
         assert rung.store.count("commerce-medusa__stores") == 1
+
+
+# ---------------------------------------------------------------------------
+# residue Batch 2, slice 3: email-integration, travel-whitelabel,
+# social-whatsapp-cost, planning-estimates
+# ---------------------------------------------------------------------------
+
+class TestEmailIntegrationPort:
+    """Helpers (_integration + the fake Gmail transport) live on the
+    class, adjacent to the cases that use them."""
+
+    @staticmethod
+    def _integration(store=None, hid=None):
+        from unittest.mock import MagicMock
+
+        import nomorals.integrations.email_integration as email_mod
+
+        integ = email_mod.EmailIntegration(MagicMock(), MagicMock(),
+                                           store=store)
+        integ._detect_backend = lambda account: "gmail_api"
+        integ._gmail_token = lambda account: "tok"
+        state = hid if hid is not None else ["100"]
+        calls = []
+
+        def fake_request(account, method, url, payload=None, params=None):
+            calls.append((method, url, dict(params or {})))
+            if url.endswith("/profile"):
+                return {"historyId": state[0]}
+            if "/history" in url:
+                return {"history": []}
+            if url.endswith("/watch"):
+                return {"historyId": state[0],
+                        "expiration": int((time.time() + 7 * 86400) * 1000)}
+            return {}
+
+        integ._gmail_request = fake_request
+        return integ, state, calls
+
+    def test_conformance(self, rung, tmp_path, monkeypatch):
+        import asyncio
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        hid = ["100"]
+        integ, _, calls = self._integration(store=rung.store, hid=hid)
+        first = asyncio.run(integ.sync_new("a@gmail.com"))
+        assert first == {"new": [], "cursor_seeded": True,
+                         "history_id": "100"}
+        hid[0] = "150"
+        second = asyncio.run(integ.sync_new("a@gmail.com"))
+        assert second["cursor_seeded"] is False
+        assert second["history_id"] == "150"
+        history_calls = [c for c in calls if "/history" in c[1]]
+        assert history_calls[-1][2].get("startHistoryId") == "100"
+        # watches ride the same store
+        asyncio.run(integ.start_watch("projects/p/topic", "a@gmail.com"))
+        status = integ.watch_status("a@gmail.com")
+        assert status is not None
+        assert status["topic"] == "projects/p/topic"
+        assert status["history_id"] == "150"
+        asyncio.run(integ.stop_watch("a@gmail.com"))
+        assert integ.watch_status("a@gmail.com") is None
+
+    def test_cursor_continuity_across_the_move(self, rung, tmp_path,
+                                               monkeypatch):
+        """The registry's continuity pin (the A17 case applied to
+        email): a historyId advanced on the native path is the
+        cursor the seam resumes from — a reset would mean a full
+        re-sync storm against Gmail's token stream."""
+        if rung.store is None:
+            pytest.skip("native rung has no move to prove")
+        import asyncio
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        hid = ["100"]
+        # phase 1: native construction seeds, then advances the
+        # file's cursor to 150
+        native, _, _ = self._integration(hid=hid)
+        first = asyncio.run(native.sync_new("a@gmail.com"))
+        assert first["cursor_seeded"] is True
+        hid[0] = "150"
+        second = asyncio.run(native.sync_new("a@gmail.com"))
+        assert second["history_id"] == "150"
+        # phase 2: seam construction imports the file's cursor and
+        # resumes from it, then advances it in its own collection
+        seam, _, seam_calls = self._integration(store=rung.store, hid=hid)
+        hid[0] = "200"
+        third = asyncio.run(seam.sync_new("a@gmail.com"))
+        assert third["cursor_seeded"] is False
+        assert third["history_id"] == "200"
+        seam_history = [c for c in seam_calls if "/history" in c[1]]
+        assert seam_history[-1][2].get("startHistoryId") == "150"
+        assert rung.store.count("email-integration__cursors") == 1
+        doc = rung.store.get("email-integration__cursors", "a@gmail.com")
+        assert doc is not None and doc["history_id"] == "200"
+        # phase 3: a second seam construction adopts the advanced
+        # cursor — never re-imports, never resets
+        again, _, again_calls = self._integration(store=rung.store,
+                                                  hid=hid)
+        hid[0] = "260"
+        fourth = asyncio.run(again.sync_new("a@gmail.com"))
+        assert fourth["history_id"] == "260"
+        again_history = [c for c in again_calls if "/history" in c[1]]
+        assert again_history[-1][2].get("startHistoryId") == "200"
+        assert rung.store.count("email-integration__cursors") == 1
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path,
+                                        monkeypatch):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        import asyncio
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        hid = ["100"]
+        native, _, _ = self._integration(hid=hid)
+        asyncio.run(native.sync_new("a@gmail.com"))
+        asyncio.run(native.start_watch("projects/p/topic", "a@gmail.com"))
+        seam, _, _ = self._integration(store=rung.store, hid=hid)
+        status = seam.watch_status("a@gmail.com")
+        assert status is not None
+        assert status["topic"] == "projects/p/topic"
+        assert rung.store.count("email-integration__cursors") == 1
+        assert rung.store.count("email-integration__watches") == 1
+        doc = rung.store.get("email-integration__watches", "a@gmail.com")
+        assert doc is not None and doc["history_id"] == "100"
+        again, _, _ = self._integration(store=rung.store, hid=hid)
+        assert again.watch_status("a@gmail.com") is not None
+        assert rung.store.count("email-integration__cursors") == 1
+        assert rung.store.count("email-integration__watches") == 1
+
+
+class TestTravelWhitelabelPort:
+    @staticmethod
+    def _scenario(store, path):
+        from nomorals.travel.whitelabel import TravelClientStore
+
+        s = TravelClientStore(str(path), store=store)
+        a = s.create("Alpha Travel", whatsapp_number="+234800000000",
+                     branding={"tone": "warm"},
+                     channels=["whatsapp", "instagram"],
+                     languages=["en", "yo"])
+        b = s.create("Beta Tours")
+        assert a is not None and b is not None
+        got = s.get(a.id)
+        assert got is not None and got.name == "Alpha Travel"
+        assert got.channels == ["whatsapp", "instagram"]
+        assert got.languages == ["en", "yo"]
+        assert got.branding == {"tone": "warm"}
+        assert {c.id for c in s.list()} == {a.id, b.id}
+        assert s.deactivate(b.id) is True
+        assert s.deactivate("tcl_missing") is False
+        assert {c.id for c in s.list()} == {a.id}
+        assert {c.id for c in s.list(active_only=False)} == {a.id, b.id}
+        s.log_event(a.id, "query", {"q": "flights"})
+        s.log_event(a.id, "query", {})
+        s.log_event(a.id, "booking", {})
+        s.log_event(b.id, "query", {})
+        assert s.event_counts(a.id, 0.0) == {"query": 2, "booking": 1}
+        return s, a, b
+
+    def test_conformance(self, rung, tmp_path):
+        self._scenario(rung.store, tmp_path / "clients.db")
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        path = tmp_path / "clients.db"
+        _native, a, _b = self._scenario(None, path)
+        from nomorals.travel.whitelabel import (
+            TravelClientStore,
+            log_client_event,
+        )
+
+        seam = TravelClientStore(str(path), store=rung.store)
+        assert rung.store.count("travel-whitelabel__travel_clients") == 2
+        assert rung.store.count("travel-whitelabel__client_events") == 4
+        assert {c.id for c in seam.list()} == {a.id}
+        assert seam.event_counts(a.id, 0.0) == {"query": 2, "booking": 1}
+        # id continuity: the seam's next event continues the file's
+        # AUTOINCREMENT sequence instead of restarting it
+        seam.log_event(a.id, "escalation", {})
+        docs = rung.store.find("travel-whitelabel__client_events")
+        assert len(docs) == 5
+        assert max(int(d["id"]) for d in docs) == 5
+        # the module-level writer reaches the same seam via the boot
+        # ambient, exactly as production wiring resolves it
+        set_ambient_document_store(rung.store)
+        try:
+            assert log_client_event(a.id, "query", {},
+                                    db_path=str(path)) is True
+        finally:
+            set_ambient_document_store(None)
+        assert rung.store.count("travel-whitelabel__client_events") == 6
+        # a second seam construction adopts — no re-import, no dupes
+        again = TravelClientStore(str(path), store=rung.store)
+        assert rung.store.count("travel-whitelabel__travel_clients") == 2
+        assert rung.store.count("travel-whitelabel__client_events") == 6
+        assert again.event_counts(a.id, 0.0) == {
+            "query": 3, "booking": 1, "escalation": 1}
+
+
+class TestWhatsAppCostPort:
+    NOW = 1_700_000_000.0
+
+    def _scenario(self, store, path):
+        from nomorals.social.whatsapp_cost import (
+            RATE_MARKETING_KOBO,
+            RATE_SERVICE_KOBO,
+            CostTracker,
+        )
+
+        t = CostTracker(str(path), now=lambda: self.NOW, store=store)
+        assert t.track("08030000000", "service", client="acme",
+                       purpose="otp") == RATE_SERVICE_KOBO
+        assert t.track("08030000000", "marketing",
+                       client="acme") == RATE_MARKETING_KOBO
+        assert t.track("08030000001", "service",
+                       client="other") == RATE_SERVICE_KOBO
+        total = RATE_SERVICE_KOBO + RATE_MARKETING_KOBO
+        assert t.spent_since(self.NOW - 3600, client="acme") == total
+        assert t.spent_since(self.NOW + 60, client="acme") == 0
+        assert t.message_count(client="acme") == 2
+        assert t.get_budget("acme") is None
+        t.set_budget("acme", total - 1, hard=True)
+        assert t.get_budget("acme") == {
+            "client": "acme", "amount_kobo": total - 1, "hard": True}
+        may, spent, amount = t.check_budget("acme")
+        assert (may, spent, amount) == (False, total, total - 1)
+        return t
+
+    def test_conformance(self, rung, tmp_path):
+        self._scenario(rung.store, tmp_path / "cost.db")
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.social.whatsapp_cost import CostTracker
+
+        path = tmp_path / "cost.db"
+        self._scenario(None, path)
+        seam = CostTracker(str(path), now=lambda: self.NOW,
+                           store=rung.store)
+        assert rung.store.count("social-whatsapp-cost__wa_budgets") == 1
+        assert rung.store.count("social-whatsapp-cost__wa_costs") == 3
+        budget = rung.store.get("social-whatsapp-cost__wa_budgets",
+                                "acme")
+        assert budget is not None and budget["hard"] == 1
+        # id continuity: the seam's next ledger row continues the
+        # file's AUTOINCREMENT sequence
+        seam.track("08030000002", "service", client="acme")
+        docs = rung.store.find("social-whatsapp-cost__wa_costs")
+        assert len(docs) == 4
+        assert max(int(d["id"]) for d in docs) == 4
+        again = CostTracker(str(path), now=lambda: self.NOW,
+                            store=rung.store)
+        assert rung.store.count("social-whatsapp-cost__wa_budgets") == 1
+        assert rung.store.count("social-whatsapp-cost__wa_costs") == 4
+        assert again.message_count(client="acme") == 3
+
+
+class TestPlanningEstimatesPort:
+    @staticmethod
+    def _scenario(store, path):
+        from nomorals.planning.estimates import EstimateStore
+
+        es = EstimateStore(str(path), store=store)
+        assert es.record_actual("email", 30.0, 45.0,
+                                {"prep": 12.0}) is True
+        assert es.record_actual("email", 30.0, 42.0,
+                                {"prep": 11.0}) is True
+        assert es.record_actual("email", 30.0, 20.0,
+                                {"prep": 9.0}) is True
+        assert es._stats("email")["n"] == 3
+        seg = es._segment_row("email", "prep")
+        assert seg is not None and seg["n"] == 3
+        est = es.estimate("email", {"prep": 0.0})
+        assert est.task_type == "email"
+        rows = es.calibration_rows()
+        assert len(rows) == 1
+        assert rows[0]["task_type"] == "email" and rows[0]["n"] == 3
+        return es
+
+    def test_conformance(self, rung, tmp_path):
+        self._scenario(rung.store, tmp_path / "estimates.db")
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.planning.estimates import EstimateStore
+
+        path = tmp_path / "estimates.db"
+        self._scenario(None, path)
+        seam = EstimateStore(str(path), store=rung.store)
+        assert rung.store.count(
+            "planning-estimates__estimate_stats") == 1
+        assert rung.store.count(
+            "planning-estimates__estimate_segments") == 1
+        doc = rung.store.get("planning-estimates__estimate_stats",
+                             "email")
+        assert doc is not None and doc["n"] == 3
+        # the stats table ports AS-IS: the seam serves the file's
+        # stored rollup, and learning continues on top of it
+        assert seam._stats("email")["n"] == 3
+        again = EstimateStore(str(path), store=rung.store)
+        assert rung.store.count(
+            "planning-estimates__estimate_stats") == 1
+        assert again.record_actual("email", 30.0, 40.0,
+                                   {"prep": 10.0}) is True
+        doc = rung.store.get("planning-estimates__estimate_stats",
+                             "email")
+        assert doc is not None and doc["n"] == 4

@@ -649,6 +649,80 @@ _register(_S(
         "serves the SQLite default."),
 ))
 
+_register(_S(
+    name="email-integration", verdict="ported", kind="sqlite-file",
+    modules=("integrations/email_integration.py",),
+    tables=("cursors", "watches"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 3): "
+        "EmailIntegration's Gmail history cursors and push "
+        "watches route through the seam "
+        "(email-integration__cursors / __watches) whenever a "
+        "store is resolved, behind its unchanged API; the port "
+        "builds lazily at first cursor use and imports the "
+        "file's rows once, so a historyId advanced on the "
+        "native path is the cursor the seam resumes from — a "
+        "reset would force a full re-sync against Gmail's "
+        "token stream (the continuity case in test_mongo_p5, "
+        "the A17 pin applied to email). The native sqlite3 "
+        "path serves the SQLite default."),
+))
+
+_register(_S(
+    name="travel-whitelabel", verdict="ported", kind="sqlite-file",
+    modules=("travel/whitelabel.py",),
+    tables=("travel_clients", "client_events"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 3): "
+        "TravelClientStore's two tables route through the seam "
+        "(travel-whitelabel__travel_clients; the AUTOINCREMENT "
+        "client_events log via put_raw with ids from the "
+        "port's atomic counter, seeded from the imported "
+        "maximum) whenever a store is resolved, behind its "
+        "unchanged never-raises API; the module-level event "
+        "and analytics readers read the same rows on both "
+        "rungs. The seam mapping derives from the module's "
+        "final-shape DDL — the native path's channels/languages "
+        "ALTERs stay native-path concerns. The per-client "
+        "knowledge files (travel/knowledge/<client_id>.db) are "
+        "NOT this store: they are DocumentIndex-owned files, a "
+        "separate surface, and stay where they are. The native "
+        "sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="social-whatsapp-cost", verdict="ported", kind="sqlite-file",
+    modules=("social/whatsapp_cost.py",),
+    tables=("wa_costs", "wa_budgets"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 3): "
+        "CostTracker's two tables route through the seam "
+        "(social-whatsapp-cost__wa_budgets; the AUTOINCREMENT "
+        "wa_costs ledger via put_raw with ids from the port's "
+        "atomic counter, seeded from the imported maximum) "
+        "whenever a store is resolved, behind its unchanged "
+        "never-raises API; the spend SUM and message COUNT "
+        "rollups re-express over finds in Python. The native "
+        "sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="planning-estimates", verdict="ported", kind="sqlite-file",
+    modules=("planning/estimates.py",),
+    tables=("estimate_segments", "estimate_stats"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 3): "
+        "EstimateStore's two tables route through the seam "
+        "(planning-estimates__estimate_stats / "
+        "__estimate_segments) whenever a store is resolved, "
+        "behind its unchanged never-raises API; both tables "
+        "port AS-IS — estimate_stats is a stored rollup, the "
+        "file's history, and is never re-derived on the seam; "
+        "the module-level calibration reader reads the same "
+        "rows on both rungs. The native sqlite3 path serves "
+        "the SQLite default."),
+))
+
 # ── federated by reference (files/blobs by nature; metadata accounted) ────
 
 _register(_S(
@@ -1057,10 +1131,6 @@ _residue("immune-corpus", "immune/corpus.py", (),
 _residue("digital-twin", "integrations/digital_twin.py",
          ("states", "desired", "entity_meta"),
          "digital-twin entity states and desired-state records.")
-_residue("email-integration", "integrations/email_integration.py",
-         ("cursors", "watches"),
-         "email sync cursors and watches — same cursor-continuity "
-         "note as calendar-integration.")
 _residue("legal-portfolio", "legal/portfolio.py",
          ("contracts", "obligations", "sla_terms"),
          "legal contract portfolio in portfolio.db.")
@@ -1106,10 +1176,6 @@ _residue("planning-congestion", "planning/congestion.py",
          "congestion.db — holds are lease-shaped state; the port "
          "reviews hold expiry semantics against the seam's "
          "store-managed expiry.")
-_residue("planning-estimates", "planning/estimates.py",
-         ("estimate_segments", "estimate_stats"),
-         "estimate segments and their rolled-up stats in "
-         "estimates.db.")
 _residue("planning-graph", "planning/graph.py",
          ("graph_nodes", "graph_edges"),
          "the world graph in world_graph.db — graph-shaped "
@@ -1129,9 +1195,6 @@ _residue("social-leads", "social/leads.py",
 _residue("social-profiles", "social/profiles.py",
          ("profiles", "elements", "likes"),
          "prompt-scaffolded profiles and element likes.")
-_residue("social-whatsapp-cost", "social/whatsapp_cost.py",
-         ("wa_costs", "wa_budgets"),
-         "WhatsApp cost tracking and budgets.")
 _residue("travel-groups", "travel/groups.py",
          ("group_trips", "legs", "expenses", "payments", "budgets",
           "proposals", "votes", "polls"),
@@ -1143,9 +1206,6 @@ _residue("travel-itinerary", "travel/itinerary.py", ("trips",),
 _residue("travel-watchers", "travel/watchers.py",
          ("watches", "price_history", "alert_log"),
          "travel price watches and their history.")
-_residue("travel-whitelabel", "travel/whitelabel.py",
-         ("travel_clients", "client_events"),
-         "white-label travel client records and events.")
 _residue("triggers-saved-search", "triggers/saved_search.py",
          ("saved_searches", "seen_matches", "pending_digest"),
          "saved searches with seen-match dedup and pending digests.")

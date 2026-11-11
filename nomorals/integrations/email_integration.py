@@ -178,22 +178,49 @@ def format_digest(messages: list[EmailMessage], *,
     return "\n".join(lines)
 
 
+#: The cursor store's own DDL — the native path executes it and the
+#: seam mapping is derived from it, so the two can never drift.
+_CURSOR_DDL = ("CREATE TABLE IF NOT EXISTS cursors ("
+                " account TEXT PRIMARY KEY, history_id TEXT NOT NULL,"
+                " updated REAL NOT NULL)")
+_WATCH_DDL = ("CREATE TABLE IF NOT EXISTS watches ("
+              " account TEXT PRIMARY KEY, topic TEXT NOT NULL,"
+              " history_id TEXT NOT NULL, expires_at REAL NOT NULL,"
+              " updated REAL NOT NULL)")
+_DDL = _CURSOR_DDL + "; " + _WATCH_DDL
+
+
 class EmailIntegration:
     """Multi-backend email integration.
-    
+
     Automatically selects the best backend based on the email provider:
     - Gmail accounts: Gmail API (if OAuth configured) or IMAP
     - Other providers: IMAP/SMTP
     - Fallback: Browser automation
+
+    The Gmail history cursors and push watches live in the module's
+    sqlite file by default. When a document store is resolved (Mongo
+    program P5 — an explicit ``store`` or the boot ambient), they run
+    over the seam in the ``email-integration__cursors`` /
+    ``__watches`` collections instead (registered in
+    storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at first cursor use — a
+    historyId is only valid against Gmail's token stream, so the
+    imported cursor is the one the next sync resumes from.
     """
-    
+
     def __init__(
         self,
         account_manager: AccountManager,
         session_manager: SessionManager,
+        *,
+        store: Any = None,
     ) -> None:
         self.account_manager = account_manager
         self.session_manager = session_manager
+        self._store_arg = store
+        self._port: Any = None
+        self._port_resolved = False
         _log.info("Email integration initialized")
     
     async def send(
@@ -439,21 +466,142 @@ class EmailIntegration:
                     return json.loads(raw) if raw else None
             raise
 
+    @staticmethod
+    def _cursors_path() -> str:
+        import os
+        return os.path.expanduser("~/.nomorals/email/cursors.db")
+
     def _cursor_db(self):
         import os
         import sqlite3
-        path = os.path.expanduser("~/.nomorals/email/cursors.db")
+        path = self._cursors_path()
         os.makedirs(os.path.dirname(path), exist_ok=True)
         db = sqlite3.connect(path, check_same_thread=False)
-        db.execute("CREATE TABLE IF NOT EXISTS cursors ("
-                   " account TEXT PRIMARY KEY, history_id TEXT NOT NULL,"
-                   " updated REAL NOT NULL)")
-        db.execute("CREATE TABLE IF NOT EXISTS watches ("
-                   " account TEXT PRIMARY KEY, topic TEXT NOT NULL,"
-                   " history_id TEXT NOT NULL, expires_at REAL NOT NULL,"
-                   " updated REAL NOT NULL)")
+        db.execute(_CURSOR_DDL)
+        db.execute(_WATCH_DDL)
         db.commit()
         return db
+
+    def _cursor_port(self):
+        """The seam port for the cursor/watch store, built on first
+        use (the module's lazy ``_cursor_db`` idiom), or None for the
+        native path."""
+        if not self._port_resolved:
+            self._port_resolved = True
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("email-integration", _DDL,
+                                ("cursors", "watches"),
+                                self._cursors_path(),
+                                store=self._store_arg)
+            if port is not None:
+                def writer(table):
+                    def write(rows):
+                        target = port.tables[table]
+                        for row in rows:
+                            target.put(row)
+                        return len(rows)
+                    return write
+
+                port.ensure_imported({"cursors": writer("cursors"),
+                                      "watches": writer("watches")})
+                self._port = port
+        return self._port
+
+    # ── cursor/watch rows, from whichever rung serves ────────────────
+
+    def _cursor_get(self, account: str) -> str | None:
+        port = self._cursor_port()
+        if port is not None:
+            row = port.tables["cursors"].get(account)
+            return row["history_id"] if row else None
+        db = self._cursor_db()
+        try:
+            row = db.execute(
+                "SELECT history_id FROM cursors WHERE account = ?",
+                (account,)).fetchone()
+            return row[0] if row else None
+        finally:
+            db.close()
+
+    def _cursor_put(self, account: str, history_id: str) -> None:
+        port = self._cursor_port()
+        if port is not None:
+            port.tables["cursors"].put({
+                "account": account, "history_id": history_id,
+                "updated": time.time()})
+            return
+        db = self._cursor_db()
+        try:
+            db.execute("INSERT OR REPLACE INTO cursors VALUES (?, ?, ?)",
+                       (account, history_id, time.time()))
+            db.commit()
+        finally:
+            db.close()
+
+    def _watch_put(self, account: str, topic: str, history_id: str,
+                   expires_at: float) -> None:
+        port = self._cursor_port()
+        if port is not None:
+            port.tables["watches"].put({
+                "account": account, "topic": topic,
+                "history_id": history_id, "expires_at": expires_at,
+                "updated": time.time()})
+            return
+        db = self._cursor_db()
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO watches VALUES (?, ?, ?, ?, ?)",
+                (account, topic, history_id, expires_at, time.time()))
+            db.commit()
+        finally:
+            db.close()
+
+    def _watch_delete(self, account: str) -> None:
+        port = self._cursor_port()
+        if port is not None:
+            port.tables["watches"].delete(account)
+            return
+        db = self._cursor_db()
+        try:
+            db.execute("DELETE FROM watches WHERE account = ?", (account,))
+            db.commit()
+        finally:
+            db.close()
+
+    def _watch_get(self, account: str) -> dict | None:
+        port = self._cursor_port()
+        if port is not None:
+            row = port.tables["watches"].get(account)
+            if not row:
+                return None
+            return {"topic": row["topic"],
+                    "history_id": row["history_id"],
+                    "expires_at": row["expires_at"]}
+        db = self._cursor_db()
+        try:
+            row = db.execute(
+                "SELECT topic, history_id, expires_at FROM watches"
+                " WHERE account = ?", (account,)).fetchone()
+        finally:
+            db.close()
+        if not row:
+            return None
+        return {"topic": row[0], "history_id": row[1],
+                "expires_at": row[2]}
+
+    def _watches_all(self) -> list[tuple[str, float]]:
+        port = self._cursor_port()
+        if port is not None:
+            return [(r["account"], r["expires_at"])
+                    for r in port.tables["watches"].find()]
+        db = self._cursor_db()
+        try:
+            rows = db.execute(
+                "SELECT account, expires_at FROM watches").fetchall()
+            return [(r[0], r[1]) for r in rows]
+        finally:
+            db.close()
 
     # ── incremental sync (History API, not search) ────────────────────
 
@@ -468,20 +616,15 @@ class EmailIntegration:
         import urllib.error
         if self._detect_backend(account) != "gmail_api":
             raise EmailError("sync_new needs the Gmail API backend")
-        db = self._cursor_db()
-        row = db.execute("SELECT history_id FROM cursors WHERE account = ?",
-                         (account,)).fetchone()
+        start_hid = self._cursor_get(account)
         profile = self._gmail_request(
             account, "GET",
             "https://gmail.googleapis.com/gmail/v1/users/me/profile")
         current_hid = str(profile.get("historyId", ""))
-        if not row:
-            db.execute("INSERT OR REPLACE INTO cursors VALUES (?, ?, ?)",
-                       (account, current_hid, time.time()))
-            db.commit(); db.close()
+        if not start_hid:
+            self._cursor_put(account, current_hid)
             return {"new": [], "cursor_seeded": True,
                     "history_id": current_hid}
-        start_hid = row[0]
         params: dict[str, Any] = {"startHistoryId": start_hid,
                                   "historyTypes": ["messageAdded"]}
         if label_ids:
@@ -507,20 +650,13 @@ class EmailIntegration:
                 if not page_token:
                     break
                 new_hid = result.get("historyId", current_hid)
-            db.execute("INSERT OR REPLACE INTO cursors VALUES (?, ?, ?)",
-                       (account, current_hid, time.time()))
-            db.commit()
+            self._cursor_put(account, current_hid)
         except urllib.error.HTTPError as exc:
             if exc.code == 404:  # historyId too old — reseed
-                db.execute(
-                    "INSERT OR REPLACE INTO cursors VALUES (?, ?, ?)",
-                    (account, current_hid, time.time()))
-                db.commit()
+                self._cursor_put(account, current_hid)
                 messages = []
             else:
                 raise
-        finally:
-            db.close()
         return {"new": messages, "cursor_seeded": False,
                 "history_id": current_hid}
 
@@ -539,11 +675,9 @@ class EmailIntegration:
             account, "POST",
             "https://gmail.googleapis.com/gmail/v1/users/me/watch",
             payload) or {}
-        db = self._cursor_db()
-        db.execute("INSERT OR REPLACE INTO watches VALUES (?, ?, ?, ?, ?)",
-                   (account, topic_name, str(result.get("historyId", "")),
-                    int(result.get("expiration", 0)) / 1000, time.time()))
-        db.commit(); db.close()
+        self._watch_put(account, topic_name,
+                        str(result.get("historyId", "")),
+                        int(result.get("expiration", 0)) / 1000)
         _log.info("gmail watch started for %s (expires %s)", account,
                   time.strftime("%Y-%m-%d",
                                 time.localtime(int(result.get("expiration", 0))
@@ -559,27 +693,20 @@ class EmailIntegration:
                 account, "POST",
                 "https://gmail.googleapis.com/gmail/v1/users/me/stop")
         finally:
-            db = self._cursor_db()
-            db.execute("DELETE FROM watches WHERE account = ?", (account,))
-            db.commit(); db.close()
+            self._watch_delete(account)
 
     def watch_status(self, account: str) -> dict | None:
         """Watch metadata: topic, expiry. None when no watch."""
-        db = self._cursor_db()
-        row = db.execute("SELECT topic, history_id, expires_at FROM watches"
-                         " WHERE account = ?", (account,)).fetchone()
-        db.close()
+        row = self._watch_get(account)
         if not row:
             return None
-        return {"topic": row[0], "history_id": row[1],
-                "expires_at": row[2],
-                "expires_in_s": max(0.0, row[2] - time.time())}
+        return {"topic": row["topic"], "history_id": row["history_id"],
+                "expires_at": row["expires_at"],
+                "expires_in_s": max(0.0, row["expires_at"] - time.time())}
 
     async def renew_watches(self, topic_name: str) -> list[str]:
         """Re-arm every watch expiring within 24h. Returns renewed accts."""
-        db = self._cursor_db()
-        rows = db.execute("SELECT account, expires_at FROM watches").fetchall()
-        db.close()
+        rows = self._watches_all()
         renewed = []
         for account, expires_at in rows:
             if expires_at - time.time() < 86400:
