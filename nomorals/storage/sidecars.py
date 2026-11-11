@@ -652,6 +652,16 @@ _register(_S(
         "Database-class sidecar awaiting its domain port pass."),
 ))
 
+_register(_S(
+    name="health-timeline", verdict="residue", kind="database-file",
+    modules=("health/timeline.py",),
+    anchors=(("health/timeline.py", "timeline.db"),),
+    reason=(
+        "the health timeline owns timeline.db through the Database "
+        "class. Same disposition as workspace-inbox: a "
+        "Database-class sidecar awaiting its domain port pass."),
+))
+
 # ── residue: contained domain file stores, classified, port queued ────────
 #
 # Each of these is a real durable store whose live path stays on its

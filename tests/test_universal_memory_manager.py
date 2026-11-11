@@ -73,6 +73,37 @@ class ManagerBackendSelectionTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_build_context_surfaces_budget_cuts(self):
+        # build_context held back records that didn't fit the budget
+        # with a bare continue for years — the cut was invisible on
+        # every surface. The outcome now lands on stats_snapshot():
+        # last_context_recall carries kept/cut/budget, and the
+        # cumulative context_cuts counter rides the stats merge.
+        memory, db = _manager()
+        try:
+            for topic in ("alpha", "bravo", "charlie", "delta"):
+                memory.remember(
+                    f"budgetpin {topic} record with a good amount of "
+                    "detail text to spend tokens on the line",
+                    kind="fact", source="test")
+            text = memory.build_context("budgetpin", budget_tokens=45)
+            stats = memory.stats_snapshot()
+            last = stats["last_context_recall"]
+            kept_lines = [ln for ln in text.splitlines()
+                          if ln.startswith("- ")]
+            self.assertEqual(last["kept"], len(kept_lines))
+            self.assertEqual(last["budget"], 45)
+            self.assertEqual(last["kept"] + last["cut"], 4)
+            self.assertGreater(last["cut"], 0)
+            self.assertEqual(stats["context_cuts"], last["cut"])
+            # a roomy budget cuts nothing, and the surface says so
+            memory.build_context("budgetpin", budget_tokens=100000)
+            last = memory.stats_snapshot()["last_context_recall"]
+            self.assertEqual(last["cut"], 0)
+            self.assertEqual(last["kept"], 4)
+        finally:
+            db.close()
+
 
 class ManagerLifecycleTests(unittest.TestCase):
     """remember → recall → update → forget, on the default backend."""

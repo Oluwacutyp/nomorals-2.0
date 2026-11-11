@@ -190,17 +190,24 @@ def test_tts_auto_tags_on_by_default(tmp_path, monkeypatch):
 
     seen: dict = {}
 
-    def _fake_run(argv, capture_output=False, timeout=None, check=False):
-        seen["argv"] = list(argv)
-        out = argv[argv.index("-w") + 1]
-        with open(out, "wb") as f:
-            f.write(b"RIFFfake")
-
+    def _fake_run(argv, *args, **kwargs):
+        # Faithful to the real subprocess.run signature: callers in
+        # the flow (and lazy library imports the flow triggers) pass
+        # kwargs the old narrow fake rejected (stdout=...), failing
+        # the test through an unrelated import instead of the synth
+        # path. Only the espeak call (the one carrying -w) is the
+        # synth under test: record it and write its output file;
+        # every other call gets a benign success and touches nothing.
         class _P:
             returncode = 0
             stderr = b""
             stdout = b""
 
+        if "-w" in argv:
+            seen["argv"] = list(argv)
+            out = argv[argv.index("-w") + 1]
+            with open(out, "wb") as f:
+                f.write(b"RIFFfake")
         return _P()
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
@@ -218,17 +225,24 @@ def test_tts_auto_tags_off(tmp_path, monkeypatch):
 
     seen: dict = {}
 
-    def _fake_run(argv, capture_output=False, timeout=None, check=False):
-        seen["argv"] = list(argv)
-        out = argv[argv.index("-w") + 1]
-        with open(out, "wb") as f:
-            f.write(b"RIFFfake")
-
+    def _fake_run(argv, *args, **kwargs):
+        # Faithful to the real subprocess.run signature: callers in
+        # the flow (and lazy library imports the flow triggers) pass
+        # kwargs the old narrow fake rejected (stdout=...), failing
+        # the test through an unrelated import instead of the synth
+        # path. Only the espeak call (the one carrying -w) is the
+        # synth under test: record it and write its output file;
+        # every other call gets a benign success and touches nothing.
         class _P:
             returncode = 0
             stderr = b""
             stdout = b""
 
+        if "-w" in argv:
+            seen["argv"] = list(argv)
+            out = argv[argv.index("-w") + 1]
+            with open(out, "wb") as f:
+                f.write(b"RIFFfake")
         return _P()
 
     monkeypatch.setattr(subprocess, "run", _fake_run)
@@ -258,7 +272,9 @@ class _FakeTools:
     def call(self, name, *args, **kwargs):
         self.calls.append(((name, args), kwargs))
         return _FakeOutcome(True, {
-            "path": "/tmp/fake-tts.mp3", "engine": "espeak_ng",
+            # the speak contract hands back the voice-note-ready ogg
+            # path the handler's default send path consumes
+            "path": "/tmp/fake-tts.ogg", "engine": "espeak_ng",
             "bytes": 2048, "seconds": 1.2,
             "dropped_sounds": [], "pauses_ms": 120,
             "pauses_dropped": False, "auto_tags_applied": ["pause×1"],
@@ -279,7 +295,29 @@ class _FakeSendResult:
     ok = True
 
 
+class _FakeAdapter:
+    """The platform adapter the gateway resolves for a chat — the
+    voice transport sends through its send_media."""
+
+    name = "telegram"
+
+    def __init__(self):
+        self.media: list[object] = []
+
+    def send_media(self, chat, media):
+        self.media.append(media)
+        return _FakeSendResult()
+
+
 class _FakeGateway:
+    def __init__(self):
+        self.adapter = _FakeAdapter()
+
+    def _adapter_for(self, platform):
+        # ChatGateway._adapter_for (the seam _send_tts_voice_note
+        # calls since the per-surface voice transports, 502f8020)
+        return self.adapter
+
     def send_file(self, platform, chat, path, caption=""):
         return _FakeSendResult()
 
@@ -299,7 +337,17 @@ def test_control_tts_auto_defaults_on_and_reports_applied():
     reply = obj._control_tts("um hello", chat_key="telegram:1")
     (_name, _args), kwargs = obj.context.tools.calls[0]
     assert kwargs["auto_tags"] is True
-    assert "auto-tags applied: pause×1" in reply
+    # The applied-tags narration this test once pinned was abolished
+    # by the no-meta-narration rule (7729382f, owner 2026-11-01):
+    # when the voice note lands, it IS the reply — success narration
+    # (auto-tags applied, timings, byte counts) is not reported.
+    # What the handler owes instead is delivery itself: exactly one
+    # voice note through the gateway's adapter seam, and an empty
+    # reply (no warnings: nothing was dropped or degraded). The
+    # applied list itself stays pinned at the tool level by
+    # test_tts_auto_tags_on_by_default.
+    assert len(obj.gateway.adapter.media) == 1
+    assert reply == ""
 
 
 def test_control_tts_auto_off():

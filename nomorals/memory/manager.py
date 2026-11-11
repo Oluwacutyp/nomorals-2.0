@@ -417,6 +417,11 @@ class MemoryManager:
         #: Last consolidation report (from consolidate() or
         #: consolidate_additive()); surfaced by health().
         self._last_consolidation_report: dict[str, Any] = {}
+        #: Last build_context outcome: how many ranked records the
+        #: context budget kept vs held back, and the budget that
+        #: decided it; surfaced by stats_snapshot(). Before this, a
+        #: record that didn't fit was skipped with no trace anywhere.
+        self._last_context_recall: dict[str, int] = {}
         #: Degraded-recall events: (timestamp, lane, reason). Bounded so a
         #: long-running process can't grow it without limit.
         self._health_events: list[dict[str, Any]] = []
@@ -1104,6 +1109,7 @@ class MemoryManager:
         budget = budget_tokens or self.context_budget
         parts: list[str] = []
         used = 0
+        cut = 0
 
         recalled = self.recall(goal, limit=limit or self.limit,
                                include_private=include_private)
@@ -1131,9 +1137,18 @@ class MemoryManager:
                 line = f"- [{record.kind}]{flag} {record.content}"
             cost = approx_token_count(line)
             if used + cost > budget:
+                cut += 1
                 continue
             parts.append(line)
             used += cost
+
+        self._last_context_recall = {
+            "kept": len(parts), "cut": cut,
+            "budget": budget, "used": used,
+        }
+        if cut:
+            self.stats["context_cuts"] = (
+                self.stats.get("context_cuts", 0) + cut)
 
         if not parts:
             return ""
@@ -1534,6 +1549,7 @@ class MemoryManager:
     def stats_snapshot(self) -> dict[str, Any]:
         return {
             **self.stats,
+            "last_context_recall": dict(self._last_context_recall),
             "records": self.repo.count(),
             "vectors": self.semantic.count(),
             "vector_backend": self.semantic.name,
