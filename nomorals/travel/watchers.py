@@ -321,8 +321,46 @@ def parse_watch_request(text: str) -> dict[str, Any] | None:
     }
 
 
+#: The store's own DDL — the native path executes these statements
+#: and the seam mapping is derived from them, so the two can never
+#: drift. The ALTERs are the additive migration for older DBs; on the
+#: seam they only shape the derived mapping (final shape).
+_WATCHES_DDL = """CREATE TABLE IF NOT EXISTS watches (
+                   id TEXT PRIMARY KEY, origin TEXT, destination TEXT,
+                   departure_date TEXT, target_kobo INTEGER DEFAULT 0,
+                   threshold_pct REAL DEFAULT 10.0,
+                   last_kobo INTEGER DEFAULT 0, last_currency TEXT DEFAULT '',
+                   alerted_kobo INTEGER DEFAULT 0,
+                   active INTEGER DEFAULT 1,
+                   created_at REAL, last_checked REAL DEFAULT 0)"""
+_WATCHES_ALTERS = (
+    "ALTER TABLE watches ADD COLUMN notify_on TEXT DEFAULT 'drop'",
+    "ALTER TABLE watches ADD COLUMN cooldown_h REAL DEFAULT 24.0",
+)
+_PRICE_HISTORY_DDL = """CREATE TABLE IF NOT EXISTS price_history (
+                   watch_id TEXT NOT NULL, checked_at REAL NOT NULL,
+                   kobo INTEGER NOT NULL, currency TEXT DEFAULT '')"""
+_ALERT_LOG_DDL = """CREATE TABLE IF NOT EXISTS alert_log (
+                   watch_id TEXT NOT NULL, at REAL NOT NULL,
+                   kind TEXT NOT NULL, kobo INTEGER NOT NULL)"""
+_DDL = ";\n".join((_WATCHES_DDL, *_WATCHES_ALTERS, _PRICE_HISTORY_DDL,
+                   _ALERT_LOG_DDL))
+
+
 class PriceWatcher:
-    """Persistent flight-price watchers backed by Duffel + the scheduler."""
+    """Persistent flight-price watchers backed by Duffel + the scheduler.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as travel-watchers):
+    watches are documents in ``travel-watchers__watches`` by their
+    text id; the PK-less price_history / alert_log children ride
+    put_raw in ``__price_history`` / ``__alert_log`` with
+    caller-shaped ids (``<watch_id>:<n>``) allocated by one atomic
+    counter per table on the meta document, seeded by the lazy
+    import. The file's existing rows are imported once, through the
+    same mapping, at first construction.
+    """
 
     def __init__(
         self,
@@ -331,50 +369,78 @@ class PriceWatcher:
         duffel: Any = None,
         sender: Callable[..., bool] | None = None,
         now: Callable[[], float] | None = None,
+        store: Any = None,
     ) -> None:
         import os
         path = db_path or os.path.expanduser(_DEFAULT_DB)
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        self._db = sqlite3.connect(path)
-        self._db.row_factory = sqlite3.Row
+        self._db = None
+        self._port: Any = None
         self._duffel = duffel
         self._sender = sender
         self._now = now or time.time
-        self._db.execute(
-            """CREATE TABLE IF NOT EXISTS watches (
-                   id TEXT PRIMARY KEY, origin TEXT, destination TEXT,
-                   departure_date TEXT, target_kobo INTEGER DEFAULT 0,
-                   threshold_pct REAL DEFAULT 10.0,
-                   last_kobo INTEGER DEFAULT 0, last_currency TEXT DEFAULT '',
-                   alerted_kobo INTEGER DEFAULT 0,
-                   active INTEGER DEFAULT 1,
-                   created_at REAL, last_checked REAL DEFAULT 0)"""
-        )
+        from ..storage.sidecars import sidecar_port
+
+        port = sidecar_port("travel-watchers", _DDL, ("watches",),
+                            path, store=store)
+        if port is not None:
+            imported = {"price_history": 0, "alert_log": 0}
+
+            def write_watches(rows: list[dict[str, Any]]) -> int:
+                table = port.tables["watches"]
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+
+            def _child_writer(table_name: str):
+                def write(rows: list[dict[str, Any]]) -> int:
+                    ordinals: dict[str, int] = {}
+                    for row in rows:
+                        watch_id = str(row["watch_id"])
+                        ordinal = ordinals.get(watch_id, 0)
+                        ordinals[watch_id] = ordinal + 1
+                        port.put_raw(table_name,
+                                     f"{watch_id}:{ordinal}", dict(row))
+                    imported[table_name] = len(rows)
+                    return len(rows)
+                return write
+
+            def seed_counters(_counts: dict[str, int]) -> None:
+                doc = port.store.get(port.meta_collection,
+                                     "counters") or {}
+                merged = dict(doc)
+                for table_name in ("price_history", "alert_log"):
+                    if int(merged.get(table_name) or 0) \
+                            < imported[table_name]:
+                        merged[table_name] = imported[table_name]
+                if merged != doc:
+                    port.store.put(port.meta_collection, "counters",
+                                   merged)
+
+            port.ensure_imported(
+                {"watches": write_watches,
+                 "price_history": _child_writer("price_history"),
+                 "alert_log": _child_writer("alert_log")},
+                after_import=seed_counters)
+            self._port = port
+            return
+        self._db = sqlite3.connect(path)
+        self._db.row_factory = sqlite3.Row
+        self._db.execute(_WATCHES_DDL)
         # additive migration for older DBs
-        for _ddl in (
-            "ALTER TABLE watches ADD COLUMN notify_on TEXT DEFAULT 'drop'",
-            "ALTER TABLE watches ADD COLUMN cooldown_h REAL DEFAULT 24.0",
-        ):
+        for _ddl in _WATCHES_ALTERS:
             try:
                 self._db.execute(_ddl)
             except Exception:  # noqa: BLE001 — column already there
                 pass
         # price history: every check writes a point → trends + forecast
-        self._db.execute(
-            """CREATE TABLE IF NOT EXISTS price_history (
-                   watch_id TEXT NOT NULL, checked_at REAL NOT NULL,
-                   kobo INTEGER NOT NULL, currency TEXT DEFAULT '')"""
-        )
+        self._db.execute(_PRICE_HISTORY_DDL)
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_ph_watch "
             "ON price_history (watch_id, checked_at)"
         )
         # alert log: cooldown enforcement per trigger
-        self._db.execute(
-            """CREATE TABLE IF NOT EXISTS alert_log (
-                   watch_id TEXT NOT NULL, at REAL NOT NULL,
-                   kind TEXT NOT NULL, kobo INTEGER NOT NULL)"""
-        )
+        self._db.execute(_ALERT_LOG_DDL)
         self._db.commit()
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -410,6 +476,17 @@ class PriceWatcher:
             cooldown_h=float(cooldown_hours or 24.0),
             created_at=self._now(),
         )
+        if self._port is not None:
+            self._port.tables["watches"].put({
+                "id": w.id, "origin": w.origin,
+                "destination": w.destination,
+                "departure_date": w.departure_date,
+                "target_kobo": w.target_kobo,
+                "threshold_pct": w.threshold_pct,
+                "notify_on": w.notify_on, "cooldown_h": w.cooldown_h,
+                "created_at": w.created_at,
+            })
+            return w
         self._db.execute(
             """INSERT INTO watches (id, origin, destination, departure_date,
                target_kobo, threshold_pct, notify_on, cooldown_h, created_at)
@@ -422,12 +499,20 @@ class PriceWatcher:
         return w
 
     def unwatch(self, watch_id: str) -> bool:
+        if self._port is not None:
+            return self._port.tables["watches"].update(
+                watch_id, {"active": 0})
         cur = self._db.execute(
             "UPDATE watches SET active = 0 WHERE id = ?", (watch_id,))
         self._db.commit()
         return cur.rowcount > 0
 
     def list_watches(self, *, active_only: bool = True) -> list[PriceWatch]:
+        if self._port is not None:
+            table = self._port.tables["watches"]
+            rows = table.find({"active": 1}) if active_only else table.all()
+            rows.sort(key=lambda r: (r["created_at"] or 0))
+            return [self._row_to_watch(r) for r in rows]
         q = "SELECT * FROM watches"
         if active_only:
             q += " WHERE active = 1"
@@ -435,12 +520,15 @@ class PriceWatcher:
         return [self._row_to_watch(r) for r in self._db.execute(q).fetchall()]
 
     def get(self, watch_id: str) -> PriceWatch | None:
+        if self._port is not None:
+            r = self._port.tables["watches"].get(watch_id)
+            return self._row_to_watch(r) if r else None
         r = self._db.execute(
             "SELECT * FROM watches WHERE id = ?", (watch_id,)).fetchone()
         return self._row_to_watch(r) if r else None
 
     @staticmethod
-    def _row_to_watch(r: sqlite3.Row) -> PriceWatch:
+    def _row_to_watch(r: Any) -> PriceWatch:
         cols = set(r.keys())
         return PriceWatch(
             id=r["id"], origin=r["origin"], destination=r["destination"],
@@ -504,8 +592,33 @@ class PriceWatcher:
 
     # ── price history (trends + forecast) ─────────────────────────────
 
+    def _child_docs(self, table: str,
+                    watch_id: str) -> list[dict[str, Any]]:
+        """One watch's PK-less child docs, in insertion order.
+
+        Child ids are ``<watch_id>:<n>``; ordering by the numeric
+        suffix is the native rowid order (ids are unique per watch,
+        allocated monotonically — see the constructor).
+        """
+        assert self._port is not None
+        docs = self._port.find_raw(table, {"watch_id": watch_id})
+        docs.sort(key=lambda d: int(str(d["_id"]).rsplit(":", 1)[1]))
+        return docs
+
     def _record_point(self, watch_id: str, kobo: int, currency: str,
                       now: float) -> None:
+        if self._port is not None:
+            ordinal = self._port.next_id("price_history")
+            self._port.put_raw("price_history", f"{watch_id}:{ordinal}", {
+                "watch_id": watch_id, "checked_at": now,
+                "kobo": int(kobo), "currency": currency or ""})
+            # prune: keep 120 days so the table stays small
+            cutoff = now - 120 * 86400
+            for doc in self._child_docs("price_history", watch_id):
+                if doc["checked_at"] < cutoff:
+                    self._port.store.delete(
+                        "travel-watchers__price_history", doc["_id"])
+            return
         self._db.execute(
             "INSERT INTO price_history (watch_id, checked_at, kobo, currency)"
             " VALUES (?, ?, ?, ?)",
@@ -519,6 +632,16 @@ class PriceWatcher:
         """Price points for a watch, oldest first. Never raises."""
         try:
             cutoff = self._now() - days * 86400
+            if self._port is not None:
+                docs = [d for d in self._child_docs("price_history",
+                                                    watch_id)
+                        if d["checked_at"] >= cutoff]
+                docs.sort(key=lambda d: d["checked_at"])
+                return [PricePoint(
+                    date=time.strftime("%Y-%m-%d",
+                                       time.gmtime(d["checked_at"])),
+                    amount_kobo=d["kobo"], currency=d["currency"] or "")
+                    for d in docs]
             rows = self._db.execute(
                 "SELECT checked_at, kobo, currency FROM price_history"
                 " WHERE watch_id = ? AND checked_at >= ?"
@@ -540,6 +663,12 @@ class PriceWatcher:
         if cooldown_h <= 0:
             return False
         try:
+            if self._port is not None:
+                ats = [d["at"] for d in self._child_docs("alert_log",
+                                                          watch_id)
+                       if d["kind"] == kind]
+                latest = max(ats) if ats else None
+                return bool(latest and now - latest < cooldown_h * 3600)
             row = self._db.execute(
                 "SELECT MAX(at) AS at FROM alert_log"
                 " WHERE watch_id = ? AND kind = ?",
@@ -552,6 +681,13 @@ class PriceWatcher:
     def _log_alert(self, watch_id: str, kind: str, kobo: int,
                    now: float) -> None:
         try:
+            if self._port is not None:
+                ordinal = self._port.next_id("alert_log")
+                self._port.put_raw(
+                    "alert_log", f"{watch_id}:{ordinal}", {
+                        "watch_id": watch_id, "at": now, "kind": kind,
+                        "kobo": int(kobo)})
+                return
             self._db.execute(
                 "INSERT INTO alert_log (watch_id, at, kind, kobo)"
                 " VALUES (?, ?, ?, ?)", (watch_id, now, kind, int(kobo)))
@@ -572,20 +708,30 @@ class PriceWatcher:
             watch = fresh
         got = self._cheapest(watch.origin, watch.destination,
                              watch.departure_date)
-        self._db.execute(
-            "UPDATE watches SET last_checked = ? WHERE id = ?",
-            (now, watch.id))
+        if self._port is not None:
+            self._port.tables["watches"].update(
+                watch.id, {"last_checked": now})
+        else:
+            self._db.execute(
+                "UPDATE watches SET last_checked = ? WHERE id = ?",
+                (now, watch.id))
         if got is None:
-            self._db.commit()
+            if self._port is None:
+                self._db.commit()
             return None
         current_kobo, currency, offer = got
         prev_kobo = watch.last_kobo or current_kobo
         self._record_point(watch.id, current_kobo, currency, now)
-        self._db.execute(
-            """UPDATE watches SET last_kobo = ?, last_currency = ?
-               WHERE id = ?""",
-            (current_kobo, currency, watch.id))
-        self._db.commit()
+        if self._port is not None:
+            self._port.tables["watches"].update(
+                watch.id, {"last_kobo": current_kobo,
+                           "last_currency": currency})
+        else:
+            self._db.execute(
+                """UPDATE watches SET last_kobo = ?, last_currency = ?
+                   WHERE id = ?""",
+                (current_kobo, currency, watch.id))
+            self._db.commit()
 
         # trend line + forecast banner for whichever alert fires
         points = self.history(watch.id)
@@ -642,11 +788,16 @@ class PriceWatcher:
             trend_line=trend_line,
             verdict=verdict,
         )
-        self._db.execute(
-            "UPDATE watches SET alerted_kobo = ? WHERE id = ?",
-            (current_kobo, watch.id))
+        if self._port is not None:
+            self._port.tables["watches"].update(
+                watch.id, {"alerted_kobo": current_kobo})
+        else:
+            self._db.execute(
+                "UPDATE watches SET alerted_kobo = ? WHERE id = ?",
+                (current_kobo, watch.id))
         self._log_alert(watch.id, NOTIFY_DROP, current_kobo, now)
-        self._db.commit()
+        if self._port is None:
+            self._db.commit()
         return alert
 
     def _rise_alert(self, watch: PriceWatch, current_kobo: int, now: float,
@@ -669,11 +820,16 @@ class PriceWatcher:
             trend_line=trend_line,
             verdict=verdict,
         )
-        self._db.execute(
-            "UPDATE watches SET alerted_kobo = ? WHERE id = ?",
-            (current_kobo, watch.id))
+        if self._port is not None:
+            self._port.tables["watches"].update(
+                watch.id, {"alerted_kobo": current_kobo})
+        else:
+            self._db.execute(
+                "UPDATE watches SET alerted_kobo = ? WHERE id = ?",
+                (current_kobo, watch.id))
         self._log_alert(watch.id, NOTIFY_RISE, current_kobo, now)
-        self._db.commit()
+        if self._port is None:
+            self._db.commit()
         return alert
 
     def check_all(self) -> list[PriceAlert]:

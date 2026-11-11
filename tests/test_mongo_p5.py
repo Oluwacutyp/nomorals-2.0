@@ -37,6 +37,8 @@ P5 settles the stores that live BESIDE the central database:
   The residue Batch 2 slice-5 ports (marketing-briefs,
   marketing-competitor, marketing-guardrails, commerce-cart-recovery)
   follow the same pattern below.
+  The residue Batch 2 slice-8 ports (travel-watchers, social-leads)
+  follow the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -236,7 +238,9 @@ class TestSidecarRegistry:
             "matching-batches", "os-timeline", "planning-route",
             # residue Batch 2, slice 5:
             "marketing-briefs", "marketing-competitor",
-            "marketing-guardrails", "commerce-cart-recovery"}
+            "marketing-guardrails", "commerce-cart-recovery",
+            # residue Batch 2, slice 8:
+            "travel-watchers", "social-leads"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -3971,3 +3975,235 @@ class TestCommerceCartRecoveryPort:
         again = self._engine(path, clock, store=rung.store)
         assert rung.store.count("commerce-cart-recovery__carts") == 1
         assert again.stats()["recovered_7d"] == 1
+
+
+class TestTravelWatchersPort:
+    """travel/watchers.py — PriceWatcher port (residue Batch 2,
+    slice 8): watches are documents by text id; the PK-less
+    price_history / alert_log children ride put_raw with
+    caller-shaped <watch_id>:<n> ids from one atomic counter per
+    table on the meta document, seeded by the lazy import so seam
+    ids stay clear of imported ones (and of the history prune).
+    Helpers live on the class, per the slice-2 placement lesson."""
+
+    @staticmethod
+    def _duffel(prices):
+        from types import SimpleNamespace
+
+        class _Duffel:
+            def __init__(self):
+                self.prices = list(prices)
+
+            def search_offers(self, origin, destination, date):
+                amount = self.prices.pop(0)
+                return [SimpleNamespace(total_amount=amount,
+                                        total_currency="NGN", raw={})]
+
+        return _Duffel()
+
+    def _scenario(self, store, path) -> dict:
+        from nomorals.travel.watchers import PriceWatcher
+
+        clock = [1_700_000_000.0]
+        duffel = self._duffel(["5000.00", "4500.00", "4000.00"])
+        w = PriceWatcher(str(path), duffel=duffel,
+                         now=lambda: clock[0], store=store)
+        watch = w.watch("LOS", "LHR", "2026-12-01",
+                        target_kobo=460_000)
+        out: dict = {"id_shape": watch.id.startswith("watch_")}
+        # first check establishes the baseline — no alert yet
+        out["first_quiet"] = w.check(watch) is None
+        clock[0] += 3600
+        alert = w.check(watch)  # ₦5000 → ₦4500: 10% drop, target crossed
+        out["drop"] = (alert is not None and alert.kind == "drop"
+                       and alert.current_kobo == 450_000
+                       and alert.previous_kobo == 500_000)
+        clock[0] += 3600
+        alert2 = w.check(watch)  # ₦4500 → ₦4000: a fresh low
+        out["second_drop"] = (alert2 is not None
+                              and alert2.current_kobo == 400_000)
+        out["history"] = [p.amount_kobo for p in w.history(watch.id)]
+        got = w.get(watch.id)
+        out["state"] = (got.last_kobo, got.alerted_kobo, got.active,
+                        got.notify_on, got.cooldown_h)
+        out["listed"] = [x.id for x in w.list_watches()] == [watch.id]
+        out["unwatch"] = w.unwatch(watch.id)
+        out["after_unwatch"] = (len(w.list_watches()),
+                                len(w.list_watches(active_only=False)))
+        return out
+
+    def test_conformance(self, rung, tmp_path):
+        observed = self._scenario(rung.store, tmp_path / "watches.db")
+        assert observed["id_shape"] is True
+        assert observed["first_quiet"] is True
+        assert observed["drop"] is True
+        assert observed["second_drop"] is True
+        assert observed["history"] == [500_000, 450_000, 400_000]
+        assert observed["state"] == (400_000, 400_000, True, "drop", 24.0)
+        assert observed["listed"] is True
+        assert observed["unwatch"] is True
+        assert observed["after_unwatch"] == (0, 1)
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.travel.watchers import PriceWatcher
+
+        clock = [1_700_000_000.0]
+        path = str(tmp_path / "watches.db")
+        native = PriceWatcher(path, now=lambda: clock[0])
+        watch = native.watch("LOS", "LHR", "2026-12-01")
+        native._record_point(watch.id, 500_000, "NGN", clock[0])
+        native._log_alert(watch.id, "drop", 500_000, clock[0])
+        native._db.commit()  # check() commits on the real native flow
+
+        seam = PriceWatcher(path, now=lambda: clock[0], store=rung.store)
+        assert rung.store.count("travel-watchers__watches") == 1
+        assert rung.store.count("travel-watchers__price_history") == 1
+        assert rung.store.count("travel-watchers__alert_log") == 1
+        doc = rung.store.get("travel-watchers__watches", watch.id)
+        assert doc is not None and doc["_id"] == watch.id
+        point = rung.store.get("travel-watchers__price_history",
+                               f"{watch.id}:0")
+        assert point is not None and point["kobo"] == 500_000
+        # the imported alert still enforces the cooldown on the seam
+        assert seam._recent_alert(watch.id, "drop", clock[0] + 60,
+                                  24.0) is True
+        # the seeded counter keeps seam point ids clear of imported ones
+        clock[0] += 3600
+        seam._record_point(watch.id, 450_000, "NGN", clock[0])
+        assert rung.store.count("travel-watchers__price_history") == 2
+        assert [p.amount_kobo for p in seam.history(watch.id)] == \
+            [500_000, 450_000]
+        again = PriceWatcher(path, now=lambda: clock[0], store=rung.store)
+        assert rung.store.count("travel-watchers__watches") == 1
+        assert [p.amount_kobo for p in again.history(watch.id)] == \
+            [500_000, 450_000]
+
+
+# ---------------------------------------------------------------------------
+# residue Batch 2, slice 8: social-leads
+# ---------------------------------------------------------------------------
+
+class TestSocialLeadsPort:
+    """social/leads.py — LeadStore port (residue Batch 2, slice 8):
+    triggers and leads are documents by text id; comment_seen and
+    trigger_meta are keyed by composite primary keys whose parts
+    live in the joined document id (membership is a get by joined
+    id, never a find on key fields); the PK-less lead_comments log
+    rides put_raw with caller-shaped <post_id>:<n> ids from one
+    atomic counter on the meta document, seeded by the lazy import;
+    funnel_stats' GROUP BY / COUNT DISTINCT rollups re-express as
+    finds + Python rollups. Helpers live on the class, per the
+    slice-2 placement lesson."""
+
+    def _scenario(self, store, path) -> dict:
+        from nomorals.social.leads import (
+            CommentEvent,
+            LeadStore,
+            handle_comment,
+            is_lead_magnet,
+            mark_lead_magnet,
+        )
+
+        s = LeadStore(str(path), store=store)
+        trig = s.add_trigger("instagram", "post1", "PRICE")
+        out: dict = {"armed": trig is not None
+                     and trig.keyword == "PRICE"}
+        out["meta"] = (
+            s.set_public_reply(trig.trigger_id,
+                               "Sent {name} — check your DMs"),
+            s.set_qualifier(trig.trigger_id, "Training now?"))
+        ev = CommentEvent(platform="instagram", post_id="post1",
+                          commenter="Ada", commenter_contact="@ada",
+                          text="PRICE please")
+        res = handle_comment(s, ev)
+        out["first"] = [(r["dmed"], r["reason"]) for r in res]
+        out["public"] = res[0].get("public_reply")
+        out["qualifier"] = res[0].get("qualifier")
+        res2 = handle_comment(s, ev)  # same commenter: already DMed
+        out["again"] = [(r["dmed"], r["reason"]) for r in res2]
+        ev2 = CommentEvent(platform="instagram", post_id="post1",
+                           commenter="Bola", commenter_contact="@bola",
+                           text="PRICE!")
+        handle_comment(s, ev2)
+        out["commenters"] = sorted(s.commenters("post1"),
+                                    key=lambda d: d["commenter"])
+        out["funnel"] = s.funnel_stats(trig.trigger_id)
+        out["magnet"] = (mark_lead_magnet(s, trig.trigger_id),
+                         is_lead_magnet(s, trig.trigger_id))
+        lead = s.list_leads()[0]
+        out["lead_status"] = (s.set_lead_status(lead.lead_id,
+                                                "converted"),
+                              s.get_lead(lead.lead_id).status)
+        out["stop"] = (s.stop_trigger(trig.trigger_id),
+                       s.get_trigger(trig.trigger_id).active)
+        return out
+
+    def test_conformance(self, rung, tmp_path):
+        observed = self._scenario(rung.store, tmp_path / "leads.db")
+        assert observed["armed"] is True
+        assert observed["meta"] == (True, True)
+        assert observed["first"] == [(True, "sent")]
+        assert observed["public"] == "Sent Ada — check your DMs"
+        assert observed["qualifier"] == "Training now?"
+        assert observed["again"] == [(False, "already DMed")]
+        assert observed["commenters"] == [
+            {"commenter": "Ada", "contact": "@ada"},
+            {"commenter": "Bola", "contact": "@bola"}]
+        funnel = observed["funnel"]
+        assert funnel["comments"] == 2 and funnel["dmed"] == 2
+        assert funnel["dm_rate"] == 1.0
+        assert funnel["leads_by_status"] == {"dmed": 2}
+        assert funnel["converted"] == 0
+        assert funnel["qualifier"] == "Training now?"
+        assert funnel["public_reply"] is True
+        assert observed["magnet"] == (True, True)
+        assert observed["lead_status"] == (True, "converted")
+        assert observed["stop"] == (True, False)
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.social.leads import CommentEvent, LeadStore, handle_comment, mark_lead_magnet
+
+        path = str(tmp_path / "leads.db")
+        native = LeadStore(path)
+        trig = native.add_trigger("instagram", "post1", "PRICE")
+        native.set_qualifier(trig.trigger_id, "Training now?")
+        ev = CommentEvent(platform="instagram", post_id="post1",
+                          commenter="Ada", commenter_contact="@ada",
+                          text="PRICE please")
+        handle_comment(native, ev)
+        mark_lead_magnet(native, trig.trigger_id)
+
+        seam = LeadStore(path, store=rung.store)
+        assert rung.store.count("social-leads__lead_triggers") == 1
+        assert rung.store.count("social-leads__leads") == 1
+        assert rung.store.count("social-leads__comment_seen") == 1
+        assert rung.store.count("social-leads__lead_comments") == 1
+        assert rung.store.count("social-leads__trigger_meta") == 1
+        assert rung.store.count("social-leads__lead_magnets") == 1
+        doc = rung.store.get("social-leads__lead_comments", "post1:0")
+        assert doc is not None and doc["commenter"] == "Ada"
+        # composite-PK membership survives the import: the same
+        # commenter is recognised as already DMed, not re-DMed
+        assert seam.already_dmed("instagram", "post1", "Ada",
+                                 trig.trigger_id) is True
+        res = handle_comment(seam, ev)
+        assert res[0]["reason"] == "already DMed"
+        # handle_comment logs every comment event before the dedup
+        # check (the native contract too — funnel_stats is what
+        # dedups, via COUNT DISTINCT), so the re-handle added a
+        # second log row for Ada; the seeded counter kept its id
+        # clear of the imported post1:0
+        assert rung.store.count("social-leads__lead_comments") == 2
+        ev2 = CommentEvent(platform="instagram", post_id="post1",
+                           commenter="Bola", commenter_contact="@bola",
+                           text="PRICE!")
+        handle_comment(seam, ev2)
+        assert rung.store.count("social-leads__lead_comments") == 3
+        assert seam.funnel_stats(trig.trigger_id)["comments"] == 2
+        again = LeadStore(path, store=rung.store)
+        assert rung.store.count("social-leads__leads") == 2
+        assert again.funnel_stats(trig.trigger_id)["dmed"] == 2

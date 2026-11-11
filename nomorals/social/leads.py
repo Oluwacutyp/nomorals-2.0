@@ -120,45 +120,114 @@ class CommentEvent:
 
 # ── store ──────────────────────────────────────────────────────────────────
 
-class LeadStore:
-    """Triggers + leads + CRM entries. Never raises."""
-
-    def __init__(self, db_path: str = "") -> None:
-        self._db: sqlite3.Connection | None = None
-        try:
-            path = db_path or _default_db()
-            self._db = sqlite3.connect(path)
-            self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS lead_triggers
+#: The store's own DDL — the native path executes these statements
+#: and the seam mapping is derived from them, so the two can never
+#: drift. lead_magnets is created lazily by mark_lead_magnet on the
+#: native path; it is declared here so the seam serves it too.
+_LEAD_TRIGGERS_DDL = """CREATE TABLE IF NOT EXISTS lead_triggers
                    (trigger_id TEXT PRIMARY KEY, platform TEXT, post_id TEXT,
                     keyword TEXT, dm_template TEXT, followup_template TEXT,
                     active INTEGER, created_at REAL)"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS leads
+_LEADS_DDL = """CREATE TABLE IF NOT EXISTS leads
                    (lead_id TEXT PRIMARY KEY, name TEXT, platform TEXT,
                     contact TEXT, interest TEXT, source_post TEXT,
                     status TEXT, expected_value_kobo INTEGER, created_at REAL)"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS comment_seen
+_COMMENT_SEEN_DDL = """CREATE TABLE IF NOT EXISTS comment_seen
                    (platform TEXT, post_id TEXT, commenter TEXT,
                     trigger_id TEXT, ts REAL,
                     PRIMARY KEY (platform, post_id, commenter, trigger_id))"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS lead_comments
+_LEAD_COMMENTS_DDL = """CREATE TABLE IF NOT EXISTS lead_comments
                    (platform TEXT, post_id TEXT, commenter TEXT,
                     contact TEXT, text TEXT, ts REAL)"""
-            )
-            # Side table for trigger extensions (public_reply, qualifier)
-            # — the lead_triggers schema stays frozen for compat.
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS trigger_meta
+_TRIGGER_META_DDL = """CREATE TABLE IF NOT EXISTS trigger_meta
                    (trigger_id TEXT, key TEXT, value TEXT,
                     PRIMARY KEY (trigger_id, key))"""
-            )
+_LEAD_MAGNETS_DDL = ("CREATE TABLE IF NOT EXISTS lead_magnets "
+                    "(trigger_id TEXT PRIMARY KEY, ts REAL)")
+_DDL = ";\n".join((_LEAD_TRIGGERS_DDL, _LEADS_DDL, _COMMENT_SEEN_DDL,
+                   _LEAD_COMMENTS_DDL, _TRIGGER_META_DDL,
+                   _LEAD_MAGNETS_DDL))
+
+
+class LeadStore:
+    """Triggers + leads + CRM entries. Never raises.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as social-leads): the
+    tables are documents in ``social-leads__lead_triggers`` /
+    ``__leads`` / ``__comment_seen`` / ``__lead_comments`` /
+    ``__trigger_meta`` / ``__lead_magnets``; comment_seen and
+    trigger_meta are keyed by their composite primary keys, whose
+    parts live in the joined document id; the PK-less lead_comments
+    log rides put_raw with caller-shaped ids (``<post_id>:<n>``)
+    from one atomic counter on the meta document, seeded by the
+    lazy import. The file's existing rows are imported once,
+    through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
+        self._db: sqlite3.Connection | None = None
+        self._port: Any = None
+        try:
+            path = db_path or _default_db()
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "social-leads", _DDL,
+                ("lead_triggers", "leads", "comment_seen",
+                 "trigger_meta", "lead_magnets"),
+                path, store=store)
+            if port is not None:
+                def _writer(table):
+                    def write(rows):
+                        for row in rows:
+                            table.put(row)
+                        return len(rows)
+                    return write
+
+                imported = {"lead_comments": 0}
+
+                def write_comments(rows):
+                    ordinals: dict[str, int] = {}
+                    for row in rows:
+                        post_id = str(row["post_id"])
+                        ordinal = ordinals.get(post_id, 0)
+                        ordinals[post_id] = ordinal + 1
+                        port.put_raw("lead_comments",
+                                     f"{post_id}:{ordinal}", dict(row))
+                    imported["lead_comments"] = len(rows)
+                    return len(rows)
+
+                def seed_counter(_counts):
+                    doc = port.store.get(port.meta_collection,
+                                         "counters") or {}
+                    if int(doc.get("lead_comments") or 0) \
+                            < imported["lead_comments"]:
+                        port.store.put(
+                            port.meta_collection, "counters",
+                            {**doc,
+                             "lead_comments": imported["lead_comments"]})
+
+                port.ensure_imported(
+                    {"lead_triggers": _writer(port.tables["lead_triggers"]),
+                     "leads": _writer(port.tables["leads"]),
+                     "comment_seen": _writer(port.tables["comment_seen"]),
+                     "lead_comments": write_comments,
+                     "trigger_meta": _writer(port.tables["trigger_meta"]),
+                     "lead_magnets": _writer(port.tables["lead_magnets"])},
+                    after_import=seed_counter)
+                self._port = port
+                return
+            self._db = sqlite3.connect(path)
+            self._db.row_factory = sqlite3.Row
+            self._db.execute(_LEAD_TRIGGERS_DDL)
+            self._db.execute(_LEADS_DDL)
+            self._db.execute(_COMMENT_SEEN_DDL)
+            self._db.execute(_LEAD_COMMENTS_DDL)
+            # Side table for trigger extensions (public_reply, qualifier)
+            # — the lead_triggers schema stays frozen for compat.
+            self._db.execute(_TRIGGER_META_DDL)
             self._db.commit()
         except Exception as exc:  # noqa: BLE001
             record_failure("leads.store_init", exc)
@@ -171,11 +240,21 @@ class LeadStore:
             platform = (platform or "").strip().lower()
             post_id = (post_id or "").strip()
             keyword = (keyword or "").strip().upper()
-            if not platform or not post_id or not keyword or self._db is None:
+            if not platform or not post_id or not keyword \
+                    or (self._db is None and self._port is None):
                 return None
             if platform not in _DOMAINS:
                 return None
             tid = "trig_" + uuid.uuid4().hex[:8]
+            if self._port is not None:
+                self._port.tables["lead_triggers"].put({
+                    "trigger_id": tid, "platform": platform,
+                    "post_id": post_id, "keyword": keyword,
+                    "dm_template": dm_template
+                    or _default_dm_template(keyword),
+                    "followup_template": followup_template,
+                    "active": 1, "created_at": time.time()})
+                return self.get_trigger(tid)
             self._db.execute(
                 "INSERT INTO lead_triggers VALUES (?,?,?,?,?,?,?,?)",
                 (tid, platform, post_id, keyword,
@@ -190,8 +269,11 @@ class LeadStore:
 
     def get_trigger(self, trigger_id: str) -> CommentTrigger | None:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return None
+            if self._port is not None:
+                row = self._port.tables["lead_triggers"].get(trigger_id)
+                return self._row_trigger(row) if row else None
             row = self._db.execute(
                 "SELECT * FROM lead_triggers WHERE trigger_id = ?", (trigger_id,)
             ).fetchone()
@@ -202,8 +284,17 @@ class LeadStore:
 
     def list_triggers(self, platform: str = "") -> list[CommentTrigger]:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            if self._port is not None:
+                table = self._port.tables["lead_triggers"]
+                if platform:
+                    rows = table.find(
+                        {"platform": platform.strip().lower()})
+                else:
+                    rows = table.all()
+                rows.sort(key=lambda r: -(r["created_at"] or 0))
+                return [self._row_trigger(r) for r in rows]
             if platform:
                 rows = self._db.execute(
                     "SELECT * FROM lead_triggers WHERE platform = ? ORDER BY created_at DESC",
@@ -218,8 +309,11 @@ class LeadStore:
 
     def stop_trigger(self, trigger_id: str) -> bool:
         try:
-            if self._db is None or not trigger_id:
+            if (self._db is None and self._port is None) or not trigger_id:
                 return False
+            if self._port is not None:
+                return self._port.tables["lead_triggers"].update(
+                    trigger_id, {"active": 0})
             cur = self._db.execute(
                 "UPDATE lead_triggers SET active = 0 WHERE trigger_id = ?", (trigger_id,))
             self._db.commit()
@@ -231,8 +325,15 @@ class LeadStore:
     def match_triggers(self, platform: str, post_id: str, text: str) -> list[CommentTrigger]:
         """Active triggers whose keyword appears in the comment text."""
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            if self._port is not None:
+                rows = self._port.tables["lead_triggers"].find({
+                    "platform": (platform or "").strip().lower(),
+                    "post_id": (post_id or "").strip(), "active": 1})
+                upper = (text or "").upper()
+                return [self._row_trigger(r) for r in rows
+                        if r["keyword"] and r["keyword"] in upper]
             rows = self._db.execute(
                 "SELECT * FROM lead_triggers WHERE platform = ? AND post_id = ? AND active = 1",
                 ((platform or "").strip().lower(), (post_id or "").strip())).fetchall()
@@ -245,8 +346,18 @@ class LeadStore:
     # — comment log (for explicit-override "DM everyone who commented") —
     def log_comment(self, ev: CommentEvent) -> bool:
         try:
-            if self._db is None or not ev.post_id:
+            if (self._db is None and self._port is None) or not ev.post_id:
                 return False
+            if self._port is not None:
+                ordinal = self._port.next_id("lead_comments")
+                self._port.put_raw(
+                    "lead_comments", f"{ev.post_id}:{ordinal}", {
+                        "platform": ev.platform, "post_id": ev.post_id,
+                        "commenter": ev.commenter,
+                        "contact": ev.commenter_contact,
+                        "text": (ev.text or "")[:500],
+                        "ts": time.time()})
+                return True
             self._db.execute(
                 "INSERT OR IGNORE INTO lead_comments VALUES (?,?,?,?,?,?)",
                 (ev.platform, ev.post_id, ev.commenter, ev.commenter_contact,
@@ -259,8 +370,23 @@ class LeadStore:
 
     def commenters(self, post_id: str, platform: str = "") -> list[dict]:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            if self._port is not None:
+                docs = self._port.find_raw("lead_comments",
+                                           {"post_id": post_id})
+                if platform:
+                    docs = [d for d in docs
+                            if d["platform"] == platform.strip().lower()]
+                seen: set = set()
+                out: list[dict] = []
+                for d in docs:
+                    key = (d["commenter"], d["contact"])
+                    if key not in seen:
+                        seen.add(key)
+                        out.append({"commenter": d["commenter"],
+                                    "contact": d["contact"]})
+                return out
             if platform:
                 rows = self._db.execute(
                     "SELECT DISTINCT commenter, contact FROM lead_comments "
@@ -278,8 +404,16 @@ class LeadStore:
     def already_dmed(self, platform: str, post_id: str, commenter: str,
                      trigger_id: str) -> bool:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return False
+            if self._port is not None:
+                # composite PK: the four parts live only in the
+                # joined document id — membership is a get by that
+                # id, never a find on key fields
+                joined = "\x1f".join((platform, post_id, commenter,
+                                      trigger_id))
+                return self._port.tables["comment_seen"].get(
+                    joined) is not None
             row = self._db.execute(
                 "SELECT 1 FROM comment_seen WHERE platform = ? AND post_id = ? "
                 "AND commenter = ? AND trigger_id = ?",
@@ -291,7 +425,17 @@ class LeadStore:
 
     def mark_dmed(self, platform: str, post_id: str, commenter: str, trigger_id: str) -> None:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
+                return
+            if self._port is not None:
+                table = self._port.tables["comment_seen"]
+                joined = "\x1f".join((platform, post_id, commenter,
+                                      trigger_id))
+                if table.get(joined) is None:  # INSERT OR IGNORE
+                    table.put({"platform": platform, "post_id": post_id,
+                               "commenter": commenter,
+                               "trigger_id": trigger_id,
+                               "ts": time.time()})
                 return
             self._db.execute(
                 "INSERT OR IGNORE INTO comment_seen VALUES (?,?,?,?,?)",
@@ -305,9 +449,21 @@ class LeadStore:
                      interest: str, source_post: str,
                      expected_value_kobo: int = 0) -> Lead | None:
         try:
-            if self._db is None or not contact:
+            if (self._db is None and self._port is None) or not contact:
                 return None
             lid = "lead_" + uuid.uuid4().hex[:8]
+            if self._port is not None:
+                self._port.tables["leads"].put({
+                    "lead_id": lid, "name": (name or "").strip()[:120],
+                    "platform": (platform or "").strip().lower(),
+                    "contact": contact.strip()[:200],
+                    "interest": (interest or "").strip()[:300],
+                    "source_post": (source_post or "").strip()[:200],
+                    "status": "new",
+                    "expected_value_kobo":
+                        max(0, int(expected_value_kobo or 0)),
+                    "created_at": time.time()})
+                return self.get_lead(lid)
             self._db.execute(
                 "INSERT INTO leads VALUES (?,?,?,?,?,?,?,?,?)",
                 (lid, (name or "").strip()[:120], (platform or "").strip().lower(),
@@ -322,8 +478,11 @@ class LeadStore:
 
     def get_lead(self, lead_id: str) -> Lead | None:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return None
+            if self._port is not None:
+                row = self._port.tables["leads"].get(lead_id)
+                return self._row_lead(row) if row else None
             row = self._db.execute(
                 "SELECT * FROM leads WHERE lead_id = ?", (lead_id,)).fetchone()
             return self._row_lead(row) if row else None
@@ -333,8 +492,17 @@ class LeadStore:
 
     def list_leads(self, status: str = "") -> list[Lead]:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            if self._port is not None:
+                table = self._port.tables["leads"]
+                if status:
+                    rows = table.find(
+                        {"status": status.strip().lower()})
+                else:
+                    rows = table.all()
+                rows.sort(key=lambda r: -(r["created_at"] or 0))
+                return [self._row_lead(r) for r in rows]
             if status:
                 rows = self._db.execute(
                     "SELECT * FROM leads WHERE status = ? ORDER BY created_at DESC",
@@ -349,8 +517,11 @@ class LeadStore:
 
     def set_lead_status(self, lead_id: str, status: str) -> bool:
         try:
-            if self._db is None or not lead_id:
+            if (self._db is None and self._port is None) or not lead_id:
                 return False
+            if self._port is not None:
+                return self._port.tables["leads"].update(
+                    lead_id, {"status": (status or "").strip().lower()})
             cur = self._db.execute(
                 "UPDATE leads SET status = ? WHERE lead_id = ?",
                 ((status or "").strip().lower(), lead_id))
@@ -361,7 +532,7 @@ class LeadStore:
             return False
 
     # — rows —
-    def _row_trigger(self, r: sqlite3.Row) -> CommentTrigger:
+    def _row_trigger(self, r: Any) -> CommentTrigger:
         trig = CommentTrigger(
             trigger_id=r["trigger_id"], platform=r["platform"], post_id=r["post_id"],
             keyword=r["keyword"], dm_template=r["dm_template"] or "",
@@ -374,8 +545,14 @@ class LeadStore:
     def set_trigger_meta(self, trigger_id: str, key: str, value: str) -> bool:
         """Store a trigger extension (public_reply, qualifier)."""
         try:
-            if self._db is None or not trigger_id or not key:
+            if (self._db is None and self._port is None) \
+                    or not trigger_id or not key:
                 return False
+            if self._port is not None:
+                self._port.tables["trigger_meta"].put({
+                    "trigger_id": trigger_id, "key": key,
+                    "value": value or ""})
+                return True
             self._db.execute(
                 "INSERT OR REPLACE INTO trigger_meta VALUES (?,?,?)",
                 (trigger_id, key, value or ""))
@@ -387,8 +564,14 @@ class LeadStore:
 
     def get_trigger_meta(self, trigger_id: str, key: str) -> str:
         try:
-            if self._db is None or not trigger_id or not key:
+            if (self._db is None and self._port is None) \
+                    or not trigger_id or not key:
                 return ""
+            if self._port is not None:
+                # composite PK: parts live only in the joined id
+                row = self._port.tables["trigger_meta"].get(
+                    "\x1f".join((trigger_id, key)))
+                return str(row["value"] or "") if row else ""
             row = self._db.execute(
                 "SELECT value FROM trigger_meta WHERE trigger_id = ? AND key = ?",
                 (trigger_id, key)).fetchone()
@@ -424,11 +607,39 @@ class LeadStore:
         Answers "is this trigger pulling its weight?" with real numbers.
         """
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return {}
             trig = self.get_trigger(trigger_id)
             if trig is None:
                 return {}
+            if self._port is not None:
+                # the SQL rollups (COUNT DISTINCT / COUNT / GROUP BY)
+                # re-expressed as seam finds + Python rollups
+                docs = self._port.find_raw(
+                    "lead_comments", {"platform": trig.platform,
+                                      "post_id": trig.post_id})
+                n_comments = len({d["commenter"] for d in docs})
+                # trigger_id is a composite-PK part: it lives in
+                # the joined document id, so the count scans
+                # restored rows — never a find on key fields
+                n_dmed = sum(
+                    1 for r in self._port.tables["comment_seen"].all()
+                    if r["trigger_id"] == trigger_id)
+                by_status: dict[str, int] = {}
+                for r in self._port.tables["leads"].find(
+                        {"source_post": trig.post_id}):
+                    by_status[r["status"]] = \
+                        by_status.get(r["status"], 0) + 1
+                return {
+                    "trigger_id": trigger_id, "keyword": trig.keyword,
+                    "comments": n_comments, "dmed": n_dmed,
+                    "dm_rate": round(n_dmed / n_comments, 3)
+                    if n_comments else 0.0,
+                    "leads_by_status": by_status,
+                    "converted": by_status.get("converted", 0),
+                    "qualifier": trig.qualifier,
+                    "public_reply": bool(trig.public_reply),
+                }
             comments = self._db.execute(
                 "SELECT COUNT(DISTINCT commenter) AS n FROM lead_comments "
                 "WHERE platform = ? AND post_id = ?",
@@ -457,7 +668,7 @@ class LeadStore:
             return {}
 
     @staticmethod
-    def _row_lead(r: sqlite3.Row) -> Lead:
+    def _row_lead(r: Any) -> Lead:
         return Lead(
             lead_id=r["lead_id"], name=r["name"] or "", platform=r["platform"] or "",
             contact=r["contact"] or "", interest=r["interest"] or "",
@@ -667,7 +878,14 @@ def mark_lead_magnet(store: LeadStore, trigger_id: str, recycle: bool = True) ->
     """Flag a trigger as an evergreen lead magnet: every recycled post
     (#44) with this trigger keeps pulling leads. Never raises."""
     try:
-        if store is None or not trigger_id or store._db is None:
+        if store is None or not trigger_id:
+            return False
+        port = getattr(store, "_port", None)
+        if port is not None:
+            port.tables["lead_magnets"].put(
+                {"trigger_id": trigger_id, "ts": time.time()})
+            return True
+        if store._db is None:
             return False
         store._db.execute(
             "CREATE TABLE IF NOT EXISTS lead_magnets (trigger_id TEXT PRIMARY KEY, ts REAL)")
@@ -682,7 +900,12 @@ def mark_lead_magnet(store: LeadStore, trigger_id: str, recycle: bool = True) ->
 
 def is_lead_magnet(store: LeadStore, trigger_id: str) -> bool:
     try:
-        if store is None or not trigger_id or store._db is None:
+        if store is None or not trigger_id:
+            return False
+        port = getattr(store, "_port", None)
+        if port is not None:
+            return port.tables["lead_magnets"].get(trigger_id) is not None
+        if store._db is None:
             return False
         row = store._db.execute(
             "SELECT 1 FROM lead_magnets WHERE trigger_id = ?", (trigger_id,)).fetchone()

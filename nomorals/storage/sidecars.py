@@ -1292,6 +1292,55 @@ _register(_S(
 ))
 
 _register(_S(
+    name="travel-watchers", verdict="ported", kind="sqlite-file",
+    modules=("travel/watchers.py",),
+    tables=("watches", "price_history", "alert_log"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 8): "
+        "flight-price watches route through the seam "
+        "(travel-watchers__watches / __price_history / __alert_log) "
+        "whenever a store is resolved, behind the unchanged "
+        "PriceWatcher API. Watches are documents by their text id; "
+        "the PK-less price_history and alert_log children ride "
+        "put_raw with caller-shaped ids (<watch_id>:<n>) allocated "
+        "by one atomic inc counter per table on the meta document, "
+        "seeded by the lazy import from the imported row counts, "
+        "so child ids stay unique and monotone across the import "
+        "and across the history prune; history reads order by "
+        "(checked_at, id ordinal) — the native rowid order. The "
+        "additive ALTER migrations (notify_on, cooldown_h) stay "
+        "native-path concerns; the seam mapping derives from the "
+        "final shape. The native sqlite3 path serves the SQLite "
+        "default."),
+))
+
+_register(_S(
+    name="social-leads", verdict="ported", kind="sqlite-file",
+    modules=("social/leads.py",),
+    tables=("leads", "lead_comments", "comment_seen", "lead_magnets",
+            "lead_triggers", "trigger_meta"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 8): the "
+        "comment → DM → lead loop routes through the seam "
+        "(social-leads__lead_triggers / __leads / __comment_seen / "
+        "__lead_comments / __trigger_meta / __lead_magnets) "
+        "whenever a store is resolved, behind the unchanged "
+        "LeadStore API. comment_seen and trigger_meta are keyed by "
+        "their composite primary keys, whose parts live in the "
+        "joined document id — membership is a get by joined id, "
+        "never a find on key fields; the PK-less lead_comments log "
+        "rides put_raw with caller-shaped ids (<post_id>:<n>) from "
+        "one atomic inc counter on the meta document, seeded by "
+        "the lazy import from the imported row count. "
+        "funnel_stats' GROUP BY / COUNT DISTINCT rollups "
+        "re-express as seam finds + Python rollups; lead_magnets "
+        "(created lazily by mark_lead_magnet on the native path) "
+        "is declared in the DDL the seam mapping derives from, so "
+        "the seam serves it from first construction. The native "
+        "sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
     name="health-timeline", verdict="residue", kind="database-file",
     modules=("health/timeline.py",),
     anchors=(("health/timeline.py", "timeline.db"),),
@@ -1389,10 +1438,6 @@ _residue("planning-graph", "planning/graph.py",
 _residue("property-passport", "property/passport.py",
          ("passports", "history", "refs", "doc_refs"),
          "property passports and their history in passport.db.")
-_residue("social-leads", "social/leads.py",
-         ("leads", "lead_comments", "comment_seen", "lead_magnets",
-          "lead_triggers", "trigger_meta"),
-         "lead capture state in leads.db.")
 _residue("social-profiles", "social/profiles.py",
          ("profiles", "elements", "likes"),
          "prompt-scaffolded profiles and element likes.")
@@ -1402,9 +1447,6 @@ _residue("travel-groups", "travel/groups.py",
          "group trip state — eight tables with money-split flows "
          "(expenses/payments); the port reviews its split "
          "composition, like household.")
-_residue("travel-watchers", "travel/watchers.py",
-         ("watches", "price_history", "alert_log"),
-         "travel price watches and their history.")
 _residue("triggers-saved-search", "triggers/saved_search.py",
          ("saved_searches", "seen_matches", "pending_digest"),
          "saved searches with seen-match dedup and pending digests.")
