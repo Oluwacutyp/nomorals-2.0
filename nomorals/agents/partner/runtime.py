@@ -1635,6 +1635,28 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 - bookkeeping never eats a turn
                 record_failure(
                     "runtime.PartnerRuntime.owner_reply_ledger", exc)
+        # Peer-post observations + the bot-turn law (dupfix2): a
+        # bot's own post in a DM is an OBSERVATION for the
+        # deferral registry, never a turn — and a post from one of
+        # Devon's own bots arriving as an ordinary message is
+        # converted to one here, so a bot's output can never feed
+        # the game, coremind or conversational engines on a
+        # second surface (the shape that produced the duplicate
+        # status blocks and leaderboards: the second surface
+        # ingested the first's output as a turn and answered it).
+        # Runs before every turn consumer below.
+        _pmeta = message.meta or {}
+        if _pmeta.get("service") == "peer_post" \
+                or _pmeta.get("observe_only"):
+            self._peer_post_observed(message)
+            return
+        if message.incoming:
+            _bot_peer = self._peer_bot_dm(message)
+            if _bot_peer is not None \
+                    and str(getattr(message, "sender_id", "") or "") \
+                    == _bot_peer:
+                self._peer_post_observed(message)
+                return
         # Trigger engine hook (nomorals/triggers): message-source triggers
         # evaluate the final inbound text here.  One call, no fork of the
         # dispatch path below; a no-op when no engine is attached, and a
@@ -2095,64 +2117,31 @@ class PartnerRuntime(
             # echo can be another surface's command (the owner's
             # /play in the BOT's DM arrives here through the
             # userbot and used to mint a second job). Standing
-            # down is silent — the owning surface answers.
-            if _parsed is not None and self._command_stands_down(
-                    message, _parsed):
-                self._bump("controls")
-                _log.info(
-                    "command /%s in %s stands down on %s — another "
-                    "surface owns it", _parsed.kind, message.chat.key,
-                    message.chat.platform)
-                return
+            # down is silent — the owning surface answers. A
+            # "defer" verdict is the dupfix2 shape: this surface
+            # cannot prove the primary claimed it (no shared
+            # ledger, no sibling adapter), so it waits to SEE the
+            # primary's answer in the room instead of guessing.
             if _parsed is not None:
-                self._bump("controls")
-                # Feed the arena's interest profiler: what the owner runs
-                # most shapes future topic picks. Never raises.
-                try:
-                    from ..arena import activity as _arena_activity
-
-                    verb = message.text.strip().split()[0].lstrip("/").lower()
-                    _arena_activity.record(self.context.db, "command", verb)
-                except Exception as e:
-                    record_failure("runtime.PartnerRuntime._process_inner:1318", e)
-                # The kind is parsed HERE, in this scope: the
-                # exception path below names it, and it used to read
-                # a stale `command` left over from an earlier scope
-                # (a NameError waiting inside the error handler).
-                _cmd = parse_control(message.text)
-                _kind = _cmd.kind if _cmd is not None else "command"
-                try:
-                    reply = self.handle_control(message.text, message.chat.key,
-                                                message=message)
-                except Exception as exc:  # noqa: BLE001
-                    _log.exception("control command failed: %s", exc)
-                    try:
-                        from ...core.error_doctor import diagnose as _diagnose
-                        _diag = _diagnose(exc, context={"command": f"/{_kind}"})
-                        _log.info("error diagnosis for /%s: %s",
-                                  _kind, _diag["summary"])
-                        _why = _diag["summary"]
-                    except Exception as e:
-                        record_failure("runtime.PartnerRuntime._process_inner:1331", e)
-                        _why = f"{type(exc).__name__}: {exc}"
-                    reply = (f"/{_kind} blew up on my end: {_why} — "
-                             f"/help {_kind} shows the right usage")
-                if reply:
-                    try:
-                        # Bare /start and /menu carry the bottom menu
-                        # keyboard on operator chats too (any platform).
-                        # Retired 2026-11-06 (menufix): the grid is
-                        # abolished — the inline menu is the action
-                        # surface; bare-menu replies clear any grid a
-                        # client still holds, once per chat.
-                        if message.text.strip() in ("/start", "/menu"):
-                            self._clear_menu_grid_once(message)
-                        _okind, _ometa = _control_output_kind(_cmd)
-                        self._send_control_reply(
-                            message, reply, output_kind=_okind,
-                            output_meta=_ometa)
-                    except Exception as exc:  # noqa: BLE001
-                        _log.warning("control reply send failed: %s", exc)
+                _arb = self._command_arbitration(message, _parsed)
+                if _arb == "defer":
+                    self._bump("controls")
+                    self._defer_peer_command(message, _parsed)
+                    _log.info(
+                        "command /%s in %s defers on %s — waiting to "
+                        "see whether the bot answers",
+                        _parsed.kind, message.chat.key,
+                        message.chat.platform)
+                    return
+                if _arb == "down":
+                    self._bump("controls")
+                    _log.info(
+                        "command /%s in %s stands down on %s — another "
+                        "surface owns it", _parsed.kind, message.chat.key,
+                        message.chat.platform)
+                    return
+            if _parsed is not None:
+                self._run_control_command(message, _parsed)
                 return
         # Armed asks (button-fix lanes 1 + 3): a review card's
         # Schedule/Edit tap — or a proposals Deny tap on an
@@ -4623,18 +4612,72 @@ class PartnerRuntime(
         return ""
 
     def _command_stands_down(self, message, command) -> bool:  # type: ignore[no-untyped-def]
-        """True when THIS surface must not handle ``command``:
-        another surface owns it. Silent by design — standing down
-        never replies; the owning surface's answer is the only
-        one the room sees. Never raises."""
+        """True when THIS surface must not handle ``command`` right
+        now: another surface owns it, or the command is deferred
+        (dupfix2 — this surface waits to see the primary's answer
+        before deciding). Silent by design — standing down never
+        replies; the owning surface's answer is the only one the
+        room sees. Never raises."""
         try:
-            return self._command_stands_down_inner(message, command)
+            return self._command_arbitration(message, command) != "handle"
         except Exception as exc:  # noqa: BLE001 - arbitration
             record_failure(               # never eats a command
                 "runtime.PartnerRuntime._command_stands_down", exc)
             return False
 
-    def _command_stands_down_inner(self, message, command) -> bool:  # type: ignore[no-untyped-def]
+    def _peer_bot_dm(self, message) -> str | None:  # type: ignore[no-untyped-def]
+        """The bot account id when ``message`` sits in a DM with
+        one of Devon's own bots on a NON-bot surface, else None.
+
+        The peer is identified WITHOUT configuration luck: the
+        adapter stamps ``peer_is_bot`` from the peer entity it
+        already resolved (the only signal that survives split
+        hosting with no shared config), or the peer id is one this
+        runtime knows as a bot account (companion ids, sibling
+        bot adapters). A DM with a bot is the primary's room — a
+        second surface must never answer in it at once."""
+        chat = message.chat
+        platform = str(chat.platform or "")
+        if platform in ("telegram-bot", "telegram-personal"):
+            return None
+        if not platform.startswith("telegram"):
+            return None
+        if chat.kind != ChatKind.DM:
+            return None
+        peer = str(getattr(chat, "chat_id", "") or "")
+        if not peer:
+            return None
+        meta = getattr(message, "meta", None) or {}
+        if meta.get("peer_is_bot"):
+            return peer
+        if peer in self._bot_account_ids():
+            return peer
+        return None
+
+    def _sibling_bot_owns(self, peer_id: str) -> bool:
+        """True when a bot adapter attached to THIS gateway owns
+        ``peer_id`` — the primary is a sibling in this runtime,
+        so its claim (when it lands) is in-process and instant."""
+        gateway = getattr(self, "gateway", None)
+        adapters = getattr(gateway, "adapters", {}) or {}
+        for adapter in adapters.values():
+            bot_id = getattr(adapter, "_bot_id", None)
+            if bot_id is not None and str(bot_id) == str(peer_id):
+                return True
+        return False
+
+    def _command_arbitration(self, message, command) -> str:  # type: ignore[no-untyped-def]
+        """One of ``"handle"`` | ``"down"`` | ``"defer"`` for
+        ``command`` on this surface.
+
+        ``"down"``: another surface owns it — stand down
+        silently. ``"defer"`` (dupfix2): the command sits in a
+        bot's DM on a non-bot surface and this surface cannot
+        PROVE the primary claimed it — no sibling adapter, no
+        live claim in a ledger the primary also writes. The
+        caller registers a deferral and watches the room for the
+        primary's answer instead of guessing; the sweeper fails
+        over if no answer ever comes."""
         chat = message.chat
         platform = str(chat.platform or "")
         bot_surface = platform in ("telegram-bot", "telegram-personal")
@@ -4650,14 +4693,31 @@ class PartnerRuntime(
                 owner_surface = owners.get(addressee)
                 if owner_surface is None \
                         or owner_surface != platform:
-                    return True
+                    return "down"
         # (2) A bot's DM belongs to that bot: a non-bot surface
         # never handles commands in a DM whose peer is one of
-        # Devon's bots (the userbot sees the owner's bot chats in
-        # his dialogs — the bot's copy is the handling).
-        if chat.kind == ChatKind.DM and not bot_surface \
-                and str(chat.chat_id or "") in self._bot_account_ids():
-            return True
+        # Devon's bots at once (the userbot sees the owner's bot
+        # chats in his dialogs). The verdict is "down" ONLY when
+        # this surface can PROVE the primary claimed it — a
+        # sibling bot adapter in this gateway plus a live claim
+        # by a bot surface in the ledger. Otherwise it is
+        # "defer": watch the room for the primary's answer
+        # (dupfix2 — the old unconditional stand-down was ALSO
+        # the silence hole: a bot that never answers left the
+        # echo muted forever, and a split-hosted surface whose
+        # claim lives in a store the primary never sees handled
+        # the command anyway, duplicating it).
+        peer_bot_id = self._peer_bot_dm(message)
+        if peer_bot_id is not None:
+            from .command_claims import command_claim_key
+
+            key = command_claim_key(
+                message, self._surface_account_id(platform))
+            if key and self._sibling_bot_owns(peer_bot_id):
+                holder = self._command_claims().claimed_by(key)
+                if holder in ("telegram-bot", "telegram-personal"):
+                    return "down"
+            return "defer"
         # (3) In a group where the bot's standing is VERIFIED
         # (the merged §33 claim says bot_admin), group systems
         # speak through the bot: a non-bot surface leaves group
@@ -4670,7 +4730,7 @@ class PartnerRuntime(
             except Exception:  # noqa: BLE001 - unproven, no defer
                 state = None
             if state and state.get("bot_admin") is True:
-                return True
+                return "down"
         # (4) One handling: claim this message identity. The same
         # message carries the same platform message id on every
         # surface; the family collapses Telegram's three platform
@@ -4688,8 +4748,210 @@ class PartnerRuntime(
         key = command_claim_key(
             message, self._surface_account_id(platform))
         if not key:
+            return "handle"
+        return "down" if not self._command_claims().claim(
+            key, platform) else "handle"
+
+    # ── peer-answer deferral (dupfix2) ──────────────────────────
+    # A command in a bot's DM on a non-bot surface is deferred,
+    # not dropped: this surface watches the room for the primary's
+    # answer and fails over if none ever comes (see
+    # :mod:`peer_deferral`). The observation channel is the
+    # MTProto stream itself, so the mechanism works when the
+    # surfaces share no store and no config at all.
+
+    def _peer_deferral(self):  # type: ignore[no-untyped-def]
+        registry = getattr(self, "_peer_deferral_obj", None)
+        if registry is None:
+            from .peer_deferral import PeerAnswerDeferral
+
+            registry = PeerAnswerDeferral(
+                window_s=float(
+                    getattr(self, "_peer_answer_window_s", 20.0)))
+            self._peer_deferral_obj = registry
+        return registry
+
+    def _defer_peer_command(self, message, command) -> bool:  # type: ignore[no-untyped-def]
+        """Register this echo command as deferred. False when the
+        registry could not take it (unkeyable) — the caller then
+        treats the turn as stood down, never as handled."""
+        try:
+            from .command_claims import command_claim_key
+
+            platform = str(message.chat.platform or "")
+            record = {
+                "chat_key": message.chat.key,
+                "platform": platform,
+                "chat_id": str(message.chat.chat_id or ""),
+                "kind": str(getattr(command, "kind", "") or ""),
+                "arg": str(getattr(command, "arg", "") or ""),
+                "text": str(message.text or ""),
+                "message_id": str(
+                    getattr(message, "message_id", "") or ""),
+                "claim_key": command_claim_key(
+                    message, self._surface_account_id(platform)),
+                "message": message,
+            }
+            registered = self._peer_deferral().register(record)
+            if registered:
+                # A newer command supersedes older pendings in
+                # this chat — the sweep must never re-apply them.
+                self._peer_deferral().supersede(
+                    record["chat_key"], record["message_id"])
+                self._start_peer_deferral_sweeper()
+            return bool(registered)
+        except Exception as exc:  # noqa: BLE001 - deferral never eats a turn
+            record_failure(
+                "runtime.PartnerRuntime._defer_peer_command", exc)
             return False
-        return not self._command_claims().claim(key, platform)
+
+    def _peer_post_observed(self, message) -> None:  # type: ignore[no-untyped-def]
+        """The primary posted in this chat: resolve every deferral
+        its post answers (standing down silently), and mirror any
+        owner start/stop intent the deferred command carried into
+        THIS instance's durable registry — the primary answered
+        it, but this surface's reconcile must honor the same stop
+        (personal-surface law: the stop stays sticky across both
+        surfaces). Never raises."""
+        try:
+            chat_key = message.chat.key
+            reply_to = str((message.meta or {}).get("reply_to") or "")
+            resolved = self._peer_deferral().resolve_for_chat(
+                chat_key, reply_to=reply_to)
+            for record in resolved:
+                if record.get("kind") in ("stop", "start") \
+                        and record.get("arg"):
+                    try:
+                        self._set_platform_owner_stopped(
+                            str(record["arg"]),
+                            record["kind"] == "stop")
+                    except Exception as exc:  # noqa: BLE001 - mirror never dies
+                        record_failure(
+                            "runtime.PartnerRuntime._peer_post_observed:mirror",
+                            exc)
+                _log.info(
+                    "peer answer in %s resolved deferred /%s — "
+                    "standing down", chat_key, record.get("kind"))
+        except Exception as exc:  # noqa: BLE001 - observation never eats a turn
+            record_failure(
+                "runtime.PartnerRuntime._peer_post_observed", exc)
+
+    def _sweep_peer_deferrals(self, *, now: float | None = None) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
+        """Failover clock: deferred commands whose window expired
+        with no primary answer are claimed (when a claim exists
+        to take — a late primary claim stands this one down) and
+        handled here. Returns the records that were due."""
+        due = self._peer_deferral().expire(now=now)
+        for record in due:
+            try:
+                key = str(record.get("claim_key") or "")
+                platform = str(record.get("platform") or "")
+                if key and not self._command_claims().claim(
+                        key, platform):
+                    _log.info(
+                        "deferred /%s in %s expired but another "
+                        "surface claimed it meanwhile — standing "
+                        "down", record.get("kind"),
+                        record.get("chat_key"))
+                    continue
+                message = record.get("message")
+                if message is None:
+                    continue
+                from ...social.chat.control import parse_control
+
+                parsed = parse_control(str(record.get("text") or ""))
+                if parsed is None:
+                    continue
+                self._run_control_command(message, parsed)
+                _log.info(
+                    "deferred /%s in %s failed over — the bot "
+                    "never answered", record.get("kind"),
+                    record.get("chat_key"))
+            except Exception as exc:  # noqa: BLE001 - a sweep never dies
+                record_failure(
+                    "runtime.PartnerRuntime._sweep_peer_deferrals", exc)
+        return due
+
+    def _start_peer_deferral_sweeper(self) -> None:  # type: ignore[no-untyped-def]
+        """One daemon thread per runtime, started lazily on the
+        first deferral: the failover clock. Exits with the
+        runtime's stop event."""
+        thread = getattr(self, "_peer_deferral_thread", None)
+        if thread is not None and thread.is_alive():
+            return
+        stop = getattr(self, "_stopped", None)
+        if stop is None:
+            return
+
+        def _loop() -> None:
+            while not stop.wait(1.0):
+                try:
+                    self._sweep_peer_deferrals()
+                except Exception as exc:  # noqa: BLE001 - the loop never dies
+                    record_failure(
+                        "runtime.PartnerRuntime.peer_deferral_sweep", exc)
+
+        thread = threading.Thread(
+            target=_loop, name="peer-deferral-sweeper", daemon=True)
+        self._peer_deferral_thread = thread
+        thread.start()
+
+    def _run_control_command(self, message, command) -> None:  # type: ignore[no-untyped-def]
+        """Run one parsed control command and send its reply
+        (the dispatch the 2099 checkpoint used to inline — the
+        failover sweep re-enters through this same path, so a
+        deferred command is answered exactly like a live one).
+        Never raises."""
+        self._bump("controls")
+        # Feed the arena's interest profiler: what the owner runs
+        # most shapes future topic picks. Never raises.
+        try:
+            from ..arena import activity as _arena_activity
+
+            verb = message.text.strip().split()[0].lstrip("/").lower()
+            _arena_activity.record(self.context.db, "command", verb)
+        except Exception as e:
+            record_failure("runtime.PartnerRuntime._process_inner:1318", e)
+        # The kind is parsed HERE, in this scope: the
+        # exception path below names it, and it used to read
+        # a stale `command` left over from an earlier scope
+        # (a NameError waiting inside the error handler).
+        from ...social.chat.control import parse_control
+
+        _cmd = parse_control(message.text)
+        _kind = _cmd.kind if _cmd is not None else "command"
+        try:
+            reply = self.handle_control(message.text, message.chat.key,
+                                        message=message)
+        except Exception as exc:  # noqa: BLE001
+            _log.exception("control command failed: %s", exc)
+            try:
+                from ...core.error_doctor import diagnose as _diagnose
+                _diag = _diagnose(exc, context={"command": f"/{_kind}"})
+                _log.info("error diagnosis for /%s: %s",
+                          _kind, _diag["summary"])
+                _why = _diag["summary"]
+            except Exception as e:
+                record_failure("runtime.PartnerRuntime._process_inner:1331", e)
+                _why = f"{type(exc).__name__}: {exc}"
+            reply = (f"/{_kind} blew up on my end: {_why} — "
+                     f"/help {_kind} shows the right usage")
+        if reply:
+            try:
+                # Bare /start and /menu carry the bottom menu
+                # keyboard on operator chats too (any platform).
+                # Retired 2026-11-06 (menufix): the grid is
+                # abolished — the inline menu is the action
+                # surface; bare-menu replies clear any grid a
+                # client still holds, once per chat.
+                if message.text.strip() in ("/start", "/menu"):
+                    self._clear_menu_grid_once(message)
+                _okind, _ometa = _control_output_kind(_cmd)
+                self._send_control_reply(
+                    message, reply, output_kind=_okind,
+                    output_meta=_ometa)
+            except Exception as exc:  # noqa: BLE001
+                _log.warning("control reply send failed: %s", exc)
 
     def _money_send_hook(self, message: ChatMessage) -> str | None:
         """Build-map #49: "send 5k to Mama" → staged transfer + guard.

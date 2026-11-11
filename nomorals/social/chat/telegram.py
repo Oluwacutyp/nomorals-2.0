@@ -1871,6 +1871,23 @@ class TelegramAdapter(ChatAdapter):
                        or getattr(message, "text", "") or "")
             kind = (ChatKind.DM if not chat_id.startswith("-")
                     else ChatKind.GROUP)
+            # dupfix2: the peer-is-a-bot stamp is the signal that
+            # survives split hosting with no shared config — the
+            # runtime's peer-bot-DM verdict reads it instead of
+            # trusting companion ids that a long-running adapter
+            # may predate. The peer entity is right here on the
+            # event; the companion set is only the fallback.
+            peer_is_bot = False
+            _peer = getattr(event, "chat", None)
+            if _peer is not None:
+                peer_is_bot = bool(getattr(_peer, "bot", False))
+            if not peer_is_bot:
+                # getattr: half-built adapters in tests never ran
+                # __init__, so the set may not exist — the stamp
+                # is best-effort, never a reason to drop an echo.
+                _companion = getattr(self, "_companion_bot_ids", None)
+                if _companion and str(chat_id).lstrip("-").isdigit():
+                    peer_is_bot = int(chat_id) in _companion
             echo = ChatMessage(
                 chat=ChatRef(platform=self.name, chat_id=chat_id,
                              kind=kind),
@@ -1883,11 +1900,60 @@ class TelegramAdapter(ChatAdapter):
                 ts=(time.time() if not getattr(message, "date", None)
                     else message.date.timestamp()),
                 meta={"own_message": True, "from_owner": True,
-                      "reply_to": reply_to},
+                      "reply_to": reply_to,
+                      "peer_is_bot": bool(peer_is_bot)},
             )
             self._deliver(handler, echo)
         except Exception as exc:  # noqa: BLE001 - echo is bookkeeping, never fatal
             record_failure("telegram.TelegramAdapter._deliver_owner_echo", exc)
+
+    def _deliver_peer_post(self, event: Any, message: Any,
+                           handler: IncomingHandler) -> None:
+        """Deliver a bot's post in a DM as an observation, never a
+        turn (dupfix2). The runtime's peer-answer deferral resolves
+        on it — did the primary answer the owner's command in that
+        DM? — and the runtime's bot-turn law would drop it as a
+        turn even if it arrived shaped as one. Never raises: an
+        observation fault must not break the event loop."""
+        try:
+            chat_id = str(getattr(event, "chat_id", "") or "")
+            if not chat_id:
+                return
+            reply_head = getattr(message, "reply_to", None)
+            reply_to = str(
+                getattr(reply_head, "reply_to_msg_id", None)
+                or getattr(reply_head, "id", "") or "")
+            sender_id = ""
+            for candidate in (
+                    getattr(event, "sender_id", None),
+                    getattr(message, "sender_id", None)):
+                if candidate is not None:
+                    sender_id = str(candidate)
+                    break
+            try:
+                mid = int(getattr(message, "id", 0) or 0)
+            except (TypeError, ValueError):
+                mid = 0
+            text = str(getattr(message, "raw_text", None)
+                       or getattr(message, "message", None)
+                       or getattr(message, "text", "") or "")
+            obs = ChatMessage(
+                chat=ChatRef(platform=self.name, chat_id=chat_id,
+                             kind=ChatKind.DM),
+                incoming=True,
+                text=text,
+                sender="",
+                sender_id=sender_id,
+                reply_to=reply_to,
+                message_id=str(mid or getattr(message, "id", "") or ""),
+                ts=(time.time() if not getattr(message, "date", None)
+                    else message.date.timestamp()),
+                meta={"service": "peer_post", "observe_only": True,
+                      "peer_is_bot": True, "reply_to": reply_to},
+            )
+            self._deliver(handler, obs)
+        except Exception as exc:  # noqa: BLE001 - observation is bookkeeping
+            record_failure("telegram.TelegramAdapter._deliver_peer_post", exc)
 
     async def _handle_inbound(self, event: Any, client: Any, handler: IncomingHandler, *,
                               allow_check: bool) -> None:
@@ -1928,12 +1994,19 @@ class TelegramAdapter(ChatAdapter):
         # When the companion BotFather bot runs alongside this userbot, the
         # bot's outgoing messages arrive here as incoming (different account).
         # Processing them would make the bot reply to itself in a loop.
-        # Drop any message sent by a bot account.
+        # A bot's post in a DM is still delivered — as an OBSERVATION,
+        # never a turn (dupfix2): the runtime's peer-answer deferral
+        # resolves on it (did the primary answer the owner's command
+        # in that DM?), and the runtime's bot-turn law drops anything
+        # that arrives shaped as a turn anyway. Groups keep the plain
+        # drop: a bot's group post is not a room the userbot defers in.
         if self._sender_is_bot(event, message):
-            _log.debug(
-                "telegram: DROPPED inbound chat_id=%s — sender is a bot (self-reply loop guard)",
-                chat_id,
-            )
+            if not str(chat_id).startswith("-"):
+                self._deliver_peer_post(event, message, handler)
+            else:
+                _log.debug(
+                    "telegram: DROPPED inbound chat_id=%s — sender is a "
+                    "bot (self-reply loop guard)", chat_id)
             return
         entity = None
         
