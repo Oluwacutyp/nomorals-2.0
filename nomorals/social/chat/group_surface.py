@@ -382,8 +382,26 @@ class GroupStore:
         return entry
 
     def settings(self, group_key: str) -> dict[str, Any]:
+        return self._merged_settings(self.group(group_key))
+
+    def peek_settings(self, group_key: str) -> dict[str, Any]:
+        """The settings view for a room WITHOUT recording the
+        room: the same merged defaults-over-stored view
+        :meth:`settings` returns, but a room the store has
+        never seen stays unseen — nothing is written to
+        ``data``.  For pure reads that must not create state
+        as a side effect (the §33 claim gate reads a room's
+        facts exactly as recorded; a gate check that first
+        materialised the room — and its Telegram family
+        siblings — corrupted any iteration over ``data`` in
+        progress, which is how the site publish path died
+        with 'dictionary changed size during iteration')."""
+        return self._merged_settings(self.data.get(group_key))
+
+    def _merged_settings(self, entry: dict[str, Any] | None
+                         ) -> dict[str, Any]:
         merged = _default_settings()
-        stored = self.group(group_key).get("settings") or {}
+        stored = (entry or {}).get("settings") or {}
         merged.update({k: v for k, v in stored.items()
                        if k in merged
                        and k not in ("defense", "presentation",
@@ -589,16 +607,24 @@ class GroupSurface:
         the runtime's probe (which stamps only bot-platform keys)
         is the room's standing on every surface. bot_admin keeps
         its tri-state: True if any record verifies it, else False
-        if any record verifies a demotion, else None."""
+        if any record verifies a demotion, else None.
+
+        A pure read: the facts come through
+        :meth:`GroupStore.peek_settings`, so asking never
+        materialises the room or a family sibling into the
+        store — the gate is consulted while other code iterates
+        the store (the site publish path enumerates claimed
+        rooms exactly that way), and a read that writes would
+        change the dict under the iteration."""
         platform, _, rest = str(group_key).partition(":")
-        own = self.store.settings(group_key).get(
+        own = self.store.peek_settings(group_key).get(
             "system_claim") or {}
         records = [own]
         if platform in self.TELEGRAM_FAMILY and rest:
             for prefix in self.TELEGRAM_FAMILY:
                 if prefix == platform:
                     continue
-                sibling = self.store.settings(
+                sibling = self.store.peek_settings(
                     f"{prefix}:{rest}").get("system_claim") or {}
                 if sibling:
                     records.append(sibling)

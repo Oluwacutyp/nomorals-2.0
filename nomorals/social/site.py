@@ -150,8 +150,14 @@ def devon_page_html(*, bot_username: str = "",
 def claimed_group_keys(surface: Any) -> list[str]:
     """Groups whose rules get a page: the CLAIMED rooms (§33 —
     designated by the owner or run by her bot).  A foreign room
-    she merely sits in publishes nothing."""
-    return sorted(k for k in surface.store.data
+    she merely sits in publishes nothing.
+
+    The enumeration is a consistent cut: it walks a snapshot
+    of the store's keys taken as the pass begins, so a room
+    registered mid-publish (her live surfaces write the same
+    store) never breaks the pass and never half-joins it —
+    it publishes whole on the next pass instead."""
+    return sorted(k for k in list(surface.store.data)
                   if surface.system_output_allowed(k))
 
 

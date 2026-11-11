@@ -470,3 +470,51 @@ def test_bot_adapter_renders_url_buttons():
         else raw_markup
     button = markup["inline_keyboard"][0][0]
     assert "callback_data" in button and "url" not in button
+
+
+# ── the publish enumeration is a consistent cut ─────────────────
+
+def test_claim_gate_never_materialises_rooms(tmp_path):
+    """The §33 gate is a pure read: enumerating the claimed
+    rooms — and publishing the whole bundle — must leave the
+    store's key set exactly as it stood.  No phantom Telegram
+    family siblings may be recorded for a room she has only
+    ever seen under one surface's key (that write, landing
+    mid-iteration, is what killed every publish with
+    'dictionary changed size during iteration')."""
+    surface = _surface(tmp_path)
+    before = set(surface.store.data)
+    assert site.claimed_group_keys(surface)  # claimed rooms exist
+    assert set(surface.store.data) == before
+    site.write_bundle(tmp_path / "bundle", surface,
+                      bot_username="devonbot")
+    assert set(surface.store.data) == before
+
+
+def test_room_registered_mid_publish_joins_the_next_pass(tmp_path):
+    """A room registered while a publish pass is enumerating
+    the store (her live surfaces write the same store) neither
+    breaks the pass nor half-joins it: the pass answers from
+    the keys it began with, and the new room publishes whole
+    on the next pass."""
+    surface = _surface(tmp_path)
+    new_key = "whatsapp:777001"
+    real_gate = surface.system_output_allowed
+    registered = []
+
+    def gate(key, **kwargs):
+        if not registered:
+            registered.append(key)
+            surface.update_settings(new_key, rules=["Late rules"])
+            surface.set_designated(new_key, True, by="99")
+        return real_gate(key, **kwargs)
+
+    surface.system_output_allowed = gate
+    try:
+        slugs = site.rules_slug_map(surface)
+    finally:
+        surface.system_output_allowed = real_gate
+    assert registered  # the registration really fired mid-pass
+    assert new_key not in slugs.values()
+    # the very next pass carries the new room whole
+    assert new_key in site.rules_slug_map(surface).values()

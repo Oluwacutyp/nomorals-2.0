@@ -2805,7 +2805,7 @@ class RuntimeGroupMixin:
         from ...social.site import group_slug, rules_url
 
         surface = self._group_surface()
-        if key not in {k for k in surface.store.data
+        if key not in {k for k in list(surface.store.data)
                        if surface.system_output_allowed(k)}:
             return ""
         title = ""
