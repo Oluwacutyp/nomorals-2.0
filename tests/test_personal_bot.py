@@ -291,7 +291,15 @@ class PersonalCallbackRoutingTests(unittest.TestCase):
         from nomorals.social.chat.base import ChatRef
 
         adapter, session = self._personal_adapter()
+        # The adapter state exactly as the inbound handler leaves it
+        # after a "/power" message: _handle_update records the origin
+        # command AND that the last inbound WAS a command, as a pair.
+        # send() only honours the origin under that freshness gate
+        # (328ae0b0) — a stale _last_command alone attaches nothing,
+        # so modelling only half the pair models a state production
+        # never produces.
         adapter._last_command["7"] = "/power"
+        adapter._last_inbound_was_command["7"] = True
         adapter.send(
             ChatRef(platform="telegram-personal", chat_id="7", kind="dm"),
             "power mode: locked",
@@ -307,6 +315,30 @@ class PersonalCallbackRoutingTests(unittest.TestCase):
         self.assertIn("power status", datas)
         self.assertIn("power on", datas)
         self.assertIn("power off", datas)
+
+    def test_stale_origin_attaches_no_personal_buttons(self):
+        # The other half of the freshness gate: the last inbound was
+        # plain chat, so a leftover _last_command must NOT dress an
+        # unrelated reply in the old command's personal buttons.
+        from nomorals.social.chat.base import ChatRef
+
+        adapter, session = self._personal_adapter()
+        adapter._last_command["7"] = "/power"
+        adapter._last_inbound_was_command["7"] = False
+        adapter.send(
+            ChatRef(platform="telegram-personal", chat_id="7", kind="dm"),
+            "power mode: locked",
+        )
+        sends = [p for url, p in session.calls if url.endswith("/sendMessage")]
+        self.assertTrue(sends, "no sendMessage recorded")
+        markup = sends[0].get("reply_markup", {})
+        datas = [
+            adapter._verify_callback(btn["callback_data"])
+            for row in markup.get("inline_keyboard", []) for btn in row
+        ]
+        self.assertNotIn("power status", datas)
+        self.assertNotIn("power on", datas)
+        self.assertNotIn("power off", datas)
 
 
 if __name__ == "__main__":

@@ -14,12 +14,18 @@ import unittest
 from types import SimpleNamespace
 
 from nomorals.agents.partner_runtime import PartnerRuntime
+from nomorals.social.chat.base import ChatKind, ChatRef
 from nomorals.social.chat.control import (
     GAME_COMMANDS, PUBLIC_COMMANDS, PUBLIC_GAME_COMMANDS, caller_may_run)
 from nomorals.storage.db import Database
 
-OWNER_CHAT = SimpleNamespace(key="telegram:1")
-STRANGER_CHAT = SimpleNamespace(key="telegram:999")
+# Real ChatRefs, not bare namespaces: production messages always carry
+# a ChatRef whose kind is set (ChatKind.DM here — private chats), and
+# dispatch reads it (the bare-/help group check, 363403ae2). A double
+# without kind models a message production never builds.
+OWNER_CHAT = ChatRef(platform="telegram", chat_id="1", kind=ChatKind.DM)
+STRANGER_CHAT = ChatRef(platform="telegram", chat_id="999",
+                        kind=ChatKind.DM)
 OWNER_DENY = "that one's just for the owner."
 
 
@@ -80,8 +86,13 @@ class HandleControlGrantTests(unittest.TestCase):
         out = self.rt.handle_control(
             "/help", "telegram:999",
             message=_msg(STRANGER_CHAT, "/help"))
-        self.assertNotEqual(out, OWNER_DENY)
-        self.assertTrue(out.strip())
+        # A stranger's public command dispatches. On a buttons
+        # surface the bare-/help reply is the live menu — an
+        # ActionableMessage, not a bare string — so unwrap the reply
+        # text the way the rest of the suite does.
+        text = str(getattr(out, "text", out) or "")
+        self.assertNotEqual(text, OWNER_DENY)
+        self.assertTrue(text.strip())
 
     def test_internal_call_runs_as_owner(self):
         # message=None = internal tour/heal/self-heal probe → owner grant.
