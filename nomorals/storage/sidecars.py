@@ -1615,6 +1615,43 @@ _register(_S(
         "default."),
 ))
 
+_register(_S(
+    name="household", verdict="ported", kind="sqlite-file",
+    modules=("household/household.py",),
+    tables=("shared_assets", "shared_calendar", "shared_commitments",
+            "household_audit"),
+    reason=(
+        "ported in the Mongo residue Batch 3 pass (C5): Household "
+        "routes its four shared tables through the seam "
+        "(household__shared_assets / __shared_calendar / "
+        "__shared_commitments / __household_audit) behind its "
+        "unchanged API; all four tables are TEXT-PK, so every one "
+        "is a RowTable and the list reads are finds + Python sorts "
+        "with the id as the stated tiebreak. Pickup is by INJECTED "
+        "port, not the ambient: household/ is layer L0 and may not "
+        "import storage, so the composition layer builds the port "
+        "via sidecar_port and hands it to the constructor; without "
+        "one the organ runs its native file path. The write "
+        "composition is the native one, preserved "
+        "verbatim — NOT made atomic: every mutation writes its "
+        "record document first and its audit document second, as "
+        "two single-document writes in the native order, so an "
+        "audit-write failure propagates with the record durable "
+        "and no compensating delete, exactly as the file path's "
+        "two sequential commits behave; delegated member ops audit "
+        "only after the family registry call returns, so a failed "
+        "call leaves no audit entry. No journaling or repair "
+        "machinery is built — its absence is the faithful port, "
+        "recorded so a later reader does not 'fix' it. The "
+        "audit-failure composition is pinned identically on both "
+        "rungs in test_mongo_p5. Membership itself stays in family "
+        "(a different store); this entry covers "
+        "household_shared.db only. The file's existing rows are "
+        "imported once, through the same mapping, at first "
+        "construction. The native sqlite3 path serves the SQLite "
+        "default byte-for-byte."),
+))
+
 
 # ── residue: contained domain file stores, classified, port queued ────────
 #
@@ -1645,13 +1682,6 @@ _residue("audio-fingerprints", "audio/fingerprint.py", ("hashes", "tracks"),
          "audio fingerprint hashes per track in fingerprints.db; "
          "hash rows are lookup-keyed blobs, document-shaped but "
          "bulk-binary in character.")
-_residue("household", "household/household.py",
-         ("shared_assets", "shared_calendar", "shared_commitments",
-          "household_audit"),
-         "household shared state in household_shared.db — "
-         "multi-member shared records whose write flows are "
-         "audited as a set; the port reviews its shared-write "
-         "composition first.")
 _residue("marketing-send", "marketing/send.py",
          ("send_queue", "send_log", "send_providers", "send_templates",
           "send_variants", "send_suppressions", "send_blocklist",

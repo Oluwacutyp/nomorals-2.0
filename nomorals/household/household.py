@@ -59,15 +59,61 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+_COMMITMENTS_DDL = """CREATE TABLE IF NOT EXISTS shared_commitments (
+                   id TEXT PRIMARY KEY, what TEXT NOT NULL,
+                   owner_person TEXT NOT NULL, due REAL,
+                   status TEXT NOT NULL, created_by TEXT NOT NULL,
+                   created_ts REAL NOT NULL)"""
+_CALENDAR_DDL = """CREATE TABLE IF NOT EXISTS shared_calendar (
+                   id TEXT PRIMARY KEY, title TEXT NOT NULL,
+                   ts REAL NOT NULL, person_id TEXT NOT NULL,
+                   created_by TEXT NOT NULL, created_ts REAL NOT NULL)"""
+_ASSETS_DDL = """CREATE TABLE IF NOT EXISTS shared_assets (
+                   id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                   owner_person TEXT NOT NULL,
+                   created_by TEXT NOT NULL, created_ts REAL NOT NULL)"""
+_AUDIT_DDL = """CREATE TABLE IF NOT EXISTS household_audit (
+                   id TEXT PRIMARY KEY, ts REAL NOT NULL,
+                   actor_id TEXT NOT NULL, action TEXT NOT NULL,
+                   target TEXT NOT NULL, detail TEXT NOT NULL)"""
+
+#: The store's tables, in registry order. All four are primary-keyed
+#: by TEXT id, so every one routes through a RowTable on the seam.
+_TABLES = ("shared_assets", "shared_calendar", "shared_commitments",
+           "household_audit")
+
+#: The module DDL the native path executes — the same constant the
+#: seam's mappings derive from, so the two can never drift.
+_DDL = ";\n".join((_ASSETS_DDL, _CALENDAR_DDL, _COMMITMENTS_DDL,
+                   _AUDIT_DDL))
+
+
 class Household:
     """Shared household layer wrapping a :class:`FamilyRegistry`.
 
     Accepts a ``FamilyRegistry`` instance (``registry=``) or a root
     path (``root=``) from which a registry is built. When neither is
     given, the default family registry is built.
+
+    When the composition layer injects a seam ``port=`` (Mongo
+    program P5 — a port built by ``storage.sidecars.sidecar_port``
+    and registered as household), the shared records run over the
+    seam instead: the four tables are documents in
+    ``household__<table>`` collections, all primary-keyed by their
+    TEXT ids, and list reads are finds + Python sorts with the id
+    as the stated tiebreak. This module sits at layer L0 and never
+    imports storage — the port is opaque to it. The write
+    composition is the native one, unchanged: every mutation writes
+    its record first and its audit entry second, as two separate
+    writes — an audit failure propagates with the record already
+    durable, exactly as on the file; the pair is never made atomic.
+    Delegated member ops audit only after the family registry call
+    returns. The file's existing rows are imported once, through
+    the same mapping, at first construction.
     """
 
-    def __init__(self, registry: Any = None, root: Any = None) -> None:
+    def __init__(self, registry: Any = None, root: Any = None, *,
+                 port: Any = None) -> None:
         if registry is not None:
             self.registry = registry
         else:
@@ -83,29 +129,23 @@ class Household:
             raw_root = root
         self.root = Path(raw_root) if raw_root is not None else Path(".")
         self.root.mkdir(parents=True, exist_ok=True)
+        self._port = None
+        if port is not None:
+            def _writer(table):
+                def write(rows):
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+                return write
+
+            port.ensure_imported({
+                name: _writer(port.tables[name]) for name in _TABLES})
+            self._port = port
+            self._db = None
+            return
         self._db = sqlite3.connect(str(self.root / "household_shared.db"))
         self._db.row_factory = sqlite3.Row
-        self._db.execute(
-            """CREATE TABLE IF NOT EXISTS shared_commitments (
-                   id TEXT PRIMARY KEY, what TEXT NOT NULL,
-                   owner_person TEXT NOT NULL, due REAL,
-                   status TEXT NOT NULL, created_by TEXT NOT NULL,
-                   created_ts REAL NOT NULL)""")
-        self._db.execute(
-            """CREATE TABLE IF NOT EXISTS shared_calendar (
-                   id TEXT PRIMARY KEY, title TEXT NOT NULL,
-                   ts REAL NOT NULL, person_id TEXT NOT NULL,
-                   created_by TEXT NOT NULL, created_ts REAL NOT NULL)""")
-        self._db.execute(
-            """CREATE TABLE IF NOT EXISTS shared_assets (
-                   id TEXT PRIMARY KEY, name TEXT NOT NULL,
-                   owner_person TEXT NOT NULL,
-                   created_by TEXT NOT NULL, created_ts REAL NOT NULL)""")
-        self._db.execute(
-            """CREATE TABLE IF NOT EXISTS household_audit (
-                   id TEXT PRIMARY KEY, ts REAL NOT NULL,
-                   actor_id TEXT NOT NULL, action TEXT NOT NULL,
-                   target TEXT NOT NULL, detail TEXT NOT NULL)""")
+        self._db.executescript(_DDL)
         self._db.commit()
 
     # ── membership helpers (delegated to family) ─────────────────
@@ -142,6 +182,9 @@ class Household:
                detail: str = "") -> dict[str, Any]:
         entry = {"id": _new_id(), "ts": time.time(), "actor_id": actor_id,
                  "action": action, "target": target, "detail": detail}
+        if self._port is not None:
+            self._port.tables["household_audit"].put(entry)
+            return dict(entry)
         self._db.execute(
             "INSERT INTO household_audit VALUES (?, ?, ?, ?, ?, ?)",
             (entry["id"], entry["ts"], entry["actor_id"], entry["action"],
@@ -152,6 +195,10 @@ class Household:
     def audit_log(self, actor: Any) -> list[dict[str, Any]]:
         """Read the household audit log. Owner-only. Append-only log."""
         self._require_owner(actor)
+        if self._port is not None:
+            rows = self._port.tables["household_audit"].all()
+            rows.sort(key=lambda r: (r["ts"], r["id"]))
+            return [dict(r) for r in rows]
         rows = self._db.execute(
             "SELECT * FROM household_audit ORDER BY ts ASC").fetchall()
         return [dict(r) for r in rows]
@@ -203,17 +250,24 @@ class Household:
         entry = {"id": _new_id(), "what": what, "owner_person": owner_person,
                  "due": due, "status": status,
                  "created_by": actor_id, "created_ts": time.time()}
-        self._db.execute(
-            "INSERT INTO shared_commitments VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (entry["id"], entry["what"], entry["owner_person"], entry["due"],
-             entry["status"], entry["created_by"], entry["created_ts"]))
-        self._db.commit()
+        if self._port is not None:
+            self._port.tables["shared_commitments"].put(entry)
+        else:
+            self._db.execute(
+                "INSERT INTO shared_commitments VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (entry["id"], entry["what"], entry["owner_person"], entry["due"],
+                 entry["status"], entry["created_by"], entry["created_ts"]))
+            self._db.commit()
         self._audit(actor_id, "shared_commitment_add", entry["id"], what)
         return dict(entry)
 
     def list_shared_commitments(self, actor: Any) -> list[dict[str, Any]]:
         """Shared commitments — visible to every active member."""
         self._require_active(actor)
+        if self._port is not None:
+            rows = self._port.tables["shared_commitments"].all()
+            rows.sort(key=lambda r: (r["created_ts"], r["id"]))
+            return [dict(r) for r in rows]
         rows = self._db.execute(
             "SELECT * FROM shared_commitments ORDER BY created_ts ASC").fetchall()
         return [dict(r) for r in rows]
@@ -233,17 +287,24 @@ class Household:
         entry = {"id": _new_id(), "title": title, "ts": float(ts),
                  "person_id": person_id,
                  "created_by": actor_id, "created_ts": time.time()}
-        self._db.execute(
-            "INSERT INTO shared_calendar VALUES (?, ?, ?, ?, ?, ?)",
-            (entry["id"], entry["title"], entry["ts"], entry["person_id"],
-             entry["created_by"], entry["created_ts"]))
-        self._db.commit()
+        if self._port is not None:
+            self._port.tables["shared_calendar"].put(entry)
+        else:
+            self._db.execute(
+                "INSERT INTO shared_calendar VALUES (?, ?, ?, ?, ?, ?)",
+                (entry["id"], entry["title"], entry["ts"], entry["person_id"],
+                 entry["created_by"], entry["created_ts"]))
+            self._db.commit()
         self._audit(actor_id, "shared_calendar_add", entry["id"], title)
         return dict(entry)
 
     def list_shared_calendar(self, actor: Any) -> list[dict[str, Any]]:
         """Shared calendar — visible to every active member."""
         self._require_active(actor)
+        if self._port is not None:
+            rows = self._port.tables["shared_calendar"].all()
+            rows.sort(key=lambda r: (r["ts"], r["created_ts"], r["id"]))
+            return [dict(r) for r in rows]
         rows = self._db.execute(
             "SELECT * FROM shared_calendar ORDER BY ts ASC, created_ts ASC").fetchall()
         return [dict(r) for r in rows]
@@ -262,17 +323,24 @@ class Household:
             raise PermissionError(f"owner_person {owner_person!r} is not an active member")
         entry = {"id": _new_id(), "name": name, "owner_person": owner_person,
                  "created_by": actor_id, "created_ts": time.time()}
-        self._db.execute(
-            "INSERT INTO shared_assets VALUES (?, ?, ?, ?, ?)",
-            (entry["id"], entry["name"], entry["owner_person"],
-             entry["created_by"], entry["created_ts"]))
-        self._db.commit()
+        if self._port is not None:
+            self._port.tables["shared_assets"].put(entry)
+        else:
+            self._db.execute(
+                "INSERT INTO shared_assets VALUES (?, ?, ?, ?, ?)",
+                (entry["id"], entry["name"], entry["owner_person"],
+                 entry["created_by"], entry["created_ts"]))
+            self._db.commit()
         self._audit(actor_id, "shared_asset_add", entry["id"], name)
         return dict(entry)
 
     def list_shared_assets(self, actor: Any) -> list[dict[str, Any]]:
         """Shared assets — visible to every active member."""
         self._require_active(actor)
+        if self._port is not None:
+            rows = self._port.tables["shared_assets"].all()
+            rows.sort(key=lambda r: (r["created_ts"], r["id"]))
+            return [dict(r) for r in rows]
         rows = self._db.execute(
             "SELECT * FROM shared_assets ORDER BY created_ts ASC").fetchall()
         return [dict(r) for r in rows]
@@ -294,4 +362,5 @@ class Household:
             person_id=person_id)
 
     def close(self) -> None:
-        self._db.close()
+        if self._db is not None:
+            self._db.close()

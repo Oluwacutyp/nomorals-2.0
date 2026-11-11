@@ -53,6 +53,8 @@ P5 settles the stores that live BESIDE the central database:
   C4 port (people — person+notes rollups re-expressed over finds,
   int-id continuity across the lazy import) follows the same
   pattern below.
+  The residue Batch 3 C5 port (household — record-then-audit
+  composition preserved verbatim) follows the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -267,7 +269,9 @@ class TestSidecarRegistry:
             # residue Batch 2, B28 lane:
             "health-challenges",
             # residue Batch 3, C4 lane:
-            "people"}
+            "people",
+            # residue Batch 3, C5 lane:
+            "household"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -5853,3 +5857,216 @@ class TestPeoplePort:
             assert rung.store.count("people__notes") == 5
         finally:
             store.close()
+
+
+class TestHouseholdPort:
+    """household/household.py — the household port (residue Batch 3,
+    C5): all four tables are TEXT-PK, so every one routes through a
+    RowTable — mechanically the plainest port in the batch. The
+    design content is the write composition: natively every mutation
+    is two sequential commits (the record INSERT, then the audit
+    INSERT), never a transaction, so an audit failure propagates
+    with the record already durable — and delegated member ops
+    audit only after the family registry call returns. The seam
+    preserves that composition verbatim (record document first,
+    audit document second, no atomicity invented), and the pins
+    below include the failure injection that proves it on every
+    rung. Membership itself stays in family; only the shared
+    records move. household/ is layer L0, so the port is INJECTED:
+    the composition layer (here, this test) builds it via
+    sidecar_port and hands it to the constructor."""
+
+    @staticmethod
+    def _port_for(tmp_path, rung):
+        # household/ is layer L0: the composition layer (this test)
+        # builds the port and injects it — the module never imports
+        # storage.
+        from nomorals.household.household import _DDL, _TABLES
+        from nomorals.storage.sidecars import sidecar_port
+
+        return sidecar_port("household", _DDL, _TABLES,
+                            str(tmp_path / "household_shared.db"),
+                            store=rung.store)
+
+    @staticmethod
+    def _registry(tmp_path):
+        from nomorals.family.registry import family_registry
+
+        registry = family_registry(str(tmp_path))
+        # Bootstrap: first member must be an owner.
+        registry.call("family_person_add", actor_id="owner1",
+                      actor_role="owner", person_id="owner1",
+                      display_name="Owner", role="owner")
+        registry.call("family_person_add", actor_id="owner1",
+                      actor_role="owner", person_id="adult1",
+                      display_name="Adult", role="adult")
+        registry.call("family_person_add", actor_id="owner1",
+                      actor_role="owner", person_id="teen1",
+                      display_name="Teen", role="teen")
+        return registry
+
+    @classmethod
+    def _household(cls, registry, tmp_path, rung=None):
+        from nomorals.household.household import Household
+
+        if rung is None or rung.store is None:
+            return Household(registry=registry)
+        return Household(registry=registry,
+                         port=cls._port_for(tmp_path, rung))
+
+    def _scenario(self, hh) -> dict:
+        commitment = hh.add_shared_commitment(
+            "owner1", "Pay the rent", owner_person="adult1",
+            due=1_800_000_000.0)
+        cal = hh.add_shared_calendar(
+            "adult1", "Dentist", 1_800_000_100.0, person_id="teen1")
+        asset = hh.add_shared_asset("teen1", "Board game")
+        member = hh.add_member(
+            actor_id="owner1", actor_role="owner", person_id="child1",
+            display_name="Kid", role="child")
+        hh.revoke_member(actor_id="owner1", actor_role="owner",
+                         person_id="teen1", reason="moved out")
+        log = hh.audit_log("owner1")
+        return {
+            "ids": (commitment["id"], cal["id"], asset["id"]),
+            "commitment": (commitment["what"],
+                           commitment["owner_person"],
+                           commitment["due"], commitment["status"]),
+            "calendar": (cal["title"], cal["ts"], cal["person_id"]),
+            "asset": (asset["name"], asset["owner_person"]),
+            "member": (member["person_id"], member["role"]),
+            "commitments": [c["what"] for c in
+                            hh.list_shared_commitments("adult1")],
+            "calendar_list": [c["title"] for c in
+                              hh.list_shared_calendar("adult1")],
+            "assets": [a["name"] for a in
+                       hh.list_shared_assets("adult1")],
+            "audit": [(e["action"], e["target"]) for e in log],
+            "audit_details": [e["detail"] for e in log],
+        }
+
+    def test_scenario_matches_across_rungs(self, rung, tmp_path):
+        hh = self._household(self._registry(tmp_path),
+                             tmp_path, rung)
+        got = self._scenario(hh)
+        ids = got.pop("ids")
+        assert got.pop("audit") == [
+            ("shared_commitment_add", ids[0]),
+            ("shared_calendar_add", ids[1]),
+            ("shared_asset_add", ids[2]),
+            ("person_add", "child1"),
+            ("person_revoke", "teen1"),
+        ]
+        assert got == {
+            "commitment": ("Pay the rent", "adult1",
+                           1_800_000_000.0, "open"),
+            "calendar": ("Dentist", 1_800_000_100.0, "teen1"),
+            "asset": ("Board game", "teen1"),
+            "member": ("child1", "child"),
+            "commitments": ["Pay the rent"],
+            "calendar_list": ["Dentist"],
+            "assets": ["Board game"],
+            "audit_details": ["Pay the rent", "Dentist", "Board game",
+                              "role=child", "moved out"],
+        }
+
+    def test_audit_failure_leaves_record_durable(self, rung, tmp_path):
+        """The composition pin: forcing the audit write to raise —
+        injected at the organ's own _audit seam, identically on
+        every rung — leaves the record durable, surfaces the
+        exception, and leaves zero audit entries. A port that made
+        the pair atomic would fail this on the seam rungs."""
+        hh = self._household(self._registry(tmp_path),
+                             tmp_path, rung)
+
+        def _boom(*args, **kwargs):
+            raise RuntimeError("audit write unavailable")
+
+        original = hh._audit
+        hh._audit = _boom
+        try:
+            with pytest.raises(RuntimeError):
+                hh.add_shared_commitment("owner1", "Pay the rent")
+        finally:
+            hh._audit = original
+        assert [c["what"] for c in
+                hh.list_shared_commitments("owner1")] == ["Pay the rent"]
+        assert hh.audit_log("owner1") == []
+
+    def test_failed_family_call_leaves_no_audit(self, rung, tmp_path):
+        """The delegation pin: audit is written only after the
+        family registry call returns — revoking the last owner
+        fails inside family (a ValueError), so nothing is logged;
+        a successful delegated add then audits exactly once."""
+        hh = self._household(self._registry(tmp_path),
+                             tmp_path, rung)
+        with pytest.raises(ValueError):
+            hh.revoke_member(actor_id="owner1", actor_role="owner",
+                             person_id="owner1")
+        assert hh.audit_log("owner1") == []
+        hh.add_member(actor_id="owner1", actor_role="owner",
+                      person_id="child1", display_name="Kid",
+                      role="child")
+        log = hh.audit_log("owner1")
+        assert [(e["action"], e["target"]) for e in log] == [
+            ("person_add", "child1")]
+
+    def test_lazy_import_from_native_file(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        registry = self._registry(tmp_path)
+        native = self._household(registry, tmp_path)
+        commitment = native.add_shared_commitment(
+            "owner1", "Imported rent", owner_person="adult1")
+        asset = native.add_shared_asset("owner1", "Imported car")
+        native.add_shared_calendar("adult1", "Imported dentist",
+                                   1_800_000_200.0, person_id="teen1")
+        native.close()
+
+        seam = self._household(registry, tmp_path, rung)
+        assert [c["what"] for c in
+                seam.list_shared_commitments("owner1")] == [
+                    "Imported rent"]
+        assert [a["name"] for a in
+                seam.list_shared_assets("owner1")] == ["Imported car"]
+        assert [(e["action"], e["target"]) for e in
+                seam.audit_log("owner1")] == [
+                    ("shared_commitment_add", commitment["id"]),
+                    ("shared_asset_add", asset["id"]),
+                    ("shared_calendar_add",
+                     seam.list_shared_calendar("owner1")[0]["id"])]
+        counts = {t: rung.store.count(f"household__{t}")
+                  for t in ("shared_assets", "shared_calendar",
+                            "shared_commitments", "household_audit")}
+        assert counts == {"shared_assets": 1, "shared_calendar": 1,
+                          "shared_commitments": 1, "household_audit": 3}
+        marker = rung.store.get("household__meta", "import")
+        assert marker is not None and marker["done"] is True
+        assert marker["tables"]["shared_commitments"] == 1
+        # a second construction adopts — never re-imports
+        again = self._household(registry, tmp_path, rung)
+        assert [c["what"] for c in
+                again.list_shared_commitments("owner1")] == [
+                    "Imported rent"]
+        assert rung.store.count("household__household_audit") == 3
+
+    def test_seam_shape(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        hh = self._household(self._registry(tmp_path),
+                             tmp_path, rung)
+        entry = hh.add_shared_commitment(
+            "owner1", "Shape rent", owner_person="adult1",
+            due=1_800_000_000.0)
+        assert rung.store.count("household__shared_commitments") == 1
+        doc = rung.store.get("household__shared_commitments",
+                             entry["id"])
+        assert doc is not None and doc["_id"] == entry["id"]
+        assert doc["what"] == "Shape rent"
+        assert doc["owner_person"] == "adult1"
+        # the audit document is a separate write in its own
+        # collection, targeting the record's id
+        assert rung.store.count("household__household_audit") == 1
+        audit = rung.store.find("household__household_audit")[0]
+        assert audit["action"] == "shared_commitment_add"
+        assert audit["target"] == entry["id"]
