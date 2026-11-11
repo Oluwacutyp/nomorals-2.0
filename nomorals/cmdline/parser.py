@@ -55,6 +55,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "books": ["library", "lib"],
     "build": ["bld"],
     "captcha": ["cap"],
+    "fonts": ["font"],
     "cards": ["cd"],
     "cipher": ["cip"],
     "code": ["c"],
@@ -1890,6 +1891,44 @@ def _parser() -> argparse.ArgumentParser:
                          help="do not ping the owner on takeover")
     c_solve.add_argument("--json", action="store_true",
                          help="output as JSON")
+
+    fonts = sub.add_parser("fonts", aliases=CLI_ALIASES["fonts"],
+        help="her stocked font library: stock / verify / browse",
+        description=("nm fonts stock --pack DIR [--build] "
+                     "(one-time whole-library stocking)\n"
+                     "nm fonts build --pack DIR (build the pack "
+                     "from the pinned google/fonts commit)\n"
+                     "nm fonts verify --pack DIR [--sample]\n"
+                     "nm fonts list | search <words> | "
+                     "info <family>"),
+    )
+    fonts_sub = fonts.add_subparsers(dest="fonts_action", required=True)
+    f_stock = fonts_sub.add_parser(
+        "stock", help="verify + stock a built pack into this home")
+    f_stock.add_argument("--pack", dest="pack_dir", required=True,
+                         help="the built pack directory")
+    f_stock.add_argument("--build", action="store_true",
+                         help="build the pack first (pinned commit)")
+    f_stock.add_argument("--commit", default="",
+                         help="google/fonts commit to build from")
+    f_build = fonts_sub.add_parser(
+        "build", help="build the pack from the pinned commit")
+    f_build.add_argument("--pack", dest="pack_dir", required=True,
+                         help="where the pack is written")
+    f_build.add_argument("--commit", default="",
+                         help="google/fonts commit (default: pinned)")
+    f_verify = fonts_sub.add_parser(
+        "verify", help="verify a pack against its manifest")
+    f_verify.add_argument("--pack", dest="pack_dir", required=True)
+    f_verify.add_argument("--sample", action="store_true",
+                          help="hash a sample instead of every file")
+    fonts_sub.add_parser("list", help="the live registry, as data")
+    f_search = fonts_sub.add_parser("search",
+                                    help="find stocked families")
+    f_search.add_argument("query")
+    f_info = fonts_sub.add_parser("info",
+                                  help="one family's registry record")
+    f_info.add_argument("family")
 
     bet = sub.add_parser("bet", aliases=CLI_ALIASES["bet"],
         help="sports bet analyst: ensemble ML, value + Kelly staking (analysis only)",

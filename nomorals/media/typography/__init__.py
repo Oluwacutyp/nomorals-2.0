@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from .cache import RenderCache
 from .catalogue import FontCatalogue, build_catalogue, default_roots
+from .fontlib import FontLibrary, FontNotStocked
 from .fontparse import FontFace, parse_font_file, script_fraction
 from .selection import INTENTS, Selection, face_traits, select
 from .service import TypographyService, get_service, reset_service
@@ -32,7 +33,8 @@ from .shaping import (
 )
 
 __all__ = [
-    "FontCatalogue", "FontFace", "INTENTS", "RenderCache", "Selection",
+    "FontCatalogue", "FontFace", "FontLibrary", "FontNotStocked",
+    "INTENTS", "RenderCache", "Selection",
     "TypographyService", "build_catalogue", "default_roots",
     "dominant_direction", "face_traits", "get_service", "graphemes",
     "load_font", "parse_font_file", "reset_service", "script_fraction",

@@ -36,6 +36,7 @@ from ...core.logging_setup import get_logger
 from . import shaping
 from .cache import DEFAULT_CAP_BYTES, RENDERER_VERSION, RenderCache
 from .catalogue import FontCatalogue, build_catalogue, default_roots
+from .fontlib import FontLibrary, FontNotStocked
 from .selection import Selection
 from .selection import select as _select
 
@@ -62,8 +63,23 @@ def _default_cap() -> int:
 class TypographyService:
     def __init__(self, roots=None, store_dir=None, *,
                  cache_cap_bytes: int | None = None):
-        self._roots = [Path(r) for r in roots] if roots is not None \
-            else default_roots()
+        # The FontLibrary registry is the service's first door:
+        # the stocked tiers (pack in the data estate, the
+        # vendored core subset, owner-local dirs) lead the
+        # catalogue roots, ahead of whatever the host happens
+        # to have installed.
+        self._library = FontLibrary.discover()
+        if roots is not None:
+            self._roots = [Path(r) for r in roots]
+        else:
+            merged: list[Path] = []
+            seen: set[str] = set()
+            for root in [*self._library.roots(), *default_roots()]:
+                key = str(root)
+                if key not in seen:
+                    seen.add(key)
+                    merged.append(Path(root))
+            self._roots = merged
         self.store_dir = Path(store_dir) if store_dir else _default_store()
         self.store_dir.mkdir(parents=True, exist_ok=True)
         self._catalogue: FontCatalogue | None = None
@@ -71,6 +87,11 @@ class TypographyService:
             self.store_dir,
             cap_bytes=cache_cap_bytes if cache_cap_bytes is not None
             else _default_cap())
+
+    def font_library(self) -> FontLibrary:
+        """The stocked FontLibrary registry behind this
+        service (pack / core / local tiers as discovered)."""
+        return self._library
 
     # catalogue + selection ───────────────────────────────────────
     def catalogue(self) -> FontCatalogue:
@@ -105,6 +126,19 @@ class TypographyService:
                 family = pin.font_family
             if pin.intent:
                 intent = pin.intent
+        if family:
+            # The registry door: an explicitly requested family
+            # is answered by the stocked library first.  When no
+            # tier stocks it AND the catalogue (host faces
+            # included) does not hold it either, the miss is the
+            # named FontNotStocked outcome — never the old
+            # silent slide to an unrelated face.  A family the
+            # host alone holds still selects, as before.
+            try:
+                self._library.resolve(family, weight=weight)
+            except FontNotStocked as miss:
+                if not self.catalogue().faces(family=family):
+                    raise miss
         selection = _select(self.catalogue(), intent, script=script,
                             text=text, weight=weight, family=family)
         if pin is not None:

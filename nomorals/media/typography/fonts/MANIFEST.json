@@ -1,0 +1,1320 @@
+{
+ "format": 1,
+ "kind": "core",
+ "source": {
+  "repo": "google/fonts",
+  "commit": "c30b221beb0c1da59d563feb91ec8656a1fa972a"
+ },
+ "built_at": "2026-11-11T16:59:26Z",
+ "family_count": 27,
+ "file_count": 56,
+ "total_bytes": 36531748,
+ "families": [
+  {
+   "name": "Inter",
+   "category": "Sans Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/inter/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/inter",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "greek",
+    "greek-ext",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/inter/Inter-Italic[opsz,wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "acd98e64795781b2058f07b18475e0ecee2a0fe2b42a49e2f9e37d0d6bf66ce6",
+     "bytes": 906596,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    },
+    {
+     "file": "ofl/inter/Inter[opsz,wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "29160a80ff49ddcab2c97711247e08b1fab27a484a329ce8b813d820dc559031",
+     "bytes": 876576,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Roboto",
+   "category": "Sans Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/roboto/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/roboto",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "greek",
+    "greek-ext",
+    "latin",
+    "latin-ext",
+    "math",
+    "menu",
+    "symbols",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/roboto/Roboto-Italic[wdth,wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "9725a847af6b460ffca162ae66d20dad48b01876137947180b42d7dcd7887182",
+     "bytes": 530944,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    },
+    {
+     "file": "ofl/roboto/Roboto[wdth,wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "d7598e12c5dbef095ff8272cfc55da0250bd07fbdecbac8a530b9b277872a134",
+     "bytes": 488584,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Open Sans",
+   "category": "Sans Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/opensans/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/opensans",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "greek",
+    "greek-ext",
+    "hebrew",
+    "latin",
+    "latin-ext",
+    "math",
+    "menu",
+    "symbols",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/opensans/OpenSans-Italic[wdth,wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "fe269381e992f32e135801740998544d6235061e37c93ec067ad2be3edd5b17b",
+     "bytes": 583992,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Hebrew",
+      "Latin"
+     ],
+     "weight_range": [
+      300,
+      800
+     ]
+    },
+    {
+     "file": "ofl/opensans/OpenSans[wdth,wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "36643644f318a812aab2d2ed3bb98f8cf0872527f835fe9398d95fe6b9adb878",
+     "bytes": 532636,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Hebrew",
+      "Latin"
+     ],
+     "weight_range": [
+      300,
+      800
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Lato",
+   "category": "Sans Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/lato/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/lato",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "greek",
+    "greek-ext",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/lato/Lato-Bold.ttf",
+     "weight": 700,
+     "style": "normal",
+     "variable": false,
+     "sha256": "8a0aace75d33794eece4b28187bfc1df0bbd2888b5d8a56e01788c8d65d16be1",
+     "bytes": 656544,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/lato/Lato-BoldItalic.ttf",
+     "weight": 700,
+     "style": "italic",
+     "variable": false,
+     "sha256": "62c1b7f0d2e74b45960154c3520efc337b553db0961bfdc950d5618334596cc8",
+     "bytes": 698364,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/lato/Lato-Italic.ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": false,
+     "sha256": "e399c44efe1387100531d26c7e4800c5d12251b890d6654a3098c7c679cb1786",
+     "bytes": 722900,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/lato/Lato-Regular.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "d636e4683231f931eda222d588e944d082bfd3bdba02f928bee461c0f185b251",
+     "bytes": 656568,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Noto Sans",
+   "category": "Sans Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/notosans/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/notosans",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "devanagari",
+    "greek",
+    "greek-ext",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/notosans/NotoSans-Italic[wdth,wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "58e6e0ebd1931b29a365aa2d3e2ee9a9e831a3af7cf3ad1462d4e72154f0b291",
+     "bytes": 2322640,
+     "scripts": [
+      "Cyrillic",
+      "Devanagari",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    },
+    {
+     "file": "ofl/notosans/NotoSans[wdth,wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "bfb7bb691513f12e734dc346c03a03f784912432d7e3fa8e56efcf906fe86b3d",
+     "bytes": 2049096,
+     "scripts": [
+      "Cyrillic",
+      "Devanagari",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Source Sans 3",
+   "category": "Sans Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/sourcesans3/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/sourcesans3",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "greek",
+    "greek-ext",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/sourcesans3/SourceSans3-Italic[wght].ttf",
+     "weight": 200,
+     "style": "italic",
+     "variable": true,
+     "sha256": "39e3ab05ccd7cb94907c31005bb5bec1d5432f0b096a2b782976e217a540eb6c",
+     "bytes": 395372,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      200,
+      900
+     ]
+    },
+    {
+     "file": "ofl/sourcesans3/SourceSans3[wght].ttf",
+     "weight": 200,
+     "style": "normal",
+     "variable": true,
+     "sha256": "042fe2cc0b933e328410d7acbd0aa6a1873dca5aef81875f4bc214b08825c7b9",
+     "bytes": 646340,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      200,
+      900
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Work Sans",
+   "category": "Sans Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/worksans/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/worksans",
+   "subsets": [
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/worksans/WorkSans-Italic[wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "0a9f935ea490d3477fc97e40248f356c29bce11a1973939056c4316b122341ec",
+     "bytes": 336756,
+     "scripts": [
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    },
+    {
+     "file": "ofl/worksans/WorkSans[wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "f50f61f2ba738e239442d40bf1069adb195c224b6a5a73a581fc2f3ed62a9f63",
+     "bytes": 361072,
+     "scripts": [
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Montserrat",
+   "category": "Sans Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/montserrat/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/montserrat",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/montserrat/Montserrat-Italic[wght].ttf",
+     "weight": 100,
+     "style": "italic",
+     "variable": true,
+     "sha256": "51607f316bc020e59f03cbf51543eecffbea501c0b31d73e5b82927c5cca442c",
+     "bytes": 762376,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    },
+    {
+     "file": "ofl/montserrat/Montserrat[wght].ttf",
+     "weight": 100,
+     "style": "normal",
+     "variable": true,
+     "sha256": "0f7b311b2f3279e4eef9b2f968bcdbab6e28f4daeb1f049f4f278a902bcd82f7",
+     "bytes": 744936,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Poppins",
+   "category": "Sans Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/poppins/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/poppins",
+   "subsets": [
+    "devanagari",
+    "latin",
+    "latin-ext",
+    "menu"
+   ],
+   "faces": [
+    {
+     "file": "ofl/poppins/Poppins-Bold.ttf",
+     "weight": 700,
+     "style": "normal",
+     "variable": false,
+     "sha256": "983676516167748b74de6f4771fb384c664fd913acb8b471122ecacf5da5ea6c",
+     "bytes": 155996,
+     "scripts": [
+      "Devanagari",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/poppins/Poppins-BoldItalic.ttf",
+     "weight": 700,
+     "style": "italic",
+     "variable": false,
+     "sha256": "3572ac8116a0ac7317d342262b29937bcbaf94d8f03f90df6fe666fa7e2fb43a",
+     "bytes": 179108,
+     "scripts": [
+      "Devanagari",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/poppins/Poppins-Italic.ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": false,
+     "sha256": "4fa76ae75b40f926420514044722cb97f32186cafd3b38263cc34dad7174d46d",
+     "bytes": 184544,
+     "scripts": [
+      "Devanagari",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/poppins/Poppins-Regular.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "7e65201e9b79159e2300267cc885e16c8dcef2424cdfa09a29bfb0980a94a7ba",
+     "bytes": 160316,
+     "scripts": [
+      "Devanagari",
+      "Latin"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Oswald",
+   "category": "Sans Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/oswald/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/oswald",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/oswald/Oswald[wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "5b38c246e255a12f5712d640d56bcced0472466fc68983d2d0410ec0457c2817",
+     "bytes": 172088,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ],
+     "weight_range": [
+      200,
+      700
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Bebas Neue",
+   "category": "Display",
+   "license": "OFL-1.1",
+   "license_file": "ofl/bebasneue/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/bebasneue",
+   "subsets": [
+    "latin",
+    "latin-ext",
+    "menu"
+   ],
+   "faces": [
+    {
+     "file": "ofl/bebasneue/BebasNeue-Regular.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "08e4623805102d819f58601e46e345648846075e363b2ceb23313c2d1c83ec73",
+     "bytes": 61400,
+     "scripts": [
+      "Latin"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Anton",
+   "category": "Display",
+   "license": "OFL-1.1",
+   "license_file": "ofl/anton/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/anton",
+   "subsets": [
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/anton/Anton-Regular.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "a4ba3a92350ebb031da0cb47630ac49eb265082ca1bc0450442f4a83ab947cab",
+     "bytes": 170812,
+     "scripts": [
+      "Latin"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Playfair Display",
+   "category": "Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/playfairdisplay/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/playfairdisplay",
+   "subsets": [
+    "cyrillic",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/playfairdisplay/PlayfairDisplay-Italic[wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "a5e26dc5e2e77fb2803a0bf02fd4f81ee136ec8dea863ccdb0c59a263b21378b",
+     "bytes": 278688,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ],
+     "weight_range": [
+      400,
+      900
+     ]
+    },
+    {
+     "file": "ofl/playfairdisplay/PlayfairDisplay[wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "c40f2293766a503bc70cce9e512ef844a4ccb7cbcde792fe2ea31d191917d8d6",
+     "bytes": 300724,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ],
+     "weight_range": [
+      400,
+      900
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Lora",
+   "category": "Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/lora/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/lora",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "latin",
+    "latin-ext",
+    "math",
+    "menu",
+    "symbols",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/lora/Lora-Italic[wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "22d8d8854b53807aa664ca34f2031a9ed57a1d0dea296b8b96cdd3aad937a2b3",
+     "bytes": 221232,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ],
+     "weight_range": [
+      400,
+      700
+     ]
+    },
+    {
+     "file": "ofl/lora/Lora[wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "822a6621ccbe8d97d20ac88c1c41f5615c9c2c202eaa75f272cd452aac6475a7",
+     "bytes": 212196,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ],
+     "weight_range": [
+      400,
+      700
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Noto Serif",
+   "category": "Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/notoserif/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/notoserif",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "greek",
+    "greek-ext",
+    "latin",
+    "latin-ext",
+    "math",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/notoserif/NotoSerif-Italic[wdth,wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "e87acbc6c0efd0d9a20d6a8cbbda2b266c14be3a3a6f5af8ec9d7b2460570ad1",
+     "bytes": 2448496,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    },
+    {
+     "file": "ofl/notoserif/NotoSerif[wdth,wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "4d8e6761424656867019081a1a01336f3cb086982682698714054fc33f782713",
+     "bytes": 1887192,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      900
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Source Serif 4",
+   "category": "Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/sourceserif4/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/sourceserif4",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "greek",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/sourceserif4/SourceSerif4-Italic[opsz,wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "15fbc7e4679489a501998c3669272637a6646388ef7e4bd77eebb5bf967a1f42",
+     "bytes": 855432,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      200,
+      900
+     ]
+    },
+    {
+     "file": "ofl/sourceserif4/SourceSerif4[opsz,wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "97b2d4da6e3cb494b5a1e66ae176914d852ccabef49e0c02c0df25f3e39aca0b",
+     "bytes": 1209508,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      200,
+      900
+     ]
+    }
+   ]
+  },
+  {
+   "name": "PT Serif",
+   "category": "Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/ptserif/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/ptserif",
+   "subsets": [
+    "menu",
+    "cyrillic",
+    "cyrillic-ext",
+    "latin",
+    "latin-ext"
+   ],
+   "faces": [
+    {
+     "file": "ofl/ptserif/PT_Serif-Web-Bold.ttf",
+     "weight": 700,
+     "style": "normal",
+     "variable": false,
+     "sha256": "038ba7336bd7ea14f12ad155bed51a4345cac5153275d521dec3ba04021c526e",
+     "bytes": 339996,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/ptserif/PT_Serif-Web-BoldItalic.ttf",
+     "weight": 700,
+     "style": "italic",
+     "variable": false,
+     "sha256": "f003788ba08981eb0988b3557a6f224a53dab49c20e283e8b74d5af3c466f8be",
+     "bytes": 337580,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/ptserif/PT_Serif-Web-Italic.ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": false,
+     "sha256": "f57e95ff9dc85691a3b2e193f2028db36f6663939a46c0fc4f286d618b80b7ce",
+     "bytes": 375356,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/ptserif/PT_Serif-Web-Regular.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "a4951fade06ff8f09b7673aa81ffb65a8cd409e24d3289a6dc670bc4dda2557a",
+     "bytes": 359048,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Merriweather",
+   "category": "Serif",
+   "license": "OFL-1.1",
+   "license_file": "ofl/merriweather/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/merriweather",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/merriweather/Merriweather-Italic[opsz,wdth,wght].ttf",
+     "weight": 300,
+     "style": "italic",
+     "variable": true,
+     "sha256": "f68a8f4989258679e4fbaf50aa42400132b5373c2d9d2514ba82ef6e85947a0b",
+     "bytes": 4591168,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ],
+     "weight_range": [
+      300,
+      900
+     ]
+    },
+    {
+     "file": "ofl/merriweather/Merriweather[opsz,wdth,wght].ttf",
+     "weight": 300,
+     "style": "normal",
+     "variable": true,
+     "sha256": "d0ed0e359e396af7ad05e73dffd11a3a4c326ea0d0283c56bd9361cb2cc86a96",
+     "bytes": 4628080,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ],
+     "weight_range": [
+      300,
+      900
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Dancing Script",
+   "category": "Handwriting",
+   "license": "OFL-1.1",
+   "license_file": "ofl/dancingscript/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/dancingscript",
+   "subsets": [
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/dancingscript/DancingScript[wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "21808625578fe8d8cd10cb684be546dca077b27cd03a53a2f1ec11dc743c924c",
+     "bytes": 133636,
+     "scripts": [
+      "Latin"
+     ],
+     "weight_range": [
+      400,
+      700
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Great Vibes",
+   "category": "Handwriting",
+   "license": "OFL-1.1",
+   "license_file": "ofl/greatvibes/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/greatvibes",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "greek-ext",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/greatvibes/GreatVibes-Regular.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "8d509802186f1b51572531ecf313e8098f9a5bfdfaca93f0c9b34467f9982d15",
+     "bytes": 457588,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Caveat",
+   "category": "Handwriting",
+   "license": "OFL-1.1",
+   "license_file": "ofl/caveat/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/caveat",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "latin",
+    "latin-ext",
+    "menu"
+   ],
+   "faces": [
+    {
+     "file": "ofl/caveat/Caveat[wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "0bdb6b660482d31531b3945849fba5916b3ef8695da7024a9e6b9ee3c4157988",
+     "bytes": 403648,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ],
+     "weight_range": [
+      400,
+      700
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Pacifico",
+   "category": "Handwriting",
+   "license": "OFL-1.1",
+   "license_file": "ofl/pacifico/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/pacifico",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/pacifico/Pacifico-Regular.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "5b6c0d5334a7bf77dea52b975c5a0c408878c0f7115ed5b6fb151f634b7bf701",
+     "bytes": 329380,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Shadows Into Light",
+   "category": "Handwriting",
+   "license": "OFL-1.1",
+   "license_file": "ofl/shadowsintolight/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/shadowsintolight",
+   "subsets": [
+    "menu",
+    "latin"
+   ],
+   "faces": [
+    {
+     "file": "ofl/shadowsintolight/ShadowsIntoLight.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "1347863151acdc00fa281daaba1a3543dbce5870b55f9cf7479a15bb84007681",
+     "bytes": 54304,
+     "scripts": [
+      "Latin"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "JetBrains Mono",
+   "category": "Monospace",
+   "license": "OFL-1.1",
+   "license_file": "ofl/jetbrainsmono/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/jetbrainsmono",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "greek",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/jetbrainsmono/JetBrainsMono-Italic[wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "85ae2a5cd3f56baf1ce1c21a851322c58e3d8fbe8e8ad4a4d090a820dd7fe558",
+     "bytes": 191556,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      800
+     ]
+    },
+    {
+     "file": "ofl/jetbrainsmono/JetBrainsMono[wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "48715a42ec242c21e9f02692891e147d022299a52e48d5e413e1a942193ffeda",
+     "bytes": 187208,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      800
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Roboto Mono",
+   "category": "Monospace",
+   "license": "OFL-1.1",
+   "license_file": "ofl/robotomono/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/robotomono",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "greek",
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/robotomono/RobotoMono-Italic[wght].ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": true,
+     "sha256": "49ac343bb7b070071e53f0a8a501d68d140ed98ebd0a43b6b8fb96cf22f09ff7",
+     "bytes": 196792,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      700
+     ]
+    },
+    {
+     "file": "ofl/robotomono/RobotoMono[wght].ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": true,
+     "sha256": "66a80e79d17e4c7cabd162e2916578a4cc08fd19eef6e2a643305eae9c567b2b",
+     "bytes": 183700,
+     "scripts": [
+      "Cyrillic",
+      "Greek",
+      "Latin"
+     ],
+     "weight_range": [
+      100,
+      700
+     ]
+    }
+   ]
+  },
+  {
+   "name": "IBM Plex Mono",
+   "category": "Monospace",
+   "license": "OFL-1.1",
+   "license_file": "ofl/ibmplexmono/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/ibmplexmono",
+   "subsets": [
+    "cyrillic",
+    "cyrillic-ext",
+    "latin",
+    "latin-ext",
+    "menu",
+    "symbols2",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/ibmplexmono/IBMPlexMono-Bold.ttf",
+     "weight": 700,
+     "style": "normal",
+     "variable": false,
+     "sha256": "ac27abd6450a64dd94467580a02fe6235156d5b92f2926ebbc8e7489df64e0be",
+     "bytes": 137784,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/ibmplexmono/IBMPlexMono-BoldItalic.ttf",
+     "weight": 700,
+     "style": "italic",
+     "variable": false,
+     "sha256": "af4e05a761e98c1adf064c48a6352c9bec1a6ad70982cd2a544149323391f98e",
+     "bytes": 144512,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/ibmplexmono/IBMPlexMono-Italic.ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": false,
+     "sha256": "3362fc791b0652193328b862c1c5f23a789bc7288b1617fa63302f88689a2a34",
+     "bytes": 143920,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/ibmplexmono/IBMPlexMono-Regular.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "6a3412f058c7d8dfd9170c41e85ade48e5156ecb89356110ca57a0a27734af46",
+     "bytes": 135580,
+     "scripts": [
+      "Cyrillic",
+      "Latin"
+     ]
+    }
+   ]
+  },
+  {
+   "name": "Space Mono",
+   "category": "Monospace",
+   "license": "OFL-1.1",
+   "license_file": "ofl/spacemono/OFL.txt",
+   "reserved_font_name": true,
+   "dir": "ofl/spacemono",
+   "subsets": [
+    "latin",
+    "latin-ext",
+    "menu",
+    "vietnamese"
+   ],
+   "faces": [
+    {
+     "file": "ofl/spacemono/SpaceMono-Bold.ttf",
+     "weight": 700,
+     "style": "normal",
+     "variable": false,
+     "sha256": "405e73d41afb7e5906efce206a326af5c956f38e255f35421c260e861e599c59",
+     "bytes": 98232,
+     "scripts": [
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/spacemono/SpaceMono-BoldItalic.ttf",
+     "weight": 700,
+     "style": "italic",
+     "variable": false,
+     "sha256": "cdcc95eddee312879a9728494e595f591cb159f3f276d79bc58673dec7e57138",
+     "bytes": 111904,
+     "scripts": [
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/spacemono/SpaceMono-Italic.ttf",
+     "weight": 400,
+     "style": "italic",
+     "variable": false,
+     "sha256": "eca264c8690a91fe837d19a6badf2d88961610c4c8aafcb196526192a9f258c5",
+     "bytes": 121396,
+     "scripts": [
+      "Latin"
+     ]
+    },
+    {
+     "file": "ofl/spacemono/SpaceMono-Regular.ttf",
+     "weight": 400,
+     "style": "normal",
+     "variable": false,
+     "sha256": "95837e182baeeada83368f7748db28357f0a1b75c6b84ff7065b5edf933c8e18",
+     "bytes": 99356,
+     "scripts": [
+      "Latin"
+     ]
+    }
+   ]
+  }
+ ]
+}

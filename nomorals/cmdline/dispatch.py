@@ -30,6 +30,7 @@ from .commands.outcomes import _cmd_outcomes
 from .commands.audio import _cmd_audio
 from .commands.builders import _cmd_build
 from .commands.captcha import _cmd_captcha
+from .commands.fonts import _cmd_fonts
 from .commands.cards import _cmd_cards
 from .commands.browse import _cmd_browse
 from .commands.code import _cmd_code
@@ -394,6 +395,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "studio": _CommandSpec(_cmd_studio),
     "voice": _CommandSpec(_cmd_voice),
     "captcha": _CommandSpec(_cmd_captcha),
+    "fonts": _CommandSpec(_cmd_fonts),
     "account": _CommandSpec(_cmd_account),
     "bet": _CommandSpec(_cmd_bet),
     "braineval": _CommandSpec(_cmd_braineval),

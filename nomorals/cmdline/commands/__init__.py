@@ -14,6 +14,7 @@ from .account import _cmd_account
 from .briefing import _cmd_briefing
 from .builders import _cmd_build
 from .captcha import _cmd_captcha
+from .fonts import _cmd_fonts
 from .cards import _cmd_cards
 from .code import _cmd_code, _cmd_code_review, _cmd_code_run, _cmd_code_test, _critic_verdict
 from .completion import _cmd_completion
@@ -140,6 +141,7 @@ __all__ = [
     "_cmd_briefing",
     "_cmd_build",
     "_cmd_captcha",
+    "_cmd_fonts",
     "_cmd_cards",
     "_cmd_code",
     "_cmd_code_run",

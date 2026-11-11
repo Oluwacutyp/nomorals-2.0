@@ -570,6 +570,12 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # social/chat/mock_screens/, the handler in
     # agents/partner/runtime_mock_screens.py.
     "mock": (0, None),        # /mock [demo|<family>] … (whatsapp/telegram/messenger/snapchat/imessage/sms/instagram)
+    # font library (font census S3): OWNER-ONLY — deliberately
+    # NOT in PUBLIC_COMMANDS, so caller_may_run admits the
+    # owner alone.  The registry lives in
+    # media/typography/fontlib.py, the handler in
+    # agents/partner/runtime_fonts.py.
+    "fonts": (0, None),       # /fonts [search <words>|category <name>|info <family>|categories]
     # chat & privacy (FEI gap wave F): OWNER-ONLY account ops
     # on his personal surfaces — deliberately NOT in
     # PUBLIC_COMMANDS, so caller_may_run admits the owner
@@ -2879,6 +2885,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/mock demo [whatsapp|group|instagram|telegram|telegram-group|messenger|messenger-group|snapchat|snapchat-group|imessage|imessage-sms|sms] [iphone|android] · /mock <family> [iphone|android] [with <Name>] me: words ;; <Name>: words ;; … ([read] sets ticks, [react ❤️] a reaction, ^ replies, ! a system row, # a day divider; me: [photo] / [photo <path>] / [photo last] a real photo — words after it are the caption — and me: [voice] / [voice <path>] a real voice note)",
               "example": "/mock whatsapp Adaeze: we still on? ;; me: yes, by 11 [read] ;; me: [photo last] the flyer",
               "related": "/qcard · /fakemsg · /sticker"},
+    "fonts": {"what": "her stocked FONT LIBRARY, browsable: the typefaces Devon owns — the full pack in her data estate (the whole Google Fonts catalogue, stocked once, offline) over the vendored core subset, plus any owner-local font dirs. Every renderer resolves families from this registry; a family she does not hold is a named answer, never a silent fallback. Owner-only.",
+              "usage": "/fonts · /fonts search <words> · /fonts category <name> · /fonts categories · /fonts info <family>",
+              "example": "/fonts info Playfair Display",
+              "related": "/stylepin · /mock · /qcard"},
     "archive": {"what": "archive a chat on YOUR personal account (WhatsApp app-state / Telegram peer folders). The target is named the human way — a chat name, a number, or nothing for this chat; never a raw key.",
               "usage": "/archive [chat name]",
               "example": "/archive Family Group",
@@ -4807,6 +4817,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "bible", "couplepp", "pp"]),
     ("mock screens — authored chat screens",
      ["mock"]),
+    ("font library — her stocked typefaces",
+     ["fonts"]),
     ("chat & privacy — your chats · your accounts",
      ["archive", "unarchive", "mutechat", "unmutechat",
       "readchat", "unreadchat", "star", "unstar",
@@ -5058,6 +5070,7 @@ LIST_ONELINERS: dict[str, str] = {
     "couplepp": "a matched pair of profile pictures from one artwork — /couplepp",
     "pp": "alias of /couplepp",
     "mock": "render a mock chat screen (WhatsApp · Telegram · Messenger · Snapchat · iMessage · SMS · Instagram) as a photo — /mock demo telegram",
+    "fonts": "browse her stocked font library — /fonts · /fonts search serif · /fonts info Inter",
     "archive": "archive a chat on your account — /archive [chat name]",
     "unarchive": "unarchive a chat — /unarchive [chat name]",
     "mutechat": "mute a whole chat — /mutechat [chat name]",

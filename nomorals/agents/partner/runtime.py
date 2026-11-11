@@ -52,6 +52,7 @@ from .runtime_anime import RuntimeAnimeMixin
 from .runtime_chatops import RuntimeChatOpsMixin
 from .runtime_makers import RuntimeMakersMixin
 from .runtime_mock_screens import RuntimeMockScreensMixin
+from .runtime_fonts import RuntimeFontsMixin
 from .failures import failure_count, recent_failures, record_failure
 from .reply_guard import (
     deliberation_reason,
@@ -438,6 +439,7 @@ class PartnerRuntime(
     RuntimeAnimeMixin,
     RuntimeMakersMixin,
     RuntimeMockScreensMixin,
+    RuntimeFontsMixin,
     RuntimeChatOpsMixin,
 ):
     """Runs the partner across all configured platforms, at the same time."""
@@ -7803,6 +7805,14 @@ class PartnerRuntime(
             # is the same set, pinned equal by
             # tests/test_mock_screens.py.
             return self._control_mock(
+                kind, command.tail or "", message)
+        if kind == "fonts":
+            # FontLibrary (font census S3): the stocked
+            # library's browse surface — the registry lives in
+            # media/typography/fontlib.py and the handler in
+            # runtime_fonts.py.  The kind is spelled out for
+            # the catalog's handler-path scan.
+            return self._control_fonts(
                 kind, command.tail or "", message)
         if kind in {
                 "archive", "unarchive", "mutechat", "unmutechat",
