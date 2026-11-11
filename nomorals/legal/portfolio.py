@@ -60,6 +60,28 @@ _DEFAULT_DB = os.path.join(
     os.path.expanduser("~"), ".nomorals", "legal", "portfolio.db"
 )
 
+#: The store's FINAL-shape DDL — the shape the native path reaches via
+#: the base CREATEs plus _migrate()'s ALTERs (which stay a native-path
+#: concern for existing files; a fresh seam store starts at the final
+#: shape). sla_terms keeps its composite (contract_id, metric) primary
+#: key — the seam mapping joins composite keys natively. The
+#: idx_obl_due index stays native-path DDL (seam reads are finds).
+_DDL = """CREATE TABLE IF NOT EXISTS contracts (
+               id TEXT PRIMARY KEY, name TEXT, contract_type TEXT,
+               parties TEXT, grade TEXT, score INTEGER,
+               findings_count INTEGER, created_at REAL,
+               doc_text TEXT DEFAULT '', auto_renew INTEGER DEFAULT 0,
+               annual_value REAL DEFAULT 0, supersedes TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS obligations (
+               id TEXT PRIMARY KEY, contract_id TEXT, kind TEXT,
+               description TEXT, due_at REAL, done INTEGER DEFAULT 0,
+               done_at REAL DEFAULT 0, source TEXT DEFAULT 'extracted',
+               confirmed INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS sla_terms (
+               contract_id TEXT, metric TEXT, target TEXT,
+               breached INTEGER DEFAULT 0, note TEXT DEFAULT '',
+               PRIMARY KEY (contract_id, metric))"""
+
 # ── date extraction (never raises, never fabricates) ─────────────────
 
 
@@ -268,10 +290,44 @@ class ContractPortfolio:
     the portfolio states dates and paperwork facts, never advice.
     """
 
-    def __init__(self, db_path: str = "") -> None:
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
+        self._port: Any = None
         try:
             path = db_path or _DEFAULT_DB
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("legal-portfolio", _DDL,
+                                ("contracts", "obligations", "sla_terms"),
+                                path, store=store)
+            if port is not None:
+                contracts = port.tables["contracts"]
+                obligations = port.tables["obligations"]
+                sla = port.tables["sla_terms"]
+
+                def write_contracts(rows: list[dict]) -> int:
+                    for row in rows:
+                        contracts.put(row)
+                    return len(rows)
+
+                def write_obligations(rows: list[dict]) -> int:
+                    for row in rows:
+                        obligations.put(row)
+                    return len(rows)
+
+                def write_sla(rows: list[dict]) -> int:
+                    for row in rows:
+                        sla.put(row)
+                    return len(rows)
+
+                port.ensure_imported(
+                    {"contracts": write_contracts,
+                     "obligations": write_obligations,
+                     "sla_terms": write_sla})
+                self._port = port
+                self._db = None  # type: ignore[assignment]
+                self._ok = True
+                return
             self._db = sqlite3.connect(path)
             self._db.row_factory = sqlite3.Row
             self._db.execute(
@@ -365,19 +421,32 @@ class ContractPortfolio:
                 findings_count=len(review.findings), created_at=_now(),
                 auto_renew=auto_renew, annual_value=annual_value,
             )
-            self._db.execute(
-                """INSERT INTO contracts (id, name, contract_type, parties,
-                       grade, score, findings_count, created_at, doc_text,
-                       auto_renew, annual_value, supersedes)
-                   VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
-                (contract.id, contract.name, contract.contract_type,
-                 contract.parties, contract.grade, contract.score,
-                 contract.findings_count, contract.created_at,
-                 (doc_text or "")[:200000], int(auto_renew), annual_value, ""),
-            )
+            if self._port is not None:
+                self._port.tables["contracts"].put({
+                    "id": contract.id, "name": contract.name,
+                    "contract_type": contract.contract_type,
+                    "parties": contract.parties, "grade": contract.grade,
+                    "score": contract.score,
+                    "findings_count": contract.findings_count,
+                    "created_at": contract.created_at,
+                    "doc_text": (doc_text or "")[:200000],
+                    "auto_renew": int(auto_renew),
+                    "annual_value": annual_value, "supersedes": ""})
+            else:
+                self._db.execute(
+                    """INSERT INTO contracts (id, name, contract_type, parties,
+                           grade, score, findings_count, created_at, doc_text,
+                           auto_renew, annual_value, supersedes)
+                       VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (contract.id, contract.name, contract.contract_type,
+                     contract.parties, contract.grade, contract.score,
+                     contract.findings_count, contract.created_at,
+                     (doc_text or "")[:200000], int(auto_renew),
+                     annual_value, ""))
             if doc_text:
                 self._extract_obligations(cid, doc_text, review.contract_type)
-            self._db.commit()
+            if self._port is None:
+                self._db.commit()
             return contract
         except Exception:  # noqa: BLE001
             _log.debug("add_contract failed", exc_info=True)
@@ -440,6 +509,12 @@ class ContractPortfolio:
                            description: str, due_at: float,
                            source: str = "extracted") -> str:
         oid = "obl_" + uuid.uuid4().hex[:10]
+        if self._port is not None:
+            self._port.tables["obligations"].put({
+                "id": oid, "contract_id": contract_id, "kind": kind,
+                "description": description[:400], "due_at": due_at,
+                "done": 0, "done_at": 0, "source": source, "confirmed": 0})
+            return oid
         self._db.execute(
             """INSERT INTO obligations (id, contract_id, kind, description,
                    due_at, done, done_at, source)
@@ -478,6 +553,11 @@ class ContractPortfolio:
         if not self._ok:
             return []
         try:
+            if self._port is not None:
+                rows = self._port.tables["contracts"].find()
+                rows.sort(key=lambda r: r["created_at"] or 0.0,
+                          reverse=True)
+                return [self._row_to_contract(r) for r in rows]
             rows = self._db.execute(
                 "SELECT * FROM contracts ORDER BY created_at DESC").fetchall()
             return [self._row_to_contract(r) for r in rows]
@@ -489,6 +569,9 @@ class ContractPortfolio:
         if not self._ok:
             return None
         try:
+            if self._port is not None:
+                r = self._port.tables["contracts"].get(contract_id)
+                return self._row_to_contract(r) if r is not None else None
             r = self._db.execute(
                 "SELECT * FROM contracts WHERE id = ?", (contract_id,)).fetchone()
             if r is None:
@@ -503,7 +586,14 @@ class ContractPortfolio:
         if not self._ok:
             return []
         try:
-            if contract_id:
+            if self._port is not None:
+                if contract_id:
+                    rows = self._port.tables["obligations"].find(
+                        {"contract_id": contract_id})
+                else:
+                    rows = self._port.tables["obligations"].find()
+                rows.sort(key=lambda r: r["due_at"] or 0.0)
+            elif contract_id:
                 rows = self._db.execute(
                     "SELECT * FROM obligations WHERE contract_id = ? "
                     "ORDER BY due_at", (contract_id,)).fetchall()
@@ -594,7 +684,8 @@ class ContractPortfolio:
             oid = self._insert_obligation(
                 contract_id, "manual", (description or "").strip()[:400],
                 float(due_at), source="manual")
-            self._db.commit()
+            if self._port is None:
+                self._db.commit()
             return oid
         except Exception as exc:  # noqa: BLE001
             record_failure("portfolio.ContractPortfolio.track_obligation", exc)
@@ -604,6 +695,9 @@ class ContractPortfolio:
         if not self._ok:
             return False
         try:
+            if self._port is not None:
+                return self._port.tables["obligations"].update(
+                    obligation_id, {"done": 1, "done_at": _now()})
             cur = self._db.execute(
                 "UPDATE obligations SET done = 1, done_at = ? WHERE id = ?",
                 (_now(), obligation_id))
@@ -620,6 +714,9 @@ class ContractPortfolio:
         if not self._ok:
             return False
         try:
+            if self._port is not None:
+                return self._port.tables["obligations"].update(
+                    obligation_id, {"confirmed": 1})
             cur = self._db.execute(
                 "UPDATE obligations SET confirmed = 1 WHERE id = ?",
                 (obligation_id,))
@@ -636,6 +733,18 @@ class ContractPortfolio:
         if not self._ok:
             return False
         try:
+            if self._port is not None:
+                table = self._port.tables["obligations"]
+                row = table.get(obligation_id)
+                if row is None:
+                    return False
+                row["confirmed"] = 1
+                if description:
+                    row["description"] = description.strip()[:400]
+                if due_at:
+                    row["due_at"] = float(due_at)
+                table.put(row)
+                return True
             sets, params = ["confirmed = 1"], []
             if description:
                 sets.append("description = ?")
@@ -658,6 +767,9 @@ class ContractPortfolio:
         if not self._ok:
             return False
         try:
+            if self._port is not None:
+                return self._port.tables["obligations"].delete(
+                    obligation_id)
             cur = self._db.execute(
                 "DELETE FROM obligations WHERE id = ?", (obligation_id,))
             self._db.commit()
@@ -671,10 +783,16 @@ class ContractPortfolio:
         if not self._ok:
             return []
         try:
-            rows = self._db.execute(
-                "SELECT * FROM obligations WHERE source = 'extracted' "
-                "AND (confirmed IS NULL OR confirmed = 0) AND done = 0 "
-                "ORDER BY due_at").fetchall()
+            if self._port is not None:
+                rows = [r for r in self._port.tables["obligations"].find(
+                    {"source": "extracted"})
+                    if not r["confirmed"] and not r["done"]]
+                rows.sort(key=lambda r: r["due_at"] or 0.0)
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM obligations WHERE source = 'extracted' "
+                    "AND (confirmed IS NULL OR confirmed = 0) AND done = 0 "
+                    "ORDER BY due_at").fetchall()
             out = []
             for r in rows:
                 out.append(Obligation(
@@ -705,10 +823,16 @@ class ContractPortfolio:
                      if len(t) >= 3]
             if not terms:
                 return []
-            rows = self._db.execute(
-                "SELECT id, name, contract_type, parties, grade, score, "
-                "findings_count, created_at, doc_text FROM contracts"
-            ).fetchall()
+            if self._port is not None:
+                keys = ("id", "name", "contract_type", "parties", "grade",
+                        "score", "findings_count", "created_at", "doc_text")
+                rows = [{k: full[k] for k in keys}
+                        for full in self._port.tables["contracts"].find()]
+            else:
+                rows = self._db.execute(
+                    "SELECT id, name, contract_type, parties, grade, score, "
+                    "findings_count, created_at, doc_text FROM contracts"
+                ).fetchall()
             hits: list[tuple[Contract, str, int]] = []
             for r in rows:
                 text = r["doc_text"] or ""
@@ -806,6 +930,16 @@ class ContractPortfolio:
         try:
             months = max(0.5, float(months or 12.0))
             shift = months * 30 * 86400
+            if self._port is not None:
+                table = self._port.tables["obligations"]
+                targets = [r for r in table.find(
+                    {"contract_id": contract_id})
+                    if not r["done"]
+                    and r["kind"] in ("renewal", "expiry", "notice")]
+                for r in targets:
+                    table.update(r["id"],
+                                 {"due_at": (r["due_at"] or 0.0) + shift})
+                return len(targets)
             cur = self._db.execute(
                 """UPDATE obligations SET due_at = due_at + ?
                    WHERE contract_id = ? AND done = 0
@@ -829,6 +963,12 @@ class ContractPortfolio:
         if not self._ok:
             return 0.0
         try:
+            if self._port is not None:
+                rows = self._port.tables["contracts"].find()
+                superseded = {r["supersedes"] for r in rows
+                              if r["supersedes"]}
+                return float(sum((r["annual_value"] or 0.0) for r in rows
+                                 if r["id"] not in superseded))
             total = self._db.execute(
                 "SELECT SUM(annual_value) FROM contracts WHERE id NOT IN "
                 "(SELECT supersedes FROM contracts "
@@ -858,18 +998,31 @@ class ContractPortfolio:
             if result is None:
                 return None
             contract, review = result
-            self._db.execute(
-                "UPDATE contracts SET supersedes = ? WHERE id = ?",
-                (contract_id, contract.id))
-            # The amended text re-extracted the live obligations under
-            # the new version; retire the superseded version's open ones
-            # so attention/pipeline/alerts track each real-world date
-            # once, not once per version. History keeps the rows.
-            self._db.execute(
-                "UPDATE obligations SET done = 1, done_at = ? "
-                "WHERE contract_id = ? AND done = 0",
-                (_now(), contract_id))
-            self._db.commit()
+            if self._port is not None:
+                table = self._port.tables["contracts"]
+                new_row = table.get(contract.id)
+                if new_row is not None:
+                    new_row["supersedes"] = contract_id
+                    table.put(new_row)
+                obls = self._port.tables["obligations"]
+                stamp = _now()
+                for r in obls.find({"contract_id": contract_id}):
+                    if not r["done"]:
+                        obls.update(r["id"],
+                                    {"done": 1, "done_at": stamp})
+            else:
+                self._db.execute(
+                    "UPDATE contracts SET supersedes = ? WHERE id = ?",
+                    (contract_id, contract.id))
+                # The amended text re-extracted the live obligations under
+                # the new version; retire the superseded version's open
+                # ones so attention/pipeline/alerts track each real-world
+                # date once, not once per version. History keeps the rows.
+                self._db.execute(
+                    "UPDATE obligations SET done = 1, done_at = ? "
+                    "WHERE contract_id = ? AND done = 0",
+                    (_now(), contract_id))
+                self._db.commit()
             contract.supersedes = contract_id
             return contract, review
         except Exception as exc:  # noqa: BLE001
@@ -907,6 +1060,13 @@ class ContractPortfolio:
         if not self._ok:
             return False
         try:
+            if self._port is not None:
+                self._port.tables["sla_terms"].put({
+                    "contract_id": contract_id,
+                    "metric": (metric or "").strip()[:120],
+                    "target": (target or "").strip()[:120],
+                    "breached": 0, "note": ""})
+                return True
             self._db.execute(
                 """INSERT OR REPLACE INTO sla_terms
                        (contract_id, metric, target, breached, note)
@@ -925,6 +1085,21 @@ class ContractPortfolio:
         if not self._ok:
             return False
         try:
+            if self._port is not None:
+                table = self._port.tables["sla_terms"]
+                metric_key = (metric or "").strip()[:120]
+                # composite-PK parts live in the document id, not
+                # its body — match on the parts in Python.
+                found = [r for r in table.find()
+                         if r["contract_id"] == contract_id
+                         and r["metric"] == metric_key]
+                if not found:
+                    return False
+                row = found[0]
+                row["breached"] = 1
+                row["note"] = (note or "").strip()[:400]
+                table.put(row)
+                return True
             cur = self._db.execute(
                 "UPDATE sla_terms SET breached = 1, note = ? "
                 "WHERE contract_id = ? AND metric = ?",
@@ -940,7 +1115,12 @@ class ContractPortfolio:
         if not self._ok:
             return []
         try:
-            if contract_id:
+            if self._port is not None:
+                rows = self._port.tables["sla_terms"].find()
+                if contract_id:
+                    rows = [r for r in rows
+                            if r["contract_id"] == contract_id]
+            elif contract_id:
                 rows = self._db.execute(
                     "SELECT * FROM sla_terms WHERE contract_id = ?",
                     (contract_id,)).fetchall()

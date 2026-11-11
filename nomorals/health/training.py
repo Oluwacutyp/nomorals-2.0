@@ -548,6 +548,27 @@ def _store_path(path: str) -> str:
     return path or os.path.expanduser("~/.nomorals/health/training.db")
 
 
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift. (The two
+#: indexes stay native-path DDL — the seam reads are finds.)
+_DDL = """CREATE TABLE IF NOT EXISTS plans (
+               id TEXT PRIMARY KEY, goal TEXT, equipment TEXT,
+               weeks INTEGER, schedule_json TEXT, blurb TEXT,
+               created_at REAL);
+CREATE TABLE IF NOT EXISTS workout_log (
+               id TEXT PRIMARY KEY, date TEXT, plan_id TEXT,
+               kind TEXT, intensity TEXT, completed INTEGER,
+               rpe INTEGER, loads_json TEXT, notes TEXT,
+               created_at REAL);
+CREATE TABLE IF NOT EXISTS set_feedback (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               date TEXT NOT NULL,
+               exercise_key TEXT NOT NULL,
+               rpe INTEGER NOT NULL,
+               load TEXT NOT NULL DEFAULT '',
+               created_at REAL NOT NULL)"""
+
+
 class TrainingCoach:
     """Owner-scoped training plans, readiness gating, workout logging.
 
@@ -562,7 +583,8 @@ class TrainingCoach:
                  bio: BioMetrics | None = None,
                  health_coach: Any | None = None,
                  tts: Callable[[str], str | None] | None = None,
-                 community: bool = False) -> None:
+                 community: bool = False,
+                 store: Any = None) -> None:
         if community:
             raise PermissionError(
                 "training plans are owner-scoped — not available in "
@@ -571,33 +593,57 @@ class TrainingCoach:
         self._coach = health_coach
         self._tts = tts
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
+        self._imported_max_feedback = 0
         try:
             p = _store_path(store_path)
             os.makedirs(os.path.dirname(p), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("health-training", _DDL,
+                                ("plans", "workout_log"), p, store=store)
+            if port is not None:
+                plans = port.tables["plans"]
+                log = port.tables["workout_log"]
+
+                def write_plans(rows: list[dict]) -> int:
+                    for row in rows:
+                        plans.put(row)
+                    return len(rows)
+
+                def write_log(rows: list[dict]) -> int:
+                    for row in rows:
+                        log.put(row)
+                    return len(rows)
+
+                def write_feedback(rows: list[dict]) -> int:
+                    for row in rows:
+                        port.put_raw("set_feedback", str(row["id"]), row)
+                        if int(row["id"]) > self._imported_max_feedback:
+                            self._imported_max_feedback = int(row["id"])
+                    return len(rows)
+
+                def seed_counter(_counts: dict) -> None:
+                    doc = port.store.get(
+                        port.meta_collection, "counters") or {}
+                    if int(doc.get("set_feedback") or 0) < \
+                            self._imported_max_feedback:
+                        port.store.put(port.meta_collection, "counters", {
+                            **doc,
+                            "set_feedback": self._imported_max_feedback})
+
+                port.ensure_imported(
+                    {"plans": write_plans, "workout_log": write_log,
+                     "set_feedback": write_feedback},
+                    after_import=seed_counter)
+                self._port = port
+                return
             self._db = sqlite3.connect(p)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS plans (
-                       id TEXT PRIMARY KEY, goal TEXT, equipment TEXT,
-                       weeks INTEGER, schedule_json TEXT, blurb TEXT,
-                       created_at REAL)""")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS workout_log (
-                       id TEXT PRIMARY KEY, date TEXT, plan_id TEXT,
-                       kind TEXT, intensity TEXT, completed INTEGER,
-                       rpe INTEGER, loads_json TEXT, notes TEXT,
-                       created_at REAL)""")
+            self._db.executescript(_DDL)
             self._db.execute(
                 """CREATE INDEX IF NOT EXISTS wl_date
                    ON workout_log(date)""")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS set_feedback (
-                       id INTEGER PRIMARY KEY AUTOINCREMENT,
-                       date TEXT NOT NULL,
-                       exercise_key TEXT NOT NULL,
-                       rpe INTEGER NOT NULL,
-                       load TEXT NOT NULL DEFAULT '',
-                       created_at REAL NOT NULL)""")
             self._db.execute(
                 """CREATE INDEX IF NOT EXISTS sf_key_date
                    ON set_feedback(exercise_key, date)""")
@@ -606,6 +652,7 @@ class TrainingCoach:
             _log.warning("training: store unavailable, running ephemeral",
                          exc_info=True)
             self._db = None
+            self._port = None
 
     # -- readiness --------------------------------------------------------
 
@@ -644,7 +691,13 @@ class TrainingCoach:
         """Generate + persist a periodized plan."""
         plan = generate_plan(goal, equipment, weeks)
         try:
-            if self._db is not None:
+            if self._port is not None:
+                self._port.tables["plans"].put({
+                    "id": plan.id, "goal": plan.goal,
+                    "equipment": plan.equipment, "weeks": plan.weeks,
+                    "schedule_json": json.dumps(plan.schedule),
+                    "blurb": plan.blurb, "created_at": plan.created_at})
+            elif self._db is not None:
                 self._db.execute(
                     "INSERT OR REPLACE INTO plans VALUES (?,?,?,?,?,?,?)",
                     (plan.id, plan.goal, plan.equipment, plan.weeks,
@@ -655,25 +708,38 @@ class TrainingCoach:
             _log.debug("training: plan persist failed", exc_info=True)
         return plan
 
+    @staticmethod
+    def _plan_from_row(row: Any) -> Plan:
+        return Plan(id=row["id"], goal=row["goal"],
+                    equipment=row["equipment"], weeks=row["weeks"],
+                    schedule=json.loads(row["schedule_json"] or "{}"),
+                    blurb=row["blurb"] or "",
+                    created_at=row["created_at"] or 0.0)
+
     def get_plan(self, plan_id: str) -> Plan | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["plans"].get(plan_id)
+                return self._plan_from_row(row) if row is not None else None
             if self._db is None:
                 return None
             row = self._db.execute(
                 "SELECT * FROM plans WHERE id = ?", (plan_id,)).fetchone()
             if row is None:
                 return None
-            return Plan(id=row["id"], goal=row["goal"],
-                        equipment=row["equipment"], weeks=row["weeks"],
-                        schedule=json.loads(row["schedule_json"] or "{}"),
-                        blurb=row["blurb"] or "",
-                        created_at=row["created_at"] or 0.0)
+            return self._plan_from_row(row)
         except Exception as exc:  # noqa: BLE001
             record_failure("training.get_plan", exc)
             return None
 
     def latest_plan(self) -> Plan | None:
         try:
+            if self._port is not None:
+                rows = self._port.tables["plans"].find()
+                if not rows:
+                    return None
+                return self._plan_from_row(
+                    max(rows, key=lambda r: r["created_at"] or 0.0))
             if self._db is None:
                 return None
             row = self._db.execute(
@@ -689,6 +755,13 @@ class TrainingCoach:
     def _last_loads(self, kind: str) -> dict[str, str]:
         """Per-exercise loads from the last completed same-kind session."""
         try:
+            if self._port is not None:
+                rows = [r for r in self._port.tables["workout_log"].find(
+                    {"kind": kind}) if r["completed"] == 1]
+                if not rows:
+                    return {}
+                rows.sort(key=lambda r: r["date"] or "", reverse=True)
+                return json.loads(rows[0]["loads_json"] or "{}")
             if self._db is None:
                 return {}
             row = self._db.execute(
@@ -799,7 +872,26 @@ class TrainingCoach:
                                                         ex.key, 1.0))
             elif not final_loads:
                 final_loads = {ex.key: ex.load for ex in workout.exercises}
-            if self._db is not None:
+            if self._port is not None:
+                self._port.tables["workout_log"].put({
+                    "id": "wl_" + uuid.uuid4().hex[:8],
+                    "date": workout.date, "plan_id": workout.plan_id,
+                    "kind": workout.kind, "intensity": workout.intensity,
+                    "completed": 1 if completed else 0,
+                    "rpe": int(rpe) if rpe is not None else None,
+                    "loads_json": json.dumps(final_loads), "notes": notes,
+                    "created_at": time.time()})
+                for key, erpe in (set_rpes or {}).items():
+                    try:
+                        fid = self._port.next_id("set_feedback")
+                        self._port.put_raw("set_feedback", str(fid), {
+                            "id": fid, "date": workout.date,
+                            "exercise_key": key, "rpe": int(erpe),
+                            "load": final_loads.get(key, ""),
+                            "created_at": time.time()})
+                    except Exception as exc:  # noqa: BLE001
+                        record_failure("training.set_feedback_insert", exc)
+            elif self._db is not None:
                 self._db.execute(
                     """INSERT INTO workout_log VALUES (?,?,?,?,?,?,?,?,?,?)""",
                     ("wl_" + uuid.uuid4().hex[:8], workout.date,
@@ -823,6 +915,15 @@ class TrainingCoach:
             _log.debug("training: log failed", exc_info=True)
             return False
 
+    def _recent_feedback(self, exercise_key: str,
+                         limit: int) -> list[dict]:
+        """Most recent set_feedback rows for a key (seam rung),
+        newest date first — the native ORDER BY date DESC shape."""
+        rows = self._port.find_raw("set_feedback",
+                                   {"exercise_key": exercise_key})
+        rows.sort(key=lambda r: r["date"] or "", reverse=True)
+        return rows[:limit]
+
     def _autoregulation(self, workout: Workout,
                         set_rpes: dict[str, int]) -> dict[str, float]:
         """Per-exercise progression factor from RPE history.
@@ -833,16 +934,21 @@ class TrainingCoach:
         """
         factors: dict[str, float] = {}
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return factors
             for ex in workout.exercises:
-                rows = self._db.execute(
-                    "SELECT rpe FROM set_feedback "
-                    "WHERE exercise_key = ? ORDER BY date DESC LIMIT 2",
-                    (ex.key,)).fetchall()
+                if self._port is not None:
+                    rpes = [int(r["rpe"]) for r in
+                            self._recent_feedback(ex.key, 2)]
+                else:
+                    rows = self._db.execute(
+                        "SELECT rpe FROM set_feedback "
+                        "WHERE exercise_key = ? ORDER BY date DESC LIMIT 2",
+                        (ex.key,)).fetchall()
+                    rpes = [int(r[0]) for r in rows]
                 # include today's just-logged values
                 hist = [int(set_rpes.get(ex.key, 0)) or None]
-                hist = [r for r in hist if r] + [int(r[0]) for r in rows]
+                hist = [r for r in hist if r] + rpes
                 hist = hist[:2]
                 if len(hist) == 2 and all(r >= 9 for r in hist):
                     factors[ex.key] = 0.0
@@ -858,12 +964,16 @@ class TrainingCoach:
         """Why the next bump is what it is — the auto-regulation loop
         explained. Never raises."""
         try:
-            if self._db is None:
+            if self._port is not None:
+                rows = [(r["rpe"], r["date"]) for r in
+                        self._recent_feedback(exercise_key, 3)]
+            elif self._db is None:
                 return "no history yet — log RPEs and I'll auto-regulate."
-            rows = self._db.execute(
-                "SELECT rpe, date FROM set_feedback "
-                "WHERE exercise_key = ? ORDER BY date DESC LIMIT 3",
-                (exercise_key,)).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT rpe, date FROM set_feedback "
+                    "WHERE exercise_key = ? ORDER BY date DESC LIMIT 3",
+                    (exercise_key,)).fetchall()
             if not rows:
                 return (f"no RPE history for {exercise_key} yet — log "
                         f"per-exercise RPEs and I'll tune progression.")
@@ -883,9 +993,17 @@ class TrainingCoach:
 
     def history(self, days: int = 14) -> list[dict[str, Any]]:
         try:
+            since = (date.today() - timedelta(days=days)).isoformat()
+            if self._port is not None:
+                rows = [r for r in self._port.tables["workout_log"].find()
+                        if (r["date"] or "") >= since]
+                rows.sort(key=lambda r: r["date"] or "", reverse=True)
+                return [{"date": r["date"], "kind": r["kind"],
+                         "intensity": r["intensity"],
+                         "completed": r["completed"], "rpe": r["rpe"],
+                         "notes": r["notes"]} for r in rows]
             if self._db is None:
                 return []
-            since = (date.today() - timedelta(days=days)).isoformat()
             rows = self._db.execute(
                 """SELECT date, kind, intensity, completed, rpe, notes
                    FROM workout_log WHERE date >= ? ORDER BY date DESC""",
@@ -906,16 +1024,22 @@ class TrainingCoach:
         """
         out: dict[str, int] = {m: 0 for m in MUSCLE_GROUPS}
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return out
             today = date.today()
             monday = today - timedelta(days=today.weekday()
                                        + 7 * weeks_back)
             sunday = monday + timedelta(days=6)
-            rows = self._db.execute(
-                """SELECT kind, loads_json FROM workout_log
-                   WHERE date >= ? AND date <= ? AND completed = 1""",
-                (monday.isoformat(), sunday.isoformat())).fetchall()
+            if self._port is not None:
+                rows = [{"kind": r["kind"], "loads_json": r["loads_json"]}
+                        for r in self._port.tables["workout_log"].find()
+                        if monday.isoformat() <= (r["date"] or "")
+                        <= sunday.isoformat() and r["completed"] == 1]
+            else:
+                rows = self._db.execute(
+                    """SELECT kind, loads_json FROM workout_log
+                       WHERE date >= ? AND date <= ? AND completed = 1""",
+                    (monday.isoformat(), sunday.isoformat())).fetchall()
             for row in rows:
                 kind = row["kind"] or ""
                 try:
@@ -971,12 +1095,19 @@ class TrainingCoach:
         """Heaviest logged load per exercise — automatic, from history."""
         out: list[PersonalRecord] = []
         try:
-            if self._db is None:
+            if self._port is not None:
+                raw = [r for r in self._port.tables["workout_log"].find()
+                       if r["completed"] == 1]
+                raw.sort(key=lambda r: r["date"] or "", reverse=True)
+                rows = [{"date": r["date"], "loads_json": r["loads_json"]}
+                        for r in raw[:500]]
+            elif self._db is None:
                 return out
-            rows = self._db.execute(
-                """SELECT date, loads_json FROM workout_log
-                   WHERE completed = 1 ORDER BY date DESC
-                   LIMIT 500""").fetchall()
+            else:
+                rows = self._db.execute(
+                    """SELECT date, loads_json FROM workout_log
+                       WHERE completed = 1 ORDER BY date DESC
+                       LIMIT 500""").fetchall()
             best: dict[str, tuple[float, str, str]] = {}
             names: dict[str, str] = {}
             for row in rows:

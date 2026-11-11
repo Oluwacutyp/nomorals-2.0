@@ -1057,6 +1057,89 @@ _register(_S(
 ))
 
 _register(_S(
+    name="digital-twin", verdict="ported", kind="sqlite-file",
+    modules=("integrations/digital_twin.py",),
+    tables=("states", "desired", "entity_meta"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 4): "
+        "HomeTwin's desired-state and entity-meta tables route "
+        "through the seam (digital-twin__desired / "
+        "__entity_meta) whenever a store is resolved, behind "
+        "its unchanged never-raises API; the AUTOINCREMENT "
+        "states history goes via put_raw with ids from the "
+        "port's atomic counter, seeded from the imported "
+        "maximum, and the GROUP BY / aggregate reads (current-"
+        "state snapshot, occupancy, energy, prune) re-express "
+        "over finds as Python rollups ordered by (ts, id), the "
+        "native ordering. entity_meta's preserve-on-empty "
+        "upsert merges in Python. The native sqlite3 path (WAL "
+        "mode plus its entity/ts index) serves the SQLite "
+        "default byte-for-byte."),
+))
+
+_register(_S(
+    name="health-training", verdict="ported", kind="sqlite-file",
+    modules=("health/training.py",),
+    tables=("plans", "workout_log", "set_feedback"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 4): "
+        "TrainingCoach's plans and workout log route through "
+        "the seam (health-training__plans / __workout_log) "
+        "whenever a store is resolved, behind its unchanged "
+        "API; the AUTOINCREMENT set_feedback rows — children "
+        "of log rows — go via put_raw with ids from the port's "
+        "atomic counter, seeded from the imported maximum, and "
+        "the feedback-recency, history and PR reads re-express "
+        "over finds in Python. The organ's ephemeral fallback "
+        "(store unavailable → in-memory behavior) is unchanged "
+        "on both rungs. The native sqlite3 path serves the "
+        "SQLite default."),
+))
+
+_register(_S(
+    name="legal-portfolio", verdict="ported", kind="sqlite-file",
+    modules=("legal/portfolio.py",),
+    tables=("contracts", "obligations", "sla_terms"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 4): "
+        "ContractPortfolio's three tables route through the "
+        "seam (legal-portfolio__contracts / __obligations / "
+        "__sla_terms) whenever a store is resolved, behind its "
+        "unchanged never-raises API; sla_terms keeps its "
+        "composite (contract_id, metric) primary key, which "
+        "the seam mapping joins natively, its breach update a "
+        "find + merged put. Contract search stays the same "
+        "Python scan over rows on both rungs. The native "
+        "path's _migrate ALTERs stay a native-path concern — "
+        "the seam mapping derives from the module's "
+        "final-shape DDL, so pre-ALTER rows import with the "
+        "added columns defaulted. The native sqlite3 path "
+        "serves the SQLite default."),
+))
+
+_register(_S(
+    name="legal-regulatory", verdict="ported", kind="sqlite-file",
+    modules=("legal/regulatory.py",),
+    tables=("reg_watches", "reg_seen", "reg_items"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 4): "
+        "RegulatoryWatch's three tables route through the seam "
+        "(legal-regulatory__reg_watches / __reg_seen / "
+        "__reg_items) whenever a store is resolved, behind its "
+        "unchanged never-raises API; the seen registry is "
+        "get-by-key with insert-ignore on first sight and "
+        "digest updates on change, and note_item keeps its "
+        "insert-or-replace + seen flow. The organ's degraded "
+        "contract is unchanged: with no store resolved the "
+        "native file path serves, and any construction failure "
+        "still falls back to the in-memory database. The "
+        "native path's _migrate ALTERs stay a native-path "
+        "concern — the seam DDL already carries reg_seen's "
+        "final shape. The native sqlite3 path serves the "
+        "SQLite default."),
+))
+
+_register(_S(
     name="health-timeline", verdict="residue", kind="database-file",
     modules=("health/timeline.py",),
     anchors=(("health/timeline.py", "timeline.db"),),
@@ -1105,9 +1188,6 @@ _residue("health-challenges", "health/challenges.py",
          "health challenge groups, streaks and proofs — the "
          "largest health sidecar, eight tables with cross-table "
          "streak flows; its port wants the domain pass to itself.")
-_residue("health-training", "health/training.py",
-         ("plans", "workout_log", "set_feedback"),
-         "training plans, workout log and per-set feedback.")
 _residue("household", "household/household.py",
          ("shared_assets", "shared_calendar", "shared_commitments",
           "household_audit"),
@@ -1128,15 +1208,6 @@ _residue("immune-corpus", "immune/corpus.py", (),
          "CorpusStore. Its only sqlite touch is a read-only "
          "harvest of the pinned incident journal's verified "
          "fixes.", kind="json-file")
-_residue("digital-twin", "integrations/digital_twin.py",
-         ("states", "desired", "entity_meta"),
-         "digital-twin entity states and desired-state records.")
-_residue("legal-portfolio", "legal/portfolio.py",
-         ("contracts", "obligations", "sla_terms"),
-         "legal contract portfolio in portfolio.db.")
-_residue("legal-regulatory", "legal/regulatory.py",
-         ("reg_items", "reg_seen", "reg_watches"),
-         "regulatory tracking items and seen-state in regulatory.db.")
 _residue("marketing-briefs", "marketing/briefs.py",
          ("briefs", "drafts", "score_feedback"),
          "marketing briefs, their drafts and score feedback.")

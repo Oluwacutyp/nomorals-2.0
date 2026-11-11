@@ -62,6 +62,24 @@ _DEFAULT_DB = os.path.join(
     os.path.expanduser("~"), ".nomorals", "legal", "regulatory.db"
 )
 
+#: The store's own DDL — the native path (file and :memory: fallback
+#: alike) executes it and the seam mapping is derived from it, so the
+#: two can never drift. reg_seen's CREATE already carries the final
+#: shape; _migrate()'s ALTERs stay a native-path concern for older
+#: files.
+_DDL = """CREATE TABLE IF NOT EXISTS reg_watches (
+               id TEXT PRIMARY KEY, regulator TEXT,
+               topics_json TEXT, created_at REAL);
+CREATE TABLE IF NOT EXISTS reg_seen (
+               item_id TEXT PRIMARY KEY, watch_id TEXT,
+               seen_at REAL, digest TEXT DEFAULT '',
+               dismissed INTEGER DEFAULT 0);
+CREATE TABLE IF NOT EXISTS reg_items (
+               item_id TEXT PRIMARY KEY, regulator TEXT, title TEXT,
+               summary TEXT, source_url TEXT, ref_no TEXT,
+               published REAL DEFAULT 0, effective_date REAL DEFAULT 0,
+               topics_json TEXT, urgency TEXT DEFAULT 'normal')"""
+
 
 # ── source registry (official domains only; no fabricated URLs) ──────
 
@@ -479,54 +497,53 @@ class RegulatoryWatch:
     live fetch is not configured (honest, not silent). Never raises.
     """
 
-    def __init__(self, db_path: str = "") -> None:
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         path = db_path or _DEFAULT_DB
+        self._port: Any = None
         try:
             os.makedirs(os.path.dirname(path), exist_ok=True)
-            self._db = sqlite3.connect(path)
-            self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS reg_watches (
-                       id TEXT PRIMARY KEY, regulator TEXT,
-                       topics_json TEXT, created_at REAL)"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS reg_seen (
-                       item_id TEXT PRIMARY KEY, watch_id TEXT,
-                       seen_at REAL, digest TEXT DEFAULT '',
-                       dismissed INTEGER DEFAULT 0)"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS reg_items (
-                       item_id TEXT PRIMARY KEY, regulator TEXT, title TEXT,
-                       summary TEXT, source_url TEXT, ref_no TEXT,
-                       published REAL DEFAULT 0, effective_date REAL DEFAULT 0,
-                       topics_json TEXT, urgency TEXT DEFAULT 'normal')"""
-            )
-            self._migrate()
-            self._db.commit()
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("legal-regulatory", _DDL,
+                                ("reg_watches", "reg_seen", "reg_items"),
+                                path, store=store)
+            if port is not None:
+                watches = port.tables["reg_watches"]
+                seen = port.tables["reg_seen"]
+                items = port.tables["reg_items"]
+
+                def write_watches(rows: list[dict]) -> int:
+                    for row in rows:
+                        watches.put(row)
+                    return len(rows)
+
+                def write_seen(rows: list[dict]) -> int:
+                    for row in rows:
+                        seen.put(row)
+                    return len(rows)
+
+                def write_items(rows: list[dict]) -> int:
+                    for row in rows:
+                        items.put(row)
+                    return len(rows)
+
+                port.ensure_imported(
+                    {"reg_watches": write_watches, "reg_seen": write_seen,
+                     "reg_items": write_items})
+                self._port = port
+                self._db = None  # type: ignore[assignment]
+            else:
+                self._db = sqlite3.connect(path)
+                self._db.row_factory = sqlite3.Row
+                self._db.executescript(_DDL)
+                self._migrate()
+                self._db.commit()
         except Exception:  # noqa: BLE001 — degraded mode
             _log.warning("regulatory db unavailable; watches in-memory only")
+            self._port = None
             self._db = sqlite3.connect(":memory:")
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS reg_watches (
-                       id TEXT PRIMARY KEY, regulator TEXT,
-                       topics_json TEXT, created_at REAL)"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS reg_seen (
-                       item_id TEXT PRIMARY KEY, watch_id TEXT,
-                       seen_at REAL, digest TEXT DEFAULT '',
-                       dismissed INTEGER DEFAULT 0)"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS reg_items (
-                       item_id TEXT PRIMARY KEY, regulator TEXT, title TEXT,
-                       summary TEXT, source_url TEXT, ref_no TEXT,
-                       published REAL DEFAULT 0, effective_date REAL DEFAULT 0,
-                       topics_json TEXT, urgency TEXT DEFAULT 'normal')"""
-            )
+            self._db.executescript(_DDL)
         import json
         self._json = json
 
@@ -555,6 +572,12 @@ class RegulatoryWatch:
         clean = [t.strip().lower() for t in (topics or []) if t.strip()]
         w = RegWatch(id="reg_" + uuid.uuid4().hex[:8], regulator=reg,
                      topics=clean, created_at=time.time())
+        if self._port is not None:
+            self._port.tables["reg_watches"].put({
+                "id": w.id, "regulator": w.regulator,
+                "topics_json": self._json.dumps(w.topics),
+                "created_at": w.created_at})
+            return w
         self._db.execute(
             "INSERT INTO reg_watches VALUES (?, ?, ?, ?)",
             (w.id, w.regulator, self._json.dumps(w.topics), w.created_at),
@@ -563,6 +586,8 @@ class RegulatoryWatch:
         return w
 
     def unwatch(self, watch_id: str) -> bool:
+        if self._port is not None:
+            return self._port.tables["reg_watches"].delete(watch_id)
         cur = self._db.execute("DELETE FROM reg_watches WHERE id = ?",
                                (watch_id,))
         self._db.commit()
@@ -570,8 +595,13 @@ class RegulatoryWatch:
 
     def list_watches(self) -> list[RegWatch]:
         out: list[RegWatch] = []
-        for row in self._db.execute(
-                "SELECT * FROM reg_watches ORDER BY created_at"):
+        if self._port is not None:
+            rows = self._port.tables["reg_watches"].find()
+            rows.sort(key=lambda r: r["created_at"] or 0.0)
+        else:
+            rows = self._db.execute(
+                "SELECT * FROM reg_watches ORDER BY created_at")
+        for row in rows:
             out.append(RegWatch(
                 id=row["id"], regulator=row["regulator"],
                 topics=self._json.loads(row["topics_json"] or "[]"),
@@ -635,30 +665,44 @@ class RegulatoryWatch:
                     continue
                 if not self.relevant(item, watch, profile):
                     continue
-                row = self._db.execute(
-                    "SELECT digest, dismissed FROM reg_seen WHERE item_id = ?",
-                    (item.id,)).fetchone()
+                if self._port is not None:
+                    row = self._port.tables["reg_seen"].get(item.id)
+                else:
+                    row = self._db.execute(
+                        "SELECT digest, dismissed FROM reg_seen "
+                        "WHERE item_id = ?", (item.id,)).fetchone()
                 if row is not None and (row["dismissed"] or 0):
                     continue  # owner dismissed this item — never alert again
                 digest = item.digest()
                 if row is None:
-                    self._db.execute(
-                        "INSERT OR IGNORE INTO reg_seen "
-                        "(item_id, watch_id, seen_at, digest, dismissed) "
-                        "VALUES (?, ?, ?, ?, 0)",
-                        (item.id, watch.id, now, digest))
+                    if self._port is not None:
+                        self._port.tables["reg_seen"].insert_ignore({
+                            "item_id": item.id, "watch_id": watch.id,
+                            "seen_at": now, "digest": digest,
+                            "dismissed": 0})
+                    else:
+                        self._db.execute(
+                            "INSERT OR IGNORE INTO reg_seen "
+                            "(item_id, watch_id, seen_at, digest, dismissed) "
+                            "VALUES (?, ?, ?, ?, 0)",
+                            (item.id, watch.id, now, digest))
                     new_items.append(item)
                 elif (row["digest"] or "") != digest:
                     # TR Regulatory Intelligence pattern: the item changed
                     # since we last saw it — alert on the update.
-                    self._db.execute(
-                        "UPDATE reg_seen SET digest = ?, seen_at = ? "
-                        "WHERE item_id = ?",
-                        (digest, now, item.id))
+                    if self._port is not None:
+                        self._port.tables["reg_seen"].update(
+                            item.id, {"digest": digest, "seen_at": now})
+                    else:
+                        self._db.execute(
+                            "UPDATE reg_seen SET digest = ?, seen_at = ? "
+                            "WHERE item_id = ?",
+                            (digest, now, item.id))
                     item.updated = True
                     new_items.append(item)
                 # unchanged items: no alert
-        self._db.commit()
+        if self._port is None:
+            self._db.commit()
         return sorted(new_items,
                       key=lambda i: (i.urgency != "urgent", -i.published))
 
@@ -668,6 +712,9 @@ class RegulatoryWatch:
         The RegTech pattern: owner feedback tunes future relevance.
         """
         try:
+            if self._port is not None:
+                return self._port.tables["reg_seen"].update(
+                    item_id, {"dismissed": 1})
             cur = self._db.execute(
                 "UPDATE reg_seen SET dismissed = 1 WHERE item_id = ?",
                 (item_id,))
@@ -686,11 +733,17 @@ class RegulatoryWatch:
         """
         try:
             now = now if now is not None else time.time()
-            rows = self._db.execute(
-                """SELECT * FROM reg_items
-                   WHERE effective_date > ? AND effective_date <= ?
-                   ORDER BY effective_date""",
-                (now, now + days * 86400)).fetchall()
+            if self._port is not None:
+                rows = [r for r in self._port.tables["reg_items"].find()
+                        if now < (r["effective_date"] or 0.0)
+                        <= now + days * 86400]
+                rows.sort(key=lambda r: r["effective_date"] or 0.0)
+            else:
+                rows = self._db.execute(
+                    """SELECT * FROM reg_items
+                       WHERE effective_date > ? AND effective_date <= ?
+                       ORDER BY effective_date""",
+                    (now, now + days * 86400)).fetchall()
             out = []
             for r in rows:
                 try:
@@ -715,6 +768,34 @@ class RegulatoryWatch:
         """
         try:
             if item.regulator not in REGULATORS or not item.title:
+                return False
+            if self._port is not None:
+                seen = self._port.tables["reg_seen"]
+                row = seen.get(item.id)
+                if row is not None and (row["dismissed"] or 0):
+                    return False
+                digest = item.digest()
+                self._port.tables["reg_items"].put({
+                    "item_id": item.id, "regulator": item.regulator,
+                    "title": item.title[:500],
+                    "summary": item.summary[:2000],
+                    "source_url": item.source_url[:500],
+                    "ref_no": item.ref_no[:120],
+                    "published": item.published,
+                    "effective_date": item.effective_date,
+                    "topics_json": self._json.dumps(item.topics[:20]),
+                    "urgency": item.urgency or "normal"})
+                if row is None:
+                    seen.insert_ignore({
+                        "item_id": item.id, "watch_id": "",
+                        "seen_at": time.time(), "digest": digest,
+                        "dismissed": 0})
+                    return True
+                if (row["digest"] or "") != digest:
+                    seen.update(item.id, {"digest": digest,
+                                          "seen_at": time.time()})
+                    item.updated = True
+                    return True
                 return False
             row = self._db.execute(
                 "SELECT digest, dismissed FROM reg_seen WHERE item_id = ?",

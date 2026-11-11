@@ -22,10 +22,41 @@ import statistics
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 _log = logging.getLogger("nomorals.integrations.digital_twin")
 
 DEFAULT_DB = os.path.expanduser("~/.nomorals/home/twin.db")
+
+#: The store's own DDL — the native path executes these statements
+#: and the seam mapping is derived from them, so the two can never
+#: drift. (The states index stays native-path DDL — the seam reads
+#: are finds.)
+_DDL_STATES = (
+    "CREATE TABLE IF NOT EXISTS states ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " entity_id TEXT NOT NULL,"
+    " state TEXT NOT NULL,"
+    " attributes TEXT NOT NULL DEFAULT '{}',"
+    " ts REAL NOT NULL)"
+)
+_DDL_DESIRED = (
+    "CREATE TABLE IF NOT EXISTS desired ("
+    " entity_id TEXT PRIMARY KEY,"
+    " state TEXT NOT NULL,"
+    " set_by TEXT NOT NULL DEFAULT 'devon',"
+    " ts REAL NOT NULL)"
+)
+_DDL_META = (
+    "CREATE TABLE IF NOT EXISTS entity_meta ("
+    " entity_id TEXT PRIMARY KEY,"
+    " device_class TEXT NOT NULL DEFAULT '',"
+    " unit TEXT NOT NULL DEFAULT '',"
+    " area TEXT NOT NULL DEFAULT '',"
+    " friendly_name TEXT NOT NULL DEFAULT '',"
+    " updated REAL NOT NULL)"
+)
+_DDL = ";\n".join((_DDL_STATES, _DDL_DESIRED, _DDL_META)) + ";"
 
 # Minimum days of history before rhythms are claimed.
 MIN_RHYTHM_DAYS = 7
@@ -75,26 +106,60 @@ class HomeTwin:
     the recorded history.
     """
 
-    def __init__(self, db_path: str = DEFAULT_DB, *, community: bool = False):
+    def __init__(self, db_path: str = DEFAULT_DB, *, community: bool = False,
+                 store: Any = None):
         if community:
             raise PermissionError("the home twin is owner-scoped")
         self.db_path = db_path
         self._lock = threading.Lock()
+        self._port: Any = None
+        self._db: Any = None
+        self._imported_max_state = 0
         os.makedirs(os.path.dirname(os.path.abspath(db_path)), exist_ok=True)
+        from ..storage.sidecars import sidecar_port
+
+        port = sidecar_port("digital-twin", _DDL, ("desired", "entity_meta"),
+                            db_path, store=store)
+        if port is not None:
+            desired = port.tables["desired"]
+            meta = port.tables["entity_meta"]
+
+            def write_states(rows: list[dict]) -> int:
+                for row in rows:
+                    port.put_raw("states", str(row["id"]), row)
+                    if int(row["id"]) > self._imported_max_state:
+                        self._imported_max_state = int(row["id"])
+                return len(rows)
+
+            def write_desired(rows: list[dict]) -> int:
+                for row in rows:
+                    desired.put(row)
+                return len(rows)
+
+            def write_meta(rows: list[dict]) -> int:
+                for row in rows:
+                    meta.put(row)
+                return len(rows)
+
+            def seed_counter(_counts: dict) -> None:
+                doc = port.store.get(port.meta_collection, "counters") or {}
+                if int(doc.get("states") or 0) < self._imported_max_state:
+                    port.store.put(port.meta_collection, "counters", {
+                        **doc, "states": self._imported_max_state})
+
+            port.ensure_imported(
+                {"states": write_states, "desired": write_desired,
+                 "entity_meta": write_meta},
+                after_import=seed_counter)
+            self._port = port
+            return
         self._db = sqlite3.connect(db_path, check_same_thread=False)
         # WAL: readers never block the ingest stream.
         try:
             self._db.execute("PRAGMA journal_mode=WAL")
         except Exception:  # noqa: BLE001 - WAL is a nicety
             pass
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS states ("
-            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
-            " entity_id TEXT NOT NULL,"
-            " state TEXT NOT NULL,"
-            " attributes TEXT NOT NULL DEFAULT '{}',"
-            " ts REAL NOT NULL)"
-        )
+        self._db.execute(_DDL_STATES)
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_states_entity_ts"
             " ON states (entity_id, ts)"
@@ -102,25 +167,25 @@ class HomeTwin:
         # Ditto-style desired state: what Devon WANTS the device to be.
         # Reported state (states table) vs desired state is the twin's
         # core contract — commands flow toward desired.
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS desired ("
-            " entity_id TEXT PRIMARY KEY,"
-            " state TEXT NOT NULL,"
-            " set_by TEXT NOT NULL DEFAULT 'devon',"
-            " ts REAL NOT NULL)"
-        )
+        self._db.execute(_DDL_DESIRED)
         # Entity metadata registry: device_class, unit, area — enriched
         # from HA attributes on ingest, overridable by the owner.
-        self._db.execute(
-            "CREATE TABLE IF NOT EXISTS entity_meta ("
-            " entity_id TEXT PRIMARY KEY,"
-            " device_class TEXT NOT NULL DEFAULT '',"
-            " unit TEXT NOT NULL DEFAULT '',"
-            " area TEXT NOT NULL DEFAULT '',"
-            " friendly_name TEXT NOT NULL DEFAULT '',"
-            " updated REAL NOT NULL)"
-        )
+        self._db.execute(_DDL_META)
         self._db.commit()
+
+    # ── seam read helpers ────────────────────────────────────────
+
+    def _state_rows(self, entity_id: str | None = None) -> list[dict]:
+        """All state rows on the seam rung (optionally one entity's)."""
+        if entity_id is None:
+            return self._port.find_raw("states")
+        return self._port.find_raw("states", {"entity_id": entity_id})
+
+    def _latest_state_row(self, entity_id: str) -> dict | None:
+        rows = self._state_rows(entity_id)
+        if not rows:
+            return None
+        return max(rows, key=lambda r: (r["ts"], int(r["id"])))
 
     # ── ingestion ────────────────────────────────────────────────
 
@@ -140,15 +205,24 @@ class HomeTwin:
             ts = ts if ts is not None else time.time()
             attrs = json.dumps(dict(attributes or {}))
             with self._lock:
-                row = self._db.execute(
-                    "SELECT state FROM states WHERE entity_id = ?"
-                    " ORDER BY ts DESC LIMIT 1", (eid,)).fetchone()
-                if row is not None and row[0] == st:
-                    return False  # no change — don't store duplicates
-                self._db.execute(
-                    "INSERT INTO states (entity_id, state, attributes, ts)"
-                    " VALUES (?, ?, ?, ?)", (eid, st, attrs, ts))
-                self._db.commit()
+                if self._port is not None:
+                    latest = self._latest_state_row(eid)
+                    if latest is not None and latest["state"] == st:
+                        return False  # no change — don't store duplicates
+                    new_id = self._port.next_id("states")
+                    self._port.put_raw("states", str(new_id), {
+                        "id": new_id, "entity_id": eid, "state": st,
+                        "attributes": attrs, "ts": ts})
+                else:
+                    row = self._db.execute(
+                        "SELECT state FROM states WHERE entity_id = ?"
+                        " ORDER BY ts DESC LIMIT 1", (eid,)).fetchone()
+                    if row is not None and row[0] == st:
+                        return False  # no change — don't store duplicates
+                    self._db.execute(
+                        "INSERT INTO states (entity_id, state, attributes, ts)"
+                        " VALUES (?, ?, ?, ?)", (eid, st, attrs, ts))
+                    self._db.commit()
             # Enrich the metadata registry from HA attributes (best-effort).
             try:
                 attr = dict(attributes or {})
@@ -177,6 +251,19 @@ class HomeTwin:
             if not eid:
                 return
             with self._lock:
+                if self._port is not None:
+                    table = self._port.tables["entity_meta"]
+                    cur = table.get(eid) or {}
+                    table.put({
+                        "entity_id": eid,
+                        "device_class": device_class or
+                        cur.get("device_class", ""),
+                        "unit": unit or cur.get("unit", ""),
+                        "area": area or cur.get("area", ""),
+                        "friendly_name": friendly_name or
+                        cur.get("friendly_name", ""),
+                        "updated": time.time()})
+                    return
                 self._db.execute(
                     "INSERT INTO entity_meta (entity_id, device_class,"
                     " unit, area, friendly_name, updated)"
@@ -202,6 +289,12 @@ class HomeTwin:
     def entity_meta(self, entity_id: str) -> dict:
         """Metadata for one entity ({} when unknown)."""
         eid = str(entity_id or "").strip().lower()
+        if self._port is not None:
+            row = self._port.tables["entity_meta"].get(eid)
+            if not row:
+                return {}
+            return {"device_class": row["device_class"], "unit": row["unit"],
+                    "area": row["area"], "friendly_name": row["friendly_name"]}
         with self._lock:
             row = self._db.execute(
                 "SELECT device_class, unit, area, friendly_name"
@@ -227,6 +320,13 @@ class HomeTwin:
                 return False
             st = str(state)
             with self._lock:
+                if self._port is not None:
+                    self._port.tables["desired"].put({
+                        "entity_id": eid, "state": st, "set_by": set_by,
+                        "ts": time.time()})
+                    latest = self._latest_state_row(eid)
+                    reported = latest["state"] if latest else None
+                    return reported != st
                 self._db.execute(
                     "INSERT INTO desired (entity_id, state, set_by, ts)"
                     " VALUES (?, ?, ?, ?)"
@@ -246,6 +346,11 @@ class HomeTwin:
 
     def desired_state(self) -> dict[str, dict]:
         """All desired states: {entity_id: {state, set_by, ts}}."""
+        if self._port is not None:
+            rows = self._port.tables["desired"].find()
+            return {r["entity_id"]: {"state": r["state"],
+                                     "set_by": r["set_by"], "ts": r["ts"]}
+                    for r in rows}
         with self._lock:
             rows = self._db.execute(
                 "SELECT entity_id, state, set_by, ts FROM desired").fetchall()
@@ -273,9 +378,13 @@ class HomeTwin:
     def clear_desired(self, entity_id: str) -> None:
         """Drop a desired state (device reached it or command revoked)."""
         try:
+            eid = str(entity_id or "").strip().lower()
             with self._lock:
+                if self._port is not None:
+                    self._port.tables["desired"].delete(eid)
+                    return
                 self._db.execute("DELETE FROM desired WHERE entity_id = ?",
-                                 (str(entity_id or "").strip().lower(),))
+                                 (eid,))
                 self._db.commit()
         except Exception:  # noqa: BLE001
             _log.debug("twin clear_desired failed", exc_info=True)
@@ -286,13 +395,19 @@ class HomeTwin:
               *, limit: int = 500) -> list[StateEvent]:
         """State-change history for one entity since ``since``."""
         eid = str(entity_id or "").strip().lower()
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT state, attributes, ts FROM states"
-                " WHERE entity_id = ? AND ts >= ?"
-                " ORDER BY ts ASC LIMIT ?", (eid, since, limit)).fetchall()
+        if self._port is not None:
+            rows = [r for r in self._state_rows(eid) if r["ts"] >= since]
+            rows.sort(key=lambda r: (r["ts"], int(r["id"])))
+            tuples = [(r["state"], r["attributes"], r["ts"])
+                      for r in rows[:limit]]
+        else:
+            with self._lock:
+                tuples = self._db.execute(
+                    "SELECT state, attributes, ts FROM states"
+                    " WHERE entity_id = ? AND ts >= ?"
+                    " ORDER BY ts ASC LIMIT ?", (eid, since, limit)).fetchall()
         out = []
-        for state, attrs, ts in rows:
+        for state, attrs, ts in tuples:
             try:
                 ad = json.loads(attrs)
             except Exception:  # noqa: BLE001
@@ -303,13 +418,19 @@ class HomeTwin:
 
     def changes_since(self, since: float, *, limit: int = 200) -> list[StateEvent]:
         """Everything that changed across the home since ``since``."""
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT entity_id, state, attributes, ts FROM states"
-                " WHERE ts >= ? ORDER BY ts ASC LIMIT ?",
-                (since, limit)).fetchall()
+        if self._port is not None:
+            rows = [r for r in self._state_rows() if r["ts"] >= since]
+            rows.sort(key=lambda r: (r["ts"], int(r["id"])))
+            tuples = [(r["entity_id"], r["state"], r["attributes"], r["ts"])
+                      for r in rows[:limit]]
+        else:
+            with self._lock:
+                tuples = self._db.execute(
+                    "SELECT entity_id, state, attributes, ts FROM states"
+                    " WHERE ts >= ? ORDER BY ts ASC LIMIT ?",
+                    (since, limit)).fetchall()
         out = []
-        for eid, state, attrs, ts in rows:
+        for eid, state, attrs, ts in tuples:
             try:
                 ad = json.loads(attrs)
             except Exception:  # noqa: BLE001
@@ -320,6 +441,16 @@ class HomeTwin:
 
     def current_state(self, *, now: float | None = None) -> dict[str, str]:
         """Latest known state per entity as of ``now`` — the home snapshot."""
+        if self._port is not None:
+            best: dict[str, dict] = {}
+            for r in self._state_rows():
+                if now is not None and r["ts"] > now:
+                    continue
+                cur = best.get(r["entity_id"])
+                if cur is None or (r["ts"], int(r["id"])) > \
+                        (cur["ts"], int(cur["id"])):
+                    best[r["entity_id"]] = r
+            return {eid: r["state"] for eid, r in best.items()}
         with self._lock:
             if now is None:
                 rows = self._db.execute(
@@ -332,6 +463,8 @@ class HomeTwin:
         return {eid: state for eid, state, _ in rows}
 
     def entity_ids(self) -> list[str]:
+        if self._port is not None:
+            return sorted({r["entity_id"] for r in self._state_rows()})
         with self._lock:
             rows = self._db.execute(
                 "SELECT DISTINCT entity_id FROM states").fetchall()
@@ -339,6 +472,12 @@ class HomeTwin:
 
     def history_days(self) -> float:
         """How many days of history exist (for rhythm honesty)."""
+        if self._port is not None:
+            rows = self._state_rows()
+            if not rows:
+                return 0.0
+            tss = [r["ts"] for r in rows]
+            return max(0.0, (max(tss) - min(tss)) / DAY_S)
         with self._lock:
             row = self._db.execute(
                 "SELECT MIN(ts), MAX(ts) FROM states").fetchone()
@@ -356,11 +495,16 @@ class HomeTwin:
         """
         now = now if now is not None else time.time()
         window = now - OCCUPANCY_WINDOW_S
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT entity_id, state, ts FROM states"
-                " WHERE ts >= ? ORDER BY ts DESC", (window,)).fetchall()
-        for eid, state, ts in rows:
+        if self._port is not None:
+            rows = [r for r in self._state_rows() if r["ts"] >= window]
+            rows.sort(key=lambda r: (r["ts"], int(r["id"])), reverse=True)
+            tuples = [(r["entity_id"], r["state"], r["ts"]) for r in rows]
+        else:
+            with self._lock:
+                tuples = self._db.execute(
+                    "SELECT entity_id, state, ts FROM states"
+                    " WHERE ts >= ? ORDER BY ts DESC", (window,)).fetchall()
+        for eid, state, ts in tuples:
             if eid.startswith("binary_sensor.") and state in ("on", "motion"):
                 return {"likely_home": True,
                         "basis": f"motion detected ({eid}) in the last "
@@ -401,13 +545,18 @@ class HomeTwin:
         """
         now = now if now is not None else time.time()
         day_start = now - (now % DAY_S)
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT entity_id, state, ts FROM states"
-                " WHERE ts >= ? ORDER BY entity_id, ts",
-                (day_start,)).fetchall()
+        if self._port is not None:
+            rows = [r for r in self._state_rows() if r["ts"] >= day_start]
+            rows.sort(key=lambda r: (r["entity_id"], r["ts"], int(r["id"])))
+            tuples = [(r["entity_id"], r["state"], r["ts"]) for r in rows]
+        else:
+            with self._lock:
+                tuples = self._db.execute(
+                    "SELECT entity_id, state, ts FROM states"
+                    " WHERE ts >= ? ORDER BY entity_id, ts",
+                    (day_start,)).fetchall()
         per_entity: dict[str, list[tuple[float, float]]] = {}
-        for eid, state, ts in rows:
+        for eid, state, ts in tuples:
             try:
                 per_entity.setdefault(eid, []).append((ts, float(state)))
             except (TypeError, ValueError):
@@ -476,24 +625,34 @@ class HomeTwin:
         removed. The twin keeps 90 days by default — rhythms need 7+."""
         cutoff = time.time() - keep_days * DAY_S
         with self._lock:
-            cur = self._db.execute("DELETE FROM states WHERE ts < ?",
-                                   (cutoff,))
-            removed = cur.rowcount
-            self._db.commit()
-            try:
-                self._db.execute("VACUUM")
+            if self._port is not None:
+                doomed = [r for r in self._state_rows() if r["ts"] < cutoff]
+                for r in doomed:
+                    self._port.store.delete("digital-twin__states",
+                                            str(r["id"]))
+                removed = len(doomed)
+            else:
+                cur = self._db.execute("DELETE FROM states WHERE ts < ?",
+                                       (cutoff,))
+                removed = cur.rowcount
                 self._db.commit()
-            except Exception:  # noqa: BLE001 - vacuum is a nicety
-                pass
+                try:
+                    self._db.execute("VACUUM")
+                    self._db.commit()
+                except Exception:  # noqa: BLE001 - vacuum is a nicety
+                    pass
         _log.info("twin pruned %d rows older than %.0f days",
                   removed, keep_days)
         return removed
 
     def export_json(self) -> dict:
         """Full twin export: states count, desired, metadata, rhythms."""
-        with self._lock:
-            n_states = self._db.execute(
-                "SELECT COUNT(*) FROM states").fetchone()[0]
+        if self._port is not None:
+            n_states = len(self._state_rows())
+        else:
+            with self._lock:
+                n_states = self._db.execute(
+                    "SELECT COUNT(*) FROM states").fetchone()[0]
         return {"exported_at": time.time(),
                 "history_days": round(self.history_days(), 2),
                 "state_rows": n_states,
@@ -615,6 +774,11 @@ class HomeTwin:
     def _state_set_at(self, entity_id: str, state: str,
                       now: float) -> float:
         """When the entity last entered ``state`` (≤ now)."""
+        if self._port is not None:
+            cands = [r["ts"] for r in self._state_rows(entity_id)
+                     if r["state"] == state and r["ts"] <= now]
+            latest = max(cands) if cands else None
+            return latest if latest else now
         with self._lock:
             row = self._db.execute(
                 "SELECT MAX(ts) FROM states WHERE entity_id = ?"
@@ -625,6 +789,10 @@ class HomeTwin:
     def _last_state_before(self, entity_id: str, exclude: str,
                            before: float) -> float | None:
         """Latest timestamp where the entity was NOT in ``exclude`` state."""
+        if self._port is not None:
+            cands = [r["ts"] for r in self._state_rows(entity_id)
+                     if r["state"] != exclude and r["ts"] <= before]
+            return max(cands) if cands else None
         with self._lock:
             row = self._db.execute(
                 "SELECT MAX(ts) FROM states WHERE entity_id = ?"
@@ -795,7 +963,8 @@ class HomeTwin:
 
     def close(self) -> None:
         with self._lock:
-            self._db.close()
+            if self._db is not None:
+                self._db.close()
 
 
 # ── stream wiring ────────────────────────────────────────────────

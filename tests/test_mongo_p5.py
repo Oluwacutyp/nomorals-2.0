@@ -218,7 +218,10 @@ class TestSidecarRegistry:
             "shopping-deals",
             # residue Batch 2, slice 3:
             "email-integration", "travel-whitelabel",
-            "social-whatsapp-cost", "planning-estimates"}
+            "social-whatsapp-cost", "planning-estimates",
+            # residue Batch 2, slice 4:
+            "digital-twin", "health-training", "legal-portfolio",
+            "legal-regulatory"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -2659,3 +2662,470 @@ class TestPlanningEstimatesPort:
         doc = rung.store.get("planning-estimates__estimate_stats",
                              "email")
         assert doc is not None and doc["n"] == 4
+
+
+class TestDigitalTwinPort:
+    """integrations/digital_twin.py — HomeTwin port (residue Batch 2,
+    slice 4): desired-state + entity-meta RowTables behind the
+    unchanged never-raises API; the AUTOINCREMENT states history
+    goes via put_raw with ids from the port's atomic counter,
+    seeded from the imported maximum, and the aggregate reads
+    re-express as Python rollups ordered by (ts, id)."""
+
+    def _scenario(self, twin) -> dict:
+        twin.register_entity("light.kitchen", device_class="light",
+                             area="kitchen", friendly_name="Kitchen Light")
+        # a second registration with an empty area preserves the first
+        twin.register_entity("light.kitchen", unit="bool")
+        recorded = [
+            twin.ingest("light.kitchen", "on", ts=1000.0),
+            twin.ingest("light.kitchen", "on", ts=1001.0),
+            twin.ingest("light.kitchen", "off", ts=1002.0),
+            twin.ingest("sensor.temp", "21.5", ts=1000.5),
+        ]
+        diverged = twin.set_desired("light.kitchen", "on")
+        desired = {eid: (d["state"], d["set_by"])
+                   for eid, d in twin.desired_state().items()}
+        out = {
+            "recorded": recorded,
+            "diverged": diverged,
+            "desired": desired,
+            "current": twin.current_state(),
+            "query": [(e.state, e.ts)
+                      for e in twin.query("light.kitchen", 0.0)],
+            "ids": twin.entity_ids(),
+            "meta": twin.entity_meta("light.kitchen"),
+            "history_days": round(twin.history_days(), 8),
+        }
+        twin.clear_desired("light.kitchen")
+        out["desired_after_clear"] = twin.desired_state()
+        return out
+
+    def test_scenario_matches_across_rungs(self, rung, tmp_path):
+        from nomorals.integrations.digital_twin import HomeTwin
+
+        twin = HomeTwin(str(tmp_path / "twin.db"), store=rung.store)
+        try:
+            assert self._scenario(twin) == {
+                "recorded": [True, False, True, True],
+                "diverged": True,
+                "desired": {"light.kitchen": ("on", "devon")},
+                "current": {"light.kitchen": "off",
+                            "sensor.temp": "21.5"},
+                "query": [("on", 1000.0), ("off", 1002.0)],
+                "ids": ["light.kitchen", "sensor.temp"],
+                "meta": {"device_class": "light", "unit": "bool",
+                         "area": "kitchen",
+                         "friendly_name": "Kitchen Light"},
+                "history_days": round(2.0 / 86400.0, 8),
+                "desired_after_clear": {},
+            }
+        finally:
+            twin.close()
+
+    def test_lazy_import_and_state_counter_continuity(self, rung,
+                                                      tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.integrations.digital_twin import HomeTwin
+
+        path = str(tmp_path / "twin.db")
+        native = HomeTwin(path)
+        native.ingest("light.kitchen", "on", ts=1000.0)
+        native.ingest("light.kitchen", "off", ts=1002.0)
+        native.register_entity("light.kitchen", area="kitchen")
+        native.set_desired("light.kitchen", "on")
+        native.close()
+
+        seam = HomeTwin(path, store=rung.store)
+        try:
+            assert seam.current_state() == {"light.kitchen": "off"}
+            assert seam.entity_meta("light.kitchen")["area"] == "kitchen"
+            assert seam.ingest("light.kitchen", "on", ts=1003.0) is True
+            docs = rung.store.find("digital-twin__states")
+            assert sorted(d["_id"] for d in docs) == ["1", "2", "3"]
+            assert rung.store.count("digital-twin__desired") == 1
+            assert rung.store.count("digital-twin__entity_meta") == 1
+        finally:
+            seam.close()
+        # a second construction adopts — never re-imports
+        again = HomeTwin(path, store=rung.store)
+        try:
+            assert again.current_state() == {"light.kitchen": "on"}
+            assert rung.store.count("digital-twin__states") == 3
+        finally:
+            again.close()
+
+    def test_seam_shape(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.integrations.digital_twin import HomeTwin
+
+        twin = HomeTwin(str(tmp_path / "twin.db"), store=rung.store)
+        try:
+            self._scenario(twin)
+        finally:
+            twin.close()
+        assert rung.store.count("digital-twin__states") == 3
+        # ingest auto-registers metadata for sensor.temp too
+        assert rung.store.count("digital-twin__entity_meta") == 2
+        # the desired row was cleared by the scenario
+        assert rung.store.count("digital-twin__desired") == 0
+        doc = rung.store.get("digital-twin__entity_meta", "light.kitchen")
+        assert doc is not None and doc["_id"] == "light.kitchen"
+
+
+class TestTrainingCoachPort:
+    """health/training.py — TrainingCoach port (residue Batch 2,
+    slice 4): plans + workout_log RowTables behind the unchanged
+    API; the AUTOINCREMENT set_feedback children of log rows go
+    via put_raw with ids from the port's atomic counter, seeded
+    from the imported maximum."""
+
+    def _scenario(self, coach) -> dict:
+        from nomorals.health.training import Exercise, Workout
+
+        plan = coach.new_plan("strength", "full", 4)
+        push = Workout(
+            date="2026-11-09", kind="push", plan_id=plan.id,
+            exercises=[Exercise(key="bench", name="Bench Press", sets=4,
+                                reps="8", rest_secs=90, intensity="hard",
+                                load="60")])
+        legs = Workout(
+            date="2026-11-10", kind="legs", plan_id=plan.id,
+            exercises=[Exercise(key="squat", name="Squat", sets=5,
+                                reps="5", rest_secs=120, intensity="hard",
+                                load="80")])
+        logged = [
+            coach.log_workout(push, completed=True, rpe=7,
+                              loads={"bench": "60"},
+                              set_rpes={"bench": 7}),
+            coach.log_workout(legs, completed=True, rpe=8,
+                              loads={"squat": "80"},
+                              set_rpes={"squat": 8}),
+        ]
+        got = coach.get_plan(plan.id)
+        latest = coach.latest_plan()
+        return {
+            "logged": logged,
+            "plan_goal": got.goal if got else None,
+            "plan_weeks": got.weeks if got else None,
+            "latest_is_plan": latest is not None
+            and latest.id == plan.id,
+            "history": [(h["date"], h["kind"], h["completed"])
+                        for h in coach.history(3650)],
+            "prs": [(p.exercise_key, p.date)
+                    for p in coach.personal_records()],
+            "advice_known": not coach.progression_advice(
+                "bench").startswith("no RPE history"),
+        }
+
+    def test_scenario_matches_across_rungs(self, rung, tmp_path):
+        from nomorals.health.training import TrainingCoach
+
+        coach = TrainingCoach(str(tmp_path / "training.db"),
+                              store=rung.store)
+        assert self._scenario(coach) == {
+            "logged": [True, True],
+            "plan_goal": "strength",
+            "plan_weeks": 4,
+            "latest_is_plan": True,
+            "history": [("2026-11-10", "legs", 1),
+                        ("2026-11-09", "push", 1)],
+            "prs": [("squat", "2026-11-10"), ("bench", "2026-11-09")],
+            "advice_known": True,
+        }
+
+    def test_lazy_import_and_feedback_counter_continuity(self, rung,
+                                                         tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.health.training import Exercise, TrainingCoach, Workout
+
+        path = str(tmp_path / "training.db")
+        native = TrainingCoach(path)
+        w = Workout(
+            date="2026-11-09", kind="push",
+            exercises=[Exercise(key="bench", name="Bench Press", sets=4,
+                                reps="8", rest_secs=90, intensity="hard",
+                                load="60")])
+        assert native.log_workout(w, completed=True, rpe=7,
+                                  loads={"bench": "60"},
+                                  set_rpes={"bench": 7}) is True
+
+        seam = TrainingCoach(path, store=rung.store)
+        assert [(h["date"], h["kind"]) for h in seam.history(3650)] == [
+            ("2026-11-09", "push")]
+        assert seam.log_workout(w, completed=True, rpe=7,
+                                loads={"bench": "60"},
+                                set_rpes={"bench": 6}) is True
+        docs = rung.store.find("health-training__set_feedback")
+        assert sorted(d["_id"] for d in docs) == ["1", "2"]
+        # a second construction adopts — never re-imports, and the
+        # counter continues past the imported maximum
+        again = TrainingCoach(path, store=rung.store)
+        assert again.log_workout(w, completed=True, rpe=7,
+                                 loads={"bench": "60"},
+                                 set_rpes={"bench": 6}) is True
+        docs = rung.store.find("health-training__set_feedback")
+        assert sorted(d["_id"] for d in docs) == ["1", "2", "3"]
+
+    def test_seam_shape(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.health.training import TrainingCoach
+
+        coach = TrainingCoach(str(tmp_path / "training.db"),
+                              store=rung.store)
+        assert self._scenario(coach)["logged"] == [True, True]
+        assert rung.store.count("health-training__plans") == 1
+        assert rung.store.count("health-training__workout_log") == 2
+        assert rung.store.count("health-training__set_feedback") == 2
+        plan_doc = rung.store.find("health-training__plans")[0]
+        assert plan_doc["_id"].startswith("plan_")
+
+
+class TestLegalPortfolioPort:
+    """legal/portfolio.py — ContractPortfolio port (residue Batch 2,
+    slice 4): contracts + obligations RowTables, and sla_terms
+    keeping its composite (contract_id, metric) primary key —
+    the seam mapping joins composite keys natively; the breach
+    update is a find + merged put. The seam DDL carries the final
+    shape the native path reaches via _migrate's ALTERs."""
+
+    _TEXT = (
+        "TENANCY AGREEMENT. This agreement commences on 1 January "
+        "2027 and the term is for a period of 12 months. The annual "
+        "rent is ₦500,000 payable yearly. The tenant shall give "
+        "notice in writing at least by 1 November 2027 to "
+        "terminate. A service charge of ₦50,000 applies.")
+
+    def _scenario(self, pf) -> dict:
+        result = pf.add_raw(self._TEXT, name="Tenancy")
+        contract, _review = result
+        cid = contract.id
+        extracted = pf.obligations(cid)
+        pending = pf.unconfirmed_obligations()
+        confirmed_one = pf.confirm_obligation(pending[0].id) if pending \
+            else False
+        oid = pf.track_obligation(cid, "Pay service charge",
+                                  1812000000.0)
+        sla_ok = pf.track_sla(cid, "uptime", "99.9%")
+        breach_ok = pf.report_sla_breach(cid, "uptime", "missed in May")
+        breach_missing = pf.report_sla_breach(cid, "latency", "n/a")
+        return {
+            "name": contract.name,
+            "annual_value": contract.annual_value,
+            "value": pf.portfolio_value(),
+            "extracted_kinds": sorted(o.kind for o in extracted),
+            "pending_before": len(pending),
+            "confirmed_one": confirmed_one,
+            "pending_after": len(pf.unconfirmed_obligations()),
+            "tracked": oid is not None,
+            "done_ok": pf.mark_done(oid) if oid else False,
+            "done_missing": pf.mark_done("obl_nope"),
+            "open_after_done": len(pf.obligations(cid)),
+            "sla_ok": sla_ok,
+            "breach_ok": breach_ok,
+            "breach_missing": breach_missing,
+            "sla": [(s.metric, s.breached) for s in pf.sla_status(cid)],
+            "search": [c.id == cid for c, _s in
+                       pf.search_contracts("service charge")],
+            "contracts": [c.name for c in pf.list_contracts()],
+        }
+
+    def test_scenario_matches_across_rungs(self, rung, tmp_path):
+        from nomorals.legal.portfolio import ContractPortfolio
+
+        pf = ContractPortfolio(str(tmp_path / "portfolio.db"),
+                               store=rung.store)
+        assert self._scenario(pf) == {
+            "name": "Tenancy",
+            "annual_value": 500000.0,
+            "value": 500000.0,
+            "extracted_kinds": ["commencement", "expiry", "notice"],
+            "pending_before": 3,
+            "confirmed_one": True,
+            "pending_after": 2,
+            "tracked": True,
+            "done_ok": True,
+            "done_missing": False,
+            "open_after_done": 3,
+            "sla_ok": True,
+            "breach_ok": True,
+            "breach_missing": False,
+            "sla": [("uptime", True)],
+            "search": [True],
+            "contracts": ["Tenancy"],
+        }
+
+    def test_lazy_import_adopts_rows(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.legal.portfolio import ContractPortfolio
+
+        path = str(tmp_path / "portfolio.db")
+        native = ContractPortfolio(path)
+        result = native.add_raw(self._TEXT, name="Tenancy")
+        assert result is not None
+        cid = result[0].id
+        assert native.track_sla(cid, "uptime", "99.9%") is True
+
+        seam = ContractPortfolio(path, store=rung.store)
+        got = seam.get_contract(cid)
+        assert got is not None and got.name == "Tenancy"
+        assert seam.portfolio_value() == 500000.0
+        assert [(s.metric, s.breached) for s in seam.sla_status(cid)] \
+            == [("uptime", False)]
+        assert rung.store.count("legal-portfolio__contracts") == 1
+        assert rung.store.count("legal-portfolio__sla_terms") == 1
+        again = ContractPortfolio(path, store=rung.store)
+        assert again.get_contract(cid).name == "Tenancy"
+        assert rung.store.count("legal-portfolio__contracts") == 1
+
+    def test_seam_shape(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.legal.portfolio import ContractPortfolio
+
+        pf = ContractPortfolio(str(tmp_path / "portfolio.db"),
+                               store=rung.store)
+        out = self._scenario(pf)
+        assert out["name"] == "Tenancy"
+        assert rung.store.count("legal-portfolio__contracts") == 1
+        assert rung.store.count("legal-portfolio__obligations") == 4
+        assert rung.store.count("legal-portfolio__sla_terms") == 1
+        doc = rung.store.find("legal-portfolio__sla_terms")[0]
+        # the composite (contract_id, metric) key, joined natively
+        assert doc["_id"].endswith("uptime")
+        assert doc["breached"] == 1
+
+
+class TestRegulatoryWatchPort:
+    """legal/regulatory.py — RegulatoryWatch port (residue Batch 2,
+    slice 4): watches + items RowTables behind the unchanged
+    never-raises API; the seen-state dedup registry is get-by-key
+    with insert-ignore on first sight and digest updates on
+    change. The degraded :memory: fallback stays native-only."""
+
+    _T0 = 1800000000.0  # fixed clock for the effective-date window
+
+    def _item(self, **kw):
+        from nomorals.legal.regulatory import RegulatoryItem
+
+        base = dict(id="note-1", regulator="CBN",
+                    title="New payments circular",
+                    summary="CBN updates payments rules.",
+                    source_url="https://www.cbn.gov.ng",
+                    published=100.0,
+                    effective_date=self._T0 + 10 * 86400,
+                    urgency="normal")
+        base.update(kw)
+        return RegulatoryItem(**base)
+
+    def _scenario(self, rw) -> dict:
+        w = rw.watch("CBN", topics=["payments"])
+        alias = rw.watch("ndpc")
+        first = rw.note_item(self._item())
+        again = rw.note_item(self._item())
+        changed_item = self._item(title="New payments circular v2")
+        changed = rw.note_item(changed_item)
+
+        def fetcher(_reg):
+            return [{"id": "chk-1", "regulator": "CBN",
+                     "title": "Fresh payments rule",
+                     "summary": "A new payments rule lands.",
+                     "source_url": "https://www.cbn.gov.ng",
+                     "published": 50.0}]
+
+        seen_first = [i.id for i in rw.check(fetcher=fetcher)]
+        seen_second = [i.id for i in rw.check(fetcher=fetcher)]
+        dismissed = rw.dismiss("chk-1")
+        seen_third = [i.id for i in rw.check(fetcher=fetcher)]
+        out = {
+            "watch": (w.regulator, w.topics) if w else None,
+            "alias": alias.regulator if alias else None,
+            "bad_regulator": rw.watch("NOPE") is None,
+            "note_first": first,
+            "note_again": again,
+            "note_changed": changed,
+            "changed_flag": changed_item.updated,
+            "seen_first": seen_first,
+            "seen_second": seen_second,
+            "dismissed": dismissed,
+            "seen_third": seen_third,
+            "watches": sorted((x.regulator, tuple(x.topics))
+                              for x in rw.list_watches()),
+            "upcoming": [i.id for i in rw.upcoming_effective(
+                days=90, now=self._T0)],
+            "upcoming_far": [i.id for i in rw.upcoming_effective(
+                days=5, now=self._T0)],
+            "unwatch": rw.unwatch(alias.id) if alias else False,
+            "unwatch_again": rw.unwatch("reg_nope"),
+        }
+        return out
+
+    def test_scenario_matches_across_rungs(self, rung, tmp_path):
+        from nomorals.legal.regulatory import RegulatoryWatch
+
+        rw = RegulatoryWatch(str(tmp_path / "regulatory.db"),
+                             store=rung.store)
+        assert self._scenario(rw) == {
+            "watch": ("CBN", ["payments"]),
+            "alias": "NDPA",
+            "bad_regulator": True,
+            "note_first": True,
+            "note_again": False,
+            "note_changed": True,
+            "changed_flag": True,
+            "seen_first": ["chk-1"],
+            "seen_second": [],
+            "dismissed": True,
+            "seen_third": [],
+            "watches": [("CBN", ("payments",)), ("NDPA", ())],
+            "upcoming": ["note-1"],
+            "upcoming_far": [],
+            "unwatch": True,
+            "unwatch_again": False,
+        }
+
+    def test_lazy_import_adopts_rows(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.legal.regulatory import RegulatoryWatch
+
+        path = str(tmp_path / "regulatory.db")
+        native = RegulatoryWatch(path)
+        w = native.watch("SEC", topics=["crypto"])
+        assert w is not None
+        assert native.note_item(self._item(
+            id="sec-1", regulator="SEC",
+            title="SEC digital asset rules")) is True
+
+        seam = RegulatoryWatch(path, store=rung.store)
+        assert [(x.regulator, tuple(x.topics))
+                for x in seam.list_watches()] == [("SEC", ("crypto",))]
+        assert [i.id for i in seam.upcoming_effective(
+            days=90, now=self._T0)] == ["sec-1"]
+        assert rung.store.count("legal-regulatory__reg_watches") == 1
+        assert rung.store.count("legal-regulatory__reg_seen") == 1
+        assert rung.store.count("legal-regulatory__reg_items") == 1
+        again = RegulatoryWatch(path, store=rung.store)
+        assert len(again.list_watches()) == 1
+        assert rung.store.count("legal-regulatory__reg_watches") == 1
+
+    def test_seam_shape(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.legal.regulatory import RegulatoryWatch
+
+        rw = RegulatoryWatch(str(tmp_path / "regulatory.db"),
+                             store=rung.store)
+        out = self._scenario(rw)
+        assert out["note_first"] is True
+        # the alias watch was unwatched by the scenario
+        assert rung.store.count("legal-regulatory__reg_watches") == 1
+        assert rung.store.count("legal-regulatory__reg_items") == 1
+        seen = rung.store.get("legal-regulatory__reg_seen", "chk-1")
+        assert seen is not None and seen["_id"] == "chk-1"
+        assert seen["dismissed"] == 1
