@@ -1,31 +1,29 @@
-"""D1 remainder — the decoder's decompressed-size cap.
+"""D1 decompression guard — the reworked shape (owner correction
+2026-11-10: a fixed output ceiling is a limitation, not a guard).
 
 The decoder quarantine exists to be the safe place to open
-untrusted data, but its compressed-stream decoders (gzip/zlib,
-bzip2, xz) used to decompress with NO output cap: a ≤2 MB input
-expands ~1000:1, so one pasted blob was a multi-GB in-memory
-expansion.  Pins:
+untrusted data.  Its compressed-stream decoders (gzip/zlib, bzip2,
+xz) used to decompress with NO output cap at all, then (02df4f91)
+under a fixed 256 MiB in-memory ceiling.  The shipped shape now:
 
-* a real crafted bomb (highly compressible zeros) is refused
-  MID-STREAM — the recorded total when it trips is above the cap
-  but far below the full decompressed size — with the refusal on
-  the report naming the format, the cap, and the size reached;
-  no partial output survives anywhere (no hit, nothing
-  quarantined);
-* a legitimate stream just under the cap — and one exactly AT
-  the cap — extracts completely and byte-identically to the
-  uncapped one-shot stdlib calls;
-* the cap binds the TOTAL across a whole run: concatenated
-  bzip2/xz streams that are each under the cap trip it together
-  (a per-entry cap is the classic bypass and is not what ships);
-* an incompressible control (ratio ~1:1) decodes fine — the cap
+* output STREAMS — RAM up to MATERIALIZE_LIMIT, then a staging
+  file on disk — so a legitimate expansion of any size decodes
+  COMPLETELY (proven at ~600 MB and >1 GB in
+  test_d1921d1_decoder_rework.py);
+* there is NO fixed byte ceiling by default: a stream stops only
+  at the owner's own ceiling (NM_DECODER_MAX_DECOMPRESSED_BYTES,
+  when he sets it) or at the staging volume's free-disk reserve
+  floor — each stop a refusal on the report naming the limit kind,
+  the effective cap, and the size reached, with nothing partial
+  surviving anywhere;
+* the ceiling, when set, binds the TOTAL across a whole run:
+  concatenated bzip2/xz streams that are each under it trip it
+  together (a per-entry cap is the classic bypass);
+* an incompressible control (ratio ~1:1) decodes fine — the guard
   counts decompressed BYTES, not ratio;
 * invalid/truncated streams stay plain no-hits with NO refusal
   (invalid is not capped, and a refusal is never an error
-  swallowed as success);
-* the cap is a named constant with the owner's
-  ``NM_DECODER_MAX_DECOMPRESSED_BYTES`` override, stated in the
-  decoder's limits record like every other D1 limit.
+  swallowed as success).
 
 Hermetic: fixtures are generated in-process; the compressed
 forms stay kilobytes on disk no matter how large they expand.
@@ -45,13 +43,15 @@ from typing import Any
 from unittest import mock
 
 from nomorals.core.decoder import (
-    MAX_DECOMPRESSED_BYTES,
+    MATERIALIZE_LIMIT,
+    MIN_FREE_DISK_BYTES,
     DecompressionCapExceeded,
     analyze,
-    max_decompressed_bytes,
+    min_free_disk_bytes,
+    owner_ceiling_bytes,
 )
 
-CAP = 1_048_576  # the test-lowered cap (1 MiB)
+CAP = 1_048_576  # the test-lowered owner ceiling (1 MiB)
 CHUNK = 1 << 20  # the pump's output chunk: reached <= cap + one chunk
 
 
@@ -94,46 +94,64 @@ def _as_bytes(out: Any) -> bytes:
     return out.encode() if isinstance(out, str) else bytes(out)
 
 
-# ─────────────────────── cap resolution ────────────────────────
+# ─────────────────── ceiling resolution ────────────────────────
 
-class CapResolutionTests(unittest.TestCase):
-    def test_default_is_the_named_constant(self) -> None:
+class CeilingResolutionTests(unittest.TestCase):
+    def test_default_is_no_fixed_ceiling(self) -> None:
+        # the rework's core fact: unset, there is NO builder-picked
+        # byte ceiling — output is bounded by the disk reserve.
         with _no_cap_env():
-            self.assertEqual(max_decompressed_bytes(),
-                             MAX_DECOMPRESSED_BYTES)
+            self.assertIsNone(owner_ceiling_bytes())
 
-    def test_default_leaves_the_d1_bomb_fixture_headroom(self) -> None:
+    def test_disk_floor_default_is_the_named_constant(self) -> None:
+        with mock.patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(min_free_disk_bytes(), MIN_FREE_DISK_BYTES)
+
+    def test_default_decodes_the_d1_bomb_fixture_size(self) -> None:
         # the shipped D1 fixture decodes a 5,000,000-byte gzip in
-        # full; the default cap must sit well above honest fixtures
-        self.assertGreater(MAX_DECOMPRESSED_BYTES, 5_000_000)
+        # full; the default shape has no ceiling below it (or at
+        # any other size) — it decodes, full stop.
+        payload = b"fixture " * (5_000_000 // 8)
+        with _no_cap_env():
+            report = analyze(_gzip_bytes(payload))
+        found = _hits(report, "gzip")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(len(_as_bytes(found[0].output)), 5_000_000)
+        self.assertEqual(report.refusals, [])
 
     def test_env_override_is_respected(self) -> None:
         with _cap_env():
-            self.assertEqual(max_decompressed_bytes(), CAP)
+            self.assertEqual(owner_ceiling_bytes(), CAP)
 
-    def test_bad_env_values_fall_back_never_unlimited(self) -> None:
+    def test_bad_env_values_set_no_ceiling(self) -> None:
+        # an unparsable owner setting must not INVENT a ceiling the
+        # owner never chose; the disk reserve still binds output.
         for bad in ("abc", "0", "-7", "", "1.5"):
             with mock.patch.dict(
                     os.environ,
                     {"NM_DECODER_MAX_DECOMPRESSED_BYTES": bad}):
-                self.assertEqual(max_decompressed_bytes(),
-                                 MAX_DECOMPRESSED_BYTES, bad)
+                self.assertIsNone(owner_ceiling_bytes(), bad)
 
-    def test_limits_record_states_the_cap(self) -> None:
+    def test_limits_record_states_the_shape(self) -> None:
         from nomorals.tools.decoder import decoder_limits
 
         with _cap_env():
             limits = decoder_limits()
         self.assertEqual(limits["max_decompressed_bytes"], CAP)
-        self.assertIn("decompressed output capped at 1,048,576 "
+        self.assertIn("decompressed output is capped at 1,048,576 "
                       "bytes", limits["text"])
         self.assertIn("never silently truncated", limits["text"])
         with _no_cap_env():
-            self.assertEqual(decoder_limits()["max_decompressed_bytes"],
-                             MAX_DECOMPRESSED_BYTES)
+            limits = decoder_limits()
+        self.assertIsNone(limits["max_decompressed_bytes"])
+        self.assertIn("no fixed byte ceiling", limits["text"])
+        self.assertEqual(limits["min_free_disk_bytes"],
+                         MIN_FREE_DISK_BYTES)
+        self.assertEqual(limits["max_materialized_input_bytes"],
+                         MATERIALIZE_LIMIT)
 
 
-# ─────────────────────── bomb refusals ─────────────────────────
+# ─────────────────────── bomb refusals (owner ceiling) ─────────
 
 class BombRefusalTests(unittest.TestCase):
     def _assert_refusal(self, report: Any, *, fmt: str, decoder: str,
@@ -142,6 +160,7 @@ class BombRefusalTests(unittest.TestCase):
         self.assertEqual(len(report.refusals), 1)
         refusal = report.refusals[0]
         self.assertEqual(refusal["reason"], "decompressed-size-cap")
+        self.assertEqual(refusal["limit_kind"], "owner-ceiling")
         self.assertEqual(refusal["format"], fmt)
         self.assertEqual(refusal["decoder"], decoder)
         self.assertEqual(refusal["cap_bytes"], CAP)
@@ -195,13 +214,14 @@ class BombRefusalTests(unittest.TestCase):
                              full_size=4 * CAP)
 
     def test_direct_decoder_call_is_capped_too(self) -> None:
-        # the cap binds the seam itself, not just analyze(): a
+        # the ceiling binds the seam itself, not just analyze(): a
         # standalone try_bytes on a bomb raises the typed refusal
         from nomorals.core.decoder import _GzipDecoder
 
         with _cap_env(), self.assertRaises(DecompressionCapExceeded) as cm:
             _GzipDecoder().try_bytes(_gzip_zeros(4 * CAP))
         self.assertEqual(cm.exception.cap_bytes, CAP)
+        self.assertEqual(cm.exception.kind, "owner-ceiling")
         self.assertGreater(cm.exception.reached_bytes, CAP)
 
     def test_summary_names_the_refusal(self) -> None:
@@ -252,8 +272,8 @@ class BombRefusalTests(unittest.TestCase):
 # ─────────────────── shared total across streams ───────────────
 
 class SharedTotalTests(unittest.TestCase):
-    """Each member under the cap, the TOTAL over it: the cap is
-    shared across every stream one run decompresses."""
+    """Each member under the ceiling, the TOTAL over it: the limit
+    is shared across every stream one run decompresses."""
 
     def test_bz2_streams_trip_the_shared_total(self) -> None:
         part = bz2.compress(b"B" * 700_000)  # 700k < CAP alone
@@ -313,7 +333,7 @@ class LegitExtractionTests(unittest.TestCase):
                 self.assertEqual(_as_bytes(found[0].output), payload)
                 self.assertEqual(report.refusals, [])
 
-    def test_stream_just_under_the_cap_extracts_completely(self) -> None:
+    def test_stream_just_under_the_ceiling_extracts_completely(self) -> None:
         payload = b"word " * ((CAP - 5_000) // 5)
         with _cap_env():
             report = analyze(_gzip_bytes(payload))
@@ -322,7 +342,7 @@ class LegitExtractionTests(unittest.TestCase):
         self.assertEqual(_as_bytes(found[0].output), payload)
         self.assertEqual(report.refusals, [])
 
-    def test_stream_exactly_at_the_cap_extracts_completely(self) -> None:
+    def test_stream_exactly_at_the_ceiling_extracts_completely(self) -> None:
         payload = b"abcd" * (CAP // 4)  # exactly CAP bytes out
         with _cap_env():
             report = analyze(_gzip_bytes(payload))
@@ -332,7 +352,7 @@ class LegitExtractionTests(unittest.TestCase):
         self.assertEqual(report.refusals, [])
 
     def test_incompressible_control_decodes(self) -> None:
-        # ratio ~1:1 — the cap counts decompressed bytes, not the
+        # ratio ~1:1 — the guard counts decompressed bytes, not the
         # compression ratio, so honest dense data passes untouched
         payload = os.urandom(CAP // 2)
         with _cap_env():
@@ -342,7 +362,7 @@ class LegitExtractionTests(unittest.TestCase):
         self.assertEqual(_as_bytes(found[0].output), payload)
         self.assertEqual(report.refusals, [])
 
-    def test_multi_stream_bz2_under_cap_sums_like_uncapped(self) -> None:
+    def test_multi_stream_bz2_under_ceiling_sums_like_uncapped(self) -> None:
         blob = bz2.compress(b"one ") + bz2.compress(b"two")
         with _cap_env():
             report = analyze(blob)
@@ -353,7 +373,7 @@ class LegitExtractionTests(unittest.TestCase):
 
     def test_gzip_multi_member_keeps_shipped_semantics(self) -> None:
         # the shipped gzip path is a zlib call: it reads the FIRST
-        # member and ignores the rest.  The cap does not change
+        # member and ignores the rest.  The rework does not change
         # success-path semantics — output stays byte-identical to
         # that uncapped call.
         blob = _gzip_bytes(b"G" * 600_000) + _gzip_bytes(b"H" * 600_000)
@@ -365,7 +385,7 @@ class LegitExtractionTests(unittest.TestCase):
                          zlib.decompress(blob, 31))
         self.assertEqual(report.refusals, [])
 
-    def test_nested_chain_lands_on_the_capped_seam(self) -> None:
+    def test_nested_chain_lands_on_the_guarded_seam(self) -> None:
         # the engine's real nesting (the D1 fixture pattern): a
         # gzip wrapping a gzip bomb.  The outer stage decodes to
         # the inner stream's bytes; the stage that would actually

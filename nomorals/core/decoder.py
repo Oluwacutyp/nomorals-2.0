@@ -17,12 +17,16 @@ A modular, extensible analysis + decoding engine for strings and bytes:
 * **Structure** — JSON, YAML (when available), CSV/TSV detection,
   key=value, INI, MIME (part parsing + base64 bodies), PEM (type +
   payload), gzip/zlib byte streams, file magic identification.
-* **Compression cap** — the compressed-stream decoders (gzip/zlib,
-  bzip2, xz) decompress incrementally under a hard cap on the TOTAL
-  decompressed bytes one analysis may produce
-  (``MAX_DECOMPRESSED_BYTES``); a stream that crosses it is refused
-  whole and the refusal is recorded on the report — never silently
-  truncated, never partially decoded.
+* **Compression guard** — the compressed-stream decoders (gzip/zlib,
+  bzip2, xz) decompress incrementally, spooling output to a staging
+  file on disk once it outgrows a bounded in-memory window, so RAM
+  stays flat no matter how large the expansion.  There is NO fixed
+  ceiling on decompressed size: a stream stops only at the owner's
+  own ceiling (``NM_DECODER_MAX_DECOMPRESSED_BYTES``, when set) or
+  when free disk on the staging volume would fall below a reserve
+  floor (``MIN_FREE_DISK_BYTES``).  A stop is refused whole and the
+  refusal is recorded on the report with the numbers — never
+  silently truncated, never partially decoded.
 * **Forensics** — Shannon entropy, printable-ratio, charset detection
   (BOM / utf-8 / utf-16 / ascii), UUID detection, Luhn (card-shaped
   number) detection.
@@ -42,6 +46,7 @@ from __future__ import annotations
 import base64
 import binascii
 import codecs
+import contextlib
 import contextvars
 import hashlib
 import html
@@ -50,11 +55,14 @@ import json
 import math
 import os
 import re
+import shutil
 import struct
 import time
 import zlib
 from collections import Counter
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 __all__ = [
@@ -62,14 +70,22 @@ __all__ = [
     "DecoderHit",
     "DecodeReport",
     "DECODERS",
-    "MAX_DECOMPRESSED_BYTES",
+    "MATERIALIZE_LIMIT",
+    "MIN_FREE_DISK_BYTES",
+    "QUARANTINE_BUDGET_BYTES",
     "DecompressionCapExceeded",
+    "StagedOutput",
     "analyze",
+    "analyze_path",
     "decode_any",
+    "decompression_run",
     "identify_hash",
     "known_hash_lookup",
     "identify_magic",
-    "max_decompressed_bytes",
+    "min_free_disk_bytes",
+    "owner_ceiling_bytes",
+    "quarantine_budget_bytes",
+    "staging_dir",
     "shannon_entropy",
     "register_decoder",
     "TOKEN_PATTERNS",
@@ -90,7 +106,9 @@ class DecoderHit:
 
     def to_dict(self) -> dict[str, Any]:
         out: Any = self.output
-        if isinstance(out, (bytes, bytearray)):
+        if isinstance(out, StagedOutput):
+            out = out.to_dict()
+        elif isinstance(out, (bytes, bytearray)):
             out = {
                 "bytes": len(out),
                 "hex_head": bytes(out)[:64].hex(),
@@ -118,14 +136,20 @@ class DecodeReport:
     tokens: list[dict[str, str]] = field(default_factory=list)
     cookies: list[dict[str, Any]] = field(default_factory=list)
     jwt: dict[str, Any] | None = None
-    #: decompression refusals (compressed streams that crossed the
-    #: decompressed-bytes cap): each names the format, the cap, and
-    #: the running total at the moment it tripped.
+    #: decompression refusals (compressed streams that stopped at
+    #: the owner's decompressed-bytes ceiling or at the staging
+    #: volume's free-disk reserve floor): each names the limit kind,
+    #: the format, the effective cap, and the running total at the
+    #: moment it tripped.
     refusals: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         best = self.best
         if best is not None and isinstance(
+                best.get("output"), StagedOutput):
+            best = dict(best)
+            best["output"] = best["output"].to_dict()
+        elif best is not None and isinstance(
                 best.get("output"), (bytes, bytearray)):
             raw = bytes(best["output"])
             best = dict(best)
@@ -1340,156 +1364,680 @@ class _LuhnDecoder(Decoder):
             data_type="structured")
 
 
-# ─────────────────── decompressed-size cap (D1 remainder) ─────────────────
-#: Hard cap on the TOTAL decompressed bytes the compressed-stream
-#: decoders (gzip/zlib, bzip2, xz) may produce during one analysis.
-#: The decoder's inputs are capped at 2,000,000 bytes, but a deflate
-#: stream expands up to ~1000:1 — an uncapped ``zlib.decompress`` of
-#: a 2 MB input is a ~2 GB in-memory expansion (a zip bomb) inside
-#: the one engine whose whole job is opening untrusted data.  The
-#: cap binds the running TOTAL across every stream and concatenated
-#: member one run decompresses — never a per-stream allowance, which
-#: is the classic bypass.  256 MiB is ~128x the largest input the
-#: decoder can be handed and ~50x the largest legitimate fixture in
-#: the tree (a 5 MB text stream); honest documents and media the
-#: decoder actually meets (compressed JSON/text/blobs, ratios of
-#: ~3–10:1 off a ≤2 MB input) sit far below it, while a bomb's
-#: expansion is stopped after at most the cap plus one pump chunk.
-MAX_DECOMPRESSED_BYTES = 268_435_456  # 256 MiB
+# ─────────────────── decompression guard (D1 rework) ────────────────────
+# The guard's shape (owner correction 2026-11-10: a fixed output
+# ceiling is a limitation, not a guard): decompressed output STREAMS
+# — held in RAM only up to MATERIALIZE_LIMIT, then spooled to a
+# staging file in the decoder's staging area — so RAM stays bounded
+# by the pump chunk no matter how large the expansion, and the ONLY
+# stops are genuine resource walls, each named with its numbers:
+#
+# * the owner's own ceiling — ``NM_DECODER_MAX_DECOMPRESSED_BYTES``
+#   when he sets it (his word outranks the default shape; unset,
+#   unparsable or non-positive means NO fixed byte ceiling);
+# * the staging volume's disk — output may grow while free space
+#   stays above the reserve floor ``MIN_FREE_DISK_BYTES`` (a decode
+#   must never fill the disk out from under the rest of the system).
+#
+# The budget binds the running TOTAL across every stream and
+# concatenated member one run decompresses — never a per-stream
+# allowance, which is the classic bypass.  A stop is a refusal on
+# the report naming the limit kind, the format, the effective cap
+# and the total reached; the partial output is discarded — never a
+# truncated decode presented as complete, never anything partial
+# quarantined.  Corrupt/truncated streams stay plain no-hits.
+
+#: How much of anything the decoder materializes in RAM: one input
+#: for the string engine, or one stream's decompressed output before
+#: it spools to a staging file.  32 MiB is ~16x the largest input the
+#: decoder was historically handed and ~6x the largest legitimate
+#: fixture in the tree, while staying trivial against even a 2 GB
+#: host; beyond it, data flows through disk instead of memory.
+MATERIALIZE_LIMIT = 33_554_432  # 32 MiB
+
+#: Reserve floor for the staging volume: decompression stops before
+#: free space would fall below this, so a decode can never starve
+#: the rest of the system (database, logs, updates) of disk.  1 GiB
+#: is 2% of the 50 GB volume Devon ships on — small enough to never
+#: bind honest work, large enough to matter when it does.
+MIN_FREE_DISK_BYTES = 1_073_741_824  # 1 GiB
+
+#: Size budget for the decoder's quarantine residents in the
+#: artifact store (``quarantine == "decoded-untrusted"``): beyond
+#: it, the reclamation sweep in agents.decoder evicts oldest-first.
+#: 2 GiB is 4% of a 50 GB disk — room for hundreds of typical
+#: decodes (each born of a ≤32 MiB materialized input) plus a few
+#: very large staged ones, while untrusted residue stays bounded.
+QUARANTINE_BUDGET_BYTES = 2_147_483_648  # 2 GiB
 
 
-def max_decompressed_bytes() -> int:
-    """The decompressed-bytes cap in force.
+def _positive_env(name: str) -> int | None:
+    """A positive-integer env setting, or None (unset/unparsable/≤0)."""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    return value if value > 0 else None
 
-    ``MAX_DECOMPRESSED_BYTES`` unless the owner's
-    ``NM_DECODER_MAX_DECOMPRESSED_BYTES`` setting overrides it with
-    a positive integer.  Anything else (unset, unparsable, zero or
-    negative) falls back to the constant — never to unlimited.
-    Resolved at call time, like the decoder's other owner settings.
+
+def owner_ceiling_bytes() -> int | None:
+    """The owner's decompressed-bytes ceiling, when he has set one.
+
+    ``NM_DECODER_MAX_DECOMPRESSED_BYTES`` as a positive integer is
+    a hard ceiling on the total decompressed bytes one run may
+    produce.  Unset (or unparsable / non-positive) means NO fixed
+    ceiling — output is then bounded only by the staging volume's
+    disk reserve.  Resolved at call time, like the decoder's other
+    owner settings.
     """
-    raw = os.environ.get("NM_DECODER_MAX_DECOMPRESSED_BYTES", "").strip()
+    return _positive_env("NM_DECODER_MAX_DECOMPRESSED_BYTES")
+
+
+def min_free_disk_bytes() -> int:
+    """The staging volume's free-disk reserve floor in force.
+
+    ``MIN_FREE_DISK_BYTES`` unless the owner's
+    ``NM_DECODER_MIN_FREE_DISK_BYTES`` overrides it with a positive
+    integer.
+    """
+    return _positive_env("NM_DECODER_MIN_FREE_DISK_BYTES") \
+        or MIN_FREE_DISK_BYTES
+
+
+def quarantine_budget_bytes() -> int:
+    """The decoded-untrusted quarantine size budget in force.
+
+    ``QUARANTINE_BUDGET_BYTES`` unless the owner's
+    ``NM_DECODER_QUARANTINE_BUDGET_BYTES`` overrides it with a
+    positive integer.
+    """
+    return _positive_env("NM_DECODER_QUARANTINE_BUDGET_BYTES") \
+        or QUARANTINE_BUDGET_BYTES
+
+
+def staging_dir() -> Path:
+    """The decoder's staging area for spooled decompression output.
+
+    ``NM_DECODER_STAGING_DIR`` when set, else ``decoder-staging``
+    under the data home (``NM_HOME``, else ``~/.nomorals`` — the
+    core home idiom, cf. core.failure_store).  Staged files are
+    working paper: a run deletes its own at the end, and orphans of
+    crashed runs are swept when the next run starts.
+    """
+    raw = os.environ.get("NM_DECODER_STAGING_DIR", "").strip()
     if raw:
-        try:
-            value = int(raw)
-        except ValueError:
-            value = 0
-        if value > 0:
-            return value
-    return MAX_DECOMPRESSED_BYTES
+        return Path(raw).expanduser()
+    home = os.environ.get("NM_HOME") or "~/.nomorals"
+    return Path(home).expanduser() / "decoder-staging"
+
+
+def _disk_free_bytes(path: Path) -> int:
+    """Free bytes on the volume holding ``path`` (or its nearest
+    existing ancestor — the staging dir may not exist yet)."""
+    probe = path
+    while not probe.exists() and probe.parent != probe:
+        probe = probe.parent
+    return shutil.disk_usage(probe).free
 
 
 class DecompressionCapExceeded(Exception):
-    """A compressed stream crossed the decompressed-bytes cap.
+    """A compressed stream stopped at a decompression limit.
 
-    Carries the three facts the refusal must name: the stream's
-    format, the cap, and the shared running total at the moment it
-    tripped.  The partial output is discarded by the caller — a cap
-    breach is a property of the archive, reported whole, never a
-    truncated decode presented as complete.
+    ``kind`` names which wall: ``"owner-ceiling"`` (the owner's
+    ``NM_DECODER_MAX_DECOMPRESSED_BYTES``) or ``"disk-reserve"``
+    (the staging volume's free-space floor, with ``free_disk_bytes``
+    and ``reserve_floor_bytes`` carrying the disk numbers).
+    ``cap_bytes`` is the effective cap at the moment it tripped —
+    the owner's ceiling, or the largest total the disk would have
+    allowed — and ``reached_bytes`` the shared running total when
+    it stopped.  The partial output is discarded by the caller: a
+    stop is a property of the stream and the machine, reported
+    whole, never a truncated decode.
     """
 
-    def __init__(self, fmt: str, cap: int, reached: int) -> None:
-        super().__init__(
-            f"{fmt} stream crossed the decompressed-size cap of "
-            f"{cap} bytes (reached {reached} bytes when stopped)")
+    def __init__(self, fmt: str, cap: int, reached: int, *,
+                 kind: str = "owner-ceiling",
+                 free_disk_bytes: int | None = None,
+                 reserve_floor_bytes: int | None = None) -> None:
+        if kind == "disk-reserve":
+            message = (
+                f"{fmt} stream stopped at the disk reserve: "
+                f"decompressed output reached {reached} bytes with "
+                f"{free_disk_bytes} bytes free on the staging "
+                f"volume and a reserve floor of "
+                f"{reserve_floor_bytes} bytes")
+        else:
+            message = (
+                f"{fmt} stream crossed the decompressed-size cap of "
+                f"{cap} bytes (reached {reached} bytes when stopped)")
+        super().__init__(message)
         self.format = fmt
         self.cap_bytes = cap
         self.reached_bytes = reached
+        self.kind = kind
+        self.free_disk_bytes = free_disk_bytes
+        self.reserve_floor_bytes = reserve_floor_bytes
 
 
-class _DecompressBudget:
-    """One analysis run's shared decompressed-bytes budget.
+#: the process's live decompression runs, by run id — the staging
+#: orphan sweep keeps exactly these runs' files.
+_live_runs: set[str] = set()
+
+#: Graces before a dead run's staged files count as orphans.  For
+#: THIS process the live-run registry is authoritative — a file
+#: whose run is gone is a crash orphan once it is a minute old
+#: (younger ones may belong to a caller still holding the hit).
+#: For OTHER processes there is no registry to consult: a live
+#: foreign run's files are fresh, so the grace is an hour.
+_ORPHAN_GRACE_S = 3600.0
+_OWN_ORPHAN_GRACE_S = 60.0
+
+
+class _DecompressRun:
+    """One decompression run: shared totals, limits, staging.
 
     Every compressed stream the run decompresses charges the SAME
     running total, so a bomb split across concatenated bzip2/xz
-    streams still trips the one cap.  Refusals are recorded here so
-    ``analyze()`` can put them on the report.
+    streams still trips the one limit.  Staged files created under
+    the run are registered here and deleted when the run closes;
+    refusals are recorded here so ``analyze()`` can put them on the
+    report.
     """
 
-    __slots__ = ("cap", "total", "refusals")
+    __slots__ = ("ceiling", "floor", "stage_dir", "probe", "total",
+                 "refusals", "staged", "run_id", "_counter")
 
-    def __init__(self, cap: int) -> None:
-        self.cap = cap
+    def __init__(self, *, stage_dir: Path | None = None,
+                 probe: Callable[[Path], int] | None = None,
+                 ceiling: int | None = None,
+                 floor: int | None = None) -> None:
+        self.ceiling = owner_ceiling_bytes() if ceiling is None \
+            else ceiling
+        self.floor = min_free_disk_bytes() if floor is None else floor
+        self.stage_dir = stage_dir if stage_dir is not None \
+            else staging_dir()
+        self.probe = probe or _disk_free_bytes
         self.total = 0
         self.refusals: list[dict[str, Any]] = []
+        self.staged: list[Path] = []
+        self.run_id = f"{time.time_ns():x}{os.getpid():x}"
+        self._counter = 0
 
+    # ── limits ────────────────────────────────────────────────────
     def charge(self, fmt: str, produced: int) -> None:
+        """Charge ``produced`` decompressed bytes to the run total;
+        raises when the owner's ceiling (when set) is crossed."""
         self.total += produced
-        if self.total > self.cap:
-            raise DecompressionCapExceeded(fmt, self.cap, self.total)
+        if self.ceiling is not None and self.total > self.ceiling:
+            raise DecompressionCapExceeded(fmt, self.ceiling,
+                                           self.total)
+
+    def check_disk(self, fmt: str, *, new_bytes: int,
+                   write_bytes: int) -> None:
+        """Writing ``write_bytes`` to the staging volume must leave
+        it at or above the reserve floor; raises otherwise.
+        ``new_bytes`` is the chunk about to be charged (the run
+        total it would produce is the refusal's reached figure)."""
+        free = self.probe(self.stage_dir)
+        if free - write_bytes < self.floor:
+            allowed = self.total + max(0, free - self.floor)
+            raise DecompressionCapExceeded(
+                fmt, allowed, self.total + new_bytes,
+                kind="disk-reserve", free_disk_bytes=free,
+                reserve_floor_bytes=self.floor)
+
+    # ── staging ───────────────────────────────────────────────────
+    def new_stage_path(self) -> Path:
+        self.stage_dir.mkdir(parents=True, exist_ok=True)
+        self._counter += 1
+        path = self.stage_dir / (
+            f"decstage-{os.getpid()}-{self.run_id}-{self._counter}.tmp")
+        self.staged.append(path)
+        return path
+
+    def discard(self, path: Path) -> None:
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
+        if path in self.staged:
+            self.staged.remove(path)
+
+    def discard_keep_file(self, path: Path) -> None:
+        """Unregister a staged file WITHOUT deleting it (ownership
+        passes to the caller — see _drain's standalone case)."""
+        if path in self.staged:
+            self.staged.remove(path)
+
+    def cleanup(self) -> None:
+        """Delete every staged file this run created (finally-
+        discipline: success, refusal and exception all land here)."""
+        for path in list(self.staged):
+            self.discard(path)
+
+    def sweep_orphans(self) -> None:
+        """Remove staged files no live run owns: this process's
+        dead-run files (orphans by construction) and other
+        processes' files older than the grace.  Best-effort — a
+        sweep failure never breaks the run that triggered it."""
+        try:
+            if not self.stage_dir.is_dir():
+                return
+            now = time.time()
+            my_pid = str(os.getpid())
+            for path in self.stage_dir.glob("decstage-*.tmp"):
+                try:
+                    parts = path.name.split("-")
+                    pid, run_id = parts[1], parts[2]
+                    age = now - path.stat().st_mtime
+                    if pid == my_pid:
+                        if run_id not in _live_runs and \
+                                age > _OWN_ORPHAN_GRACE_S:
+                            path.unlink(missing_ok=True)
+                    elif age > _ORPHAN_GRACE_S:
+                        path.unlink(missing_ok=True)
+                except (OSError, IndexError):
+                    continue
+        except OSError:
+            pass
 
 
-#: the budget of the analysis run in flight (set by analyze() /
-#: _run_byte_decoders); a standalone decoder call mints its own, so
-#: the cap binds every decompression, shared or solo.
-_active_budget: contextvars.ContextVar[_DecompressBudget | None] = \
-    contextvars.ContextVar("decoder_decompress_budget", default=None)
+#: the decompression run in flight (set by decompression_run() /
+#: analyze() / _run_byte_decoders); a standalone decoder call opens
+#: its own, so the guard binds every decompression, shared or solo.
+_active_run: contextvars.ContextVar[_DecompressRun | None] = \
+    contextvars.ContextVar("decoder_decompress_run", default=None)
+
+
+def _acquire_run() -> tuple[_DecompressRun, Any]:
+    """The ambient run, or a fresh one owned by the caller.
+
+    Returns ``(run, token)``; a non-None token means the caller
+    owns the run and must release it with :func:`_release_run`.
+    """
+    run = _active_run.get()
+    if run is not None:
+        return run, None
+    run = _DecompressRun()
+    token = _active_run.set(run)
+    _live_runs.add(run.run_id)
+    run.sweep_orphans()
+    return run, token
+
+
+def _release_run(run: _DecompressRun, token: Any) -> None:
+    if token is None:
+        return
+    _active_run.reset(token)
+    _live_runs.discard(run.run_id)
+    run.cleanup()
+
+
+@contextlib.contextmanager
+def decompression_run(*, stage_dir: str | Path | None = None,
+                      free_space_probe: Callable[[Path], int] | None
+                      = None) -> Iterator[_DecompressRun]:
+    """Scope one decompression run explicitly.
+
+    Callers whose work continues past ``analyze()`` — the decoder
+    agent, which quarantines a staged binary AFTER the report is
+    built — wrap that work in this context so staged files live
+    until the context closes and are then deleted, on success,
+    refusal or exception alike.  Joins the ambient run when one is
+    already in flight (the ambient owner keeps cleanup).
+    ``free_space_probe`` is the run's disk-guard seam: production
+    passes nothing (the real free-space reading); a different probe
+    is how a constrained disk is presented honestly, never a
+    patched-over measurement in the guard itself.
+    """
+    ambient = _active_run.get()
+    if ambient is not None:
+        yield ambient
+        return
+    run = _DecompressRun(
+        stage_dir=Path(stage_dir) if stage_dir is not None else None,
+        probe=free_space_probe)
+    token = _active_run.set(run)
+    _live_runs.add(run.run_id)
+    run.sweep_orphans()
+    try:
+        yield run
+    finally:
+        _release_run(run, token)
+
+
+# ───────────────────── staged stream output ─────────────────────
+
+_STAGE_HEAD_BYTES = 64        # hex_head material kept in RAM
+_STAGE_SAMPLE_BYTES = 1 << 18  # 256 KiB text-classification sample
+
+
+@dataclass
+class StagedOutput:
+    """A decompressed stream too large to materialize in RAM.
+
+    The full bytes live in ``path`` (a staging file owned by the
+    run that produced it — valid until that run closes) and are
+    known exactly: ``size`` and ``sha256`` were computed while the
+    stream pumped.  Everything a report needs (size, hex head,
+    magic) is carried here; the one consumer that needs the bytes
+    themselves (quarantine) streams the file into the artifact
+    store.  ``is_text`` is the shipped text classification applied
+    to a bounded head sample (the sample is what a >32 MiB stream
+    can honestly be classified from without materializing it).
+    """
+
+    path: str
+    size: int
+    sha256: str
+    magic: str = ""
+    is_text: bool = False
+    head: bytes = b""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"bytes": self.size, "hex_head": self.head.hex(),
+                "magic": self.magic, "sha256": self.sha256,
+                "staged": True}
+
+    def open(self) -> Any:
+        """The staged bytes as a binary stream (run still open)."""
+        return open(self.path, "rb")
+
+
+class _StreamOutput:
+    """One stream's decompressed output: RAM, then a staging file.
+
+    Bytes accumulate in memory up to MATERIALIZE_LIMIT; the chunk
+    that would cross it spools everything to a staging file and the
+    rest streams straight to disk, so peak RAM is the limit plus
+    one pump chunk regardless of the output's final size.  Every
+    chunk is charged to the run (owner ceiling) and, once the
+    output lives on disk, checked against the disk reserve BEFORE
+    it is written.
+    """
+
+    __slots__ = ("run", "size", "_buf", "_fh", "_path", "_hash",
+                 "_head", "_sample")
+
+    def __init__(self, run: _DecompressRun) -> None:
+        self.run = run
+        self.size = 0
+        self._buf = bytearray()
+        self._fh: Any = None
+        self._path: Path | None = None
+        self._hash = hashlib.sha256()
+        self._head = bytearray()
+        self._sample = bytearray()
+
+    def append(self, fmt: str, chunk: bytes) -> None:
+        spooling = self._fh is None and \
+            self.size + len(chunk) > MATERIALIZE_LIMIT
+        if self._fh is not None:
+            self.run.check_disk(fmt, new_bytes=len(chunk),
+                                write_bytes=len(chunk))
+        elif spooling:
+            # spooling writes the buffered bytes too — the disk
+            # guard covers the whole write, not just this chunk
+            self.run.check_disk(
+                fmt, new_bytes=len(chunk),
+                write_bytes=len(self._buf) + len(chunk))
+        self.run.charge(fmt, len(chunk))
+        if spooling:
+            self._spool()
+        if self._fh is not None:
+            self._fh.write(chunk)
+        else:
+            self._buf += chunk
+        self.size += len(chunk)
+        self._hash.update(chunk)
+        if len(self._head) < _STAGE_HEAD_BYTES:
+            self._head += chunk[:_STAGE_HEAD_BYTES - len(self._head)]
+        if len(self._sample) < _STAGE_SAMPLE_BYTES:
+            self._sample += chunk[:_STAGE_SAMPLE_BYTES - len(self._sample)]
+
+    def _spool(self) -> None:
+        self._path = self.run.new_stage_path()
+        # the sink owns the handle for its lifetime (it IS the
+        # manager: close()/discard() close it deterministically)
+        self._fh = open(self._path, "wb")  # noqa: SIM115
+        self._fh.write(self._buf)
+        self._buf = bytearray()
+
+    def discard(self) -> None:
+        """Drop a partial output (a refused/failed stream): nothing
+        half-decompressed survives anywhere."""
+        if self._fh is not None:
+            with contextlib.suppress(OSError):
+                self._fh.close()
+            self._fh = None
+        if self._path is not None:
+            self.run.discard(self._path)
+            self._path = None
+        self._buf = bytearray()
+
+    def finish(self) -> bytes | StagedOutput:
+        if self._fh is None:
+            return bytes(self._buf)
+        self._fh.flush()
+        self._fh.close()
+        self._fh = None
+        sample = bytes(self._sample).decode("utf-8", "ignore")
+        is_text = looks_like_text(sample) and len(sample) >= 3 and \
+            _commonness(sample) >= 0.55
+        path = self._path
+        assert path is not None
+        return StagedOutput(
+            path=str(path), size=self.size,
+            sha256=self._hash.hexdigest(),
+            magic=identify_magic(bytes(self._head)),
+            is_text=is_text, head=bytes(self._head))
+
+
+# ───────────────────── stream pumping ───────────────────────────
 
 _DECOMPRESS_CHUNK = 1 << 20  # 1 MiB of output per pump step
+_FEED_CHUNK = 1 << 20        # 1 MiB of input per feed read
 
 
-def _pump_stream(fmt: str, obj: Any, data: bytes,
-                 budget: _DecompressBudget) -> tuple[bytes, bytes] | None:
+class _Feed:
+    """A decompressor's input: one bytes blob or a file stream.
+
+    ``read`` returns the next input slice (b"" at the end);
+    ``unread`` pushes bytes back (a decompressor's unconsumed tail
+    / the next stream's head).  File feeds are read in bounded
+    chunks, so a file input is never materialized whole.
+    """
+
+    __slots__ = ("_data", "_pos", "_fh", "_pushback", "_eof")
+
+    def __init__(self, data: bytes | None = None,
+                 fileobj: Any = None) -> None:
+        self._data = data
+        self._pos = 0
+        self._fh = fileobj
+        self._pushback = b""
+        self._eof = False
+
+    def read(self, n: int) -> bytes:
+        if self._pushback:
+            out, self._pushback = self._pushback[:n], self._pushback[n:]
+            return out
+        if self._eof:
+            return b""
+        if self._fh is not None:
+            out = self._fh.read(n)
+        elif self._data is not None:
+            out = self._data[self._pos:self._pos + n]
+            self._pos += len(out)
+        else:
+            out = b""
+        if not out:
+            self._eof = True
+        return out
+
+    def unread(self, data: bytes) -> None:
+        if data:
+            self._pushback = data + self._pushback
+            self._eof = False
+
+    def at_end(self) -> bool:
+        if self._pushback:
+            return False
+        if self._fh is not None:
+            return self._eof
+        return self._pos >= len(self._data or b"")
+
+
+def _pump_stream(fmt: str, obj: Any, feed: _Feed,
+                 run: _DecompressRun,
+                 sink: _StreamOutput) -> bytes | None:
     """Drain ONE compressed stream through decompressor ``obj``.
 
-    Output is produced in bounded chunks and every chunk is charged
-    to the shared budget the moment it exists — the pump stops
-    mid-stream the moment the total crosses the cap
-    (:class:`DecompressionCapExceeded`), never after a full
-    decompression has already happened.  Returns ``(output,
-    unused_input)``; ``None`` when the input ends before the stream
+    Output is produced in bounded chunks; every chunk is charged
+    to the run and written to ``sink`` the moment it exists — a
+    limit stop raises mid-stream (:class:`DecompressionCapExceeded`),
+    never after a full decompression has already happened.
+    Returns the stream's unused input (the next concatenated
+    stream's head); ``None`` when the input ends before the stream
     does (a truncated stream — the one-shot calls this replaces
     raised there, so a partial drain is not a decode).
     """
-    out = bytearray()
-    feed = data
     stalled = 0
+    carry = b""
     while not obj.eof:
-        chunk = obj.decompress(feed, _DECOMPRESS_CHUNK)
+        if not carry:
+            carry = feed.read(_FEED_CHUNK)
+        chunk = obj.decompress(carry, _DECOMPRESS_CHUNK)
+        carry = getattr(obj, "unconsumed_tail", b"") or b""
         if chunk:
-            budget.charge(fmt, len(chunk))
-            out += chunk
+            sink.append(fmt, chunk)
             stalled = 0
         else:
             stalled += 1
-        feed = getattr(obj, "unconsumed_tail", b"") or b""
         if obj.eof:
             break
-        if not chunk and not feed and getattr(obj, "needs_input", True):
+        if not chunk and not carry and feed.at_end() and \
+                getattr(obj, "needs_input", True):
             return None  # input exhausted mid-stream: truncated
         if stalled > 4:
             return None  # no progress possible: not a drainable stream
-    return bytes(out), bytes(getattr(obj, "unused_data", b"") or b"")
+    return bytes(getattr(obj, "unused_data", b"") or b"")
 
 
-def _decompress_capped(fmt: str, factory: Any, data: bytes, *,
-                       multi_stream: bool) -> bytes | None:
-    """Decompress ``data`` under the run's shared size cap.
+def _drain(fmt: str, factory: Any, feed: _Feed, *,
+           multi_stream: bool) -> bytes | StagedOutput | None:
+    """Decompress a whole feed under the run's guard.
 
     ``factory`` builds a fresh incremental decompressor (a zlib /
     bz2 / lzma decompressobj).  With ``multi_stream``, concatenated
     streams (bzip2 and xz data carries several) drain in sequence
-    against the SAME budget — the total is what the cap binds.
-    Without it, bytes after the first stream are ignored, exactly as
-    the one-shot ``zlib.decompress`` call this replaces behaved.
-    Format errors propagate to the caller, which already maps them
-    to "not this format"; a cap breach raises
-    :class:`DecompressionCapExceeded` and the partial output built
-    here is discarded with it — nothing half-decompressed leaves.
+    against the SAME run total.  Without it, bytes after the first
+    stream are ignored, exactly as the one-shot ``zlib.decompress``
+    call this replaces behaved.  Format errors propagate to the
+    caller, which already maps them to "not this format"; a limit
+    stop raises :class:`DecompressionCapExceeded` and the partial
+    output is discarded with it.
     """
-    budget = _active_budget.get()
-    if budget is None:
-        budget = _DecompressBudget(max_decompressed_bytes())
-    out = bytearray()
-    rest = data
-    while True:
-        drained = _pump_stream(fmt, factory(), rest, budget)
-        if drained is None:
-            return None
-        piece, rest = drained
-        out += piece
-        if not multi_stream or not rest:
-            return bytes(out)
+    run, token = _acquire_run()
+    sink = _StreamOutput(run)
+    try:
+        while True:
+            unused = _pump_stream(fmt, factory(), feed, run, sink)
+            if unused is None:
+                sink.discard()
+                return None
+            if not multi_stream:
+                break
+            if not unused and feed.at_end():
+                break
+            feed.unread(unused)
+        out = sink.finish()
+        if token is not None and isinstance(out, StagedOutput):
+            # a standalone drain (a bare decoder call) minted this
+            # run: the staged file outlives it as caller-owned
+            # working paper — the run's cleanup must not take it;
+            # the orphan sweep reaps it later if the caller drops it.
+            run.discard_keep_file(Path(out.path))
+        return out
+    except BaseException:
+        sink.discard()
+        raise
+    finally:
+        _release_run(run, token)
+
+
+def _decompress_capped(fmt: str, factory: Any, data: bytes, *,
+                       multi_stream: bool) -> bytes | StagedOutput | None:
+    """Decompress ``data`` (a bytes blob) under the run's guard."""
+    return _drain(fmt, factory, _Feed(data=data),
+                  multi_stream=multi_stream)
+
+
+def _decompress_file(fmt: str, factory: Any, path: str | Path, *,
+                     multi_stream: bool) -> bytes | StagedOutput | None:
+    """Decompress a file under the run's guard, read in chunks."""
+    with open(path, "rb") as fh:
+        return _drain(fmt, factory, _Feed(fileobj=fh),
+                      multi_stream=multi_stream)
+
+
+def _output_hit(decoder: str, out: bytes | StagedOutput, conf: float,
+                note: str) -> DecoderHit | None:
+    """The hit for one decompressed stream, RAM-held or staged.
+
+    RAM-held output classifies exactly as shipped (``_bytes_hit``).
+    A staged output keeps its facts on the hit: text classification
+    from the staged sample (same gates as ``_bytes_hit``), the size
+    and hash in the note, the full bytes in the staging file.
+    """
+    if isinstance(out, bytes):
+        return _bytes_hit(decoder, out, conf, note)
+    if out.is_text:
+        return DecoderHit(
+            decoder, out, min(conf + 0.05, 0.98),
+            f"{note} ({out.size} bytes → utf-8, staged to disk; "
+            f"sha256 {out.sha256[:16]}…)", data_type="text")
+    return DecoderHit(
+        decoder, out, conf,
+        f"{note} ({out.size} bytes, staged to disk; "
+        f"sha256 {out.sha256[:16]}…)", data_type="bytes")
+
+
+def _record_refusal(run: _DecompressRun, decoder: str,
+                    exc: DecompressionCapExceeded,
+                    input_bytes: int) -> None:
+    """One limit stop, on the run's record in the shipped refusal
+    shape (extended with the limit kind and, for a disk stop, the
+    disk numbers)."""
+    if exc.kind == "disk-reserve":
+        detail = (
+            f"{exc.format} stream refused: decompressed output "
+            f"stopped at the staging disk reserve — reached "
+            f"{exc.reached_bytes} bytes with {exc.free_disk_bytes} "
+            f"bytes free on the staging volume and a reserve floor "
+            f"of {exc.reserve_floor_bytes} bytes; the stream was "
+            f"not decoded and nothing was extracted from it")
+    else:
+        detail = (
+            f"{exc.format} stream refused: decompressed output "
+            f"crossed the cap of {exc.cap_bytes} bytes (reached "
+            f"{exc.reached_bytes} bytes when stopped); the stream "
+            f"was not decoded and nothing was extracted from it")
+    run.refusals.append({
+        "decoder": decoder,
+        "reason": "decompressed-size-cap",
+        "limit_kind": exc.kind,
+        "format": exc.format,
+        "cap_bytes": exc.cap_bytes,
+        "reached_bytes": exc.reached_bytes,
+        "input_bytes": input_bytes,
+        "free_disk_bytes": exc.free_disk_bytes,
+        "reserve_floor_bytes": exc.reserve_floor_bytes,
+        "detail": detail,
+    })
+
+
 
 
 class _GzipDecoder(Decoder):
@@ -1511,8 +2059,9 @@ class _GzipDecoder(Decoder):
             return None
         if raw is None:
             return None
-        return _bytes_hit(self.name, raw, 0.9,
-                          f"decompressed {len(data)} → {len(raw)} bytes")
+        size = len(raw) if isinstance(raw, bytes) else raw.size
+        return _output_hit(self.name, raw, 0.9,
+                           f"decompressed {len(data)} → {size} bytes")
 
 
 class _Bz2Decoder(Decoder):
@@ -1531,8 +2080,9 @@ class _Bz2Decoder(Decoder):
             return None
         if raw is None:
             return None
-        return _bytes_hit(self.name, raw, 0.9,
-                          f"bzip2 {len(data)} → {len(raw)} bytes")
+        size = len(raw) if isinstance(raw, bytes) else raw.size
+        return _output_hit(self.name, raw, 0.9,
+                           f"bzip2 {len(data)} → {size} bytes")
 
 
 class _XzDecoder(Decoder):
@@ -1552,8 +2102,9 @@ class _XzDecoder(Decoder):
             return None
         if raw is None:
             return None
-        return _bytes_hit(self.name, raw, 0.9,
-                          f"xz {len(data)} → {len(raw)} bytes")
+        size = len(raw) if isinstance(raw, bytes) else raw.size
+        return _output_hit(self.name, raw, 0.9,
+                           f"xz {len(data)} → {size} bytes")
 
 
 class _QuotedPrintableDecoder(Decoder):
@@ -1817,34 +2368,18 @@ def _run_decoders(data: str, min_confidence: float) -> list[DecoderHit]:
 
 
 def _run_byte_decoders(raw: bytes) -> list[DecoderHit]:
-    budget = _active_budget.get()
-    token = None
-    if budget is None:
-        budget = _DecompressBudget(max_decompressed_bytes())
-        token = _active_budget.set(budget)
+    run, token = _acquire_run()
     try:
         hits: list[DecoderHit] = []
         for dec in DECODERS:
             try:
                 hit = dec.try_bytes(raw)
             except DecompressionCapExceeded as exc:
-                # a cap breach is a property of the archive, not a
-                # decoder failure: it goes on the run's record (the
-                # report), never down as a silent no-hit.
-                budget.refusals.append({
-                    "decoder": dec.name,
-                    "reason": "decompressed-size-cap",
-                    "format": exc.format,
-                    "cap_bytes": exc.cap_bytes,
-                    "reached_bytes": exc.reached_bytes,
-                    "input_bytes": len(raw),
-                    "detail": (
-                        f"{exc.format} stream refused: decompressed "
-                        f"output crossed the cap of {exc.cap_bytes} "
-                        f"bytes (reached {exc.reached_bytes} bytes "
-                        f"when stopped); the stream was not decoded "
-                        f"and nothing was extracted from it"),
-                })
+                # a limit stop is a property of the stream and the
+                # machine, not a decoder failure: it goes on the
+                # run's record (the report), never down as a silent
+                # no-hit.
+                _record_refusal(run, dec.name, exc, len(raw))
                 hit = None
             except Exception:  # noqa: BLE001
                 hit = None
@@ -1852,8 +2387,7 @@ def _run_byte_decoders(raw: bytes) -> list[DecoderHit]:
                 hits.append(hit)
         return hits
     finally:
-        if token is not None:
-            _active_budget.reset(token)
+        _release_run(run, token)
 
 
 def decode_any(data: str, *, max_depth: int = 3,
@@ -1911,7 +2445,8 @@ def decode_any(data: str, *, max_depth: int = 3,
             "count": len(hits), "_hits_raw": hits}
 
 
-def analyze(data: str | bytes, *, max_depth: int = 3) -> DecodeReport:
+def _analyze_guts(data: str | bytes, *, max_depth: int,
+                  run: _DecompressRun) -> DecodeReport:
     """Full analysis: forensics + hash id + tokens + every decoder hit."""
     raw = data if isinstance(data, bytes) else data.encode("utf-8", "ignore")
     text = data if isinstance(data, str) else raw.decode("utf-8", "ignore")
@@ -1948,16 +2483,23 @@ def analyze(data: str | bytes, *, max_depth: int = 3) -> DecodeReport:
         best = str_report["best"]
     else:
         best = None
-    # one shared decompressed-bytes budget for the whole run: every
-    # compressed stream below charges it, and its refusals land on
-    # the report.
-    budget = _DecompressBudget(max_decompressed_bytes())
-    token = _active_budget.set(budget)
-    try:
-        all_hits.extend(_run_byte_decoders(raw))
-    finally:
-        _active_budget.reset(token)
+    # every compressed stream below charges the run's shared total,
+    # and its refusals land on the report.
+    all_hits.extend(_run_byte_decoders(raw))
 
+    return _assemble_report(best=best, all_hits=all_hits,
+                            forensics=forensics, hash_info=hash_info,
+                            tokens=tokens, refusals=run.refusals)
+
+
+def _assemble_report(*, best: dict[str, Any] | None,
+                     all_hits: list[DecoderHit],
+                     forensics: dict[str, Any],
+                     hash_info: dict[str, Any] | None,
+                     tokens: list[dict[str, str]],
+                     refusals: list[dict[str, Any]]) -> DecodeReport:
+    """The shared report tail: cookie/JWT extraction, best-hit
+    fallback, ranking — one assembly for every analysis path."""
     cookies: list[dict[str, Any]] = []
     jwt_info: dict[str, Any] | None = None
     for h in all_hits:
@@ -1968,7 +2510,9 @@ def analyze(data: str | bytes, *, max_depth: int = 3) -> DecodeReport:
 
     if best is None and all_hits:
         top = max(all_hits, key=lambda h: h.confidence)
-        out_kind = "text" if isinstance(top.output, str) else "bytes"
+        is_text = isinstance(top.output, str) or (
+            isinstance(top.output, StagedOutput) and top.output.is_text)
+        out_kind = "text" if is_text else "bytes"
         best = {"chain": [top.decoder] + ([out_kind] if out_kind == "text"
                                           else []),
                 "confidence": top.confidence,
@@ -1977,4 +2521,153 @@ def analyze(data: str | bytes, *, max_depth: int = 3) -> DecodeReport:
     all_hits.sort(key=lambda h: (-h.confidence, _rank(h.decoder)))
     return DecodeReport(best=best, hits=all_hits, forensics=forensics,
                         hash=hash_info, tokens=tokens, cookies=cookies,
-                        jwt=jwt_info, refusals=budget.refusals)
+                        jwt=jwt_info, refusals=refusals)
+
+
+def analyze(data: str | bytes, *, max_depth: int = 3) -> DecodeReport:
+    """Full analysis: forensics + hash id + tokens + every decoder hit.
+
+    Runs inside the ambient decompression run when one is in flight
+    (see :func:`decompression_run`); otherwise opens its own and
+    closes it — staged files included — before returning.
+    """
+    run, token = _acquire_run()
+    try:
+        return _analyze_guts(data, max_depth=max_depth, run=run)
+    finally:
+        _release_run(run, token)
+
+
+# ─────────────────── file inputs (streamed) ─────────────────────
+
+#: Forensics/hash/token identification over a streamed file reads
+#: this head sample; the byte-stream decoders always see the whole
+#: file.  (The sample size is the decoder's historical input
+#: ceiling, demoted from a cap to a named sampling scope.)
+_FORENSICS_SAMPLE_BYTES = 2_000_000
+
+def _run_stream_decoders(path: Path, head: bytes,
+                         size: int) -> list[DecoderHit]:
+    """The byte-stream decoders over a file, fed in chunks.
+
+    Only the compressed-stream decoders run here: they are the
+    decoders whose semantics are whole-stream.  The string engine
+    is materialization-shaped (it runs dozens of full-text passes)
+    and is NOT run over a prefix — a prefix decode presented as a
+    whole-file decode would be a silent truncation.  What the file
+    is, forensically, is named by the caller's sampled forensics.
+    """
+    run, token = _acquire_run()
+    try:
+        hits: list[DecoderHit] = []
+        candidates: list[tuple[str, str]] = []
+        if head[:2] in (b"\x1f\x8b", b"\x78\x9c", b"\x78\x01",
+                        b"\x78\xda"):
+            candidates.append(("gzip", "gzip"))
+        if head.startswith(b"BZh"):
+            candidates.append(("bz2", "bzip2"))
+        if head[:6] == b"\xfd7zXZ\x00":
+            candidates.append(("xz", "xz"))
+        for name, fmt in candidates:
+            factory: Any
+            if fmt == "gzip":
+                wbits = 16 + zlib.MAX_WBITS \
+                    if head[:2] == b"\x1f\x8b" else zlib.MAX_WBITS
+
+                def factory(w: int = wbits) -> Any:
+                    return zlib.decompressobj(w)
+
+                multi = False
+            elif fmt == "bzip2":
+                import bz2
+
+                factory = bz2.BZ2Decompressor
+                multi = True
+            else:
+                import lzma
+
+                factory = lzma.LZMADecompressor
+                multi = True
+            try:
+                out = _decompress_file(fmt, factory, path,
+                                       multi_stream=multi)
+            except DecompressionCapExceeded as exc:
+                _record_refusal(run, name, exc, size)
+                continue
+            except Exception:  # noqa: BLE001 — not this format
+                continue
+            if out is None:
+                continue
+            out_size = len(out) if isinstance(out, bytes) else out.size
+            note = (f"decompressed {size} → {out_size} bytes"
+                    if fmt == "gzip" else
+                    f"{fmt} {size} → {out_size} bytes")
+            hit = _output_hit(name, out, 0.9, note)
+            if hit is not None:
+                hits.append(hit)
+        return hits
+    finally:
+        _release_run(run, token)
+
+
+def analyze_path(path: str | Path, *, max_depth: int = 3) -> DecodeReport:
+    """Full analysis of a FILE, streamed — files are never truncated.
+
+    A file up to MATERIALIZE_LIMIT is read in chunks and analyzed
+    exactly as :func:`analyze` analyzes its bytes (byte-identical
+    reports).  A larger file streams: forensics, hash candidates
+    and token scans are computed over a named head sample
+    (``forensics`` carries ``input_mode: "streamed"`` with the file
+    and sample sizes), and the compressed-stream decoders decode
+    the WHOLE file through the staging machinery — a 50 MB .gz is
+    decoded completely, not at a 2 MB door.
+    """
+    target = Path(path)
+    size = target.stat().st_size
+    if size <= MATERIALIZE_LIMIT:
+        buf = bytearray()
+        with open(target, "rb") as fh:
+            while chunk := fh.read(_FEED_CHUNK):
+                buf += chunk
+        return analyze(bytes(buf), max_depth=max_depth)
+
+    with open(target, "rb") as fh:
+        sample = fh.read(_FORENSICS_SAMPLE_BYTES)
+    text = sample.decode("utf-8", "ignore")
+    forensics: dict[str, Any] = {
+        "chars": len(text),
+        "bytes": size,
+        "entropy": round(shannon_entropy(text), 3),
+        "printable_ratio": round(printable_ratio(sample), 3),
+        "charset": detect_charset(sample) if sample else "empty",
+        "magic": identify_magic(sample),
+        "top_chars": Counter(text).most_common(5),
+        "looks_like_text": looks_like_text(text),
+        "input_mode": "streamed",
+        "file_bytes": size,
+        "sample_bytes": len(sample),
+        "string_analysis": (
+            f"head sample only ({len(sample)} of {size} bytes); "
+            "compressed byte streams are decoded in full"),
+    }
+    stripped = text.strip()
+    hash_info: dict[str, Any] | None = None
+    candidates = identify_hash(stripped)
+    if candidates:
+        hash_info = {"candidates": candidates,
+                     "known": known_hash_lookup(stripped)}
+    tokens = []
+    for key, pattern, label in TOKEN_PATTERNS:
+        for m in pattern.finditer(text):
+            tokens.append({"kind": key, "label": label,
+                           "sample": _mask(m.group(0))})
+    tokens = tokens[:20]
+
+    run, token = _acquire_run()
+    try:
+        all_hits = _run_stream_decoders(target, sample, size)
+        return _assemble_report(best=None, all_hits=all_hits,
+                                forensics=forensics, hash_info=hash_info,
+                                tokens=tokens, refusals=run.refusals)
+    finally:
+        _release_run(run, token)

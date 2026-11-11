@@ -315,6 +315,42 @@ class ArtifactStore:
         kwargs.setdefault("mime", "text/plain")
         return self.put(text.encode("utf-8"), type=kwargs.pop("type", "text"), **kwargs)
 
+    def put_file(self, source: str | os.PathLike[str], *, type: str = "blob",
+                 creator: str = "", mission_id: str = "", task_id: str = "",
+                 mime: str = "", metadata: dict[str, Any] | None = None,
+                 provenance: Provenance | dict[str, Any] | None = None,
+                 ) -> Artifact:
+        """Store a file's bytes as an artifact, streaming (large
+        files never sit in memory).  Same row, content index and
+        creation event as :meth:`put` — the body is sourced from
+        disk via the blob store's streaming ``put_file``."""
+        info = self.blobs.put_file(source, mime=mime)
+        if isinstance(provenance, dict):
+            provenance = Provenance.from_dict(provenance)
+        art = Artifact(
+            id=ulid_now(),
+            type=type,
+            content_hash=info.sha256,
+            size=info.size,
+            mime=mime,
+            creator=creator,
+            mission_id=mission_id,
+            task_id=task_id,
+            metadata=dict(metadata or {}),
+            provenance=provenance or Provenance(),
+        )
+        self.db.execute(
+            "INSERT INTO artifacts (id, type, content_hash, size, mime, creator,"
+            " mission_id, task_id, created_at, metadata, provenance)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (art.id, art.type, art.content_hash, art.size, art.mime,
+             art.creator, art.mission_id, art.task_id, art.created_at,
+             json.dumps(art.metadata), json.dumps(art.provenance.to_dict())),
+        )
+        self._index_content(art)
+        _emit_created(art)
+        return art
+
     def put_json(self, obj: Any, **kwargs: Any) -> Artifact:
         kwargs.setdefault("mime", "application/json")
         return self.put(json.dumps(obj, ensure_ascii=False, indent=2).encode("utf-8"),

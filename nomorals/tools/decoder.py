@@ -22,14 +22,15 @@ import os
 from pathlib import Path
 from typing import Any
 
-from ..core.decoder import (DECODERS, analyze, decode_any, identify_hash,
-                            identify_magic, known_hash_lookup,
-                            known_hash_lookup_chained, learn_hash,
-                            max_decompressed_bytes, save_report)
+from ..core.decoder import (DECODERS, MATERIALIZE_LIMIT, StagedOutput,
+                            analyze, analyze_path, decode_any,
+                            identify_hash, identify_magic,
+                            known_hash_lookup, known_hash_lookup_chained,
+                            learn_hash, min_free_disk_bytes,
+                            owner_ceiling_bytes, quarantine_budget_bytes,
+                            save_report)
 from ..core.errors import ToolError
 from ..core.policy import Capability
-
-_MAX_FILE_BYTES = 2_000_000
 
 
 def _env_flag(name: str) -> bool:
@@ -62,30 +63,52 @@ _DECODER_LIMITS_TEXT = (
     "— handled as inert data only · binary decodes are quarantined "
     "in the artifact store (provenance-recorded, unscanned, "
     "unverified — quarantine is not a safety certification) and "
-    "leave it only through an explicit owner action · input capped "
-    "at 2,000,000 bytes (truncation is reported, never silent) · "
-    "decode chains capped at depth 6 · hash auto-attack is off "
-    "unless explicitly requested (bounded at 800,000 candidates "
-    "when on); mode=crack is the explicit attack path"
+    "leave it only through an explicit owner action · file inputs "
+    "are streamed whole — no byte cap, no truncation · pasted text "
+    f"is materialized in memory up to {MATERIALIZE_LIMIT:,} bytes "
+    "(past that it is refused with the numbers — a file input does "
+    "the same job streamed) · decode chains capped at depth 6 · "
+    "hash auto-attack is off unless explicitly requested (bounded "
+    "at 800,000 candidates when on); mode=crack is the explicit "
+    "attack path"
 )
 
 
 def decoder_limits() -> dict[str, Any]:
     """The limits record every decoder surface carries (D1)."""
-    cap = max_decompressed_bytes()
+    ceiling = owner_ceiling_bytes()
+    floor = min_free_disk_bytes()
+    if ceiling is not None:
+        decompression_clause = (
+            f" · decompressed output is capped at {ceiling:,} bytes "
+            "in total per decode by the owner's "
+            "NM_DECODER_MAX_DECOMPRESSED_BYTES setting — a "
+            "compressed stream that crosses it is refused whole and "
+            "named on the report, never silently truncated")
+    else:
+        decompression_clause = (
+            " · decompressed output streams to disk staging with "
+            "no fixed byte ceiling — it stops only at the owner's "
+            "NM_DECODER_MAX_DECOMPRESSED_BYTES ceiling when set, "
+            f"or when free disk would fall below the {floor:,}-byte "
+            "reserve; a stop is refused whole and named on the "
+            "report with its numbers, never silently truncated")
     return {
-        "text": _DECODER_LIMITS_TEXT + (
-            f" · decompressed output capped at {cap:,} bytes in "
-            "total per decode — a compressed stream that crosses "
-            "the cap is refused whole and named on the report, "
-            "never silently truncated"),
+        "text": _DECODER_LIMITS_TEXT + decompression_clause + (
+            f" · quarantined decodes are reclaimed oldest-first "
+            f"beyond a {quarantine_budget_bytes():,}-byte budget "
+            "(owner-kept and referenced artifacts exempt; every "
+            "eviction is recorded on the artifact record)"),
         "executes_decoded_content": False,
         "binary_storage": "artifact-quarantine",
         "scanned": False,
         "verification_state": "unverified",
-        "max_input_bytes": _MAX_FILE_BYTES,
+        "max_materialized_input_bytes": MATERIALIZE_LIMIT,
+        "file_input_bytes": None,
         "max_chain_depth": 6,
-        "max_decompressed_bytes": cap,
+        "max_decompressed_bytes": ceiling,
+        "min_free_disk_bytes": floor,
+        "quarantine_budget_bytes": quarantine_budget_bytes(),
         "auto_crack_default": auto_crack_default(),
         "auto_crack_max_candidates": 800_000,
         "caller_gating": (
@@ -102,6 +125,12 @@ def _summarize(report: Any) -> str:
     if report.best:
         chain = " → ".join(str(c) for c in report.best["chain"])
         out = report.best["output"]
+        if isinstance(out, StagedOutput):
+            bits.append(f"decodes as {chain} "
+                        f"({'text' if out.is_text else 'file'}: "
+                        f"{out.magic or 'binary'}, {out.size} bytes, "
+                        "staged to disk)")
+            out = None
         if isinstance(out, (bytes, bytearray)):
             bits.append(f"decodes as {' → '.join(str(c) for c in report.best['chain'])} "
                         f"(file: {identify_magic(bytes(out)) or 'binary'}, "
@@ -333,13 +362,20 @@ def register(registry: Any) -> None:
             from .filesystem import safe_path
 
             target = safe_path(context, path, must_exist=True)
-            raw = target.read_bytes()[:_MAX_FILE_BYTES]
-            truncated = target.stat().st_size > _MAX_FILE_BYTES
-            report = analyze(raw, max_depth=max_depth)
-            input_text = raw.decode("utf-8", "ignore")
+            # files stream whole (analyze_path): no byte cap, no
+            # truncation — the archive keeps a bounded head sample
+            # of the input text, as it always has.
+            report = analyze_path(target, max_depth=max_depth)
+            with open(target, "rb") as fh:
+                input_text = fh.read(2_000_000).decode("utf-8", "ignore")
         else:
-            if isinstance(data, str) and len(data) > 2_000_000:
-                data = data[:2_000_000]
+            if isinstance(data, str) and len(data) > MATERIALIZE_LIMIT:
+                raise ToolError(
+                    f"decoder data= input is {len(data):,} bytes — "
+                    f"pasted text is materialized in memory up to "
+                    f"{MATERIALIZE_LIMIT:,} bytes; pass the content "
+                    "as a file via path= instead (files stream "
+                    "without a byte cap)")
             report = analyze(data, max_depth=max_depth)
             input_text = data
 
@@ -356,7 +392,9 @@ def register(registry: Any) -> None:
             out["decoded"] = (report.best or {}).get("output")
         elif path:
             out["path"] = str(target)
-            out["truncated"] = truncated
+            out["truncated"] = False
+            if report.forensics.get("input_mode"):
+                out["input_mode"] = report.forensics["input_mode"]
 
         # OSINT feed: successful decodes map cookies/JWTs into the
         # identity graph as person + domain entities (fail-soft —

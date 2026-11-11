@@ -278,13 +278,16 @@ class LimitsTests(unittest.TestCase):
         self.assertIs(limits["scanned"], False)
         self.assertEqual(limits["verification_state"], "unverified")
         self.assertEqual(limits["binary_storage"], "artifact-quarantine")
-        self.assertEqual(limits["max_input_bytes"], 2_000_000)
+        self.assertEqual(limits["max_materialized_input_bytes"],
+                         33_554_432)
+        self.assertIsNone(limits["file_input_bytes"])
         self.assertEqual(limits["max_chain_depth"], 6)
         self.assertIs(limits["auto_crack_default"], False)
         self.assertEqual(limits["auto_crack_max_candidates"], 800_000)
         text = limits["text"]
         for clause in ("never executed", "quarantined in the artifact "
-                       "store", "not a safety certification", "2,000,000",
+                       "store", "not a safety certification",
+                       "streamed whole", "33,554,432",
                        "depth 6", "800,000", "mode=crack"):
             self.assertIn(clause, text)
         # the tool layer's honesty about caller identity
@@ -314,19 +317,24 @@ class LimitsTests(unittest.TestCase):
         out = _call(self.ctx, "decoder", mode="decoders")
         self.assertIn("decoder limits:", out["limits"]["text"])
 
-    def test_truncation_is_reported(self) -> None:
-        # behavioral pin for the input-cap clause: shrink the cap so
-        # the fixture stays tiny; the flag (and its honesty) is real.
-        import nomorals.tools.decoder as tool_mod
-
+    def test_file_inputs_are_never_truncated(self) -> None:
+        # the reworked input door (2026-11-10): the old 2,000,000-
+        # byte file cap is gone — a larger file is analyzed WHOLE
+        # (streamed), the report's forensics carry its full size,
+        # and the flag says not truncated.
         ws = os.path.join(self.tmp.name, "workspace")
         os.makedirs(ws, exist_ok=True)
-        with open(os.path.join(ws, "big.txt"), "wb") as fh:
-            fh.write(b"hello world, this is a longer text")
-        with mock.patch.object(tool_mod, "_MAX_FILE_BYTES", 10):
-            out = _call(self.ctx, "decoder", path="big.txt")
-        self.assertIs(out["truncated"], True)
-        self.assertEqual(out["limits"]["max_input_bytes"], 10)
+        payload = gzip.compress(os.urandom(2_100_000))
+        self.assertGreater(len(payload), 2_000_000)
+        with open(os.path.join(ws, "big.bin"), "wb") as fh:
+            fh.write(payload)
+        out = _call(self.ctx, "decoder", path="big.bin")
+        self.assertIs(out["truncated"], False)
+        self.assertEqual(out["report"]["forensics"]["bytes"],
+                         len(payload))
+        self.assertEqual(
+            out["limits"]["max_materialized_input_bytes"], 33_554_432)
+        self.assertIsNone(out["limits"]["file_input_bytes"])
 
 
 # ────────────────────────── auto-crack honesty ─────────────────────────
