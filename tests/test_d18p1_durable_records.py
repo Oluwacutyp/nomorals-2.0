@@ -13,8 +13,9 @@ never as a clean cancel; (d) records never carry credentials
 (e) media jobs get the same treatment via media_job_records +
 the render adapter; (f) a record-write failure never changes the
 run's behavior (fail-open, failure recorded); (g) adapter_health
-flips for exactly browser + render — transfers + artifacts stay
-unavailable with their reasons.
+reports the record-backed domains working — browser + render from
+this pass's records; transfers + artifacts joined them when the
+doc-15 delivery record registry landed.
 """
 
 from __future__ import annotations
@@ -323,17 +324,20 @@ class MediaRecordTests(unittest.TestCase):
 
 
 class StewardFlipTests(unittest.TestCase):
-    def test_adapter_health_flips_exactly_two_domains(self):
+    def test_adapter_health_record_domains_working(self):
         health = {row["domain"]: row for row in adapter_health()}
         self.assertEqual(len(health), 9)
         self.assertEqual(health["browser"]["status"], "working")
         self.assertIn("browser_run_records", health["browser"]["note"])
         self.assertEqual(health["render"]["status"], "working")
         self.assertIn("media_job_records", health["render"]["note"])
-        for domain in ("transfers", "artifacts"):
-            self.assertEqual(health[domain]["status"], "unavailable",
-                             domain)
-            self.assertTrue(health[domain]["note"], domain)
+        # Transfers + artifacts were this suite's unavailable pair
+        # until the doc-15 delivery record registry landed; their
+        # health now names the registry's records, like the rest.
+        self.assertEqual(health["transfers"]["status"], "working")
+        self.assertIn("transfer_entries", health["transfers"]["note"])
+        self.assertEqual(health["artifacts"]["status"], "working")
+        self.assertIn("delivery_receipts", health["artifacts"]["note"])
 
     def test_sweep_opens_cases_from_the_new_records(self):
         db = _file_db(self)
