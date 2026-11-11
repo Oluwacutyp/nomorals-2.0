@@ -2066,7 +2066,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     re_sub = re_p.add_subparsers(dest="re_action", required=True)
     re_sub.add_parser("status", help="engine capability matrix + store counts")
-    r_ins = re_sub.add_parser("inspect", help="static-inspect one binary file → Evidence chain + residual unknowns, routed to the deepest rung that can answer")
+    r_ins = re_sub.add_parser("inspect", help="static-inspect one binary file -> Evidence chain + residual unknowns, routed to the deepest rung that can answer")
     r_ins.add_argument("path")
     r_ins.add_argument("--deep", action="store_true",
                        help="provision any missing deep engine first, then route (the self-provisioning drive)")
@@ -2100,7 +2100,7 @@ def _parser() -> argparse.ArgumentParser:
     r_cl.add_argument("--confidence", default="inferred",
                       choices=["observed", "derived", "inferred"],
                       help="confidence the close states")
-    r_mis = re_sub.add_parser("mission", help="plan + work a brain-directed RE mission over the rungs: question + targets → journaled steps → verified reconstruction per target (static only; run-only questions open dynamic_required unknowns naming the owner's sandbox-posture gate)")
+    r_mis = re_sub.add_parser("mission", help="plan + work a brain-directed RE mission over the rungs: question + targets -> journaled steps -> verified reconstruction per target (static only; run-only questions open dynamic_required unknowns naming the owner's sandbox-posture gate)")
     r_mis.add_argument("question",
                        help="the question the mission answers, in words")
     r_mis.add_argument("targets", nargs="+",
@@ -2769,7 +2769,7 @@ def _parser() -> argparse.ArgumentParser:
                       help="where to write (default: ./<name>.format.json)")
 
     director = sub.add_parser("director",
-        help="Devon directs: coverage → breakdown + design → shoot → QA",
+        help="Devon directs: coverage -> breakdown + design -> shoot -> QA",
         description=("nm director cover <script-file>\n"
                      "nm director plan <script-file> [--style neutral|naturalist|noir|neon|golden] [--refine]\n"
                      "nm director shoot <production-id> [--backend auto|ltx|wan|motion] [--model NAME] [--lora NAME[:W]] [--shots 1.1,2.3] [--no-qa]\n"
@@ -3091,7 +3091,9 @@ def _parser() -> argparse.ArgumentParser:
     t_audit = trade_sub.add_parser("audit", help="self-audit: grade the journal's forecasts, judgments and playbooks against their outcomes (chronological walk-forward + locked holdout; verdicts are recommendations only)")
     t_audit.add_argument("symbol", nargs="?", default="", help="e.g. XAUUSD (default: all symbols)")
     t_audit.add_argument("--json", action="store_true", help="Output as JSON")
-    t_execute = trade_sub.add_parser("execute", help="one DEMO-execution pass: triggered setups + judgment act, under the hard invariants (friction gate, 15% drawdown halt, caps, kill switch) — demo rung only")
+    # argparse %-expands help text: a literal percent must be written %%
+    # or format_help() dies ("%%d format: ... not dict") on "15% drawdown".
+    t_execute = trade_sub.add_parser("execute", help="one DEMO-execution pass: triggered setups + judgment act, under the hard invariants (friction gate, 15%% drawdown halt, caps, kill switch) — demo rung only")
     t_execute.add_argument("symbol", help="e.g. XAUUSD, BTC/USDT")
     t_execute.add_argument("--market", default="crypto", help="crypto|forex|stocks")
     t_execute.add_argument("--mode", default="paper", help="paper (simulator) | demo (Exness demo account) | mt5 (bridge rung)")

@@ -60,6 +60,28 @@ def test_cli_help_encodes_in_cp1252() -> None:
     _all_help_text().encode("cp1252")
 
 
+def test_trade_help_renders_drawdown_invariant() -> None:
+    """The execute line must RENDER with its invariant named, not vanish.
+
+    Regression: the help source carried a bare "15% drawdown" — argparse
+    %-expands help text, so ``nm trade --help`` died with
+    ``TypeError: %d format: a real number is required, not dict``.
+    The fix escapes the percent (%% in source); this pin proves the
+    rendered line still names the 15% drawdown halt it advertises.
+    """
+    from nomorals.cmdline.parser import _parser
+
+    parser = _parser()
+    for action in parser._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            trade = action.choices.get("trade")
+            if trade is not None:
+                rendered = " ".join(trade.format_help().split())
+                assert "15% drawdown halt" in rendered
+                return
+    raise AssertionError("trade subparser not found")
+
+
 def test_cp1252_stdout_simulation() -> None:
     """Writing help to a simulated cp1252 console must not raise."""
     buf = io.BytesIO()
