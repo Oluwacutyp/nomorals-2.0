@@ -780,6 +780,14 @@ def _query_melody_hash(melody: Melody) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+#: The catalog's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_DDL = ("CREATE TABLE IF NOT EXISTS works ("
+        "work_id TEXT PRIMARY KEY, title TEXT, artist TEXT, "
+        "source TEXT, track_id INTEGER, notes TEXT, "
+        "chroma TEXT, feature_source TEXT, created REAL)")
+
+
 class MelodyCatalog:
     """Devon's melody memory: the works she can hypothesize about.
 
@@ -789,25 +797,54 @@ class MelodyCatalog:
     two catalogs answer different questions (recording vs work) and
     a class-3 row must never be able to masquerade as class-1
     evidence. ``match`` never raises.
+
+    Native path: a SQLite file at ``db_path``. When a document
+    store is resolved (Mongo program P5 — an explicit ``store`` or
+    the boot ambient), the same API runs over the seam in the
+    ``audio-melodic__works`` collection instead (registered in
+    storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at first use. The collection
+    stays a deliberate sibling of the fingerprint catalog's —
+    class separation is structural, never merged.
     """
 
-    def __init__(self, db_path: str = "") -> None:
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self.db_path = db_path or _default_catalog_path()
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
+        self._store_arg = store
+        self._port: Any = None
+        self._port_pending = True
 
     def _connect(self) -> sqlite3.Connection:
         if self._conn is None:
             Path(self.db_path).parent.mkdir(parents=True, exist_ok=True)
             self._conn = sqlite3.connect(self.db_path,
                                          check_same_thread=False)
-            self._conn.execute(
-                "CREATE TABLE IF NOT EXISTS works ("
-                "work_id TEXT PRIMARY KEY, title TEXT, artist TEXT, "
-                "source TEXT, track_id INTEGER, notes TEXT, "
-                "chroma TEXT, feature_source TEXT, created REAL)")
+            self._conn.execute(_DDL)
             self._conn.commit()
         return self._conn
+
+    def _seam(self) -> Any:
+        """The seam port, constructed on first use (the
+        ``_connect`` idiom), or None for the native path."""
+        if self._port_pending:
+            self._port_pending = False
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("audio-melodic", _DDL, ("works",),
+                                self.db_path, store=self._store_arg)
+            if port is not None:
+                table = port.tables["works"]
+
+                def write_works(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"works": write_works})
+                self._port = port
+        return self._port
 
     # -- enrollment ----------------------------------------------------
 
@@ -845,16 +882,28 @@ class MelodyCatalog:
             notes_json = json.dumps(
                 [[n.midi, n.start_s, n.dur_s, n.alt_midi]
                  for n in melody.notes])
+            chroma_json = json.dumps(list(melody.chroma))
+            created = time.time()
             with self._lock:
-                conn = self._connect()
-                conn.execute(
-                    "INSERT OR REPLACE INTO works (work_id, title, "
-                    "artist, source, track_id, notes, chroma, "
-                    "feature_source, created) VALUES (?,?,?,?,?,?,?,?,?)",
-                    (work_id, title, artist, source, track_id,
-                     notes_json, json.dumps(list(melody.chroma)),
-                     feature_source, time.time()))
-                conn.commit()
+                port = self._seam()
+                if port is not None:
+                    port.tables["works"].put({
+                        "work_id": work_id, "title": title,
+                        "artist": artist, "source": source,
+                        "track_id": track_id, "notes": notes_json,
+                        "chroma": chroma_json,
+                        "feature_source": feature_source,
+                        "created": created})
+                else:
+                    conn = self._connect()
+                    conn.execute(
+                        "INSERT OR REPLACE INTO works (work_id, title, "
+                        "artist, source, track_id, notes, chroma, "
+                        "feature_source, created) VALUES (?,?,?,?,?,?,?,?,?)",
+                        (work_id, title, artist, source, track_id,
+                         notes_json, chroma_json,
+                         feature_source, created))
+                    conn.commit()
             return {"ok": True, "work_id": work_id,
                     "track_id": track_id, "title": title,
                     "notes": len(melody.notes),
@@ -897,12 +946,20 @@ class MelodyCatalog:
         """Catalog size at a glance. Never raises."""
         try:
             with self._lock:
-                conn = self._connect()
-                works = conn.execute(
-                    "SELECT COUNT(*) FROM works").fetchone()[0]
-                rows = conn.execute("SELECT notes FROM works").fetchall()
-            intervals = sum(max(0, len(json.loads(r[0])) - 1)
-                            for r in rows)
+                port = self._seam()
+                if port is not None:
+                    docs = port.tables["works"].all()
+                    works = len(docs)
+                    notes_col = [r["notes"] for r in docs]
+                else:
+                    conn = self._connect()
+                    works = conn.execute(
+                        "SELECT COUNT(*) FROM works").fetchone()[0]
+                    rows = conn.execute(
+                        "SELECT notes FROM works").fetchall()
+                    notes_col = [r[0] for r in rows]
+            intervals = sum(max(0, len(json.loads(n)) - 1)
+                            for n in notes_col)
             return {"ok": True, "works": works, "intervals": intervals}
         except Exception as exc:  # noqa: BLE001
             record_failure("melodic.stats", exc)
@@ -912,6 +969,19 @@ class MelodyCatalog:
         """Every enrolled work. Never raises."""
         try:
             with self._lock:
+                port = self._seam()
+                if port is not None:
+                    rows = port.tables["works"].all()
+                    rows.sort(key=lambda r: (
+                        r["created"] is None, r["created"] or 0.0))
+                    return [{"work_id": r["work_id"],
+                             "title": r["title"],
+                             "artist": r["artist"],
+                             "source": r["source"],
+                             "track_id": r["track_id"],
+                             "notes": len(json.loads(r["notes"])),
+                             "feature_source": r["feature_source"]}
+                            for r in rows]
                 conn = self._connect()
                 rows = conn.execute(
                     "SELECT work_id, title, artist, source, track_id, "
@@ -930,10 +1000,17 @@ class MelodyCatalog:
         fingerprint catalog). Never raises."""
         try:
             with self._lock:
-                conn = self._connect()
-                rows = conn.execute(
-                    "SELECT work_id, title, artist, notes FROM works "
-                    "ORDER BY work_id").fetchall()
+                port = self._seam()
+                if port is not None:
+                    docs = port.tables["works"].all()
+                    docs.sort(key=lambda r: r["work_id"])
+                    rows = [(r["work_id"], r["title"], r["artist"],
+                             r["notes"]) for r in docs]
+                else:
+                    conn = self._connect()
+                    rows = conn.execute(
+                        "SELECT work_id, title, artist, notes FROM works "
+                        "ORDER BY work_id").fetchall()
             canonical = "\n".join(
                 "|".join(str(v) for v in row) for row in rows)
             digest = hashlib.sha256(
@@ -950,6 +1027,9 @@ class MelodyCatalog:
         """Drop one enrolled work. Never raises."""
         try:
             with self._lock:
+                port = self._seam()
+                if port is not None:
+                    return port.tables["works"].delete(work_id)
                 conn = self._connect()
                 cur = conn.execute(
                     "DELETE FROM works WHERE work_id = ?", (work_id,))
@@ -970,24 +1050,40 @@ class MelodyCatalog:
 
     # -- matching --------------------------------------------------------
 
+    @staticmethod
+    def _work_from_row(work_id: Any, title: Any, artist: Any,
+                       track_id: Any, notes_json: Any, chroma_json: Any,
+                       feature_source: Any
+                       ) -> tuple[dict[str, Any], Melody]:
+        notes = tuple(MelodyNote(
+            midi=int(n[0]), start_s=float(n[1]),
+            dur_s=float(n[2]),
+            alt_midi=(int(n[3]) if len(n) > 3 and n[3] is not None
+                      else None))
+            for n in json.loads(notes_json))
+        chroma = tuple(float(c) for c in json.loads(chroma_json))
+        meta = {"work_id": work_id, "title": title, "artist": artist,
+                "track_id": track_id, "feature_source": feature_source}
+        return meta, Melody(notes=notes, chroma=chroma)
+
+    def _works(self) -> list[tuple[dict[str, Any], Melody]]:
+        """Every enrolled work as (meta, melody), on either rung.
+        Caller holds ``self._lock``."""
+        port = self._seam()
+        if port is not None:
+            return [self._work_from_row(
+                r["work_id"], r["title"], r["artist"], r["track_id"],
+                r["notes"], r["chroma"], r["feature_source"])
+                for r in port.tables["works"].all()]
+        return self._works_locked(self._connect())
+
     def _works_locked(self, conn: sqlite3.Connection
                       ) -> list[tuple[dict[str, Any], Melody]]:
         rows = conn.execute(
             "SELECT work_id, title, artist, track_id, notes, chroma, "
             "feature_source FROM works").fetchall()
-        out: list[tuple[dict[str, Any], Melody]] = []
-        for r in rows:
-            notes = tuple(MelodyNote(
-                midi=int(n[0]), start_s=float(n[1]),
-                dur_s=float(n[2]),
-                alt_midi=(int(n[3]) if len(n) > 3 and n[3] is not None
-                          else None))
-                for n in json.loads(r[4]))
-            chroma = tuple(float(c) for c in json.loads(r[5]))
-            meta = {"work_id": r[0], "title": r[1], "artist": r[2],
-                    "track_id": r[3], "feature_source": r[6]}
-            out.append((meta, Melody(notes=notes, chroma=chroma)))
-        return out
+        return [self._work_from_row(r[0], r[1], r[2], r[3], r[4], r[5],
+                                    r[6]) for r in rows]
 
     def rank_hypotheses(self, query: Melody, *,
                         limit: int = 5) -> list[dict[str, Any]]:
@@ -1001,7 +1097,7 @@ class MelodyCatalog:
             if len(melody_intervals(query)) < MIN_QUERY_INTERVALS:
                 return []
             with self._lock:
-                works = self._works_locked(self._connect())
+                works = self._works()
             ranked: list[dict[str, Any]] = []
             for meta, work in works:
                 ev = align_melodies(query, work)

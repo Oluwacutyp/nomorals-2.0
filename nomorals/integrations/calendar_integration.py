@@ -54,15 +54,19 @@ _log = get_logger(__name__)
 _SYNC_DB = os.path.expanduser("~/.nomorals/calendar/sync.db")
 _sync_lock = threading.Lock()
 
+#: The cursor store's own DDL — the native path executes it and the
+#: seam mapping is derived from it, so the two can never drift.
+_DDL = ("CREATE TABLE IF NOT EXISTS sync_cursors ("
+        " account TEXT NOT NULL, calendar_id TEXT NOT NULL,"
+        " sync_token TEXT NOT NULL,"
+        " updated REAL NOT NULL,"
+        " PRIMARY KEY (account, calendar_id))")
+
 
 def _sync_db() -> sqlite3.Connection:
     os.makedirs(os.path.dirname(_SYNC_DB), exist_ok=True)
     db = sqlite3.connect(_SYNC_DB, check_same_thread=False)
-    db.execute("CREATE TABLE IF NOT EXISTS sync_cursors ("
-               " account TEXT NOT NULL, calendar_id TEXT NOT NULL,"
-               " sync_token TEXT NOT NULL,"
-               " updated REAL NOT NULL,"
-               " PRIMARY KEY (account, calendar_id))")
+    db.execute(_DDL)
     db.commit()
     return db
 
@@ -129,16 +133,55 @@ def format_agenda(events: list[CalendarEvent], *, title: str = "📅 agenda") ->
 
 
 class CalendarIntegration:
-    """Multi-backend calendar integration."""
-    
+    """Multi-backend calendar integration.
+
+    The sync cursors live in the module's sqlite file by default.
+    When a document store is resolved (Mongo program P5 — an
+    explicit ``store`` or the boot ambient), they run over the
+    seam in the ``calendar-integration__sync_cursors`` collection
+    instead (registered in storage.sidecars), and the file's
+    existing cursors are imported once, through the same mapping,
+    at first sync — a cursor is only valid against the external
+    system's token stream, so the imported cursor is the one the
+    next sync resumes from.
+    """
+
     def __init__(
         self,
         account_manager: AccountManager,
         session_manager: SessionManager,
+        *,
+        store: Any = None,
     ) -> None:
         self.account_manager = account_manager
         self.session_manager = session_manager
+        self._store_arg = store
+        self._port: Any = None
+        self._port_resolved = False
         _log.info("Calendar integration initialized")
+
+    def _cursor_port(self) -> Any:
+        """The seam port for the cursor store, built on first use
+        (the module's lazy ``_sync_db`` idiom), or None for the
+        native path."""
+        if not self._port_resolved:
+            self._port_resolved = True
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("calendar-integration", _DDL,
+                                ("sync_cursors",), _SYNC_DB,
+                                store=self._store_arg)
+            if port is not None:
+                table = port.tables["sync_cursors"]
+
+                def write_cursors(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"sync_cursors": write_cursors})
+                self._port = port
+        return self._port
     
     async def add_event(
         self,
@@ -287,12 +330,19 @@ class CalendarIntegration:
         backend = self._detect_backend(account)
         if backend != "google_api":
             raise ValueError(f"No calendar backend available for {account}")
+        port = self._cursor_port()
+        db = None
         with _sync_lock:
-            db = _sync_db()
-            row = db.execute(
-                "SELECT sync_token FROM sync_cursors WHERE account = ?"
-                " AND calendar_id = ?", (account, calendar_id)).fetchone()
-            token = row[0] if row else None
+            if port is not None:
+                found = port.tables["sync_cursors"].get(
+                    "\x1f".join((account, calendar_id)))
+                token = found["sync_token"] if found else None
+            else:
+                db = _sync_db()
+                row = db.execute(
+                    "SELECT sync_token FROM sync_cursors WHERE account = ?"
+                    " AND calendar_id = ?", (account, calendar_id)).fetchone()
+                token = row[0] if row else None
         url = ("https://www.googleapis.com/calendar/v3/calendars/"
                f"{calendar_id}/events")
         params: dict[str, str] = {"singleEvents": "true",
@@ -318,15 +368,23 @@ class CalendarIntegration:
         new_token = result.get("nextSyncToken")
         if new_token:
             with _sync_lock:
-                db.execute(
-                    "INSERT INTO sync_cursors (account, calendar_id,"
-                    " sync_token, updated) VALUES (?, ?, ?, ?)"
-                    " ON CONFLICT (account, calendar_id) DO UPDATE SET"
-                    " sync_token = excluded.sync_token,"
-                    " updated = excluded.updated",
-                    (account, calendar_id, new_token, time.time()))
-                db.commit()
-            db.close()
+                if port is not None:
+                    port.tables["sync_cursors"].put({
+                        "account": account,
+                        "calendar_id": calendar_id,
+                        "sync_token": new_token,
+                        "updated": time.time()})
+                else:
+                    db.execute(
+                        "INSERT INTO sync_cursors (account, calendar_id,"
+                        " sync_token, updated) VALUES (?, ?, ?, ?)"
+                        " ON CONFLICT (account, calendar_id) DO UPDATE SET"
+                        " sync_token = excluded.sync_token,"
+                        " updated = excluded.updated",
+                        (account, calendar_id, new_token, time.time()))
+                    db.commit()
+            if db is not None:
+                db.close()
         return {"changed": changed, "deleted": deleted,
                 "full_sync": token is None}
 

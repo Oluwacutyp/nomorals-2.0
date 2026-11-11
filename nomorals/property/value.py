@@ -37,6 +37,7 @@ import re
 import sqlite3
 import time
 import uuid
+from typing import Any
 
 _log = logging.getLogger("nomorals.property.value")
 
@@ -294,31 +295,89 @@ def _default_db() -> str:
         return os.path.join(os.path.expanduser("~"), ".nomorals_values.db")
 
 
-class ValueStore:
-    """Persists estimates so comp-picker works later. Never raises."""
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_DDL = """CREATE TABLE IF NOT EXISTS value_estimates (
+       id TEXT PRIMARY KEY, area TEXT, bedrooms TEXT,
+       point_kobo INTEGER, low_kobo INTEGER,
+       high_kobo INTEGER, fsd REAL, comps_json TEXT,
+       kept_ids_json TEXT, thin_market INTEGER,
+       created_at REAL)"""
 
-    def __init__(self, db_path: str = "") -> None:
+
+class ValueStore:
+    """Persists estimates so comp-picker works later. Never raises.
+
+    Native path: a SQLite file at ``db_path``. When a document
+    store is resolved (Mongo program P5 — an explicit ``store`` or
+    the boot ambient), the same API runs over the seam in the
+    ``property-value__value_estimates`` collection instead
+    (registered in storage.sidecars), and the file's existing
+    rows are imported once, through the same mapping, at
+    construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             path = db_path or _default_db()
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("property-value", _DDL,
+                                ("value_estimates",), path, store=store)
+            if port is not None:
+                table = port.tables["value_estimates"]
+
+                def write_estimates(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported(
+                    {"value_estimates": write_estimates})
+                self._port = port
+                return
             self._db = sqlite3.connect(path)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS value_estimates (
-                       id TEXT PRIMARY KEY, area TEXT, bedrooms TEXT,
-                       point_kobo INTEGER, low_kobo INTEGER,
-                       high_kobo INTEGER, fsd REAL, comps_json TEXT,
-                       kept_ids_json TEXT, thin_market INTEGER,
-                       created_at REAL)""")
+            self._db.execute(_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001
             _log.warning("value: db unavailable, running memory-only",
                          exc_info=True)
             self._db = None
+            self._port = None
+
+    @staticmethod
+    def _row_to_estimate(row: Any) -> ValueEstimate:
+        """One stored row (sqlite3.Row or seam dict) → estimate."""
+        comps = [Comp.from_dict(d)
+                 for d in json.loads(row["comps_json"] or "[]")]
+        return ValueEstimate(
+            estimate_id=row["id"], area=row["area"],
+            bedrooms=row["bedrooms"], point_kobo=row["point_kobo"],
+            low_kobo=row["low_kobo"], high_kobo=row["high_kobo"],
+            fsd=row["fsd"], comps=comps,
+            kept_ids=json.loads(row["kept_ids_json"] or "[]"),
+            thin_market=bool(row["thin_market"]),
+            created_at=row["created_at"])
 
     def save(self, est: ValueEstimate) -> bool:
         try:
+            if self._port is not None:
+                self._port.tables["value_estimates"].put({
+                    "id": est.id, "area": est.area,
+                    "bedrooms": est.bedrooms,
+                    "point_kobo": est.point_kobo,
+                    "low_kobo": est.low_kobo,
+                    "high_kobo": est.high_kobo, "fsd": est.fsd,
+                    "comps_json": json.dumps(
+                        [c.to_dict() for c in est.comps]),
+                    "kept_ids_json": json.dumps(est.kept_ids),
+                    "thin_market": int(est.thin_market),
+                    "created_at": est.created_at})
+                return True
             if self._db is None:
                 return False
             self._db.execute(
@@ -336,23 +395,19 @@ class ValueStore:
 
     def get(self, estimate_id: str) -> ValueEstimate | None:
         try:
-            if self._db is None or not estimate_id:
+            if (self._db is None and self._port is None) \
+                    or not estimate_id:
                 return None
+            if self._port is not None:
+                row = self._port.tables["value_estimates"].get(
+                    estimate_id)
+                return self._row_to_estimate(row) if row else None
             row = self._db.execute(
                 "SELECT * FROM value_estimates WHERE id = ?",
                 (estimate_id,)).fetchone()
             if not row:
                 return None
-            comps = [Comp.from_dict(d)
-                     for d in json.loads(row["comps_json"] or "[]")]
-            return ValueEstimate(
-                estimate_id=row["id"], area=row["area"],
-                bedrooms=row["bedrooms"], point_kobo=row["point_kobo"],
-                low_kobo=row["low_kobo"], high_kobo=row["high_kobo"],
-                fsd=row["fsd"], comps=comps,
-                kept_ids=json.loads(row["kept_ids_json"] or "[]"),
-                thin_market=bool(row["thin_market"]),
-                created_at=row["created_at"])
+            return self._row_to_estimate(row)
         except Exception:  # noqa: BLE001
             return None
 
@@ -361,8 +416,20 @@ class ValueStore:
                 limit: int = 20) -> list[ValueEstimate]:
         """Past estimates for an area/bedroom class, newest first."""
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            cap = max(1, int(limit or 20))
+            if self._port is not None:
+                filt: dict[str, Any] = {}
+                if area:
+                    filt["area"] = area
+                if bedrooms:
+                    filt["bedrooms"] = bedrooms
+                docs = self._port.tables["value_estimates"].find(
+                    filt or None)
+                docs.sort(key=lambda r: r["created_at"] or 0.0,
+                          reverse=True)
+                return [self._row_to_estimate(r) for r in docs[:cap]]
             q = ("SELECT * FROM value_estimates WHERE 1=1")
             params: list = []
             if area:
@@ -372,20 +439,9 @@ class ValueStore:
                 q += " AND bedrooms = ?"
                 params.append(bedrooms)
             q += " ORDER BY created_at DESC LIMIT ?"
-            params.append(max(1, int(limit or 20)))
-            out = []
-            for row in self._db.execute(q, params):
-                comps = [Comp.from_dict(d)
-                         for d in json.loads(row["comps_json"] or "[]")]
-                out.append(ValueEstimate(
-                    estimate_id=row["id"], area=row["area"],
-                    bedrooms=row["bedrooms"], point_kobo=row["point_kobo"],
-                    low_kobo=row["low_kobo"], high_kobo=row["high_kobo"],
-                    fsd=row["fsd"], comps=comps,
-                    kept_ids=json.loads(row["kept_ids_json"] or "[]"),
-                    thin_market=bool(row["thin_market"]),
-                    created_at=row["created_at"]))
-            return out
+            params.append(cap)
+            return [self._row_to_estimate(row)
+                    for row in self._db.execute(q, params)]
         except Exception:  # noqa: BLE001
             return []
 

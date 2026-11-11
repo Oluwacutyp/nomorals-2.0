@@ -38,6 +38,7 @@ import sqlite3
 import time
 import urllib.parse
 from dataclasses import dataclass, field
+from typing import Any
 
 __all__ = [
     "ScamReport", "ScamFlag", "AREA_NORMS", "ILLEGAL_FEE_TERMS",
@@ -173,20 +174,51 @@ class ScamReport:
 
 # ── store (duplicate detection) ─────────────────────────────────────
 
-class ScamStore:
-    """SQLite: seen listings (photo hashes + normalized addresses)."""
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift. (The
+#: photo/address indexes below stay native-path DDL; the seam
+#: reads are finds.)
+_DDL = """CREATE TABLE IF NOT EXISTS seen_listings (
+       id TEXT PRIMARY KEY, photo_hash TEXT, address_norm TEXT,
+       url TEXT, price_kobo INTEGER, created_at REAL)"""
 
-    def __init__(self, db_path: str = "") -> None:
+
+class ScamStore:
+    """Seen listings (photo hashes + normalized addresses).
+
+    Native path: a SQLite file at ``db_path``. When a document
+    store is resolved (Mongo program P5 — an explicit ``store`` or
+    the boot ambient), the same API runs over the seam in the
+    ``property-scam__seen_listings`` collection instead
+    (registered in storage.sidecars), and the file's existing
+    rows are imported once, through the same mapping, at
+    construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             path = db_path or _default_db()
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("property-scam", _DDL,
+                                ("seen_listings",), path, store=store)
+            if port is not None:
+                table = port.tables["seen_listings"]
+
+                def write_seen(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"seen_listings": write_seen})
+                self._port = port
+                return
             self._db = sqlite3.connect(path)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS seen_listings (
-                       id TEXT PRIMARY KEY, photo_hash TEXT, address_norm TEXT,
-                       url TEXT, price_kobo INTEGER, created_at REAL)""")
+            self._db.execute(_DDL)
             self._db.execute(
                 "CREATE INDEX IF NOT EXISTS sl_photo ON seen_listings(photo_hash)")
             self._db.execute(
@@ -195,16 +227,27 @@ class ScamStore:
         except Exception:  # noqa: BLE001 — a bad DB is an empty store
             _log.warning("scam: db unavailable, running empty", exc_info=True)
             self._db = None
+            self._port = None
 
     def remember(self, photo_hash: str, address_norm: str,
                  url: str, price_kobo: int) -> None:
         try:
+            listing_id = hashlib.md5(
+                f"{photo_hash}|{address_norm}|{url}".encode()
+            ).hexdigest()[:16]
+            created = time.time()
+            if self._port is not None:
+                self._port.tables["seen_listings"].insert_ignore({
+                    "id": listing_id, "photo_hash": photo_hash,
+                    "address_norm": address_norm, "url": url,
+                    "price_kobo": price_kobo, "created_at": created})
+                return
             if self._db is None:
                 return
             self._db.execute(
                 "INSERT OR IGNORE INTO seen_listings VALUES (?, ?, ?, ?, ?, ?)",
-                (hashlib.md5(f"{photo_hash}|{address_norm}|{url}".encode()).hexdigest()[:16],
-                 photo_hash, address_norm, url, price_kobo, time.time()))
+                (listing_id, photo_hash, address_norm, url, price_kobo,
+                 created))
             self._db.commit()
         except Exception:  # noqa: BLE001
             _log.debug("scam remember failed", exc_info=True)
@@ -213,6 +256,21 @@ class ScamStore:
                        address_norm: str) -> list[dict]:
         """Prior listings with the same photos or the same address."""
         try:
+            if self._port is not None:
+                table = self._port.tables["seen_listings"]
+                rows = []
+                if photo_hash:
+                    rows += table.find({"photo_hash": photo_hash})
+                if address_norm:
+                    rows += [r for r in table.find(
+                        {"address_norm": address_norm})
+                        if r["photo_hash"] != (photo_hash or "")]
+                seen, out = set(), []
+                for r in rows:
+                    if r["id"] not in seen:
+                        seen.add(r["id"])
+                        out.append(r)
+                return out
             if self._db is None:
                 return []
             rows = []

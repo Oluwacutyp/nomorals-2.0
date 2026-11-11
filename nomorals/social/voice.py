@@ -633,15 +633,54 @@ class EvergreenPost:
     cooldown_days: float = 30.0
 
 
+#: The queue's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift. (The
+#: category index stays native-path DDL; the seam reads are finds.)
+_DDL = """CREATE TABLE IF NOT EXISTS evergreen (
+       id TEXT PRIMARY KEY,
+       content TEXT NOT NULL,
+       category TEXT NOT NULL,
+       engagement REAL NOT NULL DEFAULT 0,
+       min_engagement REAL NOT NULL DEFAULT 0,
+       last_posted_at REAL,
+       cooldown_days REAL NOT NULL DEFAULT 30,
+       created_at REAL NOT NULL
+   )"""
+
+
 class EvergreenQueue:
     """Category queues of proven winners, reposted past cooldown.
 
-    SQLite-backed. ``add`` a winner with its measured engagement;
-    ``next_due`` returns whatever is past cooldown and above its floor.
+    ``add`` a winner with its measured engagement; ``next_due``
+    returns whatever is past cooldown and above its floor.
+
+    Native path: a SQLite file at ``db_path``. When a document
+    store is resolved (Mongo program P5 — an explicit ``store`` or
+    the boot ambient), the same API runs over the seam in the
+    ``social-voice__evergreen`` collection instead (registered in
+    storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at construction.
     """
 
-    def __init__(self, db_path: Path | str | None = None) -> None:
+    def __init__(self, db_path: Path | str | None = None, *,
+                 store: Any = None) -> None:
         self.db_path = Path(db_path) if db_path else _home_db("evergreen.db")
+        self._port: Any = None
+        from ..storage.sidecars import sidecar_port
+
+        port = sidecar_port("social-voice", _DDL, ("evergreen",),
+                            str(self.db_path), store=store)
+        if port is not None:
+            table = port.tables["evergreen"]
+
+            def write_evergreen(rows: list[dict[str, Any]]) -> int:
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+
+            port.ensure_imported({"evergreen": write_evergreen})
+            self._port = port
+            return
         self._init()
 
     def _conn(self) -> sqlite3.Connection:
@@ -651,17 +690,7 @@ class EvergreenQueue:
 
     def _init(self) -> None:
         with self._conn() as c:
-            c.execute(
-                """CREATE TABLE IF NOT EXISTS evergreen (
-                       id TEXT PRIMARY KEY,
-                       content TEXT NOT NULL,
-                       category TEXT NOT NULL,
-                       engagement REAL NOT NULL DEFAULT 0,
-                       min_engagement REAL NOT NULL DEFAULT 0,
-                       last_posted_at REAL,
-                       cooldown_days REAL NOT NULL DEFAULT 30,
-                       created_at REAL NOT NULL
-                   )""")
+            c.execute(_DDL)
             c.execute("CREATE INDEX IF NOT EXISTS idx_evergreen_cat "
                       "ON evergreen(category)")
 
@@ -672,24 +701,57 @@ class EvergreenQueue:
         try:
             import uuid
             pid = uuid.uuid4().hex[:12]
+            row = {
+                "id": pid, "content": (content or "").strip(),
+                "category": (category or "general"),
+                "engagement": float(engagement),
+                "min_engagement": float(min_engagement),
+                "last_posted_at": None,
+                "cooldown_days": float(cooldown_days),
+                "created_at": time.time()}
+            if self._port is not None:
+                self._port.tables["evergreen"].put(row)
+                return pid
             with self._conn() as c:
                 c.execute(
                     "INSERT INTO evergreen (id, content, category, engagement,"
                     " min_engagement, last_posted_at, cooldown_days,"
                     " created_at) VALUES (?,?,?,?,?,?,?,?)",
-                    (pid, (content or "").strip(), (category or "general"),
-                     float(engagement), float(min_engagement), None,
-                     float(cooldown_days), time.time()))
+                    (row["id"], row["content"], row["category"],
+                     row["engagement"], row["min_engagement"],
+                     row["last_posted_at"], row["cooldown_days"],
+                     row["created_at"]))
             return pid
         except Exception:  # noqa: BLE001
             _log.debug("evergreen add failed", exc_info=True)
             return ""
+
+    @staticmethod
+    def _post_from_row(r: Any) -> EvergreenPost:
+        return EvergreenPost(
+            id=r["id"], content=r["content"], category=r["category"],
+            engagement=r["engagement"],
+            last_posted_at=r["last_posted_at"],
+            cooldown_days=r["cooldown_days"])
 
     def next_due(self, category: str = "",
                  *, limit: int = 5) -> list[EvergreenPost]:
         """Winners past cooldown and above their engagement floor."""
         try:
             now = time.time()
+            if self._port is not None:
+                filt = {"category": category} if category else None
+                rows = [r for r in self._port.tables["evergreen"].find(
+                    filt)
+                    if r["engagement"] >= r["min_engagement"]
+                    and (r["last_posted_at"] is None
+                         or r["last_posted_at"]
+                         + r["cooldown_days"] * 86400 <= now)]
+                # ORDER BY last_posted_at NULLS FIRST (ascending)
+                rows.sort(key=lambda r: (
+                    r["last_posted_at"] is not None,
+                    r["last_posted_at"] or 0.0))
+                return [self._post_from_row(r) for r in rows[:limit]]
             q = ("SELECT * FROM evergreen WHERE engagement >= min_engagement"
                  " AND (last_posted_at IS NULL OR last_posted_at +"
                  " cooldown_days * 86400 <= ?)")
@@ -701,17 +763,17 @@ class EvergreenQueue:
             args.append(limit)
             with self._conn() as c:
                 rows = c.execute(q, args).fetchall()
-            return [EvergreenPost(
-                id=r["id"], content=r["content"], category=r["category"],
-                engagement=r["engagement"],
-                last_posted_at=r["last_posted_at"],
-                cooldown_days=r["cooldown_days"]) for r in rows]
+            return [self._post_from_row(r) for r in rows]
         except Exception:  # noqa: BLE001
             _log.debug("evergreen next_due failed", exc_info=True)
             return []
 
     def mark_posted(self, post_id: str) -> None:
         try:
+            if self._port is not None:
+                self._port.tables["evergreen"].update(
+                    post_id, {"last_posted_at": time.time()})
+                return
             with self._conn() as c:
                 c.execute("UPDATE evergreen SET last_posted_at = ?"
                           " WHERE id = ?",

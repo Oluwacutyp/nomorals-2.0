@@ -15,7 +15,11 @@ P5 settles the stores that live BESIDE the central database:
   existing file data imports lazily, once, through the same mapping.
   The residue Batch 1 slice-1 ports (agent-identities,
   audio-audiobooks, audio-characters, audio-overviews,
-  audio-keyterms) follow the same pattern below.
+  audio-keyterms) follow the same pattern below, as do the
+  slice-3 ports (audio-melodic, property-scam, property-value,
+  social-voice, social-voice-notes, calendar-integration — the
+  last with the cursor-continuity case its registry entry
+  demands).
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -191,7 +195,11 @@ class TestSidecarRegistry:
             "challenge-memory", "preferences", "social-drafts",
             # residue Batch 1, slice 1:
             "agent-identities", "audio-audiobooks", "audio-characters",
-            "audio-overviews", "audio-keyterms"}
+            "audio-overviews", "audio-keyterms",
+            # residue Batch 1, slice 3:
+            "audio-melodic", "property-scam", "property-value",
+            "social-voice", "social-voice-notes",
+            "calendar-integration"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -771,6 +779,488 @@ class TestKeytermStorePort:
         again = KeytermStore(db_path=str(path), store=rung.store)
         assert [r["term"] for r in again.list()] == ["Adaeze"]
         assert rung.store.count("audio-keyterms__keyterms") == 1
+
+
+class TestMelodyCatalogPort:
+    _ALPHA = (60, 64, 67, 72, 76, 79, 84, 79, 76, 72)
+    _BETA = (48, 55, 62, 59, 53, 65, 50, 57, 64, 60)
+
+    @staticmethod
+    def _melody(midis):
+        from nomorals.audio.melodic import Melody, MelodyNote
+
+        notes = tuple(MelodyNote(midi=m, start_s=i * 0.4, dur_s=0.4)
+                      for i, m in enumerate(midis))
+        chroma = [0.0] * 12
+        for m in midis:
+            chroma[m % 12] += 1.0
+        total = sum(chroma)
+        return Melody(notes=notes,
+                      chroma=tuple(c / total for c in chroma))
+
+    def _patch_extraction(self, monkeypatch):
+        import nomorals.audio.melodic as melodic
+
+        melodies = {"alpha.wav": self._melody(self._ALPHA),
+                    "beta.wav": self._melody(self._BETA)}
+
+        def fake(path, *, prefer_stem=True):
+            return melodies[Path(str(path)).name], "f0-test"
+
+        monkeypatch.setattr(melodic, "melody_from_path", fake)
+
+    def _scenario(self, catalog) -> dict:
+        import time as _time
+
+        a = catalog.add_work("alpha.wav", title="Alpha",
+                             artist="Fixture")
+        _time.sleep(0.02)  # distinct created stamps: order is pinned
+        b = catalog.add_work("beta.wav", title="Beta", artist="Fixture")
+        _time.sleep(0.02)
+        # re-enrolling supersedes (INSERT OR REPLACE): still 2 works,
+        # and Alpha's created stamp is now the newest
+        again = catalog.add_work("alpha.wav", title="Alpha",
+                                 artist="Fixture")
+        works = catalog.list_works()
+        stats = catalog.stats()
+        snap = catalog.catalog_snapshot()
+        hyps = catalog.rank_hypotheses(self._melody(self._ALPHA))
+        return {
+            "ok": (a["ok"], b["ok"], again["ok"]),
+            "same_id": a["work_id"] == again["work_id"],
+            "titles": [w["title"] for w in works],
+            "notes": [w["notes"] for w in works],
+            "stats": (stats["works"], stats["intervals"]),
+            "snap": (snap["works"], snap["intervals"],
+                     snap["version"].split(":")[0]),
+            "top": hyps[0]["title"] if hyps else None,
+            "removed": catalog.remove_work(b["work_id"]),
+            "removed_again": catalog.remove_work(b["work_id"]),
+            "after": [w["title"] for w in catalog.list_works()],
+        }
+
+    def test_conformance(self, rung, tmp_path, monkeypatch):
+        from nomorals.audio.melodic import MelodyCatalog
+
+        self._patch_extraction(monkeypatch)
+        catalog = MelodyCatalog(str(tmp_path / "melodies.db"),
+                                store=rung.store)
+        try:
+            observed = self._scenario(catalog)
+        finally:
+            catalog.close()
+        assert observed["ok"] == (True, True, True)
+        assert observed["same_id"] is True
+        assert observed["titles"] == ["Beta", "Alpha"]
+        assert observed["notes"] == [10, 10]
+        assert observed["stats"] == (2, 18)
+        assert observed["snap"] == (2, 18, "local-melody-v1")
+        assert observed["top"] == "Alpha"
+        assert observed["removed"] is True
+        assert observed["removed_again"] is False
+        assert observed["after"] == ["Alpha"]
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path,
+                                        monkeypatch):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        import json as _json
+
+        from nomorals.audio.melodic import MelodyCatalog
+
+        self._patch_extraction(monkeypatch)
+        path = tmp_path / "melodies.db"
+        native = MelodyCatalog(str(path))
+        kept = native.add_work("alpha.wav", title="Alpha",
+                               artist="Fixture")
+        native.close()
+
+        catalog = MelodyCatalog(str(path), store=rung.store)
+        try:
+            assert [w["title"] for w in catalog.list_works()] == ["Alpha"]
+            assert rung.store.count("audio-melodic__works") == 1
+            doc = rung.store.get("audio-melodic__works", kept["work_id"])
+            assert doc is not None and doc["title"] == "Alpha"
+            # the segmented melody rides as its JSON text (a field)
+            assert _json.loads(doc["notes"])[0][0] == 60
+            # doc-24 class separation is structural: nothing landed
+            # in the class-1 fingerprint catalog's collections
+            assert rung.store.count("audio-fingerprints__tracks") == 0
+            assert rung.store.count("audio-fingerprints__hashes") == 0
+        finally:
+            catalog.close()
+        # second construction: adopted, not re-imported or duplicated
+        again = MelodyCatalog(str(path), store=rung.store)
+        try:
+            assert [w["title"] for w in again.list_works()] == ["Alpha"]
+            assert rung.store.count("audio-melodic__works") == 1
+        finally:
+            again.close()
+
+
+class TestScamStorePort:
+    def _scenario(self, store) -> dict:
+        store.remember("ph_a", "12 Allen Ave, Ikeja",
+                       "http://x/1", 150_000_00)
+        store.remember("ph_b", "12 Allen Ave, Ikeja",
+                       "http://x/2", 140_000_00)
+        store.remember("ph_a", "9 Other Rd, Lekki",
+                       "http://x/3", 200_000_00)
+        # INSERT OR IGNORE: the same (photo, address, url) triple
+        # keeps the first row, price and all
+        store.remember("ph_a", "12 Allen Ave, Ikeja",
+                       "http://x/1", 999)
+        by_photo = store.find_duplicate("ph_a", "")
+        by_addr = store.find_duplicate("", "12 Allen Ave, Ikeja")
+        both = store.find_duplicate("ph_a", "12 Allen Ave, Ikeja")
+        return {
+            "photo_urls": sorted(r["url"] for r in by_photo),
+            "kept_price": [r["price_kobo"] for r in by_photo
+                           if r["url"] == "http://x/1"],
+            "addr_urls": sorted(r["url"] for r in by_addr),
+            "both_urls": sorted(r["url"] for r in both),
+            "none": store.find_duplicate("ph_zz", "nowhere"),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.property.scam import ScamStore
+
+        store = ScamStore(db_path=str(tmp_path / "scam.db"),
+                          store=rung.store)
+        observed = self._scenario(store)
+        assert observed["photo_urls"] == ["http://x/1", "http://x/3"]
+        assert observed["kept_price"] == [150_000_00]
+        assert observed["addr_urls"] == ["http://x/1", "http://x/2"]
+        assert observed["both_urls"] == [
+            "http://x/1", "http://x/2", "http://x/3"]
+        assert observed["none"] == []
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        import hashlib as _hashlib
+
+        from nomorals.property.scam import ScamStore
+
+        path = tmp_path / "scam.db"
+        native = ScamStore(db_path=str(path))
+        native.remember("ph_a", "12 Allen Ave, Ikeja",
+                        "http://x/1", 150_000_00)
+
+        store = ScamStore(db_path=str(path), store=rung.store)
+        found = store.find_duplicate("ph_a", "")
+        assert [r["url"] for r in found] == ["http://x/1"]
+        assert rung.store.count("property-scam__seen_listings") == 1
+        listing_id = _hashlib.md5(
+            b"ph_a|12 Allen Ave, Ikeja|http://x/1"
+        ).hexdigest()[:16]
+        doc = rung.store.get("property-scam__seen_listings", listing_id)
+        assert doc is not None and doc["price_kobo"] == 150_000_00
+        again = ScamStore(db_path=str(path), store=rung.store)
+        assert len(again.find_duplicate("ph_a", "")) == 1
+        assert rung.store.count("property-scam__seen_listings") == 1
+
+
+class TestValueStorePort:
+    @staticmethod
+    def _estimate(eid, area, bedrooms, point, created):
+        from nomorals.property.value import Comp, ValueEstimate
+
+        return ValueEstimate(
+            estimate_id=eid, area=area, bedrooms=bedrooms,
+            point_kobo=point, low_kobo=point - 10, high_kobo=point + 10,
+            fsd=0.12,
+            comps=[Comp(comp_id="c1", price_kobo=point, area=area,
+                        bedrooms=bedrooms, title="Listing One",
+                        source="seed")],
+            kept_ids=["c1"], thin_market=True, created_at=created)
+
+    def _scenario(self, store) -> dict:
+        saved = (
+            store.save(self._estimate("val_1", "ikeja", "3", 5000, 100.0)),
+            store.save(self._estimate("val_2", "ikeja", "3", 7000, 200.0)),
+            store.save(self._estimate("val_3", "lekki", "2", 9000, 300.0)))
+        # INSERT OR REPLACE: val_1's point moves, its stamp stays
+        store.save(self._estimate("val_1", "ikeja", "3", 5500, 100.0))
+        got = store.get("val_1")
+        trend = store.trend("ikeja", "3")
+        return {
+            "saved": saved,
+            "got": (got.point_kobo, got.area, got.comps[0].title,
+                    got.kept_ids, got.thin_market),
+            "hist_area": [e.id for e in store.history("ikeja", "3")],
+            "hist_all": [e.id for e in store.history()],
+            "hist_limit1": [e.id for e in store.history(limit=1)],
+            "trend": (trend["ok"], trend["direction"], trend["n"]),
+            "missing": store.get("nope"),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.property.value import ValueStore
+
+        store = ValueStore(db_path=str(tmp_path / "values.db"),
+                           store=rung.store)
+        observed = self._scenario(store)
+        assert observed["saved"] == (True, True, True)
+        assert observed["got"] == (
+            5500, "ikeja", "Listing One", ["c1"], True)
+        assert observed["hist_area"] == ["val_2", "val_1"]
+        assert observed["hist_all"] == ["val_3", "val_2", "val_1"]
+        assert observed["hist_limit1"] == ["val_3"]
+        assert observed["trend"] == (True, "up", 2)
+        assert observed["missing"] is None
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.property.value import ValueStore
+
+        path = tmp_path / "values.db"
+        native = ValueStore(db_path=str(path))
+        native.save(self._estimate("val_kept", "ikeja", "3", 5000, 100.0))
+
+        store = ValueStore(db_path=str(path), store=rung.store)
+        got = store.get("val_kept")
+        assert got is not None and got.point_kobo == 5000
+        assert rung.store.count("property-value__value_estimates") == 1
+        doc = rung.store.get("property-value__value_estimates", "val_kept")
+        assert doc is not None and "Listing One" in doc["comps_json"]
+        again = ValueStore(db_path=str(path), store=rung.store)
+        assert [e.id for e in again.history()] == ["val_kept"]
+        assert rung.store.count("property-value__value_estimates") == 1
+
+
+class TestEvergreenQueuePort:
+    def _scenario(self, queue) -> dict:
+        old = queue.add("Old winner", "tips", engagement=90.0,
+                        min_engagement=50.0, cooldown_days=30.0)
+        fresh = queue.add("Fresh winner", "tips", engagement=80.0,
+                          min_engagement=50.0)
+        below = queue.add("Below floor", "tips", engagement=10.0,
+                          min_engagement=50.0)
+        other = queue.add("Other cat", "wins", engagement=99.0,
+                          min_engagement=50.0)
+        due_all = queue.next_due()
+        due_tips = queue.next_due("tips")
+        fresh_post = next(p for p in due_tips
+                          if p.content == "Fresh winner")
+        queue.mark_posted(old)
+        due_after = queue.next_due()
+        queue.mark_posted(fresh)
+        return {
+            "ids_ok": all([old, fresh, below, other]),
+            "due_all": sorted(p.content for p in due_all),
+            "due_tips": sorted(p.content for p in due_tips),
+            "fresh_fields": (fresh_post.category, fresh_post.engagement,
+                             fresh_post.last_posted_at,
+                             fresh_post.cooldown_days),
+            "due_after": sorted(p.content for p in due_after),
+            "due_final": [p.content for p in queue.next_due()],
+            "limited1": [p.content for p in queue.next_due(limit=1)],
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.social.voice import EvergreenQueue
+
+        queue = EvergreenQueue(tmp_path / "evergreen.db",
+                               store=rung.store)
+        observed = self._scenario(queue)
+        assert observed["ids_ok"] is True
+        assert observed["due_all"] == [
+            "Fresh winner", "Old winner", "Other cat"]
+        assert observed["due_tips"] == ["Fresh winner", "Old winner"]
+        assert observed["fresh_fields"] == ("tips", 80.0, None, 30.0)
+        assert observed["due_after"] == ["Fresh winner", "Other cat"]
+        assert observed["due_final"] == ["Other cat"]
+        assert observed["limited1"] == ["Other cat"]
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.social.voice import EvergreenQueue
+
+        path = tmp_path / "evergreen.db"
+        native = EvergreenQueue(path)
+        kept = native.add("Kept winner", "tips", engagement=90.0,
+                          min_engagement=50.0)
+
+        queue = EvergreenQueue(path, store=rung.store)
+        assert [p.content for p in queue.next_due()] == ["Kept winner"]
+        assert rung.store.count("social-voice__evergreen") == 1
+        doc = rung.store.get("social-voice__evergreen", kept)
+        assert doc is not None and doc["content"] == "Kept winner"
+        queue.mark_posted(kept)
+        assert queue.next_due() == []
+        again = EvergreenQueue(path, store=rung.store)
+        assert again.next_due() == []
+        assert rung.store.count("social-voice__evergreen") == 1
+
+
+class TestVoiceNoteStorePort:
+    @staticmethod
+    def _stt(path, lang):
+        return {"text": f"talk about the market in {lang}",
+                "backend": "fake-stt"}
+
+    def _scenario(self, store, audio) -> dict:
+        import time as _time
+
+        n1 = store.store_voice_note("chat-1", "Ada", audio,
+                                    language="en")
+        _time.sleep(0.01)  # distinct created stamps: order is pinned
+        n2 = store.store_voice_note("chat-1", "Bola", audio,
+                                    language="yo")
+        _time.sleep(0.01)
+        n3 = store.store_voice_note("chat-2", "Ada", audio,
+                                    language="en")
+        got = store.get(n1.note_id)
+        stats_all = store.stats()
+        stats_chat = store.stats("chat-2")
+        return {
+            "stored": (n1 is not None, n2 is not None, n3 is not None),
+            "got": (got.chat_id, got.sender, got.transcript,
+                    got.language, got.stt_backend),
+            "listed": [n.sender for n in store.list("chat-1")],
+            "stats_all": (stats_all["total"], stats_all["transcribed"],
+                          stats_all["transcript_coverage"],
+                          stats_all["languages"]),
+            "stats_chat": (stats_chat["total"],
+                           stats_chat["transcribed"]),
+            "found": [n.sender for n in
+                      store.search_voice_notes("market")],
+            "missing": store.get("vn_nope"),
+            "bad_chat": store.store_voice_note("  ", "Ada", audio),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.social.voice_notes import VoiceNoteStore
+
+        audio = tmp_path / "note.wav"
+        audio.write_bytes(b"fake-audio")
+        store = VoiceNoteStore(db_path=str(tmp_path / "vn.db"),
+                               vault_dir=str(tmp_path / "vault"),
+                               stt=self._stt, store=rung.store)
+        observed = self._scenario(store, str(audio))
+        assert observed["stored"] == (True, True, True)
+        assert observed["got"] == (
+            "chat-1", "Ada", "talk about the market in en", "en",
+            "fake-stt")
+        assert observed["listed"] == ["Ada", "Bola"]
+        assert observed["stats_all"] == (
+            3, 3, 1.0, {"en": 2, "yo": 1})
+        assert observed["stats_chat"] == (1, 1)
+        assert observed["found"] == ["Ada", "Bola", "Ada"]
+        assert observed["missing"] is None
+        assert observed["bad_chat"] is None
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.social.voice_notes import VoiceNoteStore
+
+        audio = tmp_path / "note.wav"
+        audio.write_bytes(b"fake-audio")
+        path = tmp_path / "vn.db"
+        vault = str(tmp_path / "vault")
+        native = VoiceNoteStore(db_path=str(path), vault_dir=vault,
+                                stt=self._stt)
+        kept = native.store_voice_note("chat-1", "Ada", str(audio),
+                                       language="en")
+
+        store = VoiceNoteStore(db_path=str(path), vault_dir=vault,
+                               stt=self._stt, store=rung.store)
+        got = store.get(kept.note_id)
+        assert got is not None and got.sender == "Ada"
+        assert rung.store.count("social-voice-notes__voice_notes") == 1
+        doc = rung.store.get("social-voice-notes__voice_notes",
+                             kept.note_id)
+        assert doc is not None \
+            and doc["transcript"] == "talk about the market in en"
+        again = VoiceNoteStore(db_path=str(path), vault_dir=vault,
+                               stt=self._stt, store=rung.store)
+        assert [n.sender for n in again.list()] == ["Ada"]
+        assert rung.store.count("social-voice-notes__voice_notes") == 1
+
+
+class TestCalendarIntegrationPort:
+    @staticmethod
+    def _integration(store=None, counter=None):
+        from unittest.mock import MagicMock
+
+        import nomorals.integrations.calendar_integration as cal_mod
+
+        integ = cal_mod.CalendarIntegration(MagicMock(), MagicMock(),
+                                            store=store)
+        integ._detect_backend = lambda account: "google_api"
+        calls = []
+        tally = counter if counter is not None else [0]
+
+        def fake_request(account, method, url, payload=None, params=None):
+            calls.append(dict(params or {}))
+            tally[0] += 1
+            return {"items": [], "nextSyncToken": f"tok-{tally[0]}"}
+
+        integ._request = fake_request
+        return integ, calls
+
+    def test_conformance(self, rung, tmp_path, monkeypatch):
+        import asyncio
+
+        import nomorals.integrations.calendar_integration as cal_mod
+
+        monkeypatch.setattr(cal_mod, "_SYNC_DB", str(tmp_path / "sync.db"))
+        integ, calls = self._integration(store=rung.store)
+        first = asyncio.run(integ.sync_changes("a@gmail.com"))
+        second = asyncio.run(integ.sync_changes("a@gmail.com"))
+        other = asyncio.run(
+            integ.sync_changes("a@gmail.com", calendar_id="work"))
+        assert first["full_sync"] is True
+        assert calls[0].get("syncToken") is None
+        assert second["full_sync"] is False
+        assert calls[1].get("syncToken") == "tok-1"
+        # a different calendar keeps its own cursor
+        assert other["full_sync"] is True
+        assert calls[2].get("syncToken") is None
+
+    def test_cursor_continuity_across_the_move(self, rung, tmp_path,
+                                               monkeypatch):
+        """The registry's continuity pin: a cursor advanced on the
+        native path is the cursor the seam resumes from — a reset
+        would mean a full re-sync storm against the external
+        system's token stream."""
+        if rung.store is None:
+            pytest.skip("native rung has no move to prove")
+        import asyncio
+
+        import nomorals.integrations.calendar_integration as cal_mod
+
+        monkeypatch.setattr(cal_mod, "_SYNC_DB", str(tmp_path / "sync.db"))
+        counter = [0]
+        # phase 1: native construction advances the cursor to tok-1
+        native, _native_calls = self._integration(counter=counter)
+        first = asyncio.run(native.sync_changes("a@gmail.com"))
+        assert first["full_sync"] is True
+        # phase 2: seam construction imports the file's cursor and
+        # resumes from it, then advances it in its own collection
+        seam, seam_calls = self._integration(store=rung.store,
+                                             counter=counter)
+        second = asyncio.run(seam.sync_changes("a@gmail.com"))
+        assert second["full_sync"] is False
+        assert seam_calls[0].get("syncToken") == "tok-1"
+        assert rung.store.count(
+            "calendar-integration__sync_cursors") == 1
+        doc = rung.store.get("calendar-integration__sync_cursors",
+                             "a@gmail.com\x1fprimary")
+        assert doc is not None and doc["sync_token"] == "tok-2"
+        # phase 3: a second seam construction adopts the advanced
+        # cursor — never re-imports, never resets
+        again, again_calls = self._integration(store=rung.store,
+                                               counter=counter)
+        third = asyncio.run(again.sync_changes("a@gmail.com"))
+        assert third["full_sync"] is False
+        assert again_calls[0].get("syncToken") == "tok-2"
+        assert rung.store.count(
+            "calendar-integration__sync_cursors") == 1
 
 
 class TestAmbientPickup:

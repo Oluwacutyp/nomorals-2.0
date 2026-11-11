@@ -28,6 +28,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
+from typing import Any
 
 from ..core.logging_setup import get_logger
 
@@ -94,30 +95,65 @@ class VoiceNote:
     created_at: float = 0.0
 
 
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift. (The
+#: chat index below stays native-path DDL; the seam reads are
+#: finds.)
+_DDL = """CREATE TABLE IF NOT EXISTS voice_notes (
+       note_id TEXT PRIMARY KEY, chat_id TEXT,
+       sender TEXT, audio_path TEXT, transcript TEXT,
+       language TEXT, stt_backend TEXT, created_at REAL)"""
+
+
 class VoiceNoteStore:
-    """SQLite voice-note storage + STT indexing. Never raises."""
+    """Voice-note storage + STT indexing. Never raises.
+
+    Native path: a SQLite file at ``db_path``. When a document
+    store is resolved (Mongo program P5 — an explicit ``store`` or
+    the boot ambient), the note records run over the seam in the
+    ``social-voice-notes__voice_notes`` collection instead
+    (registered in storage.sidecars), and the file's existing
+    rows are imported once, through the same mapping, at
+    construction. The vault copy and STT stay outside the seam,
+    unchanged.
+    """
 
     def __init__(self, db_path: str = "",
                  vault_dir: str = "",
                  stt: object = None,
-                 tts: object = None) -> None:
+                 tts: object = None,
+                 *, store: Any = None) -> None:
         #: ``stt(audio_path, language) -> {"text": ..., "backend": ...}``
         self._stt = stt
         #: ``tts(text, language) -> audio_path`` (a factory producing audio)
         self._tts = tts
         self._vault = vault_dir or _DEFAULT_VAULT
         self._db_path = db_path or _DEFAULT_DB
+        self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             os.makedirs(os.path.dirname(db_path or _DEFAULT_DB),
                         exist_ok=True)
             os.makedirs(self._vault, exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("social-voice-notes", _DDL,
+                                ("voice_notes",), self._db_path,
+                                store=store)
+            if port is not None:
+                table = port.tables["voice_notes"]
+
+                def write_notes(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"voice_notes": write_notes})
+                self._port = port
+                return
             self._db = sqlite3.connect(db_path or _DEFAULT_DB)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS voice_notes (
-                       note_id TEXT PRIMARY KEY, chat_id TEXT,
-                       sender TEXT, audio_path TEXT, transcript TEXT,
-                       language TEXT, stt_backend TEXT, created_at REAL)""")
+            self._db.execute(_DDL)
             self._db.execute(
                 "CREATE INDEX IF NOT EXISTS vn_chat ON voice_notes(chat_id)")
             self._db.commit()
@@ -125,6 +161,7 @@ class VoiceNoteStore:
             _log.warning("voice_notes: db unavailable, running empty",
                          exc_info=True)
             self._db = None
+            self._port = None
 
     # — recording —
 
@@ -146,7 +183,7 @@ class VoiceNoteStore:
         previously named ``send_voice_note`` while only storing — the
         name now says what the code does.)
         """
-        if self._db is None:
+        if self._db is None and self._port is None:
             return None
         if not (chat_id or "").strip():
             return None
@@ -179,12 +216,20 @@ class VoiceNoteStore:
                 _log.debug("voice_notes: STT failed", exc_info=True)
         try:
             now = time.time()
-            self._db.execute(
-                """INSERT INTO voice_notes
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-                (note_id, chat_id.strip(), (sender or "").strip(), dest,
-                 transcript, lang, backend, now))
-            self._db.commit()
+            if self._port is not None:
+                self._port.tables["voice_notes"].put({
+                    "note_id": note_id, "chat_id": chat_id.strip(),
+                    "sender": (sender or "").strip(),
+                    "audio_path": dest, "transcript": transcript,
+                    "language": lang, "stt_backend": backend,
+                    "created_at": now})
+            else:
+                self._db.execute(
+                    """INSERT INTO voice_notes
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                    (note_id, chat_id.strip(), (sender or "").strip(),
+                     dest, transcript, lang, backend, now))
+                self._db.commit()
             return VoiceNote(note_id=note_id, chat_id=chat_id.strip(),
                              sender=(sender or "").strip(),
                              audio_path=dest, transcript=transcript,
@@ -201,6 +246,25 @@ class VoiceNoteStore:
         answer without dumping every note.
         """
         try:
+            if self._port is not None:
+                filt = {"chat_id": chat_id} if chat_id else None
+                docs = self._port.tables["voice_notes"].find(filt)
+                n_total = len(docs)
+                n_text = sum(1 for r in docs if r["transcript"])
+                counts: dict[Any, int] = {}
+                for r in docs:
+                    counts[r["language"]] = \
+                        counts.get(r["language"], 0) + 1
+                # GROUP BY language ORDER BY n DESC LIMIT 8
+                langs = dict(sorted(
+                    counts.items(), key=lambda kv: -kv[1])[:8])
+                return {
+                    "total": n_total,
+                    "transcribed": n_text,
+                    "transcript_coverage":
+                        round(n_text / n_total, 2) if n_total else 0.0,
+                    "languages": langs,
+                }
             if self._db is None:
                 return {}
             where = "WHERE chat_id = ?" if chat_id else ""
@@ -212,7 +276,7 @@ class VoiceNoteStore:
                 + (" AND " if where else " WHERE ")
                 + "transcript != ''",
                 params).fetchone()
-            langs = self._db.execute(
+            langs_rows = self._db.execute(
                 f"SELECT language, COUNT(*) AS n FROM voice_notes {where} "
                 f"GROUP BY language ORDER BY n DESC LIMIT 8", params).fetchall()
             n_total = int(total["n"] or 0)
@@ -221,16 +285,19 @@ class VoiceNoteStore:
                 "total": n_total,
                 "transcribed": n_text,
                 "transcript_coverage": round(n_text / n_total, 2) if n_total else 0.0,
-                "languages": {r["language"]: int(r["n"]) for r in langs},
+                "languages": {r["language"]: int(r["n"]) for r in langs_rows},
             }
         except Exception:  # noqa: BLE001
             return {}
 
     def get(self, note_id: str) -> VoiceNote | None:
         """One note by id. None when missing/down."""
-        if self._db is None:
+        if self._db is None and self._port is None:
             return None
         try:
+            if self._port is not None:
+                row = self._port.tables["voice_notes"].get(note_id)
+                return self._row(row) if row else None
             row = self._db.execute(
                 "SELECT * FROM voice_notes WHERE note_id = ?",
                 (note_id,)).fetchone()
@@ -240,9 +307,15 @@ class VoiceNoteStore:
 
     def list(self, chat_id: str = "", limit: int = 50) -> list[VoiceNote]:
         """Notes in a chat (or everywhere), newest last."""
-        if self._db is None:
+        if self._db is None and self._port is None:
             return []
         try:
+            cap = max(1, int(limit or 50))
+            if self._port is not None:
+                filt = {"chat_id": chat_id} if chat_id else None
+                docs = self._port.tables["voice_notes"].find(filt)
+                docs.sort(key=lambda r: r["created_at"] or 0.0)
+                return [self._row(r) for r in docs[:cap]]
             q = "SELECT * FROM voice_notes"
             args: tuple = ()
             if chat_id:
@@ -250,7 +323,7 @@ class VoiceNoteStore:
                 args = (chat_id,)
             q += " ORDER BY created_at LIMIT ?"
             return [self._row(r) for r in
-                    self._db.execute(q, args + (max(1, int(limit or 50)),))]
+                    self._db.execute(q, args + (cap,))]
         except Exception:  # noqa: BLE001
             return []
 
@@ -259,12 +332,19 @@ class VoiceNoteStore:
     def search_voice_notes(self, query: str,
                            chat_id: str = "") -> list[VoiceNote]:
         """Find notes by their transcripts — 'what did she say about X?'"""
-        if self._db is None:
+        if self._db is None and self._port is None:
             return []
         q = (query or "").strip().lower()
         if not q:
             return []
         try:
+            if self._port is not None:
+                filt = {"chat_id": chat_id} if chat_id else None
+                docs = [r for r in
+                        self._port.tables["voice_notes"].find(filt)
+                        if q in (r["transcript"] or "").lower()]
+                docs.sort(key=lambda r: r["created_at"] or 0.0)
+                return [self._row(r) for r in docs]
             sql = "SELECT * FROM voice_notes WHERE LOWER(transcript) LIKE ?"
             args: tuple = (f"%{q}%",)
             if chat_id:
@@ -306,7 +386,8 @@ class VoiceNoteStore:
     # — internals —
 
     @staticmethod
-    def _row(r: sqlite3.Row) -> VoiceNote:
+    def _row(r: Any) -> VoiceNote:
+        """One stored row (sqlite3.Row or seam dict) → note."""
         return VoiceNote(
             note_id=r["note_id"], chat_id=r["chat_id"],
             sender=r["sender"], audio_path=r["audio_path"],

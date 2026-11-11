@@ -470,6 +470,105 @@ _register(_S(
         "sqlite3 path serves the SQLite default."),
 ))
 
+_register(_S(
+    name="audio-melodic", verdict="ported", kind="sqlite-file",
+    modules=("audio/melodic.py",),
+    tables=("works",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 3): "
+        "MelodyCatalog's single table routes through the seam "
+        "(audio-melodic__works) whenever a store is resolved, "
+        "behind its unchanged never-raises API. The store name, "
+        "file and collections stay deliberately distinct from "
+        "audio-fingerprints (SongRecon class-1): class separation "
+        "is structural — a class-3 work can never masquerade as a "
+        "class-1 recording. The segmented melody/chroma payloads "
+        "ride as document fields, their JSON text exactly as the "
+        "file stores it. The native sqlite3 path (its lazy "
+        "connection) serves the SQLite default."),
+))
+
+_register(_S(
+    name="property-scam", verdict="ported", kind="sqlite-file",
+    modules=("property/scam.py",),
+    tables=("seen_listings",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 3): "
+        "ScamStore's seen-listing registry routes through the "
+        "seam (property-scam__seen_listings) whenever a store is "
+        "resolved, behind its unchanged API; duplicate lookups "
+        "are finds by photo hash / normalized address, and the "
+        "INSERT OR IGNORE remember goes through the row "
+        "adapter's insert_ignore. The photo/address indexes stay "
+        "native-path DDL — the seam reads are finds. The native "
+        "sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="property-value", verdict="ported", kind="sqlite-file",
+    modules=("property/value.py",),
+    tables=("value_estimates",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 3): "
+        "ValueStore's single table routes through the seam "
+        "(property-value__value_estimates) whenever a store is "
+        "resolved, behind its unchanged never-raises API; "
+        "estimates are documents and their comps / kept-id "
+        "payloads ride as their JSON text exactly as the file "
+        "stores them. The native sqlite3 path serves the SQLite "
+        "default."),
+))
+
+_register(_S(
+    name="social-voice", verdict="ported", kind="sqlite-file",
+    modules=("social/voice.py",),
+    tables=("evergreen",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 3): "
+        "EvergreenQueue's single table routes through the seam "
+        "(social-voice__evergreen) whenever a store is resolved, "
+        "behind its unchanged API; next_due's engagement-floor / "
+        "cooldown filter and NULLS-FIRST ordering re-express "
+        "over finds in Python. The category index stays "
+        "native-path DDL. The native sqlite3 path serves the "
+        "SQLite default."),
+))
+
+_register(_S(
+    name="social-voice-notes", verdict="ported", kind="sqlite-file",
+    modules=("social/voice_notes.py",),
+    tables=("voice_notes",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 3): "
+        "VoiceNoteStore's single table routes through the seam "
+        "(social-voice-notes__voice_notes) whenever a store is "
+        "resolved, behind its unchanged never-raises API; the "
+        "stats language rollup (its one GROUP BY) and the "
+        "transcript substring search re-express over finds in "
+        "Python. The vault copy and STT stay outside the store "
+        "seam, unchanged; the chat index stays native-path DDL. "
+        "The native sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="calendar-integration", verdict="ported", kind="sqlite-file",
+    modules=("integrations/calendar_integration.py",),
+    tables=("sync_cursors",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 3): "
+        "the calendar sync cursors route through the seam "
+        "(calendar-integration__sync_cursors) whenever a store "
+        "is resolved, behind CalendarIntegration's unchanged "
+        "API; the composite (account, calendar_id) key rides "
+        "the carry's joined-id shape (the preferences "
+        "precedent). A cursor is only valid against the "
+        "external system's sync token stream, so the port "
+        "carries the continuity pin in test_mongo_p5: a cursor "
+        "advanced on the native path is the cursor the seam "
+        "resumes from after the lazy import. The module's "
+        "native _sync_db() path serves the SQLite default."),
+))
+
 # ── federated by reference (files/blobs by nature; metadata accounted) ────
 
 _register(_S(
@@ -763,12 +862,6 @@ _residue("audio-fingerprints", "audio/fingerprint.py", ("hashes", "tracks"),
          "audio fingerprint hashes per track in fingerprints.db; "
          "hash rows are lookup-keyed blobs, document-shaped but "
          "bulk-binary in character.")
-_residue("audio-melodic", "audio/melodic.py", ("works",),
-         "the melody catalog (SongRecon class-3): enrolled works "
-         "— segmented melody and chroma per work — in melodies.db "
-         "under the audio home, a deliberate sibling of the "
-         "fingerprint catalog (class-1), kept separate so a work "
-         "can never masquerade as a recording.")
 _residue("commerce-cart-recovery", "commerce/cart_recovery.py",
          ("carts", "cart_steps", "recoveries"),
          "abandoned-cart recovery flows and their step state.")
@@ -811,11 +904,6 @@ _residue("immune-corpus", "immune/corpus.py", (),
          "CorpusStore. Its only sqlite touch is a read-only "
          "harvest of the pinned incident journal's verified "
          "fixes.", kind="json-file")
-_residue("calendar-integration", "integrations/calendar_integration.py",
-         ("sync_cursors",),
-         "calendar sync cursors: small, but a cursor is only valid "
-         "against the external system's sync token stream; the "
-         "port proves cursor continuity across the move.")
 _residue("digital-twin", "integrations/digital_twin.py",
          ("states", "desired", "entity_meta"),
          "digital-twin entity states and desired-state records.")
@@ -890,10 +978,6 @@ _residue("planning-route", "planning/route.py",
 _residue("property-passport", "property/passport.py",
          ("passports", "history", "refs", "doc_refs"),
          "property passports and their history in passport.db.")
-_residue("property-scam", "property/scam.py", ("seen_listings",),
-         "seen-listing registry for scam detection in scam.db.")
-_residue("property-value", "property/value.py", ("value_estimates",),
-         "property value estimates.")
 _residue("social-leads", "social/leads.py",
          ("leads", "lead_comments", "comment_seen", "lead_magnets",
           "lead_triggers", "trigger_meta"),
@@ -901,10 +985,6 @@ _residue("social-leads", "social/leads.py",
 _residue("social-profiles", "social/profiles.py",
          ("profiles", "elements", "likes"),
          "prompt-scaffolded profiles and element likes.")
-_residue("social-voice", "social/voice.py", ("evergreen",),
-         "evergreen voice content registry in evergreen.db.")
-_residue("social-voice-notes", "social/voice_notes.py", ("voice_notes",),
-         "voice note records.")
 _residue("social-whatsapp-cost", "social/whatsapp_cost.py",
          ("wa_costs", "wa_budgets"),
          "WhatsApp cost tracking and budgets.")
