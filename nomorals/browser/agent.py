@@ -259,7 +259,8 @@ class AgentLoop:
                  max_steps: int = 30,
                  on_trace: Callable[[AgentTrace], None] | None = None,
                  on_progress: Callable[[dict[str, Any]], None] | None = None,
-                 on_blocked: Callable[[Observation, str], str] | None = None) -> None:
+                 on_blocked: Callable[[Observation, str], str] | None = None,
+                 cancel_requested: Callable[[], bool] | None = None) -> None:
         self.driver = driver
         self.decide_llm = decide_llm
         self.strategy = strategy.lower()
@@ -276,6 +277,11 @@ class AgentLoop:
         #: takeover); anything else stops the loop honestly.
         #: No handler + wall = stop, never blindly continue.
         self.on_blocked = on_blocked
+        #: Cooperative cancel hook (doc 18 P1): a zero-arg callable
+        #: the loop polls at step boundaries — wired by the browser
+        #: job runner to ``BrowserRunJob.cancel_requested``. None
+        #: means the loop runs unobserved, exactly as before.
+        self.cancel_requested = cancel_requested
         self.trace: list[AgentTrace] = []
         self.stopped_reason = ""
 
@@ -329,17 +335,62 @@ class AgentLoop:
                 return None, page
         return f"blocked: {detection} (wall handler said stop)", page
 
+    def _cancel_seen(self) -> bool:
+        """Poll the injected cancel hook. Fail-open: a hook that
+        raises is recorded once in the browser failure ledger, the
+        poll is disarmed for the rest of the run, and the run
+        continues exactly as an unobserved loop behaves — a broken
+        cancel read must never kill a healthy run."""
+        hook = self.cancel_requested
+        if hook is None:
+            return False
+        try:
+            return bool(hook())
+        except Exception as exc:  # noqa: BLE001 - fail-open poll
+            self.cancel_requested = None
+            try:
+                from .failures import record_failure
+
+                record_failure("browser.agent.cancel_poll", exc)
+            except Exception:  # noqa: BLE001 - ledger never gates
+                pass
+            _log.warning("browser agent cancel poll failed; "
+                         "continuing unobserved", exc_info=True)
+            return False
+
     def run(self, start_url: str, *, goal: str = "") -> dict[str, Any]:
+        armed = self.cancel_requested is not None
+        if self._cancel_seen():
+            # Cancelled before the first page operation: nothing
+            # has been driven yet, so nothing is in flight.
+            self.stopped_reason = "cancelled: owner request"
+            out = {"goal": goal, "steps": 0,
+                   "stopped_reason": self.stopped_reason,
+                   "final_url": start_url, "trace": []}
+            if armed:
+                out["cancel_poll_armed"] = True
+            return out
         page = self.driver.fetch(start_url)
         wall, page = self._wall_check(page, 0, goal)
         if wall is not None:
             self.stopped_reason = wall
-            return {"goal": goal, "steps": 0,
-                    "stopped_reason": self.stopped_reason,
-                    "final_url": page.url,
-                    "trace": []}
+            out = {"goal": goal, "steps": 0,
+                   "stopped_reason": self.stopped_reason,
+                   "final_url": page.url,
+                   "trace": []}
+            if armed:
+                out["cancel_poll_armed"] = True
+            return out
         last_result: dict[str, Any] | None = None
+        cancelled = False
         for step in range(1, self.max_steps + 1):
+            if self._cancel_seen():
+                # Step boundary: the previous action completed and
+                # was verified; no page operation is in flight, so
+                # stopping here corrupts nothing.
+                cancelled = True
+                self.stopped_reason = "cancelled: owner request"
+                break
             obs = Observation(page=page, last_result=last_result, step=step,
                               goal=goal,
                               history=[t.to_dict() for t in self.trace])
@@ -398,7 +449,24 @@ class AgentLoop:
                 break
         else:
             self.stopped_reason = "step budget exhausted"
-        return {"goal": goal, "steps": len(self.trace),
-                "stopped_reason": self.stopped_reason,
-                "final_url": page.url,
-                "trace": [t.to_dict() for t in self.trace]}
+        if not cancelled \
+                and not self.stopped_reason.startswith("blocked:") \
+                and self._cancel_seen():
+            # Close-out re-check: the request landed after the
+            # final step boundary, while the loop was closing —
+            # the run reads cancelled, not completed. A blocked
+            # stop is exempt: the wall is the run's own terminal
+            # truth, and the record says so.
+            prior = self.stopped_reason
+            self.stopped_reason = "cancelled: owner request" + (
+                f" (loop had stopped: {prior})" if prior else "")
+        out = {"goal": goal, "steps": len(self.trace),
+               "stopped_reason": self.stopped_reason,
+               "final_url": page.url,
+               "trace": [t.to_dict() for t in self.trace]}
+        if armed:
+            # Tells the job's finish() this runner polled
+            # cooperatively, so a request standing at record
+            # close still lands the run cancelled (jobs.py).
+            out["cancel_poll_armed"] = True
+        return out

@@ -39,7 +39,14 @@ runners poll :meth:`BrowserRunJob.cancel_requested` and stop
 themselves, returning a ``cancelled: …`` stopped reason; the record
 distinguishes ``requested`` from ``confirmed``, and a run that ends
 without honoring the request is recorded ``unhonored``, never as a
-clean cancel.
+clean cancel. The production runner (the wired ``AgentLoop``) polls
+at its step boundaries and re-checks once more as it closes out;
+its result carries a ``cancel_poll_armed`` marker, and when a
+request is standing at :meth:`BrowserRunJob.finish` for such a
+runner — it landed in the sliver after the loop's final poll — the
+close lands the run ``cancelled``/``confirmed`` rather than a
+revoked completion. A runner that never polls carries no marker
+and keeps the ``unhonored`` reading when it ends on its own terms.
 """
 from __future__ import annotations
 
@@ -342,6 +349,24 @@ class BrowserRunJob:
             blocked = self.stopped_reason.startswith("blocked:")
             cancelled = self._cancel_requested.is_set() \
                 and self.stopped_reason.startswith("cancelled")
+            if not cancelled and not blocked \
+                    and self._cancel_requested.is_set() \
+                    and result.get("cancel_poll_armed"):
+                # Close-out re-check: the runner polls
+                # cooperatively (its result carries the armed
+                # marker), but this request landed after its
+                # final poll, in the sliver before this close —
+                # the record lands cancelled, never a clean
+                # completion the owner had already revoked.
+                # Runners that never poll carry no marker and
+                # keep the unhonored reading below.
+                cancelled = True
+                prior = self.stopped_reason
+                self.stopped_reason = (
+                    "cancelled: request landed before the record "
+                    f"closed (loop stopped: {prior})" if prior else
+                    "cancelled: request landed before the record "
+                    "closed")
             if cancelled:
                 self.status = STATUS_CANCELLED
             elif blocked:

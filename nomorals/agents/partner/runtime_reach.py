@@ -624,7 +624,8 @@ class RuntimeReachMixin:
                 max_steps=30, approve=_approve_benign,
                 decide_llm=_decider(),
                 on_progress=job.note_progress,
-                on_wall_outcome=job.wall_event)
+                on_wall_outcome=job.wall_event,
+                cancel_requested=job.cancel_requested)
             return loop.run(url, goal=goal)
 
         job, duplicate = self._browser_run_jobs().start(

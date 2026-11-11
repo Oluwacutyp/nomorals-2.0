@@ -164,7 +164,8 @@ def build_wired_agent_loop(*, tab: Any,
                            dry_run: bool = False,
                            on_trace: Any = None,
                            on_progress: Any = None,
-                           on_wall_outcome: Any = None) -> AgentLoop:
+                           on_wall_outcome: Any = None,
+                           cancel_requested: Any = None) -> AgentLoop:
     """Build an ``AgentLoop`` whose wall path is fully wired.
 
     ``tab`` is the live rendered tab (raw — the factory wraps it in
@@ -175,7 +176,11 @@ def build_wired_agent_loop(*, tab: Any,
     (optional) receives wall lifecycle events — ``wall_hit`` /
     ``wall_escalated`` / ``wall_cleared`` / ``wall_blocked`` — so a
     background job can notify the owner and record the wall outcome.
-    Everything else is passed straight through to :class:`AgentLoop`.
+    ``cancel_requested`` (optional) is the cooperative cancel poll
+    handed to the loop — the browser job runner passes its job's
+    ``cancel_requested`` so a cancel stops the run at its next step
+    boundary. Everything else is passed straight through to
+    :class:`AgentLoop`.
     """
     adapter = RenderedTabTakeoverAdapter(tab)
     solver = ChallengeSolver(
@@ -190,5 +195,5 @@ def build_wired_agent_loop(*, tab: Any,
         autonomy=autonomy, approve=approve, verify=verify,
         dry_run=dry_run, max_steps=max_steps,
         on_trace=on_trace, on_progress=on_progress,
-        on_blocked=handler)
+        on_blocked=handler, cancel_requested=cancel_requested)
     return loop
