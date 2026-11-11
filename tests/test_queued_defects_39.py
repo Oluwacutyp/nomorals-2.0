@@ -14,12 +14,17 @@ and two still real, pinned here:
   at step ``submit_signup`` (owner screenshot, 2026-10-26). The pin
   drives the flow the REGISTRY resolves for odds-api against a fake
   tab modelling that recorded page shape: only the email field
-  exists, only START controls exist, ``submit()`` fails.
+  exists, only START controls exist, ``submit()`` fails. A second
+  pin drives ``ProvisionDriver.provision("odds-api")`` itself, so a
+  dispatch regression (the registry entry repointed at the generic
+  flow, the driver bypassing the named flow) cannot pass silently.
 
 * **B2 — the same failure text twice.** ``_run_provision_drive``
   handed the full failure message to the live view's ❌ frame AND
-  returned it as the reply. The pin: the full text appears exactly
-  once (the reply); the frame gets a short step-named head.
+  returned it as the reply. The pins: the full text appears exactly
+  once (the reply); the frame gets a short head — step-named when
+  the result carries a step, the outcome label when it does not —
+  and never the message itself.
 
 * **C1 — Ctrl-C does not stop Devon (Windows).** The runtime
   installed only the SIGTERM mapping: no managed SIGINT handler (an
@@ -198,6 +203,52 @@ class TestOddsSignupContract(unittest.TestCase):
         self.assertEqual(tab.fills, {"email": "desk@example.com"})
 
 
+class TestOddsSignupThroughTheDriver(unittest.TestCase):
+    """B1 through the production dispatch: ``ProvisionDriver``
+    itself must reach the subscribe flow for odds-api. The class
+    above drives the resolved flow directly; this one proves the
+    registry → driver → named-flow wiring the /provision command
+    actually runs, on a recorded owner identity."""
+
+    def test_driver_provisions_odds_api_via_the_subscribe_flow(self):
+        from nomorals.accounts.creator import AccountCreator
+        from nomorals.accounts.provisioning import ProvisionDriver
+        from nomorals.accounts.vault import CredentialVault
+        from nomorals.storage.db import Database
+
+        ensure_provisioning()
+        home = _tmp_dir(self, "nm-qdef39-driver-")
+        db = Database(os.path.join(home, "test.db"))
+        db.migrate()
+        self.addCleanup(db.close)
+        vault = CredentialVault(db, master_passphrase="test-pass")
+        AccountCreator(vault, db=db).set_owner_identity(
+            "Test Person", "desk@example.com")
+        tab = OddsPageTab()
+        driver = ProvisionDriver(
+            vault, open_tab=lambda service: tab, environ={})
+        result = driver.provision("odds-api")
+        # The subscribe drive lands on the email-verification
+        # checkpoint — NOT the generic flow's page-changed death at
+        # submit_signup, and nothing in the reply names that step.
+        self.assertEqual(result.outcome,
+                         ProvisionOutcome.CREATION_CHECKPOINT,
+                         result.message)
+        self.assertEqual(result.checkpoint.get("kind"), "email_verify")
+        self.assertNotIn("submit_signup", result.message)
+        # The page saw exactly the subscribe contract: the free plan
+        # started deliberately, only the email field filled.
+        self.assertTrue(tab.free_plan_clicked)
+        self.assertFalse(tab.first_plan_clicked)
+        self.assertEqual(tab.fills, {"email": "desk@example.com"})
+        # The driver's own audit records the verification-pending
+        # conversion of the flow's result.
+        self.assertTrue(any(
+            r.get("service") == "odds-api"
+            and r.get("outcome") == "signup_verification_pending"
+            for r in driver.audit_trail), driver.audit_trail)
+
+
 # ── B2: the failure surfaces exactly once ────────────────────────────
 
 
@@ -214,13 +265,21 @@ class _FakeView:
 
 
 class _FakeDriver:
-    def __init__(self, vault, **kwargs) -> None:
+    def __init__(self, vault, step: str = "signup:submit_signup",
+                 **kwargs) -> None:
         self.vault = vault
+        self._step = step
 
     def provision(self, service_id: str) -> ProvisionResult:
         return ProvisionResult(
             ProvisionOutcome.PAGE_CHANGED, "odds-api",
-            FAILURE_MESSAGE, step="signup:submit_signup")
+            FAILURE_MESSAGE, step=self._step)
+
+
+def _stepless_driver(vault, **kwargs) -> _FakeDriver:
+    """A driver whose failure result carries no step — the head
+    must fall back to the outcome label, still never the message."""
+    return _FakeDriver(vault, step="", **kwargs)
 
 
 def _make_runtime(test: unittest.TestCase):
@@ -279,6 +338,26 @@ class TestProvisionFailureSurfacesOnce(unittest.TestCase):
         self.assertEqual(len(view.fail_calls), 1)
         self.assertNotIn(FAILURE_MESSAGE, view.fail_calls[0])
         self.assertIn("submit_signup", view.fail_calls[0])
+        self.assertEqual(view.finish_calls, [])
+
+    def test_failure_head_without_a_step_still_hides_the_message(self):
+        runtime = _make_runtime(self)
+        view = _FakeView()
+        runtime._provision_state()["watch_views"]["chat-1"] = view
+        runtime._provision_vault = lambda: object()  # noqa: E731
+        with mock.patch(
+                "nomorals.accounts.provisioning.ProvisionDriver",
+                _stepless_driver):
+            out = runtime._run_provision_drive(
+                "odds-api", chat_key="chat-1", message=None)
+        # The full failure text: exactly once, in the reply — even
+        # when the result names no step for the head to quote.
+        self.assertEqual(out.count(FAILURE_MESSAGE), 1)
+        # The frame's head falls back to the outcome label; the
+        # message itself never reaches the frame.
+        self.assertEqual(len(view.fail_calls), 1)
+        self.assertNotIn(FAILURE_MESSAGE, view.fail_calls[0])
+        self.assertIn("page_changed", view.fail_calls[0])
         self.assertEqual(view.finish_calls, [])
 
 
