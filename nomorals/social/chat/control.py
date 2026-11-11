@@ -387,7 +387,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "pack": (0, None),      # /pack [open <id> | on|off <id> | act <id> <verb> …] — experience packs (Living Chat P4): the 25 journeys of the pack registry as living cards over the manifest/action/operations substrate; lifecycle persists, a disabled pack's surfaces stop resolving
     "skills": (0, None),    # /skills [show <id> | search <task> | drafts | promote <id>] — the flat-file skillbook: seed library in the repo + distilled drafts at $NM_HOME/skills; drafts promote after 2 successful missions or by this verb. Owner-only.
     "delegate": (0, None),  # /delegate [show <id> | claims [id]] — accountable delegation cockpit: work contracts, claim ledger, verification state, on living cards. Owner-only.
-    "computer": (0, None),  # /computer [status|open|close|view|takeover|handback|stop|resume] — Devon's own desktop: persistent sessions she drives herself; owner watch + takeover; sticky owner stop. Owner-only.
+    "computer": (0, None),  # /computer [status|open|close|view|watch|unwatch|takeover|handback|stop|resume] — Devon's own desktop: persistent sessions she drives herself; owner watch (live stream) + takeover; sticky owner stop. Owner-only.
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
@@ -2105,8 +2105,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/delegate  ·  /delegate show <contract id>  ·  /delegate claims [contract id]",
              "example": "/delegate   ·   /delegate show dc-1a2b3c4d5e6f   ·   /delegate claims",
              "related": "/skills /mission"},
-    "computer": {"what": "Devon's own computer: a persistent desktop on the host she runs on — sessions with a display that survive between tasks, driven end-to-end (screenshot, window list, mouse, keyboard, app launch and focus) through her own bridge (raw X11 on Linux, raw Win32 on Windows; no third-party automation). The brain drives it through the computer tool under a verified perceive-act loop; here the owner watches and intervenes: view sends the live frame, takeover puts the agent's hands off the desktop until handback, and stop is the sticky owner stop — it survives restarts and only resume clears it. A degraded brain is observe-only on the desktop. Owner-only.",
-             "usage": "/computer  ·  /computer open  ·  /computer view  ·  /computer takeover  ·  /computer handback  ·  /computer stop  ·  /computer resume  ·  /computer close",
+    "computer": {"what": "Devon's own computer: a persistent desktop on the host she runs on — sessions with a display that survive between tasks, driven end-to-end (screenshot, window list, mouse, keyboard, app launch and focus) through her own bridge (raw X11 on Linux, raw Win32 on Windows; no third-party automation). The brain drives it through the computer tool under a verified perceive-act loop; here the owner watches and intervenes: view sends the live frame, watch streams new frames to the chat as they happen (a durable job — it shows on /runs and stops through the same receipted cancel), takeover puts the agent's hands off the desktop until handback, and stop is the sticky owner stop — it survives restarts and only resume clears it. A degraded brain is observe-only on the desktop. Owner-only.",
+             "usage": "/computer  ·  /computer open  ·  /computer view  ·  /computer watch  ·  /computer unwatch  ·  /computer takeover  ·  /computer handback  ·  /computer stop  ·  /computer resume  ·  /computer close",
              "example": "/computer   ·   /computer open   ·   /computer view",
              "related": "/delegate /mission /webshot"},
     "model": {"what": "switch the active model live (up to 5 fallbacks); no argument shows the chain.",
@@ -5102,7 +5102,7 @@ LIST_ONELINERS: dict[str, str] = {
     "mission": "mission progress + ETA + stall reasons",
     "skills": "the flat-file skillbook: /skills lists it, /skills show <id> reads one, /skills search routes a task, drafts + promote manage distilled skills",
     "delegate": "accountable delegation: /delegate lists work contracts + verification state, /delegate show <id> reads the claim ledger",
-    "computer": "her own desktop: /computer shows sessions + gate, open starts one, view sends the live frame, takeover/handback and the sticky stop are the owner's hands",
+    "computer": "her own desktop: /computer shows sessions + gate, open starts one, view sends the live frame, watch streams it live, takeover/handback and the sticky stop are the owner's hands",
     "email": "mailbox (Gmail): inbox/search/read/thread + triage + draft queue; sends need your explicit 'send it'",
     "gmail": "alias of /email — the owner's mailbox over Gmail",
     "mail": "alias of /email — the owner's mailbox over Gmail",

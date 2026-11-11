@@ -34,7 +34,9 @@ not-found, never an empty ticket.
 
 Reference shapes are the steward's subject keys, adopted not
 replaced: ``contract:<id>`` · ``mission:<id>`` · ``job:<id>`` ·
-``browser:<run_id>`` · ``render:<job_id>`` — plus ``task:<id>``
+``browser:<run_id>`` · ``render:<job_id>`` · ``watch:<watch_id>``
+(the computer organ's durable watch records, read the browser/
+media way) — plus ``task:<id>``
 resolved against a caller-supplied TaskGraph (task graphs are
 in-memory; there is no durable task record to read without one),
 and ``mind:<job_id>`` resolved against a caller-supplied CoreMind
@@ -66,7 +68,7 @@ their stores), core.jobs snapshots, core.proof_grade (L1),
 core.leases live-lease reads (L1, via its module-level readers —
 no store is constructed, no DDL runs), core.cancellation receipt
 reads (L1, same reader discipline), the help protocol's request
-reads (L5 peer, same discipline), and the browser/media
+reads (L5 peer, same discipline), and the browser/media/watch
 durable record tables directly by SQL (the outcome steward's
 precedent — observation constructs no manager and writes
 nothing).
@@ -123,6 +125,7 @@ _REF_KINDS = {
     "browser": "browser_run",
     "render": "media_job",
     "media": "media_job",
+    "watch": "computer_watch",
     "task": "task",
     "mind": "coremind_job",
 }
@@ -772,6 +775,77 @@ def _media_ticket(row: dict[str, Any], now: float) -> ExecutionTicket:
     return ticket
 
 
+def _watch_ticket(row: dict[str, Any], now: float) -> ExecutionTicket:
+    status = str(row.get("status") or "")
+    label = str(row.get("label") or "").strip()
+    ticket = ExecutionTicket(
+        ref=f"watch:{row.get('watch_id')}", kind="computer_watch",
+        label=f"computer watch: {label[:40]}" if label
+        else "computer watch: desktop stream",
+        status=status, read_at=now)
+    platform = str(row.get("platform") or "")
+    ticket.fill(
+        "purpose",
+        "live-tail the desktop session's stream to the owner's "
+        "chat as it is produced"
+        + (f" ({platform})" if platform else ""),
+        "computer.watch")
+    ticket.mark_absent(
+        "actors", "the watch record names no actor")
+    _no_owner_chat(ticket, "computer watch")
+    ticket.fill(
+        "capabilities",
+        {"organ": "computer", "mode": "observe-only stream",
+         "stream": "frames"},
+        "computer.watch")
+    ticket.mark_absent(
+        "fencing", "computer watches keep no fencing generation")
+    ticket.mark_absent(
+        "evidence",
+        "the watch record names no evidence requirement for its "
+        "completion — its delivered-frame counts ride in liveness")
+    ticket.mark_absent(
+        "acceptance",
+        "no acceptance predicate is recorded for a computer watch")
+    budget_s = float(row.get("budget_s") or 0)
+    started = float(row.get("started_at") or 0)
+    finished = float(row.get("finished_at") or 0)
+    ticket.fill(
+        "budget",
+        {"max_seconds": budget_s or None,
+         "elapsed_s": (round((finished or now) - started, 1)
+                       if started else None)},
+        "computer.watch")
+    ticket.fill("liveness",
+                {"status": status,
+                 "created_at": row.get("created_at"),
+                 "started_at": row.get("started_at"),
+                 "finished_at": row.get("finished_at"),
+                 "updated_at": row.get("updated_at"),
+                 "age_s": _age(now, row.get("updated_at")),
+                 "last_seen_at": row.get("last_seen_at"),
+                 "last_frame_at": row.get("last_frame_at"),
+                 "frames_delivered": row.get("frames_delivered"),
+                 "frames_skipped": row.get("frames_skipped")},
+                "computer.watch")
+    ticket.fill(
+        "cancel",
+        _cancel_from_state(
+            str(row.get("cancel_state") or ""),
+            row.get("cancel_requested_at"),
+            "the watch record's own typed cancel state: requested "
+            "is not confirmed, and a watch that ended without "
+            "honoring a request reads unhonored"),
+        "computer.watch")
+    ticket.detail = {
+        "reason": str(row.get("reason") or ""),
+        "error": str(row.get("error") or ""),
+        "frames_dropped": row.get("frames_dropped"),
+        "platform": platform,
+    }
+    return ticket
+
+
 def _task_ticket(task: Any, graph: Any, now: float) -> ExecutionTicket:
     state = getattr(task.state, "value", str(task.state))
     ticket = ExecutionTicket(
@@ -977,11 +1051,11 @@ def ticket_for(ref: str, db: Any = None, *,
     typed not-found dict (``{"found": False, "ref", "reason"}``).
 
     ``db`` backs the durable organs (contracts, missions, browser
-    runs, media jobs). ``registry`` defaults to the shared
-    JobRegistry for ``job:`` refs; ``tool_registry`` (optional)
-    resolves a job's tool name to its ToolSpec; ``graph`` (a
-    TaskGraph) resolves ``task:`` refs; ``coremind`` (a CoreMind)
-    resolves ``mind:`` refs.
+    runs, media jobs, computer watches). ``registry`` defaults to
+    the shared JobRegistry for ``job:`` refs; ``tool_registry``
+    (optional) resolves a job's tool name to its ToolSpec;
+    ``graph`` (a TaskGraph) resolves ``task:`` refs; ``coremind``
+    (a CoreMind) resolves ``mind:`` refs.
     """
     now = time.time() if now is None else now
     prefix, _, ident = str(ref or "").partition(":")
@@ -1059,6 +1133,20 @@ def ticket_for(ref: str, db: Any = None, *,
         _apply_cancel_receipt(ticket, db)
         _apply_help(ticket, db)
         return ticket.to_dict()
+    if kind == "computer_watch":
+        if db is None:
+            return _not_found(ref, "reading a computer-watch ticket "
+                                   "needs a database handle")
+        rows = _rows(db, "computer_watch_records", "watch_id = ?",
+                     (ident,))
+        if not rows:
+            return _not_found(ref, "no computer_watch_records row "
+                                   f"with watch_id {ident!r} exists")
+        ticket = _watch_ticket(rows[0], now)
+        _apply_leases(ticket, db, now)
+        _apply_cancel_receipt(ticket, db)
+        _apply_help(ticket, db)
+        return ticket.to_dict()
     if kind == "coremind_job":
         if coremind is None:
             return _not_found(ref, "coremind job records live on a "
@@ -1117,6 +1205,9 @@ def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
         for row in _rows(db, "media_job_records", "1 = 1", (),
                          limit=limit):
             tickets.append(_media_ticket(row, now))
+        for row in _rows(db, "computer_watch_records", "1 = 1", (),
+                         limit=limit):
+            tickets.append(_watch_ticket(row, now))
     reg = registry if registry is not None else shared_registry()
     for snap in reg.list():
         tickets.append(_job_ticket(snap, tool_registry, now))
@@ -1150,7 +1241,8 @@ def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
         f"{by_source.get('mission', 0)} · registry jobs "
         f"{by_source.get('job', 0)} · browser runs "
         f"{by_source.get('browser_run', 0)} · media jobs "
-        f"{by_source.get('media_job', 0)} · tasks "
+        f"{by_source.get('media_job', 0)} · computer watches "
+        f"{by_source.get('computer_watch', 0)} · tasks "
         f"{by_source.get('task', 0)}")
     if coremind is not None:
         first_line += (f" · coremind jobs "

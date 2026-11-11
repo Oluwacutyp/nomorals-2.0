@@ -22,4 +22,5 @@ runtime), never imported from agents/.
 
 from __future__ import annotations
 
-__all__ = ["service", "sessions", "loop", "protocol", "provision"]
+__all__ = ["service", "sessions", "loop", "protocol", "provision",
+           "watch"]

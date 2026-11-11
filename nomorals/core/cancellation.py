@@ -108,6 +108,10 @@ RECEIPT_STATES = ("requested", "confirmed", "unhonored",
 #:   ``cancelled`` flag is true, else its ``state`` word verbatim
 #:   (``active`` = started, not interrupted there; ``queued`` = a
 #:   record with no live queue entry in this process).
+#: * computer_watch — the watch manager's typed dict: its
+#:   ``state`` word, with ``already_terminal`` qualified by the
+#:   record's cancel_state — the browser scheme, shared because
+#:   the watch record carries the same cancel lifecycle.
 CANCEL_MAPPINGS: dict[str, dict[str, str]] = {
     "delegation": {
         "cancelled": "confirmed",
@@ -156,6 +160,19 @@ CANCEL_MAPPINGS: dict[str, dict[str, str]] = {
         "failed": "refused",
         "lost": "refused",
     },
+    # computer_watch — the watch manager's typed dict: its
+    # ``state`` word, with ``already_terminal`` qualified by the
+    # record's cancel_state — the browser table's exact scheme
+    # (``own_terms`` = ended with no cancel ever recorded), because
+    # the watch record carries the same cancel lifecycle.
+    "computer_watch": {
+        "requested": "requested",
+        "not_found": "not_found",
+        "already_terminal:confirmed": "confirmed",
+        "already_terminal:unhonored": "unhonored",
+        "already_terminal:requested": "requested",
+        "already_terminal:own_terms": "refused",
+    },
 }
 
 #: Reference prefixes (the ticket projection's shapes) → the organ
@@ -168,6 +185,7 @@ _REF_ORGANS = {
     "render": "media",
     "media": "media",
     "mind": "coremind",
+    "watch": "computer_watch",
 }
 
 _RECEIPT_DDL = """
@@ -471,6 +489,38 @@ def _cancel_browser(ident: str, manager: Any) -> _Outcome:
                     "the facade does not know", answer)
 
 
+def _cancel_watch(ident: str, manager: Any) -> _Outcome:
+    answer = manager.cancel(ident)
+    state = str(answer.get("state") or "")
+    if state == "not_found":
+        return _Outcome("not_found",
+                        "no computer watch with that id (or unique "
+                        "prefix) exists in the manager", answer)
+    if state == "requested":
+        return _Outcome(
+            "requested",
+            f"cancel requested while the watch stood at "
+            f"{answer.get('status')}; it takes effect "
+            f"{answer.get('takes_effect')} — the watch record "
+            "carries the final word (confirmed when honored, "
+            "unhonored when the watch ends on its own terms)",
+            answer)
+    if state == "already_terminal":
+        cancel_state = str(answer.get("cancel_state") or "")
+        if cancel_state in ("confirmed", "unhonored", "requested"):
+            word = f"already_terminal:{cancel_state}"
+        else:
+            word = "already_terminal:own_terms"
+        shown = cancel_state or "empty (no cancel was ever recorded)"
+        return _Outcome(
+            word,
+            f"the watch already finished at {answer.get('status')}; "
+            f"its record's cancel_state is {shown}", answer)
+    return _Outcome(f"unclassified:{state}",
+                    "the watch manager answered a state word "
+                    "the facade does not know", answer)
+
+
 def _cancel_media(ident: str, manager: Any) -> _Outcome:
     try:
         answer = manager.cancel(ident)
@@ -523,18 +573,21 @@ def cancel_with_receipt(db: Any, ref: str, *,
                         browser_manager: Any = None,
                         media_manager: Any = None,
                         coremind: Any = None,
+                        watch_manager: Any = None,
                         now: float | None = None
                         ) -> dict[str, Any]:
     """Cancel one operation through its organ's own mechanism and
     mint the uniform receipt. ``ref`` uses the ticket
     projection's shapes (``contract:`` / ``mission:`` / ``job:`` /
-    ``browser:`` / ``render:`` / ``media:`` / ``mind:``); each
-    organ is the caller-supplied live handle its wrapper needs
-    (``delegation`` a DelegationStore, ``missions`` a MissionStore,
-    ``registry`` a JobRegistry — the shared registry when omitted,
-    ``browser_manager`` / ``media_manager`` the P1 managers,
-    ``coremind`` a CoreMind). ``generation`` is honoured only by
-    delegation, whose cancel is generation-fenced.
+    ``browser:`` / ``render:`` / ``media:`` / ``mind:`` /
+    ``watch:``); each organ is the caller-supplied live handle
+    its wrapper needs (``delegation`` a DelegationStore,
+    ``missions`` a MissionStore, ``registry`` a JobRegistry — the
+    shared registry when omitted, ``browser_manager`` /
+    ``media_manager`` the P1 managers, ``coremind`` a CoreMind,
+    ``watch_manager`` the computer watch manager).
+    ``generation`` is honoured only by delegation, whose cancel
+    is generation-fenced.
 
     Returns ``{"ref", "organ", "native", "native_state",
     "receipt", "receipt_error"}``: the organ's raw answer, the
@@ -558,6 +611,7 @@ def cancel_with_receipt(db: Any, ref: str, *,
         "browser": browser_manager,
         "media": media_manager,
         "coremind": coremind,
+        "computer_watch": watch_manager,
     }
     if organ in handles and handles[organ] is None:
         return {
@@ -583,6 +637,8 @@ def cancel_with_receipt(db: Any, ref: str, *,
         outcome = _cancel_browser(ident, browser_manager)
     elif organ == "media":
         outcome = _cancel_media(ident, media_manager)
+    elif organ == "computer_watch":
+        outcome = _cancel_watch(ident, watch_manager)
     else:
         outcome = _cancel_coremind(ident, coremind)
     receipt = None

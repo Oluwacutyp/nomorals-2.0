@@ -1831,8 +1831,12 @@ class RuntimeExpressionMixin:
         organ's state — availability, sessions, and each session's
         control gate; open starts a persistent desktop session;
         view perceives and sends the live frame as a photo;
-        takeover puts the agent's hands off the desktop until
-        handback; stop is the owner's STICKY stop (survives
+        watch starts a live tail of the session's stream (new
+        frames delivered to this chat as they are produced — a
+        durable job on /runs, stoppable from either surface);
+        unwatch stops this chat's watch through the cancellation
+        facade; takeover puts the agent's hands off the desktop
+        until handback; stop is the owner's STICKY stop (survives
         restarts, cleared only by resume); close ends a session.
         Watching is never gated; acting is — the organ enforces
         it, this surface only speaks it."""
@@ -1843,9 +1847,12 @@ class RuntimeExpressionMixin:
         parts = text.split()
         verb = parts[0].lower() if parts else "status"
         session_id = ""
+        watch_id = ""
         for part in parts[1:]:
             if part.startswith("desk-"):
                 session_id = part
+            elif part.startswith("cw-"):
+                watch_id = part
         if verb == "status":
             return svc.status_text()
         if verb == "open":
@@ -1872,6 +1879,11 @@ class RuntimeExpressionMixin:
                 lines.append("the live frame is attached.")
                 self._computer_send_frame(message, seen["frame_path"])
             return "\n".join(lines)
+        if verb == "watch":
+            return self._computer_watch_start(svc, session_id, message)
+        if verb == "unwatch":
+            return self._computer_watch_stop(session_id, watch_id,
+                                             message)
         if verb in ("takeover", "handback", "stop", "resume", "close"):
             handler = {"takeover": svc.takeover, "handback": svc.handback,
                        "stop": svc.stop, "resume": svc.resume,
@@ -1896,9 +1908,9 @@ class RuntimeExpressionMixin:
             if verb == "resume":
                 return f"computer resumed — {rec['id']} may be driven."
             return f"session {rec['id']} closed."
-        return ("computer verbs: status · open · view · takeover · "
-                "handback · stop · resume · close — /computer on its "
-                "own shows the state.")
+        return ("computer verbs: status · open · view · watch · "
+                "unwatch · takeover · handback · stop · resume · "
+                "close — /computer on its own shows the state.")
 
     def _computer_send_frame(self, message, frame_path: str) -> None:  # type: ignore[no-untyped-def]
         """Send a desktop frame to the owner's chat as a photo."""
@@ -1915,6 +1927,149 @@ class RuntimeExpressionMixin:
                 name="desktop.png")
         except Exception as exc:  # noqa: BLE001 — the text reply still lands
             record_failure("computer view send", exc)
+
+    def _computer_watch_manager(self):  # type: ignore[no-untyped-def]
+        """The ONE computer-watch manager for this runtime (cached).
+
+        Mirrors _browser_run_jobs: the manager owns the watch
+        threads and the durable watch records, so it is built
+        once, never fresh per command. Its construction
+        reconciles records a previous process left standing
+        live — a watch never silently resurrects across a
+        restart. The capture/gate functions close over their own
+        SessionManager (perception is ungated; the store is the
+        shared truth across manager instances)."""
+        mgr = getattr(self, "_computer_watch_manager_inst", None)
+        if mgr is None:
+            from ...computer.sessions import SessionManager
+            from ...computer.watch import (
+                ComputerWatchManager,
+                session_capture_fn,
+                session_gate_fn,
+            )
+
+            sessions = SessionManager()
+            mgr = ComputerWatchManager(
+                capture_fn=session_capture_fn(sessions),
+                gate_fn=session_gate_fn(sessions),
+                db=getattr(getattr(self, "context", None), "db",
+                           None))
+            self._computer_watch_manager_inst = mgr
+        return mgr
+
+    def _computer_watch_senders(self, message):  # type: ignore[no-untyped-def]
+        """(send_frame, send_note) bound to the chat that asked.
+
+        Frames ride the gateway's file seam as photos (the
+        _computer_send_frame precedent); notes ride its text
+        seam. A failed send raises into the watch's delivery
+        loop, which counts and ledgers it — the watch itself
+        never dies on a send."""
+        platform = str(getattr(message.chat, "platform", "") or "")
+        chat_key = str(getattr(message.chat, "key", "") or "")
+        gateway = self.gateway
+
+        def _check(result, what):  # type: ignore[no-untyped-def]
+            if result is not None and not getattr(result, "ok", True):
+                raise RuntimeError(
+                    f"{what} send failed: "
+                    f"{getattr(result, 'error', '') or 'unknown error'}")
+
+        def send_frame(frame, caption):  # type: ignore[no-untyped-def]
+            _check(gateway.send_file(
+                platform, chat_key, frame.frame_path,
+                caption=caption, kind="photo", name="desktop.png"),
+                "frame")
+
+        def send_note(text):  # type: ignore[no-untyped-def]
+            _check(gateway.send(platform, chat_key, text), "note")
+
+        return send_frame, send_note
+
+    def _computer_watch_start(self, svc, session_id, message) -> str:  # type: ignore[no-untyped-def]
+        """``/computer watch [session]`` — start the live tail."""
+        if message is None:
+            return ("a watch delivers to the chat that starts "
+                    "it — there is no chat here to stream to.")
+        platform = str(getattr(message.chat, "platform", "") or "")
+        chat_key = str(getattr(message.chat, "key", "") or "")
+        if not platform or not chat_key:
+            return ("this surface has no chat address to stream "
+                    "to, so no watch was started.")
+        rec = svc.manager.resolve(session_id)
+        if rec is None:
+            return ("no desktop session exists yet — /computer "
+                    "open starts one, then /computer watch "
+                    "streams it here.")
+        if rec.state != "open":
+            return (f"session {rec.id} is {rec.state}"
+                    + (f" — {rec.note}" if rec.note else "")
+                    + "; a watch needs an open session.")
+        mgr = self._computer_watch_manager()
+        send_frame, send_note = self._computer_watch_senders(message)
+        watch, duplicate = mgr.start(
+            rec, platform=platform, chat_key=chat_key,
+            send_frame=send_frame, send_note=send_note)
+        budget = watch.budget_s
+        budget_words = (f"{budget / 60:.0f}m" if budget >= 120
+                        else f"{budget:.0f}s")
+        if duplicate:
+            return (f"already watching {rec.id} — the stream is "
+                    f"live in this chat. /computer unwatch stops "
+                    f"it; it is also on /runs.")
+        return (f"watching {rec.id} live — new frames land here "
+                f"as the desktop changes (watch budget "
+                f"{budget_words}). /computer unwatch stops it; "
+                f"it also shows on /runs.")
+
+    def _computer_watch_stop(self, session_id, watch_id,  # type: ignore[no-untyped-def]
+                             message) -> str:
+        """``/computer unwatch`` — stop through the ONE facade."""
+        mgr = self._computer_watch_manager()
+        watch = None
+        if watch_id:
+            watch = mgr.get(watch_id)
+        if watch is None and message is not None:
+            chat_key = str(getattr(message.chat, "key", "") or "")
+            if chat_key:
+                watch = mgr.active_for(chat_key, session_id)
+        if watch is None:
+            return ("no watch is running for this chat — "
+                    "/computer watch starts one.")
+        from ...core.cancellation import cancel_with_receipt
+
+        db = getattr(getattr(self, "context", None), "db", None)
+        try:
+            result = cancel_with_receipt(
+                db, f"watch:{watch.watch_id}",
+                requested_by="owner",
+                reason="stopped from /computer unwatch",
+                watch_manager=mgr)
+        except Exception as exc:  # noqa: BLE001 - the facade
+            # re-raises a classifiable organ refusal unchanged
+            # (its doctrine) — speak the organ's words.
+            return (f"the watch answered the stop in its own "
+                    f"words: {exc}")
+        receipt = result.get("receipt")
+        if receipt is not None:
+            state = receipt.get("receipt_state") or ""
+            if state == "requested":
+                return ("⏹ stop requested — the watch lands "
+                        "cancelled at its next tick and delivery "
+                        "ceases. Receipt: requested — it rides "
+                        "the watch's /runs ticket.")
+            if state == "confirmed":
+                return ("⏹ stopped — the watch stands cancelled "
+                        "on its own record. Receipt: confirmed.")
+            if state == "not_found":
+                return ("the watch was already gone — nothing "
+                        "to stop. Receipt: not_found.")
+            return (f"the stop was not honored (receipt: "
+                    f"{state or 'refused'}) — "
+                    f"{receipt.get('detail') or 'the watch manager declined'}")
+        return (f"⏹ the watch was stopped natively, but no "
+                f"receipt could be minted: "
+                f"{result.get('receipt_error') or 'unknown reason'}")
 
     def _delegation_card(self, store, contracts, message) -> None:  # type: ignore[no-untyped-def]
         """Publish/revise the delegation living card for this chat."""

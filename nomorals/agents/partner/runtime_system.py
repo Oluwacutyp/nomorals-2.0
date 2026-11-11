@@ -2741,7 +2741,8 @@ class RuntimeSystemMixin:
 
         /runs               — the board: every execution ticket
                               (delegations, missions, registry jobs,
-                              browser runs, media jobs, mind queue)
+                              browser runs, media jobs, computer
+                              watches, mind queue)
                               and healing ticket (incidents, heals,
                               fever cases, antibodies, receipts,
                               chat state) over the live stores —
@@ -2824,6 +2825,13 @@ class RuntimeSystemMixin:
                 media_manager = get_manager(db)
             except Exception:  # noqa: BLE001 - facade answers honestly
                 media_manager = None
+            watch_manager = None
+            watch_fn = getattr(self, "_computer_watch_manager", None)
+            if watch_fn is not None:
+                try:
+                    watch_manager = watch_fn()
+                except Exception:  # noqa: BLE001 - facade answers honestly
+                    watch_manager = None
             from ...core.jobs import shared_registry
             from ...missions import MissionStore
             from ..delegation import DelegationStore
@@ -2837,7 +2845,8 @@ class RuntimeSystemMixin:
                     registry=shared_registry(),
                     browser_manager=browser_manager,
                     media_manager=media_manager,
-                    coremind=getattr(self, "mind", None))
+                    coremind=getattr(self, "mind", None),
+                    watch_manager=watch_manager)
             except Exception as exc:  # noqa: BLE001 - the facade
                 # receipts a classifiable organ refusal and then
                 # re-raises the organ's own exception unchanged
