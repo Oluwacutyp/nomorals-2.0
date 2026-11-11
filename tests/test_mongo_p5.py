@@ -49,7 +49,10 @@ P5 settles the stores that live BESIDE the central database:
   The B9 lane (identity-documents, injected port, vault review
   recorded) follows the same pattern below.
   The B28 lane (health-challenges, full streak-lifecycle
-  conformance) follows the same pattern below.
+  conformance) follows the same pattern below. The residue Batch 3
+  C4 port (people — person+notes rollups re-expressed over finds,
+  int-id continuity across the lazy import) follows the same
+  pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -262,7 +265,9 @@ class TestSidecarRegistry:
             # residue Batch 2, B9 lane:
             "identity-documents",
             # residue Batch 2, B28 lane:
-            "health-challenges"}
+            "health-challenges",
+            # residue Batch 3, C4 lane:
+            "people"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -5601,3 +5606,250 @@ class TestHealthChallengesPort:
         proof = rung.store.find("health-challenges__proofs")[0]
         assert proof["verdict"] == "honor system — trusted"
         assert proof["verified"] == 1
+
+
+class TestPeoplePort:
+    """people/store.py — the people port (residue Batch 3, C4):
+    persons are documents in people__persons; the four
+    AUTOINCREMENT children ride put_raw under caller-shaped ids
+    str(next_id(<table>)), seeded by the lazy import, and child
+    writes return int(doc_id) — the public int-id contract. The
+    module's only JOIN (search's LEFT JOIN notes) re-expresses as
+    a find-all + notes grouped by person_id with literal substring
+    match. No FK layer: the module never deletes and every child
+    write ensures the person first, on both rungs. The scenario is
+    the rollup-equivalence bar: one fixture population, identical
+    get / top_contacts / needs_reconnect / search / gifts_for /
+    obligations_for / links_for observables on every rung, all
+    interaction time driven through the methods' own at= seams."""
+
+    T0 = 1_700_000_000.0
+
+    @staticmethod
+    def _port_for(path, rung):
+        # people/store.py is L0: the composition layer (this test)
+        # builds the port and injects it — the module never imports
+        # storage.
+        from nomorals.people.store import _SCHEMA
+        from nomorals.storage.sidecars import sidecar_port
+
+        return sidecar_port("people", _SCHEMA, ("persons",),
+                            str(path), store=rung.store)
+
+    @staticmethod
+    def _view(person) -> dict:
+        # The cross-rung person view: every field the interaction
+        # at= seams determine. created_at / updated_at / first_seen
+        # are excluded — child writes (add_note & friends) ensure
+        # with the wall clock. warmth is rounded to 6 places: the
+        # EMA is unrounded in the store (0.6000000000000001), the
+        # rounding here is the view's, not the data's.
+        return {
+            "person_id": person["person_id"],
+            "display_name": person["display_name"],
+            "closeness": person["closeness"],
+            "warmth": round(person["warmth"], 6),
+            "inbound_count": person["inbound_count"],
+            "outbound_count": person["outbound_count"],
+            "owner_initiated_count": person["owner_initiated_count"],
+            "last_inbound": person["last_inbound"],
+            "last_outbound": person["last_outbound"],
+            "last_topic": person["last_topic"],
+            "notes": person["notes"],
+        }
+
+    def _scenario(self, store) -> dict:
+        t0 = self.T0
+        store.ensure("ada", "Ada Lovelace", at=t0)
+        store.record_inbound("ada", topic="interview prep", warm=True,
+                             at=t0 + 60)
+        store.record_outbound("ada", owner_initiated=True, at=t0 + 120)
+        store.record_outbound("ada", owner_initiated=True, at=t0 + 180)
+        note_ids = (
+            store.add_note("ada", "Birthday in June"),
+            store.add_note("ada", "Scored 100% on review"),
+            store.add_note("ada", "Birthday in June"),  # duplicate
+        )
+        gift_id = store.add_gift(
+            "ada", "Book", "given", value_minor=2500, currency="NGN",
+            date="2026-10-01")
+        obligation_ids = (
+            store.link_obligation("ada", "c-1", "Send the draft",
+                                  deadline="2026-10-20"),
+            store.link_obligation("ada", "c-1", "Send the draft"),
+            store.link_obligation("ada", None, "Water the plants"),
+        )
+        link_ids = (
+            store.add_link("ada", "grace", "colleague"),
+            store.add_link("ada", "grace", "colleague"),  # duplicate
+        )
+        store.ensure("grace", "Grace Hopper", at=t0 + 200)
+        grace_note = store.add_note("grace", "Loves chess")
+        # closeness tie: identical interactions, person_id breaks it
+        store.record_outbound("mia", owner_initiated=True, at=t0 + 30)
+        store.record_outbound("nia", owner_initiated=True, at=t0 + 30)
+        for _ in range(5):
+            store.record_outbound("old", owner_initiated=True,
+                                  at=t0 - 40 * 86400)
+        store.record_inbound("stranger", at=t0 - 40 * 86400)
+        # orphan pin: a child write for an unknown person creates them
+        orphan_note = store.add_note("newbie", "First fact")
+        record = {
+            "person_id": "imported", "display_name": "Imported Person",
+            "closeness": 0.25, "warmth": 0.7, "inbound_count": 3,
+            "outbound_count": 1, "owner_initiated_count": 1,
+            "first_seen": t0 - 1000, "last_inbound": t0 - 500,
+            "last_outbound": 0.0, "last_topic": "migration",
+            "notes": ["Migrated note"],
+        }
+        imported = (store.import_record(record),
+                    store.import_record(record))
+        return {
+            "ids": {"notes": note_ids, "gift": gift_id,
+                    "obligations": obligation_ids, "links": link_ids,
+                    "grace_note": grace_note, "orphan_note": orphan_note},
+            "imported_flags": imported,
+            "ada": self._view(store.get("ada")),
+            "grace": self._view(store.get("grace")),
+            "newbie": self._view(store.get("newbie")),
+            "imported": self._view(store.get("imported")),
+            "missing": store.get("nobody"),
+            "top": [p["person_id"] for p in store.top_contacts()],
+            "top2": [p["person_id"] for p in store.top_contacts(limit=2)],
+            "reconnect": [
+                p["person_id"]
+                for p in store.needs_reconnect(days=30, now=t0)],
+            "search": {
+                q: [p["person_id"] for p in store.search(q)]
+                for q in ("lovelace", "interview", "chess", "100%",
+                          "birthday", "zzz", "a")
+            },
+            "gifts": [
+                (g["id"], g["description"], g["direction"],
+                 g["value_minor"], g["currency"], g["date"])
+                for g in store.gifts_for("ada")],
+            "obligations": [
+                (o["id"], o["commitment_id"], o["what"], o["deadline"],
+                 o["status"])
+                for o in store.obligations_for("ada")],
+            "links_ada": [
+                (link["id"], link["from_person"], link["to_person"],
+                 link["kind"])
+                for link in store.links_for("ada")],
+            "links_grace": [
+                (link["id"], link["from_person"], link["to_person"],
+                 link["kind"])
+                for link in store.links_for("grace")],
+            "gifts_grace": store.gifts_for("grace"),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.people import PersonStore
+
+        path = tmp_path / "people.db"
+        store = PersonStore(path, port=self._port_for(path, rung))
+        try:
+            observed = self._scenario(store)
+        finally:
+            store.close()
+        t0 = self.T0
+        assert observed == {
+            "ids": {"notes": (1, 2, 1), "gift": 1,
+                    "obligations": (1, 1, 2), "links": (1, 1),
+                    "grace_note": 3, "orphan_note": 4},
+            "imported_flags": (True, False),
+            "ada": {
+                "person_id": "ada", "display_name": "Ada Lovelace",
+                "closeness": 0.49, "warmth": 0.6, "inbound_count": 1,
+                "outbound_count": 2, "owner_initiated_count": 2,
+                "last_inbound": t0 + 60, "last_outbound": t0 + 180,
+                "last_topic": "interview prep",
+                "notes": ["Birthday in June", "Scored 100% on review"],
+            },
+            "grace": {
+                "person_id": "grace", "display_name": "Grace Hopper",
+                "closeness": 0.0, "warmth": 0.5, "inbound_count": 0,
+                "outbound_count": 0, "owner_initiated_count": 0,
+                "last_inbound": 0.0, "last_outbound": 0.0,
+                "last_topic": "", "notes": ["Loves chess"],
+            },
+            "newbie": {
+                "person_id": "newbie", "display_name": "",
+                "closeness": 0.0, "warmth": 0.5, "inbound_count": 0,
+                "outbound_count": 0, "owner_initiated_count": 0,
+                "last_inbound": 0.0, "last_outbound": 0.0,
+                "last_topic": "", "notes": ["First fact"],
+            },
+            "imported": {
+                "person_id": "imported",
+                "display_name": "Imported Person",
+                "closeness": 0.25, "warmth": 0.7, "inbound_count": 3,
+                "outbound_count": 1, "owner_initiated_count": 1,
+                "last_inbound": t0 - 500, "last_outbound": 0.0,
+                "last_topic": "migration", "notes": ["Migrated note"],
+            },
+            "missing": None,
+            "top": ["old", "ada", "mia", "nia", "imported", "stranger",
+                    "grace", "newbie"],
+            "top2": ["old", "ada"],
+            "reconnect": ["old"],
+            "search": {
+                "lovelace": ["ada"], "interview": ["ada"],
+                "chess": ["grace"], "100%": ["ada"],
+                "birthday": ["ada"], "zzz": [],
+                "a": ["ada", "mia", "nia", "imported", "stranger",
+                      "grace", "newbie"],
+            },
+            "gifts": [(1, "Book", "given", 2500, "NGN", "2026-10-01")],
+            "obligations": [
+                (1, "c-1", "Send the draft", "2026-10-20", "open"),
+                (2, None, "Water the plants", "", "open"),
+            ],
+            "links_ada": [(1, "ada", "grace", "colleague")],
+            "links_grace": [(1, "ada", "grace", "colleague")],
+            "gifts_grace": [],
+        }
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.people import PersonStore
+
+        path = tmp_path / "people.db"
+        native = PersonStore(path)
+        native.ensure("ada", "Ada Lovelace")
+        for text in ("n1", "n2", "n3"):
+            native.add_note("ada", text)
+        native.add_gift("ada", "Book", "given", value_minor=100)
+        native.close()
+
+        store = PersonStore(path, port=self._port_for(path, rung))
+        try:
+            # the file's history is the seam's history
+            assert store.get("ada")["notes"] == ["n1", "n2", "n3"]
+            assert [g["id"] for g in store.gifts_for("ada")] == [1]
+            # int-id continuity: imported notes 1..3, the next
+            # add_note returns 4 — the file's sequence, continued
+            assert store.add_note("ada", "n4") == 4
+            assert store.add_gift("ada", "Pen", "received") == 2
+            assert rung.store.count("people__notes") == 4
+            assert rung.store.count("people__persons") == 1
+            marker = rung.store.get("people__meta", "import")
+            assert marker is not None and marker["done"] is True
+            assert marker["tables"]["notes"] == 3
+            counters = rung.store.get("people__meta", "counters")
+            assert counters["notes"] == 4 and counters["gifts"] == 2
+            # the person key lives only in the document id
+            doc = rung.store.get("people__persons", "ada")
+            assert doc is not None and doc["_id"] == "ada"
+            assert "person_id" not in doc
+            # a second construction adopts — never re-imports
+            again = PersonStore(path, port=self._port_for(path, rung))
+            try:
+                assert again.get("ada")["notes"] == ["n1", "n2", "n3", "n4"]
+                assert again.add_note("ada", "n5") == 5
+            finally:
+                again.close()
+            assert rung.store.count("people__notes") == 5
+        finally:
+            store.close()

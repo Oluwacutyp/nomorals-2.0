@@ -1574,6 +1574,47 @@ _register(_S(
         "default byte-for-byte."),
 ))
 
+_register(_S(
+    name="people", verdict="ported", kind="sqlite-file",
+    modules=("people/store.py",),
+    tables=("persons", "notes", "links", "gifts", "obligations"),
+    reason=(
+        "ported in the Mongo residue Batch 3 pass (C4): PersonStore "
+        "routes through the seam behind its unchanged API — "
+        "pickup is by INJECTED port, not the ambient: "
+        "people/store.py is layer L0 (stdlib only), so it cannot "
+        "import storage; the composition layer builds the port "
+        "with sidecar_port() and passes it as port=. Persons are "
+        "documents in "
+        "people__persons (RowTable by person_id); the four "
+        "AUTOINCREMENT children (notes, links, gifts, obligations) "
+        "ride put_raw under caller-shaped ids str(next_id(<table>)), "
+        "the counters seeded by the one-time lazy import from each "
+        "table's file maximum, and child writes return int(doc_id), "
+        "so the public int-id contract is unchanged and id "
+        "continuity holds across the import (imported notes 1..3, "
+        "the next add_note returns 4). The module's only JOIN — "
+        "search()'s LEFT JOIN notes — re-expresses as a persons "
+        "find-all plus notes find-all grouped by person_id with "
+        "literal substring match (the native LIKE escapes make "
+        "%/_ literal, so the seam does plain substring, not LIKE "
+        "emulation); SQLite LIKE folds ASCII only, so the seam's "
+        "lower() folding can differ on non-ASCII names — a stated "
+        "corner, the pinned corpus is ASCII. No FK layer exists on "
+        "the seam and none is built: the module has no DELETEs, and "
+        "every child-write path ensures the person first (add_note, "
+        "add_link, add_gift, link_obligation), so no public path "
+        "can create an orphan on either rung — the FKs' observable "
+        "contract is the module's ensure-first discipline, "
+        "preserved verbatim; the gifts direction CHECK is likewise "
+        "pre-validated in Python (ValueError before any write) and "
+        "the obligations partial-unique rule is pre-checked by "
+        "link_obligation's own lookup. The file's existing rows "
+        "are imported once, through the same mapping, at first "
+        "construction. The native sqlite3 path serves the SQLite "
+        "default."),
+))
+
 
 # ── residue: contained domain file stores, classified, port queued ────────
 #
@@ -1619,11 +1660,6 @@ _residue("marketing-send", "marketing/send.py",
          "contains a QUEUE (send_queue) whose claim semantics need "
          "the P4 fencing treatment, so this port is a coordination "
          "port, not a plain CRUD port.")
-_residue("people", "people/store.py",
-         ("persons", "notes", "links", "gifts", "obligations"),
-         "the people store: five tables with JOIN-shaped reads "
-         "(person + notes rollups); the port re-expresses those "
-         "reads over _id-ordered finds, a domain pass of its own.")
 _residue("planning-congestion", "planning/congestion.py",
          ("congestion_resources", "congestion_events",
           "congestion_holds", "congestion_breakers"),
