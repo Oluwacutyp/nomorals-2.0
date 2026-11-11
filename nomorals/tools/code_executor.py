@@ -729,12 +729,21 @@ Reply as JSON only:
         task: str = "",
         *,
         ranked: bool = True,
-        budget_tokens: int = 12000,
+        budget_tokens: int | None = None,
     ) -> dict[str, str]:
         """Gather project context for planning.
 
-        Phase D: ranked assembly under a token budget by default
-        (``ranked=False`` keeps the old truncation for debugging).
+        Phase D: ranked assembly by default (``ranked=False`` keeps
+        the old truncation for debugging).  There is NO built-in token
+        ceiling (power mode, owner directive 2026-11-10): the old
+        ``budget_tokens=12000`` default bound every :meth:`plan` call,
+        silently dropping ranked files at a number nobody chose for
+        the run.  With no explicit budget the ranked context arrives
+        whole — the assembled plan prompt is fitted to the serving
+        rung's real window at send time by the brain's send-fit, which
+        is where real-window fitting belongs.  An explicit
+        ``budget_tokens`` keeps the exact ranked-fill semantics for
+        callers that need one.
         """
         if not ranked:
             from .repo_context import legacy_context

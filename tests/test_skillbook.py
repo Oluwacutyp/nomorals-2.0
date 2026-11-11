@@ -245,6 +245,57 @@ class ContextSeamTests(unittest.TestCase):
         built = ContextEngine().build(system="sys")
         self.assertNotIn("skills", [s.name for s in built.sections])
 
+    def test_engine_loads_long_skills_whole_no_local_ceiling(self):
+        """Power mode: the skills section carries NO local char ceiling.
+
+        The section builder used to pre-truncate routed skill docs at
+        a hardcoded 4000-char pool (and never reach the second routed
+        doc once the pool was spent) before the engine's own budget
+        layer saw them.  Docs now arrive whole; overflow is governed
+        by the caller's ContextBudget (fit/compress), the assembly's
+        declared budget seam.  The engine here is given a roomy
+        explicit budget, so any cut in the output is the old local
+        ceiling's doing — and there must be none.
+        """
+        from nomorals.context.budget import ContextBudget
+        from nomorals.context.engine import ContextEngine
+
+        class Doc:
+            def __init__(self, doc_id, body):
+                self.id = doc_id
+                self.body = body
+
+            def header(self):
+                return self.id
+
+        class Library:
+            def route(self, query, limit=2):
+                return [(d, 1.0) for d in self._docs[:limit]]
+
+            def record_load(self, loaded, mission_id=""):
+                self.recorded = list(loaded)
+
+        tail_a = "TAIL-A-" + "a" * 100
+        tail_b = "TAIL-B-" + "b" * 100
+        lib = Library()
+        lib._docs = [Doc("skill-a", "a" * 5000 + tail_a),
+                     Doc("skill-b", "b" * 3000 + tail_b)]
+        engine = ContextEngine(budget=ContextBudget(total=100000))
+        engine._skillbook = lib
+        mission = SimpleNamespace(
+            goal="delegate the long background work", id="m-seam-2",
+            status="running", acceptance_criteria=[],
+            required_artifacts=[], state={})
+        built = engine.build(system="sys", mission=mission)
+        # doc A alone exceeds the old 4000-char ceiling; doc B was
+        # unreachable behind it.  Both tails arrive whole.
+        self.assertIn(tail_a, built.text)
+        self.assertIn(tail_b, built.text)
+        self.assertNotIn("[skill truncated to context budget]",
+                         built.text)
+        self.assertEqual(built.meta.get("skills_loaded"),
+                         ["skill-a", "skill-b"])
+
 
 if __name__ == "__main__":
     unittest.main()

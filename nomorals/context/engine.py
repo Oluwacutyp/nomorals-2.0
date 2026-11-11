@@ -542,6 +542,13 @@ class ContextEngine:
         the mission id, so the terminal settle/promote loop can see
         which skills a mission actually used.  Any failure returns
         ``None`` — skills enrich context, they never gate it.
+
+        Routed docs load WHOLE: there is no local char ceiling here
+        (power mode, owner directive 2026-11-10 — a hardcoded pool
+        silently amputated skill docs before the engine's own budget
+        layer ever saw them).  Overflow is governed by the caller's
+        :class:`ContextBudget` in :meth:`build` (fit/compress), which
+        is the assembly's declared budget seam.
         """
         goal = _get(mission, "goal") if mission is not None else ""
         query = " ".join(p for p in (str(goal or ""), memory_query or "")
@@ -557,20 +564,12 @@ class ContextEngine:
                 if mission is not None else ""
             parts: list[str] = []
             loaded: list[str] = []
-            budget_chars = 4000
             for doc, _score in routed:
                 body = doc.body.strip()
                 if not body:
                     continue
-                chunk = f"## {doc.header()}\n{body}"
-                if len(chunk) > budget_chars:
-                    chunk = chunk[:budget_chars].rstrip() \
-                        + "\n[skill truncated to context budget]"
-                parts.append(chunk)
+                parts.append(f"## {doc.header()}\n{body}")
                 loaded.append(doc.id)
-                budget_chars -= len(chunk)
-                if budget_chars <= 0:
-                    break
             if not loaded:
                 return None
             if mission_id:

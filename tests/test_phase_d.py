@@ -214,6 +214,32 @@ class RankedContextTests(unittest.TestCase):
             self.assertLessEqual(ctx.used_tokens, budget)
             self.assertTrue(meta["within_budget"])
 
+    def test_no_budget_includes_everything_whole(self):
+        """Power mode: budget_tokens=None means NO fill ceiling.
+
+        The production planning path (CodeExecutor's gather) passes
+        no budget: every ranked file arrives whole and nothing is
+        dropped or truncated at a number nobody chose.  Fitting the
+        assembled prompt to the serving window happens at send time
+        in the brain, not in this layer.
+        """
+        self.fx.write("big.py", "X = 1\n" * 12000)  # ~18k tokens alone
+        ctx = rank_context(self.fx.root, "fix the coding loop",
+                           targets=["coding.py", "big.py"],
+                           budget_tokens=None,
+                           symbol_search=lambda q, lim: ["unrelated.py"])
+        self.assertIsNone(ctx.budget_tokens)
+        # the set sails past the old 12000-token gather default whole
+        self.assertGreater(ctx.used_tokens, 12000)
+        self.assertIn("big.py", ctx.included_files)
+        self.assertEqual(ctx.files["big.py"], "X = 1\n" * 12000)
+        self.assertIn("unrelated.py", ctx.included_files)
+        self.assertEqual(ctx.dropped_files, [])
+        self.assertEqual(ctx.truncated_files, [])
+        meta = ctx.metadata()
+        self.assertIsNone(meta["budget_tokens"])
+        self.assertTrue(meta["within_budget"])
+
     def test_tiny_budget_truncates_top_file_instead_of_empty(self):
         self.fx.write("big.py", "X = 1\n" * 5000)
         ctx = rank_context(self.fx.root, "big", targets=["big.py"],

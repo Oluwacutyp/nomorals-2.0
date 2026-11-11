@@ -176,6 +176,51 @@ class ExecutePlanRollbackTests(GitFixture):
         self.assertEqual((self.repo / "app.py").read_text(), original)
 
 
+class GatherProjectContextTests(unittest.TestCase):
+    """Power mode: the planning gather carries NO built-in ceiling.
+
+    ``CodeExecutor.plan`` calls the gather with no budget; the old
+    ``budget_tokens=12000`` default therefore bound every production
+    plan, silently dropping ranked files past 12000 tokens.  The
+    default path now passes no budget at all (the plan prompt is
+    fitted to the serving window at send time by the brain); an
+    explicit budget keeps binding exactly as before.
+    """
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp(prefix="phase_a_gather_"))
+        self.addCleanup(shutil.rmtree, self.root, True)
+        # ~18k tokens of ranked content: past the old default.
+        (self.root / "big.py").write_text("X = 1\n" * 12000)
+        (self.root / "main.py").write_text("from big import X\n")
+
+    def _executor(self):
+        return code_executor.CodeExecutor(
+            StubAgent("pass"), project_root=str(self.root))
+
+    def test_default_gather_includes_big_ranked_file_whole(self):
+        gathered = asyncio.run(self._executor()._gather_project_context(
+            ["main.py"], task="use the big module"))
+        # every line of the big ranked file arrived — whole, not
+        # dropped and not truncated at the old default
+        self.assertEqual(gathered["files"].count("X = 1"), 12000)
+        self.assertNotIn("truncated to fit", gathered["files"])
+        meta = json.loads(gathered["metadata"])
+        self.assertIsNone(meta["budget_tokens"])
+        self.assertEqual(meta["dropped_files"], [])
+        self.assertEqual(meta["truncated_files"], [])
+        self.assertGreater(meta["used_tokens"], 12000)
+
+    def test_explicit_budget_still_binds(self):
+        gathered = asyncio.run(self._executor()._gather_project_context(
+            ["main.py"], task="use the big module", budget_tokens=100))
+        meta = json.loads(gathered["metadata"])
+        self.assertEqual(meta["budget_tokens"], 100)
+        self.assertLessEqual(meta["used_tokens"], 100)
+        self.assertTrue(meta["within_budget"])
+        self.assertIn("big.py", meta["dropped_files"])
+
+
 class RegistryExposureTests(unittest.TestCase):
     def test_phase_a_tools_registered(self):
         root = tempfile.mkdtemp(prefix="phase_a_reg_")

@@ -181,7 +181,9 @@ class RankedContext:
     included_files: list[str] = field(default_factory=list)
     dropped_files: list[str] = field(default_factory=list)
     truncated_files: list[str] = field(default_factory=list)
-    budget_tokens: int = DEFAULT_BUDGET_TOKENS
+    #: The fill budget in force, or None when NO budget applies —
+    #: every ranked file is included whole and nothing is cut here.
+    budget_tokens: int | None = DEFAULT_BUDGET_TOKENS
     used_tokens: int = 0
     structure: str = ""
 
@@ -193,7 +195,9 @@ class RankedContext:
             "budget_tokens": self.budget_tokens,
             "used_tokens": self.used_tokens,
             # invariant the caller can assert: never silently exceeded.
-            "within_budget": self.used_tokens <= self.budget_tokens,
+            # With no budget in force there is nothing to exceed.
+            "within_budget": self.budget_tokens is None
+            or self.used_tokens <= self.budget_tokens,
         }
 
     def metadata_json(self) -> str:
@@ -216,11 +220,21 @@ def rank_context(
     task: str,
     targets: list[str] | None = None,
     *,
-    budget_tokens: int = DEFAULT_BUDGET_TOKENS,
+    budget_tokens: int | None = DEFAULT_BUDGET_TOKENS,
     symbol_search: Callable[[str, int], list[str]] | None = None,
     symbol_limit: int = 10,
 ) -> RankedContext:
     """Rank repo files by relevance to ``task`` and fill under budget.
+
+    ``budget_tokens=None`` means NO fill ceiling (power mode): every
+    ranked file is included whole; nothing lands in ``dropped_files``
+    or ``truncated_files``.  An explicit budget keeps the exact
+    fill/drop/truncate semantics below.  The production planning path
+    (:meth:`CodeExecutor._gather_project_context`) passes None — the
+    assembled prompt is fitted to the serving rung's real window at
+    send time by the brain, which is where real-window fitting
+    belongs; a fixed number here silently cut ranked files at a size
+    nobody chose for the run.
 
     ``symbol_search(query, limit)`` maps a keyword query to candidate rel
     paths (rank 3).  When it also offers ``search_many(queries, limit)``,
@@ -297,8 +311,9 @@ def rank_context(
             continue
         header = f"--- {rel} ---\n"
         cost = estimate_tokens(header + content)
-        room = budget_tokens - ctx.used_tokens
-        if cost > room:
+        if (budget_tokens is not None
+                and cost > budget_tokens - ctx.used_tokens):
+            room = budget_tokens - ctx.used_tokens
             if not ctx.files:
                 # The top-ranked file alone exceeds the budget: truncate
                 # it to fit instead of silently exceeding the budget or
