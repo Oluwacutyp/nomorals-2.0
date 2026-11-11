@@ -36,7 +36,9 @@ __all__ = [
     "Draft",
     "DraftQueue",
     "detect_explicit_post",
+    "draft_media_entries",
     "execute_post",
+    "media_notes",
     "post_scheduled_draft",
     "make_draft_post_fn",
     "wire_draft_poster",
@@ -577,6 +579,182 @@ def add_variant(queue: DraftQueue, draft_id: str, hook_text: str) -> Draft:
     return draft
 
 
+# ── draft media ─────────────────────────────────────────────────────────────
+#
+# A draft's media lives in ``metadata["media"]`` — a list of entries
+# written when the draft was created (the GS desk landing attaches
+# its PNG this way): ``{"artifact": <id>, "mime": ..., "name": ...}``
+# for artifact-store media, or ``{"path": ...}`` for a file on disk.
+# The publish path below the manager already carries media (the
+# post row records media_paths; adapters receive them); what was
+# missing was THIS layer loading the draft's entries and handing
+# resolved files down. Media here is load-bearing, exactly as it
+# is in the publish path (a Postiz upload failure fails that post;
+# a personal-surface send failure fails that result): an entry
+# that no longer resolves fails the execution BEFORE anything
+# posts — a text-only post must never masquerade as the full draft.
+
+
+def draft_media_entries(draft: Draft) -> list[dict[str, Any]]:
+    """The draft's media entries, in draft order. Bare-string
+    entries are artifact refs (the earliest shape)."""
+    raw = (draft.metadata or {}).get("media")
+    if not isinstance(raw, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for item in raw:
+        if isinstance(item, dict):
+            entries.append(item)
+        elif isinstance(item, str) and item:
+            entries.append({"artifact": item})
+    return entries
+
+
+def _media_store_for(manager: Any, explicit: Any) -> Any:
+    """The artifact store draft media resolves against: an
+    explicitly passed store, then the context's, then the canonical
+    construction over the manager's db (the same ArtifactStore +
+    BlobStore-beside-the-db shape the composition roots build)."""
+    if explicit is not None:
+        return explicit
+    context_store = getattr(
+        getattr(manager, "context", None), "artifact_store", None)
+    if context_store is not None:
+        return context_store
+    db = getattr(manager, "db", None)
+    if db is None:
+        return None
+    try:
+        from ..storage.artifacts import ArtifactStore
+        from ..storage.blob import BlobStore
+
+        db_path = getattr(db, "path", None)
+        blob_dir = (Path(db_path).parent / "blobs" if db_path
+                    else Path("data/blobs"))
+        return ArtifactStore(db, BlobStore(db, blob_dir))
+    except Exception:  # noqa: BLE001 — no store is a resolution failure
+        return None
+
+
+def _resolve_media_entry(
+    entry: dict[str, Any], store: Any
+) -> tuple[bytes, str, str] | str:
+    """One entry → (data, name, mime), or a problem string naming
+    the media (by its display name — never an internal id)."""
+    import mimetypes
+
+    name = str(entry.get("name") or "")
+    mime = str(entry.get("mime") or "")
+    label = name or "a media item"
+    art_ref = str(entry.get("artifact") or "")
+    path = str(entry.get("path") or "")
+    if art_ref:
+        if store is None:
+            return (f"{label} could not be loaded — no artifact "
+                    "store is available to resolve it")
+        art = None
+        data = None
+        try:
+            art = store.resolve(art_ref)
+            if art is not None:
+                data = store.read(art.id)
+        except Exception:  # noqa: BLE001 — a read failure is a miss
+            art, data = None, None
+        if art is None or data is None:
+            return f"{label} is no longer in the artifact store"
+        if not name:
+            ext = mimetypes.guess_extension(mime or art.mime or "") or ""
+            name = f"media{ext}"
+        return data, name, (mime or art.mime or "")
+    if path:
+        file_path = Path(path)
+        if not file_path.is_file():
+            return (f"{label} is missing — the file it points to "
+                    "is gone")
+        try:
+            data = file_path.read_bytes()
+        except OSError as exc:
+            return f"{label} could not be read: {exc}"
+        return data, (name or file_path.name), (
+            mime or mimetypes.guess_type(file_path.name)[0] or "")
+    return f"{label} names no artifact and no file — nothing to post"
+
+
+def _materialize_media(
+    resolved: list[tuple[bytes, str, str]], directory: Path
+) -> list[str]:
+    """Write resolved media bytes into ``directory`` under their
+    display names (deduped), returning the paths in draft order."""
+    paths: list[str] = []
+    used: set[str] = set()
+    for index, (data, name, _mime) in enumerate(resolved):
+        safe = Path(name or f"media-{index}").name or f"media-{index}"
+        candidate = safe
+        n = 1
+        while candidate in used:
+            n += 1
+            stem, dot, ext = safe.rpartition(".")
+            candidate = (f"{stem}-{n}{dot}{ext}" if dot
+                         else f"{safe}-{n}")
+        used.add(candidate)
+        target = directory / candidate
+        target.write_bytes(data)
+        paths.append(str(target))
+    return paths
+
+
+def _media_failure_outcome(
+    content: str, platforms: list[str] | None, draft: Draft | None,
+    problem: str,
+) -> Any:
+    """The honest pre-post failure: one failed result per target
+    platform, media error code, and NO publish — the draft keeps
+    its state and nothing anywhere claims it posted."""
+    from .base import ERROR_MEDIA, PostResult
+    from .manager import PublishOutcome
+
+    targets = list(platforms or (draft.platforms if draft else [])
+                   or [])
+    names = targets or ["draft"]
+    return PublishOutcome(content=content, results=[
+        PostResult(platform=name, ok=False, error=problem,
+                   error_code=ERROR_MEDIA)
+        for name in names])
+
+
+def media_notes(outcome: Any) -> str:
+    """One owner-facing summary of how a posted draft's media
+    travelled, read from the per-platform records the publish
+    itself wrote (offered vs carried in each result's metrics).
+    "" when the draft carried no media or nothing posted — so
+    media-less executions render exactly as they always have."""
+    lines: list[str] = []
+    carried_all: list[str] = []
+    for result in getattr(outcome, "results", []) or []:
+        if not getattr(result, "ok", False):
+            continue
+        metrics = getattr(result, "metrics", None) or {}
+        offered = metrics.get("media_offered")
+        if not offered:
+            continue
+        offered = int(offered)
+        carried = int(metrics.get("media_carried", 0) or 0)
+        if carried >= offered:
+            carried_all.append(str(result.platform))
+        elif carried > 0:
+            lines.append(
+                f"⚠️ {result.platform} carried {carried} of {offered} "
+                "media items — the rest was not carried there")
+        else:
+            lines.append(
+                f"⚠️ {result.platform} posted the text without the "
+                f"media (0 of {offered} media items carried)")
+    if carried_all:
+        lines.insert(
+            0, f"📎 the media went out on {', '.join(carried_all)}")
+    return "\n".join(lines)
+
+
 # ── the override: execute without reconfirming ────────────────────────────────
 
 def execute_post(
@@ -587,6 +765,7 @@ def execute_post(
     draft_id: str | None = None,
     queue: DraftQueue | None = None,
     actor: str = "user",
+    artifact_store: Any = None,
 ) -> Any:
     """Post IMMEDIATELY on the owner's explicit instruction.
 
@@ -598,6 +777,13 @@ def execute_post(
 
     ``manager`` is a SocialManager; ``platforms`` selects targets.
     When ``draft_id`` + ``queue`` are given, the draft is marked posted.
+
+    A draft carrying media (``metadata["media"]``) posts WITH its
+    media: every entry is resolved (artifact store, or an explicit
+    ``artifact_store`` when given) and materialized for the publish,
+    which hands the files to each adapter in the shape it accepts.
+    An entry that no longer resolves fails the execution BEFORE
+    posting — a failed outcome naming the media, draft unmarked.
     Returns the PublishOutcome.
     """
     from ..core.policy import Capability
@@ -628,9 +814,38 @@ def execute_post(
     # Passed only when a reply draft actually carries a link, so
     # every other publish call keeps its exact pre-P8 shape.
     extra = {"reply_to": reply_to} if reply_to else {}
-    outcome = manager.publish(content, platforms=platforms or None,
-                              actor=actor, confirmation=confirmation,
-                              **extra)
+    # Thread the draft's media (WS3 P7 remainder): every entry is
+    # resolved BEFORE posting — an entry that no longer resolves
+    # fails the execution here, with nothing posted and the draft
+    # unmarked. Passed only when the draft actually carries media,
+    # so media-less publish calls keep their exact pre-P7 shape.
+    media_dir: Any = None
+    if draft is not None:
+        entries = draft_media_entries(draft)
+        if entries:
+            store = _media_store_for(manager, artifact_store)
+            resolved: list[tuple[bytes, str, str]] = []
+            for entry in entries:
+                got = _resolve_media_entry(entry, store)
+                if isinstance(got, str):
+                    _log.warning("draft %s media not postable: %s",
+                                 draft_id, got)
+                    return _media_failure_outcome(
+                        content, platforms, draft, got)
+                resolved.append(got)
+            import tempfile
+
+            media_dir = tempfile.TemporaryDirectory(
+                prefix="draft-media-")
+            extra["media_paths"] = _materialize_media(
+                resolved, Path(media_dir.name))
+    try:
+        outcome = manager.publish(content, platforms=platforms or None,
+                                  actor=actor, confirmation=confirmation,
+                                  **extra)
+    finally:
+        if media_dir is not None:
+            media_dir.cleanup()
     if draft_id and queue is not None:
         try:
             queue.mark_posted(draft_id)
@@ -717,8 +932,12 @@ def post_scheduled_draft(
         platforms=draft.platforms or None, draft_id=draft_id, queue=q)
     posted = len(getattr(outcome, "posted", []) or [])
     failed = len(getattr(outcome, "failed", []) or [])
-    return {"ok": posted > 0, "posted": posted, "failed": failed,
-            "draft_id": draft_id}
+    result: dict[str, Any] = {"ok": posted > 0, "posted": posted,
+                              "failed": failed, "draft_id": draft_id}
+    note = media_notes(outcome)
+    if note:
+        result["media_note"] = note
+    return result
 
 
 def make_draft_post_fn(context: Any) -> Callable[[str], Any]:
@@ -837,7 +1056,9 @@ def handle_draft_callback(
                                platforms=draft.platforms or None,
                                draft_id=draft_id, queue=queue)
         posted = len(getattr(outcome, "posted", []) or [])
-        return f"posted to {posted} platform(s)."
+        reply = f"posted to {posted} platform(s)."
+        note = media_notes(outcome)
+        return f"{reply}\n{note}" if note else reply
     if action == "schedule":
         if ask_schedule_time is None:
             return "when should I post it? (e.g. 'post at 6')"

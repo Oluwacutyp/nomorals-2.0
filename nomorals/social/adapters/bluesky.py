@@ -11,13 +11,16 @@ the whole reason Bluesky has app passwords.
 from __future__ import annotations
 
 import json
+import mimetypes
 import re
 import time
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from ...core.http import HttpClient
 from ...core.logging_setup import get_logger
-from ..base import Account, PlatformAdapter, PostResult
+from ..base import ERROR_MEDIA, Account, PlatformAdapter, PostResult
 
 __all__ = ["Adapter"]
 
@@ -30,6 +33,11 @@ BSKY_GRAPHEME_LIMIT = 300
 BSKY_BYTE_LIMIT = 3000
 #: Auto-thread cap: longer content is rejected, not silently eaten.
 BSKY_MAX_THREAD_POSTS = 10
+#: Images per post — the images embed's platform ceiling. Offered
+#: media beyond it (and non-image media: this adapter's post path
+#: embeds images only) is not attached; the publish layer records
+#: the shortfall from this adapter's ``media_attached`` report.
+BSKY_MAX_IMAGES = 4
 
 _URL_RE = re.compile(r"https?://[^\s<>\"]+")
 _MENTION_RE = re.compile(
@@ -269,6 +277,63 @@ class Adapter(PlatformAdapter):
         except json.JSONDecodeError:
             return {}
 
+    def _upload_image_blobs(
+        self, account: Account, session: dict[str, Any],
+        paths: Sequence[str],
+    ) -> tuple[list[dict[str, Any]], str]:
+        """Upload image files as blobs → (blob refs, problem).
+
+        Images only, at most ``BSKY_MAX_IMAGES``: the embed this
+        adapter's post path builds is ``app.bsky.embed.images``.
+        Non-image media is skipped — the caller reports how many
+        were attached, so a skipped item is named in the execution
+        record, never silently dropped. A failed upload is a
+        problem string; the caller fails the post rather than
+        sending it without media it was told to carry.
+        """
+        client = HttpClient(
+            timeout=self.timeout,
+            headers={"Authorization":
+                     f"Bearer {session.get('accessJwt', '')}"})
+        blobs: list[dict[str, Any]] = []
+        for path in paths:
+            if len(blobs) >= BSKY_MAX_IMAGES:
+                break
+            mime = mimetypes.guess_type(str(path))[0] or ""
+            if not mime.startswith("image/"):
+                continue
+            name = Path(str(path)).name
+            try:
+                response = client.request(
+                    "POST",
+                    f"{self._pds(account)}/xrpc/com.atproto.repo.uploadBlob",
+                    data=Path(str(path)).read_bytes(),
+                    headers={"Content-Type": mime})
+            except Exception as exc:  # noqa: BLE001 - transport → words
+                return blobs, (f"bluesky media upload failed for "
+                               f"{name}: {exc}")
+            if not response.ok:
+                return blobs, (
+                    f"bluesky media upload failed for {name} "
+                    f"({response.status}): {response.text[:200]}")
+            try:
+                payload = json.loads(response.text or "{}")
+            except json.JSONDecodeError:
+                payload = {}
+            blob = payload.get("blob") if isinstance(payload, dict) else None
+            if not isinstance(blob, dict):
+                return blobs, (f"bluesky media upload for {name} "
+                               "returned no blob")
+            blobs.append(blob)
+        return blobs, ""
+
+    @staticmethod
+    def _images_embed(blobs: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        return {
+            "$type": "app.bsky.embed.images",
+            "images": [{"alt": "", "image": blob} for blob in blobs],
+        }
+
     def post_thread(self, account: Account, texts: list[str],
                     **kwargs: Any) -> PostResult:
         """Post a thread: each chunk replies to the previous, all rooted
@@ -291,6 +356,20 @@ class Adapter(PlatformAdapter):
 
         langs = account.limits.get("langs") or ["en"]
         link_card = kwargs.get("link_card") or {}
+        media_paths = [str(p) for p in (kwargs.get("media_paths") or []) if p]
+        media_embed: dict[str, Any] = {}
+        attached = 0
+        if media_paths:
+            blobs, problem = self._upload_image_blobs(
+                account, session, media_paths)
+            if problem:
+                return PostResult(
+                    platform=self.name, ok=False, error=problem,
+                    error_code=ERROR_MEDIA,
+                    seconds=time.perf_counter() - started)
+            attached = len(blobs)
+            if blobs:
+                media_embed = self._images_embed(blobs)
         posted: list[dict[str, str]] = []
         try:
             root_ref: dict[str, str] = {}
@@ -311,7 +390,9 @@ class Adapter(PlatformAdapter):
                     record["reply"] = {"root": root_ref, "parent": parent_ref}
                 elif kwargs.get("reply_to"):
                     record["reply"] = kwargs["reply_to"]
-                if i == 0 and link_card.get("uri"):
+                if i == 0 and media_embed:
+                    record["embed"] = media_embed
+                elif i == 0 and link_card.get("uri"):
                     record["embed"] = external_embed(
                         str(link_card["uri"]), str(link_card.get("title", "")),
                         str(link_card.get("description", "")))
@@ -333,11 +414,15 @@ class Adapter(PlatformAdapter):
                 metrics={"posted": posted, "total": len(texts)},
             )
         first = posted[0]
+        thread_metrics: dict[str, Any] = {
+            "posts": posted, "thread_posts": len(posted)}
+        if media_paths:
+            thread_metrics["media_attached"] = attached
         return PostResult(
             platform=self.name, ok=True,
             external_id=first["uri"].rsplit("/", 1)[-1], url=first["url"],
             seconds=time.perf_counter() - started,
-            metrics={"posts": posted, "thread_posts": len(posted)},
+            metrics=thread_metrics,
         )
 
     def post(self, account: Account, content: str, **kwargs: Any) -> PostResult:
@@ -377,6 +462,19 @@ class Adapter(PlatformAdapter):
             record["embed"] = external_embed(
                 str(link_card["uri"]), str(link_card.get("title", "")),
                 str(link_card.get("description", "")))
+        media_paths = [str(p) for p in (kwargs.get("media_paths") or []) if p]
+        attached = 0
+        if media_paths:
+            blobs, problem = self._upload_image_blobs(
+                account, session, media_paths)
+            if problem:
+                return PostResult(
+                    platform=self.name, ok=False, error=problem,
+                    error_code=ERROR_MEDIA,
+                    seconds=time.perf_counter() - started)
+            attached = len(blobs)
+            if blobs:
+                record["embed"] = self._images_embed(blobs)
 
         try:
             data = self._create_post(account, session, record)
@@ -393,6 +491,7 @@ class Adapter(PlatformAdapter):
             platform=self.name, ok=True, external_id=uri.rsplit("/", 1)[-1],
             url=_post_url(account.handle, uri),
             seconds=time.perf_counter() - started,
+            metrics={"media_attached": attached} if media_paths else {},
         )
 
     def health(self, account: Account) -> bool:

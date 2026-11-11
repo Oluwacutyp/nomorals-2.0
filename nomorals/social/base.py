@@ -209,6 +209,12 @@ class PlatformAdapter(ABC):
     name: str = "unknown"
     max_chars: int = 500
     supports_media: bool = False
+    #: Media convention: ``post`` receives offered media as the
+    #: ``media_paths`` kwarg. An adapter that attaches media reports
+    #: the count it actually attached as ``metrics["media_attached"]``
+    #: on its PostResult, in the same breath as attaching — the
+    #: publish layer records offered-vs-carried from that report and
+    #: never assumes an unreported attachment happened.
     supports_thread: bool = False
     #: True when :meth:`post` threads a real in-reply-to linkage from
     #: the ``reply_to`` kwarg (an external post id) — Mastodon's

@@ -4661,7 +4661,8 @@ class PartnerRuntime(
         error string, never silence.
         """
         from ...social.drafts import (
-            DraftQueue, detect_explicit_post, execute_post, schedule_post,
+            DraftQueue, detect_explicit_post, execute_post, media_notes,
+            schedule_post,
         )
         intent = detect_explicit_post(message.text)
         if intent is None:
@@ -4711,11 +4712,13 @@ class PartnerRuntime(
                                    draft_id=draft_id, queue=queue)
             posted = len(getattr(outcome, "posted", []) or [])
             failed = len(getattr(outcome, "failed", []) or [])
+            note = media_notes(outcome)
+            suffix = f"\n{note}" if note else ""
             if posted and not failed:
-                return f"posted to {posted} platform(s)."
+                return f"posted to {posted} platform(s).{suffix}"
             if posted:
                 return (f"posted to {posted}, {failed} failed: "
-                        f"{getattr(outcome, 'error', '')[:120]}")
+                        f"{getattr(outcome, 'error', '')[:120]}{suffix}")
             return (f"post failed: "
                     f"{getattr(outcome, 'error', 'unknown error')[:160]}")
         except Exception as exc:  # noqa: BLE001

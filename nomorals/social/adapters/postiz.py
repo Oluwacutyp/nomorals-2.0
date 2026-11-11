@@ -301,7 +301,9 @@ class Adapter(PlatformAdapter):
             seconds=seconds,
             metrics={"channels": channels,
                      "post_type": post_type,
-                     "scheduled_for": date if post_type == "schedule" else ""},
+                     "scheduled_for": date if post_type == "schedule" else "",
+                     **({"media_attached": len(images)} if media_paths
+                        else {})},
         )
 
     def _schedule(self, schedule_at: Any) -> tuple[str, str]:

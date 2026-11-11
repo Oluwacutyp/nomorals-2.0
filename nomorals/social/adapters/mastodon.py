@@ -9,15 +9,22 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
 from ...core.http import HttpClient
 from ...core.logging_setup import get_logger
-from ..base import Account, PlatformAdapter, PostResult
+from ..base import ERROR_MEDIA, Account, PlatformAdapter, PostResult
 
 __all__ = ["Adapter"]
 
 _log = get_logger(__name__)
+
+#: Attachments per status — the platform's own ceiling. Media
+#: offered beyond it is not attached; the publish layer records
+#: the shortfall from this adapter's ``media_attached`` report.
+MAX_ATTACHMENTS = 4
 
 
 class Adapter(PlatformAdapter):
@@ -45,6 +52,41 @@ class Adapter(PlatformAdapter):
             raise ValueError(f"cannot derive a Mastodon instance for {account.handle!r}")
         return f"https://{domain}"
 
+    def _upload_media(
+        self, account: Account, paths: Sequence[str]
+    ) -> tuple[list[str], str]:
+        """Upload files to the instance → (media_ids, problem).
+
+        The status endpoint takes ids, not files: each path goes
+        through ``POST /api/v1/media`` first. A failed upload is a
+        problem string, never a partial silent drop — the caller
+        fails the post rather than sending it text-only.
+        """
+        base = self._base(account)
+        client = self._client(account)
+        ids: list[str] = []
+        for path in paths:
+            name = Path(str(path)).name
+            try:
+                response = client.post_multipart(
+                    f"{base}/api/v1/media", files=[("file", str(path), "")])
+            except Exception as exc:  # noqa: BLE001 - transport → words
+                return [], f"mastodon media upload failed for {name}: {exc}"
+            if not response.ok:
+                return [], (
+                    f"mastodon media upload failed for {name} "
+                    f"({response.status}): {response.text[:200]}")
+            try:
+                data = json.loads(response.text or "{}")
+            except json.JSONDecodeError:
+                data = {}
+            media_id = str(data.get("id") or "")
+            if not media_id:
+                return [], (f"mastodon media upload for {name} "
+                            "returned no media id")
+            ids.append(media_id)
+        return ids, ""
+
     def post(self, account: Account, content: str, **kwargs: Any) -> PostResult:
         started = time.perf_counter()
         base = self._base(account)
@@ -53,9 +95,22 @@ class Adapter(PlatformAdapter):
         reply_to = kwargs.get("reply_to") or ""
         if reply_to:
             payload["in_reply_to_id"] = reply_to
-        media_ids = kwargs.get("media_ids") or []
+        media_ids = list(kwargs.get("media_ids") or [])
+        media_paths = [str(p) for p in (kwargs.get("media_paths") or []) if p]
+        if media_paths and not media_ids:
+            uploaded, problem = self._upload_media(
+                account, media_paths[:MAX_ATTACHMENTS])
+            if problem:
+                return PostResult(
+                    platform=self.name, ok=False, error=problem,
+                    error_code=ERROR_MEDIA,
+                    seconds=time.perf_counter() - started)
+            media_ids = uploaded
         if media_ids:
             payload["media_ids[]"] = media_ids
+        media_metrics = (
+            {"media_attached": len(media_ids)}
+            if media_ids or media_paths else {})
 
         try:
             response = client.post_json(f"{base}/api/v1/statuses", payload)
@@ -79,6 +134,7 @@ class Adapter(PlatformAdapter):
             url=str(data.get("url", "")), status_code=response.status,
             seconds=time.perf_counter() - started,
             rate_limit_remaining=_int_header(response.headers, "x-ratelimit-remaining"),
+            metrics=media_metrics,
         )
 
     def delete(self, account: Account, external_id: str) -> PostResult:

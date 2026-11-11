@@ -380,6 +380,9 @@ class SocialManager:
         if not result.ok and result.status_code and result.error_code == ERROR_UNKNOWN:
             result.error_code = classify_http_error(result.status_code, result.error)
 
+        if media_paths:
+            self._annotate_media(result, media_paths)
+
         self._update_post(
             row_id,
             PostStatus.POSTED if result.ok else PostStatus.FAILED,
@@ -390,6 +393,30 @@ class SocialManager:
             posted_at=self._clock() if result.ok else None,
         )
         return result
+
+    @staticmethod
+    def _annotate_media(result: PostResult, media_paths: Sequence[str]) -> None:
+        """Record how much of the offered media the adapter attached.
+
+        Lands on the result's metrics, and so on the post row — the
+        execution record states offered vs carried per platform.
+        Adapters report attachments as ``metrics["media_attached"]``
+        (see PlatformAdapter); an adapter that reports nothing is
+        recorded as carrying nothing — never assumed to have carried.
+        """
+        metrics = getattr(result, "metrics", None)
+        if not isinstance(metrics, dict):
+            return
+        from pathlib import Path as _Path
+
+        offered = len(media_paths)
+        try:
+            carried = int(metrics.get("media_attached", 0) or 0)
+        except (TypeError, ValueError):
+            carried = 0
+        metrics["media_offered"] = offered
+        metrics["media_carried"] = max(0, min(carried, offered))
+        metrics["media_names"] = [_Path(str(p)).name for p in media_paths]
 
     # ── rate limiting ────────────────────────────────────────────────────────
 

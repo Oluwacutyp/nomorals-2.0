@@ -234,7 +234,8 @@ class WhatsAppStatusAdapter(_PersonalAdapter):
         return PostResult(
             platform=self.name, ok=True,
             external_id=str(verdict.get("message_id") or ""),
-            seconds=time.perf_counter() - started)
+            seconds=time.perf_counter() - started,
+            metrics={"media_attached": 1} if media_path else {})
 
 
 class TelegramChannelAdapter(_PersonalAdapter):
@@ -292,4 +293,5 @@ class TelegramChannelAdapter(_PersonalAdapter):
             url = f"https://t.me/{target[1:]}/{message_id}"
         return PostResult(
             platform=self.name, ok=True, external_id=message_id, url=url,
-            seconds=time.perf_counter() - started)
+            seconds=time.perf_counter() - started,
+            metrics={"media_attached": 1} if media_paths else {})
