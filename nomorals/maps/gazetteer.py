@@ -16,8 +16,11 @@ each row carrying the feature's coordinate, converted from tile
 space through the Web-Mercator inverse.  The same place sighted
 at several zooms collapses to one row — the coarsest (most
 prominent) sighting wins — where "same" means same folded name
-within ~110 m: tile quantization shifts a label's decoded
-coordinate per zoom, so identity is proximity, never exact
+within the merge tolerance: a ~110 m base plus one tile-extent
+unit of the coarser zoom, because tile quantization shifts a
+label's decoded coordinate per zoom by that grain (hundreds of
+metres at country zooms — a flat window splits one city into
+several entries there), so identity is proximity, never exact
 float equality.  Storage is a sqlite file in the packs
 directory: derived data, rebuildable at any time, keyed per pack
 by the pack digest (M1's contract) so an unchanged pack is never
@@ -495,6 +498,56 @@ def _parse_tile_member(path: str) -> tuple[int, int, int] | None:
         return None
 
 
+#: The merge's base window, in metres: same-name sightings
+#: closer than this are one place at any zoom.  Fine-zoom
+#: anchors agree far inside it; it is the binding term there.
+_MERGE_BASE_M = 110.0
+
+#: The layer extent the pack schema stores positions over
+#: (MVT extents in the OpenMapTiles/planetiler tiles the packs
+#: are built in): one extent unit is the quantization grain of
+#: a decoded anchor.
+_TILE_EXTENT = 4096.0
+
+#: Earth's circumference in metres (the Web-Mercator world
+#: width the tile pyramid divides).
+_WORLD_M = 40_075_016.686
+
+
+def _extent_unit_m(zoom: int) -> float:
+    """One extent unit of tile width at ``zoom``, in metres —
+    how far a decoded anchor can sit from the position a finer
+    zoom reports for the same feature, purely from the tile's
+    integer grid: ~611 m at z4, ~306 m at z5, centimetres by
+    z14.  This is the drift the multi-zoom merge must absorb.
+    """
+    return _WORLD_M / ((1 << max(0, int(zoom))) * _TILE_EXTENT)
+
+
+def _merge_tolerance_m(zoom_a: int, zoom_b: int) -> float:
+    """How close two same-name sightings must sit to be one
+    place: the base window plus one extent unit of the
+    COARSER of the two zooms (the coarser sighting's anchor
+    carries the larger quantization error, so it sets the
+    pair's honest reach)."""
+    return _MERGE_BASE_M + _extent_unit_m(min(zoom_a, zoom_b))
+
+
+def _latlon_unchecked(lat: float, lon: float) -> LatLon:
+    """A decoded anchor as a LatLon, for distance math only.
+
+    Buffered tiles legitimately decode anchors a hair outside
+    the valid ranges (a feature at a tile's edge is stored in
+    the buffer beyond it, and a world tile's buffer crosses
+    the antimeridian): wrap/clamp into range so the distance
+    compares the earth the anchor sits on.  The entry itself
+    keeps the decoded coordinate verbatim — this shapes only
+    the merge's measuring, never the stored row."""
+    wrapped = (float(lon) + 180.0) % 360.0 - 180.0
+    clamped = max(-90.0, min(90.0, float(lat)))
+    return LatLon(lat=clamped, lon=wrapped)
+
+
 # ── the gazetteer ─────────────────────────────────────────────────
 
 
@@ -635,15 +688,19 @@ class Gazetteer:
         finalize read orders by zoom — with population breaking
         same-zoom ties toward the larger figure)."""
         found: dict[tuple, GazetteerEntry] = {}
+        keys_by_norm: dict[str, list[tuple]] = {}
         for (pack_id, name, indexed_name, norm, kind, lat, lon,
              z, population) in rows:
-            key = self._merge_key(found, norm, lat, lon)
+            key = self._merge_key(
+                found, keys_by_norm.get(norm, ()), norm, lat, lon, z)
             existing = found.get(key)
             if existing is not None \
                     and (existing.source_zoom < z
                          or (existing.source_zoom == z
                              and existing.population >= population)):
                 continue
+            if key not in found:
+                keys_by_norm.setdefault(norm, []).append(key)
             found[key] = GazetteerEntry(
                 name=name, indexed_name=indexed_name, kind=kind,
                 lat=lat, lon=lon, pack_id=pack_id,
@@ -656,23 +713,34 @@ class Gazetteer:
             for entry in found.values()]
 
     @staticmethod
-    def _merge_key(found: dict, norm: str, lat: float,
-                   lon: float) -> tuple:
-        """The dedupe key for a sighting: its own 3-decimal cell,
-        or the key of a same-name entry already indexed within
-        ~110 m (the multi-zoom merge — see the module docstring).
-        """
-        cell = (norm, round(lat, 3), round(lon, 3))
-        for dlat in (-0.001, 0.0, 0.001):
-            for dlon in (-0.001, 0.0, 0.001):
-                key = (norm, round(lat + dlat, 3),
-                       round(lon + dlon, 3))
-                existing = found.get(key)
-                if existing is not None \
-                        and abs(existing.lat - lat) <= 0.0012 \
-                        and abs(existing.lon - lon) <= 0.0012:
-                    return key
-        return cell
+    def _merge_key(found: dict, sibling_keys, norm: str,
+                   lat: float, lon: float, zoom: int) -> tuple:
+        """The dedupe key for a sighting: the key of a same-name
+        entry already indexed within the pair's merge tolerance,
+        or a fresh key of its own.  The tolerance is zoom-aware —
+        the base window plus one extent unit of the coarser
+        zoom (see :func:`_merge_tolerance_m`): a feature's
+        decoded anchor drifts by that grain between zooms, so
+        a flat window splits one place into several entries at
+        coarse zooms — in the real Nigeria pack the one Port
+        Harcourt feature's sightings sit 150–300 m apart
+        across z4–z6, each beyond a flat ~110 m reach of the
+        next.  Genuinely different places sharing a folded
+        name sit farther apart than the tolerance at the
+        zooms where both are sighted (the grain shrinks to
+        metres at the fine zooms where same-name neighbours
+        actually occur) and keep separate keys."""
+        point = _latlon_unchecked(lat, lon)
+        for key in sibling_keys:
+            existing = found[key]
+            if haversine_m(
+                    point, _latlon_unchecked(
+                        existing.lat, existing.lon)
+                    ) <= _merge_tolerance_m(
+                        existing.source_zoom, zoom):
+                return key
+        return (norm, round(float(lat), 3), round(float(lon), 3),
+                len(sibling_keys))
 
     # ── the managed build: chunked, resumable, digest-cached ──
 
