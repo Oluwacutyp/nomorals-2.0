@@ -10,7 +10,9 @@ Covers:
   the public catalog grows; and the doc
   (``docs/PERSONAL_BOT_COMMANDS.md``) matches the generator (no drift);
 * personal inline keyboards — /help gets category buttons, /power gets
-  Power On/Off/Status, button callbacks route to the right handler
+  Power Off/Status (no Power On button: the key never travels in a
+  callback, so a keyless tap could only earn usage text — filler,
+  removed Lane 4), button callbacks route to the right handler
   through the adapter (signed callback → synthetic ``/command``);
 * the gated bot is unchanged — its replies carry no personal buttons.
 """
@@ -160,9 +162,12 @@ class PersonalButtonsTests(unittest.TestCase):
         kb = personal_buttons_for("power mode: locked", "/power")
         assert kb is not None
         self.assertEqual(
-            _callbacks(kb), ["power on", "power off", "power status"])
-        # Power On carries NO key — the callback is exactly "power on",
-        # nothing after it that could be a key.
+            _callbacks(kb), ["power off", "power status"])
+        # No Power On button (Lane 4, button audit F3): the owner key
+        # can never travel in a callback, so a keyless "power on" tap
+        # performs no act — it only earns the usage text. Enabling
+        # stays typed (/power on <key>); Off locks and Status reads,
+        # both real one-tap acts.
 
     def test_search_gets_next_actions(self):
         kb = personal_buttons_for("results …", "/search quantum computing")
@@ -313,8 +318,9 @@ class PersonalCallbackRoutingTests(unittest.TestCase):
             for row in rows for btn in row
         ]
         self.assertIn("power status", datas)
-        self.assertIn("power on", datas)
         self.assertIn("power off", datas)
+        # No Power On button ships (Lane 4): a keyless tap is filler.
+        self.assertNotIn("power on", datas)
 
     def test_stale_origin_attaches_no_personal_buttons(self):
         # The other half of the freshness gate: the last inbound was

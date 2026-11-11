@@ -142,9 +142,9 @@ def grid_layout(keyboard: Keyboard | None) -> Keyboard | None:
     the same packing the menu grid uses
     (:func:`...control._pack_menu_rows`). A lone trailing button
     takes its own row. Named exceptions stay authored, not
-    reflowed: confirm/cancel pairs (:func:`confirm_keyboard`),
-    pagination (:func:`paginate`), ballots and the pick-list
-    number keypad — tight grids where the pairing IS the meaning.
+    reflowed: confirm/cancel pairs (the :func:`buttons_for_text`
+    confirm flow), ballots and the pick-list number keypad —
+    tight grids where the pairing IS the meaning.
     """
     if not keyboard:
         return None
@@ -306,9 +306,12 @@ def buttons_for_text(text: str) -> Keyboard | None:
 # * every callback is a real routable command — never a dead button;
 # * a button whose payload would exceed the 47-byte budget is OMITTED,
 #   never sent truncated (a truncated query would run the wrong query);
-# * "Power On" carries NO key — the owner key must never travel in a
-#   callback (visible in Telegram + logs). Tapping it routes to the
-#   /power handler, which replies with usage ("provide the key").
+# * there is NO "Power On" button: the owner key must never travel
+#   in a callback (visible in Telegram + logs), so a keyless tap
+#   could only ever earn the usage text — an effect-free button,
+#   i.e. filler (button audit F3, decided 2026-11-11). Power Off
+#   and Power Status are real one-tap acts and stay; enabling is
+#   typed (/power on <key>, or `nm power unlock`).
 # * replies with no sensible next action get NO keyboard (None).
 
 
@@ -390,11 +393,11 @@ def personal_buttons_for(text: str, last_command: str = "") -> Keyboard | None:
             return keyboard_for_screen("bin_result")
         return None
 
-    # ── /power — controls (Power On carries NO key by design) ──
+    # ── /power — controls (no Power On button: see the rules above) ──
     if kind == "power":
         rows = [
-            _personal_row(("⚡ Power On", "power on"), ("🔌 Power Off", "power off")),
-            _personal_row(("📊 Power Status", "power status")),
+            _personal_row(("🔌 Power Off", "power off"),
+                          ("📊 Power Status", "power status")),
         ]
         return [r for r in rows if r] or None
 
@@ -502,51 +505,6 @@ def nav_row(*items: tuple[str, str]) -> list[Button]:
         check_callback_data(data)
         row.append((label, data))
     return row
-
-
-def paginate(page: int,
-             total_pages: int,
-             prefix: str,
-             *,
-             labels: tuple[str, str] = ("‹ Prev", "Next ›")) -> Keyboard:
-    """Prev/next pagination keyboard with index-embedded callbacks.
-
-    ``prefix`` namespaces the payload: ``f"{prefix}:page:{n}"`` — an index,
-    not a label, so it stays under the 64-byte budget and survives label
-    redesigns (the Aura index-embedding pattern). No buttons when there's
-    only one page.
-    """
-    if total_pages <= 1:
-        return []
-    page = max(0, min(total_pages - 1, page))
-    row: list[Button] = []
-    if page > 0:
-        data = f"{prefix}:page:{page - 1}"
-        check_callback_data(data)
-        row.append((labels[0], data))
-    indicator = f"{page + 1}/{total_pages}"
-    if page < total_pages - 1:
-        data = f"{prefix}:page:{page + 1}"
-        check_callback_data(data)
-        row.append((indicator, f"{prefix}:noop"))
-        row.append((labels[1], data))
-    else:
-        row.append((indicator, f"{prefix}:noop"))
-    return [row]
-
-
-def confirm_keyboard(action: str,
-                     item_id: str = "",
-                     *,
-                     confirm_label: str = "✅ Confirm",
-                     cancel_label: str = "❌ Cancel") -> Keyboard:
-    """Destructive-action confirm/cancel. Destructive goes last, isolated —
-    and the callback carries the item ID, never the item label."""
-    confirm_data = f"{action}:confirm:{item_id}".rstrip(":")
-    cancel_data = f"{action}:cancel:{item_id}".rstrip(":")
-    check_callback_data(confirm_data)
-    check_callback_data(cancel_data)
-    return [[(cancel_label, cancel_data), (confirm_label, confirm_data)]]
 
 
 # ── public bottom menu (BotFather list) ─────────────────────────────────

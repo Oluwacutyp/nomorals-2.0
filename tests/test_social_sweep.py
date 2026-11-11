@@ -34,7 +34,7 @@ from nomorals.social.chat import style
 from nomorals.social.chat import platforms as pf
 from nomorals.social.render import render_metrics_card
 from nomorals.social.chat.tgbot_buttons import (
-    paginate, confirm_keyboard, nav_row, check_callback_data,
+    nav_row, check_callback_data,
 )
 from nomorals.social.chat.sms import (
     sms_encoding, sms_segments, normalize_gsm7, split_sms,
@@ -377,24 +377,33 @@ class RenderTests(unittest.TestCase):
 
 
 class ButtonsTests(unittest.TestCase):
-    def test_paginate(self):
-        kb = paginate(0, 3, "drafts")
-        self.assertEqual(len(kb), 1)
-        labels = [b[0] for b in kb[0]]
-        self.assertIn("1/3", labels)
-        self.assertIn("Next ›", labels)
-        # Index-embedded callbacks, ids not labels.
-        datas = [b[1] for b in kb[0]]
-        self.assertIn("drafts:page:1", datas)
-        mid = paginate(1, 3, "drafts")
-        self.assertIn("‹ Prev", [b[0] for b in mid[0]])
-        self.assertEqual(paginate(0, 1, "drafts"), [])
+    def test_dead_button_builders_removed(self):
+        # Lane 4 (button audit F2 + orphan #2): paginate() minted a
+        # "{prefix}:noop" page-indicator button no route accepts —
+        # and its "{prefix}:page:{n}" payloads had no consumer
+        # either — while confirm_keyboard()'s "<action>:confirm:<id>"
+        # stamp shape had no route and no production caller. Both
+        # orphan builders are deleted so nothing can arm them again;
+        # real paging rides command-shaped grammars (books page …,
+        # pulse stories …, the wisdom pager) and the live confirm
+        # flow is pinned below.
+        from nomorals.social.chat import tgbot_buttons
 
-    def test_confirm_keyboard_destructive_last(self):
-        kb = confirm_keyboard("draft_delete", "abc123")
-        self.assertEqual(len(kb), 1)
-        self.assertEqual(kb[0][-1][0], "✅ Confirm")  # destructive last
-        self.assertEqual(kb[0][-1][1], "draft_delete:confirm:abc123")
+        self.assertFalse(hasattr(tgbot_buttons, "paginate"))
+        self.assertFalse(hasattr(tgbot_buttons, "confirm_keyboard"))
+
+    def test_live_confirm_flow_buttons(self):
+        # The confirm flow that actually ships: buttons_for_text
+        # turns the runtime's "⚠️ confirm: /<kind>" prompt into
+        # "<kind> confirm" / "<kind> cancel" — plain routable
+        # commands the runtime's confirm gate resolves, destructive
+        # (Confirm) last.
+        from nomorals.social.chat.tgbot_buttons import buttons_for_text
+
+        kb = buttons_for_text("⚠️ confirm: /quit — are you sure?")
+        self.assertEqual(
+            kb, [[("❌ Cancel", "quit cancel"),
+                  ("✅ Confirm", "quit confirm")]])
 
     def test_nav_row(self):
         row = nav_row(("🏠 Home", "menu:home"), ("‹ Back", "menu:back"))

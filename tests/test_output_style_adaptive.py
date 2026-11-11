@@ -174,14 +174,13 @@ class TestAdaptiveButtons(unittest.TestCase):
         self.assertEqual(flat["⏭️ Next"], "game list")
         self._all_callbacks_valid(kb)
 
-    def test_command_result_gets_retry_only(self):
+    def test_command_result_gets_no_retry_strip(self):
+        # Lane 4 (button audit F1): the retry-only origin fallback is
+        # deleted — a bare command result earns no keyboard at all.
         from nomorals.social.chat.adaptive_buttons import adaptive_buttons_for
 
-        kb = adaptive_buttons_for(output_kind="command",
-                                  origin_command="/game trivia")
-        flat = [b for row in kb for b in row]
-        self.assertEqual(flat, [("🔁 Retry", "/game trivia")])
-        self._all_callbacks_valid(kb)
+        self.assertIsNone(adaptive_buttons_for(
+            output_kind="command", origin_command="/game trivia"))
 
     def test_tool_result_without_origin_gets_none(self):
         from nomorals.social.chat.adaptive_buttons import adaptive_buttons_for
@@ -358,15 +357,13 @@ class TestAdapterNoStaleButtons(unittest.TestCase):
     def _adapter(self, owner_only=True):
         from nomorals.social.chat.telegram import TelegramBotAdapter
 
-        a = TelegramBotAdapter.__new__(TelegramBotAdapter)
-        a.owner_only = owner_only
-        a.token = "123:fake"
-        a.stats = {"sent": 0, "send_errors": 0}
-        a._last_command = {}
-        a._last_inbound_was_command = {}
-        # __init__ state send() reads: screen-stack nav markers
-        # (Bot Hub, 3185435) — empty = no pending tap, as in prod.
-        a._nav_edit = {}
+        # Built through the REAL constructor: the old __new__ mock
+        # drifted behind __init__ (the F4 weaving state —
+        # _weave_refused, custom_emoji_weave_source — never existed
+        # on it), so send() died on a missing attribute and this
+        # class's assertions ran against sends that never reached
+        # the API (two vacuous passes, one silent failure on base).
+        a = TelegramBotAdapter(token="123:fake", owner_only=owner_only)
         a._api = MagicMockApi()
         return a
 
@@ -385,18 +382,22 @@ class TestAdapterNoStaleButtons(unittest.TestCase):
         a.send(MagicChat("1"), "✅ got it, thanks!")
         self.assertNotIn("reply_markup", a._api.last_params)
 
-    def test_command_result_gets_retry_only(self):
+    def test_command_result_gets_no_filler_strip(self):
+        # Lane 4 (button audit F1): through the real adapter, a
+        # command result whose text matches no content pattern ships
+        # NO keyboard — the bare "🔁 Retry" re-running the origin
+        # command was filler and the derivation that minted it is
+        # deleted. (Before the harness repair in _adapter() above
+        # this test failed on the base for an unrelated reason: the
+        # hand-built mock's send never reached the API at all.)
         a = self._adapter()
         a._last_command["1"] = "/game trivia"
         a._last_inbound_was_command["1"] = True
-        a.send(MagicChat("1"), "✅ done — Result: 3 points")
+        result = a.send(MagicChat("1"), "✅ done — Result: 3 points")
+        self.assertTrue(result.ok)  # the send really happened
         params = a._api.last_params
-        self.assertIn("reply_markup", params)
-        labels = [b["text"] for row in
-                  params["reply_markup"]["inline_keyboard"] for b in row]
-        self.assertEqual(labels, ["🔁 Retry"])
-        self.assertNotIn("🔍 Expand", labels)
-        self.assertNotIn("⏭️ Next", labels)
+        self.assertIn("chat_id", params)
+        self.assertNotIn("reply_markup", params)
 
     def test_scheduled_push_text_with_stale_command_gets_no_buttons(self):
         # The exact screenshot regression: a scheduled

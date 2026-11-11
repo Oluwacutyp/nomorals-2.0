@@ -9,9 +9,12 @@ output (kind + content), and a push with no relevant action gets no
 buttons at all.
 
 What remains here is the ``is_tool_result`` heuristic — "does this
-reply look like a tool result, not chat" — which the adaptive system
-uses for its retry-only fallback (a command result earns exactly one
-generic action: re-run the command that produced it).
+reply look like a tool result, not chat". Its one production caller
+was the adaptive system's retry-only fallback; that fallback was
+filler and is deleted (button audit F1, 2026-11-11), so the
+heuristic currently has NO production caller. It stays as the
+recorded tool-result classifier — the marker set is the tuned part —
+until a real consumer (not a button derivation) needs it.
 """
 
 from __future__ import annotations

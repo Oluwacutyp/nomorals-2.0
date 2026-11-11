@@ -167,21 +167,6 @@ def _memory_buttons() -> Keyboard | None:
     return grid_layout([row] if row else None)
 
 
-def _retry_only(origin_command: str) -> Keyboard | None:
-    """Retry for a command result — the origin, nothing else.
-
-    No Expand (help for the command) and no Next (catalog) filler:
-    those appeared on every result regardless of content. A command
-    result earns exactly one generic action: re-run the command that
-    produced it.
-    """
-    origin = (origin_command or "").strip()
-    if not origin:
-        return None
-    row = _row((button_label("rerun", "Retry"), origin))
-    return [row] if row else None
-
-
 def adaptive_buttons_for(
     *,
     output_kind: str | None = None,
@@ -193,11 +178,18 @@ def adaptive_buttons_for(
 
     ``output_kind`` is the output's kind (``"scheduled"`` / ``"search"``
     / ``"game"`` / ``"memory"`` / ``"music-ask"`` / ``"command"`` /
-    ``"tool"``) with ``payload`` its structured content. ``origin_command`` is the
-    command that produced this output, when the caller knows it
-    (a command result). ``text`` is the output text, used for the
-    content-pattern fallback (game results, play pick-lists, confirm
-    prompts, …) when no kind is given.
+    ``"tool"``) with ``payload`` its structured content. The
+    ``"command"`` / ``"tool"`` kinds are recognised — they short-circuit
+    the content patterns — but earn NO keyboard: a bare command/tool
+    result has no generic action worth a button, and the old retry-only
+    strip (one bare "Retry" re-running the origin command) was filler
+    (button audit F1, removed 2026-11-11). ``origin_command`` is the
+    command that produced this output, when the caller knows it;
+    it is accepted for caller compatibility and never derives buttons
+    by itself — buttons come from the output (kind + content), never
+    from the last inbound command. ``text`` is the output text, used
+    for the content-pattern fallback (game results, play pick-lists,
+    confirm prompts, …) when no kind is given.
 
     The kind handlers win over text patterns: a scheduled push whose
     text happens to mention a game gets job buttons, not game buttons.
@@ -216,11 +208,16 @@ def adaptive_buttons_for(
     if kind == "music-ask":
         return _music_ask_buttons()
     if kind in ("command", "tool"):
-        return _retry_only(origin_command)
+        # Recognised kinds with no kind keyboard of their own: a bare
+        # command/tool result ships NO buttons rather than a filler
+        # strip (button audit F1 — the retry-only origin fallback that
+        # used to answer here is deleted, both reaches).
+        return None
 
     # No kind: content-pattern fallback (game results, play pick-lists,
     # confirm prompts, …) — those patterns ARE content-derived, not
-    # stale. Only then the retry-only fallback for a command result.
+    # stale. When no pattern matches, the reply ships no buttons: an
+    # origin command alone never earns one.
     try:
         kb = buttons_for_text(text or "")
     except Exception as exc:  # noqa: BLE001 - button derivation never breaks a send
@@ -228,9 +225,4 @@ def adaptive_buttons_for(
         kb = None
     if kb:
         return kb
-    if origin_command:
-        from .action_footers import is_tool_result
-
-        if is_tool_result(text or ""):
-            return _retry_only(origin_command)
     return None

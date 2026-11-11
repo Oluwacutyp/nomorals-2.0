@@ -27,13 +27,20 @@ class TestTelegramMenu(unittest.TestCase):
 
 
 class TestAdaptiveButtonsReplaceFooters(unittest.TestCase):
-    def test_command_result_gets_retry_only_no_filler(self):
+    def test_command_result_gets_no_filler_buttons(self):
+        # Lane 4 (button audit F1): the bare-Retry origin strip is
+        # deleted — a command/tool result earns NO generic keyboard,
+        # on the explicit-kind reach AND on the no-kind tool-result
+        # fallback reach the adapters use.
         from nomorals.social.chat.adaptive_buttons import adaptive_buttons_for
 
-        kb = adaptive_buttons_for(output_kind="command",
-                                  origin_command="/game trivia")
-        flat = [b for row in kb for b in row]
-        self.assertEqual(flat, [("🔁 Retry", "/game trivia")])
+        self.assertIsNone(adaptive_buttons_for(
+            output_kind="command", origin_command="/game trivia"))
+        self.assertIsNone(adaptive_buttons_for(
+            output_kind="tool", origin_command="/search cats"))
+        self.assertIsNone(adaptive_buttons_for(
+            origin_command="/game trivia",
+            text="✅ done — Result: 3 points"))
 
     def test_plain_text_gets_no_buttons(self):
         from nomorals.social.chat.adaptive_buttons import adaptive_buttons_for

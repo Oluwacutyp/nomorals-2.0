@@ -203,6 +203,7 @@ SURFACES: tuple[Surface, ...] = (
             "fun one-shots — jokes · facts · pictures · space",
             "makers & tools — cards · qr · links · bible",
             "mock screens — authored chat screens",
+            "font library — her stocked typefaces",
             "chat & privacy — your chats · your accounts",
             "memory & thinking",
             "games — 41, DM + group, start them directly",
