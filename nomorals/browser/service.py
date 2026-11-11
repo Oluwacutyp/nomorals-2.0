@@ -814,13 +814,29 @@ class RenderedTab:
         except Exception as exc:  # noqa: BLE001 - cosmetic
             record_failure("service._on_response.method", exc)
             method = ""
-        self._remember(self._network_log, {
+        entry: dict[str, Any] = {
             "kind": "response",
             "method": method if isinstance(method, str) else str(method),
             "url": url if isinstance(url, str) else str(url),
             "status": int(status) if isinstance(status, int) else status,
             "ts": time.time(),
-        }, 500)
+        }
+        # Media evidence for the download ladder's capture stage:
+        # what the response SAYS it is (content type / length) is
+        # how a media request is told from page furniture in the
+        # log.  Headers are best-effort — a response that won't
+        # give them up still logs its URL/status as before.
+        try:
+            headers = response.headers or {}
+            ctype = str(headers.get("content-type") or "")
+            if ctype:
+                entry["content_type"] = ctype
+            clen = headers.get("content-length")
+            if clen is not None:
+                entry["content_length"] = int(clen)
+        except Exception as exc:  # noqa: BLE001 - cosmetic
+            record_failure("service._on_response.headers", exc)
+        self._remember(self._network_log, entry, 500)
 
     def _on_dialog(self, dialog: Any) -> None:
         try:

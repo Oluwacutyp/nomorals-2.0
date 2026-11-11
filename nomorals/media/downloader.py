@@ -22,10 +22,28 @@ four-stage chain that keeps trying instead of erroring out:
    moves, an up-front refusal for sources the registry marks
    not-downloadable, quality-label → format translation, and an
    integrity-ledger entry for every landed download.
+1c. **connector** — a source's own connector resolves the stream
+   itself (today: SoundCloud — ``stream_url`` with the track's
+   ``track_authorization`` forwarded), and the resolved stream URL
+   is fetched as a first-class rung: progressive streams through
+   the download kit, HLS playlists through the direct backend.
+   A classified block (preview / DRM / region / login) is recorded
+   with its class and the chain moves on — the connector's answer
+   is evidence, never a dead end.
 2. **proxy** — retry through the proxy lab (:class:`ProxyPoolConnector`
    via :meth:`healthy_proxies`, protocol-aware ordering).  A proxy that
    fails is *demoted* (``record_failure``) and the chain moves to the
    next one — a dead proxy never kills the download.
+3a. **rendered** — the driven-player capture: the page opens in a
+   REAL rendered tab on the browser service (her persistent cookie
+   space), playback is started, and the media requests the player
+   itself makes are harvested from the tab's network log, selected
+   by the log's evidence (content type, extension, size), and
+   fetched through the tab's own session so session-gated streams
+   resolve.  This is the rung for JS players that expose no media
+   URL to static scraping.  DRM-encrypted streams are recognised
+   from the log's license traffic and reported as DRM — capture
+   does not chase them.
 3. **browser** — open the source page in a persistent
    :class:`BrowserSession` (cookies survive across downloads — the
    session is seeded from the same persisted browser profile the
@@ -534,7 +552,9 @@ class MediaDownloader:
                  ledger: Any | None = None,
                  cookie_store: Any | None = None,
                  source_registry: Any | None = None,
-                 artifact_store: Any | None = None) -> None:
+                 artifact_store: Any | None = None,
+                 soundcloud_connector: Any | None = None,
+                 rendered_tab_factory: Any | None = None) -> None:
         self.context = context
         self.profile = profile or detect_profile()
         self._connector_factory = connector_factory
@@ -572,6 +592,18 @@ class MediaDownloader:
         # only where there is no database to register into.
         self._artifact_store_injected = artifact_store
         self._artifact_store_cache: Any = None
+        # Connector stage (B2): an injected SoundCloud connector
+        # wins; otherwise the stage builds one through the injected
+        # connector factory + vault, exactly like the proxy pool.
+        self._soundcloud_connector_injected = soundcloud_connector
+        self._soundcloud_connector_cache: Any = None
+        self._soundcloud_connector_tried = False
+        # Rendered capture stage (B3): an injected tab factory wins
+        # (tests hand in a fake tab); the production default opens a
+        # real rendered tab on the browser service.  The factory
+        # takes the page URL and returns a tab-shaped object
+        # (network_requests / session_fetch_bytes / click / close).
+        self._rendered_tab_factory = rendered_tab_factory
 
     # ── download-kit accessors (Pass #76) ─────────────────────────────
 
@@ -775,7 +807,8 @@ class MediaDownloader:
     #: stages whose mechanism the stage itself defines.  The direct
     #: and proxy stages are refined by the backend that landed the
     #: file (see :meth:`_learn_from_success`).
-    _STAGE_RULES = {"kit": "direct", "browser": "scrape"}
+    _STAGE_RULES = {"kit": "direct", "browser": "scrape",
+                    "connector": "api", "rendered": "capture"}
 
     def _learned_for(self, url: str) -> Any | None:
         """(descriptor, learned rule) when the registry holds an
@@ -813,7 +846,8 @@ class MediaDownloader:
             winner = next((s for s in reversed(report.stages) if s.ok),
                           None)
             if winner is None or winner.stage not in (
-                    "direct", "kit", "proxy", "browser"):
+                    "direct", "kit", "connector", "proxy", "rendered",
+                    "browser"):
                 return
             reg = self.source_registry()
             desc = reg.for_url(report.resolved_url or report.url)
@@ -862,9 +896,16 @@ class MediaDownloader:
         if stage == "kit":
             return self._stage_kit(report, url, target_dir, audio_only,
                                    budget)
+        if stage == "connector":
+            return self._stage_connector(report, url, target_dir,
+                                         audio_only, budget)
         if stage == "proxy":
             return self._stage_proxy(report, url, target_dir, audio_only,
                                      format_spec, timeout, budget)
+        if stage == "rendered":
+            return self._stage_rendered(report, url, target_dir,
+                                        audio_only, page_url or url,
+                                        budget)
         if stage == "browser":
             return self._stage_browser(report, url, target_dir,
                                        audio_only, page_url or url,
@@ -1157,7 +1198,8 @@ class MediaDownloader:
         try:
             if learned_pair is not None:
                 learned_desc, learned_rule = learned_pair
-                if learned_rule.stage in ("kit", "proxy", "browser"):
+                if learned_rule.stage in ("kit", "connector", "proxy",
+                                          "rendered", "browser"):
                     _log.info(
                         "download learned rule host=%s stage=%s "
                         "rule=%s — trying the learned path first",
@@ -1172,7 +1214,8 @@ class MediaDownloader:
                     self._note_rule_failure(learned_desc)
                     rule_failure_recorded = True
                     skip_stages.add(learned_rule.stage)
-            for stage_name in ("direct", "kit", "proxy", "browser"):
+            for stage_name in ("direct", "kit", "connector", "proxy",
+                               "rendered", "browser"):
                 if stage_name in skip_stages:
                     continue
                 if self._attempt_stage(
@@ -1345,6 +1388,204 @@ class MediaDownloader:
         self._fill_success(report, {
             "path": _path, "bytes": size, "title": "",
             "extractor": "download-kit"}, size)
+        return True
+
+    # ── stage 1c: connector streams (B2) ──────────────────────────
+
+    def _soundcloud_connector(self) -> Any | None:
+        """The SoundCloud connector for the connector stage: an
+        injected one wins; otherwise it is built through the
+        injected connector factory + the accounts vault, exactly
+        like the proxy pool.  None when no factory is wired — the
+        stage then records its absence and the chain moves on."""
+        if self._soundcloud_connector_injected is not None:
+            return self._soundcloud_connector_injected
+        if self._soundcloud_connector_tried:
+            return self._soundcloud_connector_cache
+        self._soundcloud_connector_tried = True
+        factory = self._connector_factory or _CONNECTOR_FACTORY
+        if factory is None:
+            return None
+        try:
+            from ..accounts.vault import open_vault
+            vault = open_vault(getattr(self.context, "db", None),
+                               context=self.context,
+                               actor="downloader-soundcloud")
+            self._soundcloud_connector_cache = factory(
+                "soundcloud", vault)
+        except Exception as exc:  # noqa: BLE001 — connector optional
+            record_failure("_soundcloud_connector", exc)
+            self._soundcloud_connector_cache = None
+        return self._soundcloud_connector_cache
+
+    def _stage_connector(self, report: DownloadReport, url: str,
+                         target_dir: Path, audio_only: bool,
+                         budget: dict[str, float]) -> bool:
+        """The connector's own resolved stream as a download rung.
+
+        Engages only for SoundCloud URLs: the connector resolves the
+        track and hands back the stream URL (progressive MP3 or an
+        HLS playlist, with the track's ``track_authorization``
+        forwarded by the connector itself).  Progressive streams are
+        fetched through the download kit (validator-verified, like
+        the kit stage); HLS playlists go to the direct backend,
+        which speaks HLS.  A classified block (preview / DRM /
+        region / login) is journaled WITH its class and the chain
+        moves on — later rungs (proxy, rendered capture) still get
+        their turn, and true DRM is named, never chased.
+        """
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+        if host != "soundcloud.com" \
+                and not host.endswith(".soundcloud.com"):
+            return False
+        connector = self._soundcloud_connector()
+        if connector is None:
+            report.stages.append(StageLog(
+                stage="connector", url=url,
+                note="SoundCloud connector unavailable (no connector "
+                     "factory wired)"))
+            _log.info("download stage=connector url=%s skipped: no "
+                      "connector factory", url)
+            return False
+        if time.perf_counter() > budget["deadline"]:
+            return False
+        t0 = time.perf_counter()
+        try:
+            stream = connector.stream_url(url)
+        except Exception as exc:  # noqa: BLE001 — a stage reports
+            lat = time.perf_counter() - t0
+            kind = classify_failure(exc)
+            block = str(getattr(exc, "reason", "") or "")
+            report.stages.append(StageLog(
+                stage="connector", url=url, latency_s=lat,
+                error_class=kind.value, error=_err_text(exc),
+                note=f"soundcloud block: {block}" if block else ""))
+            self._log_stage("connector", url, "", lat, 0, kind,
+                            _err_text(exc, 200))
+            return False
+        final = str((stream or {}).get("url", "") or "")
+        protocol = str((stream or {}).get("protocol", "") or "")
+        track = (stream or {}).get("track") or {}
+        title = str(track.get("title", "") or "")
+        if not final:
+            lat = time.perf_counter() - t0
+            report.stages.append(StageLog(
+                stage="connector", url=url, latency_s=lat,
+                error_class=FailureKind.NO_MEDIA_FOUND.value,
+                error="connector resolved the track but returned no "
+                      "stream URL"))
+            self._log_stage("connector", url, "", lat, 0,
+                            FailureKind.NO_MEDIA_FOUND,
+                            "no stream URL")
+            return False
+        if protocol == "hls":
+            return self._connector_hls(report, final, target_dir,
+                                       title, t0, budget)
+        dest = target_dir / _safe_name(
+            str(track.get("permalink_url") or url), audio_only=True)
+        try:
+            kit = self._kit()
+            tracker = self._tracker()
+            if tracker is not None and _accepts_progress(kit.download):
+                result = kit.download(
+                    final, dest,
+                    progress=lambda received, expected:
+                        tracker.report_bytes(received, expected))
+            else:
+                result = kit.download(final, dest)
+        except Exception as exc:  # noqa: BLE001 - a stage reports
+            result = None
+            error = _err_text(exc)
+        else:
+            error = "" if result.ok else (
+                result.error or "kit fetch failed")
+        lat = time.perf_counter() - t0
+        if result is None or not result.ok:
+            kind = classify_failure(error)
+            report.stages.append(StageLog(
+                stage="connector", url=url, latency_s=lat,
+                error_class=kind.value, error=error,
+                note="connector stream fetch failed"))
+            self._log_stage("connector", url, "", lat, 0, kind,
+                            _err_text(error, 200))
+            return False
+        landed = self._verify_landed(
+            {"path": result.path, "bytes": result.size_bytes})
+        if landed is None:
+            report.stages.append(StageLog(
+                stage="connector", url=url, latency_s=lat,
+                error_class=FailureKind.NO_MEDIA_FOUND.value,
+                error="connector stream fetch reported success but "
+                      "the file is missing or empty on disk "
+                      f"({result.path or 'no path'})"))
+            self._log_stage("connector", url, "", lat, 0,
+                            FailureKind.NO_MEDIA_FOUND,
+                            "reported success, nothing on disk")
+            return False
+        _path, size = landed
+        report.stages.append(StageLog(
+            stage="connector", url=url, latency_s=lat,
+            size_bytes=size, ok=True,
+            note="soundcloud connector stream (progressive) via "
+                 "download kit"))
+        self._log_stage("connector", url, "", lat, size,
+                        FailureKind.OK, "")
+        self._fill_success(report, {
+            "path": _path, "bytes": size, "title": title,
+            "extractor": "soundcloud-connector"}, size)
+        return True
+
+    def _connector_hls(self, report: DownloadReport, playlist_url: str,
+                       target_dir: Path, title: str, t0: float,
+                       budget: dict[str, float]) -> bool:
+        """An HLS stream URL from the connector, fetched through the
+        direct backend (yt-dlp/ffmpeg speak HLS natively)."""
+        from ..tools.media import download as direct_download
+
+        if time.perf_counter() > budget["deadline"]:
+            return False
+        try:
+            result = direct_download(
+                playlist_url, target_dir, format_spec="bestaudio/best",
+                audio_only=True, timeout=self.stage_timeout,
+                cookies_file="",
+                progress=self._job_progress("connector"),
+                **self._progress_kwargs(self._tracker()))
+        except Exception as exc:  # noqa: BLE001 — a stage reports
+            lat = time.perf_counter() - t0
+            kind = classify_failure(exc)
+            report.stages.append(StageLog(
+                stage="connector", url=playlist_url, latency_s=lat,
+                error_class=kind.value, error=_err_text(exc),
+                note="connector HLS fetch failed"))
+            self._log_stage("connector", playlist_url, "", lat, 0,
+                            kind, _err_text(exc, 200))
+            return False
+        lat = time.perf_counter() - t0
+        landed = self._verify_landed(result)
+        if landed is None:
+            report.stages.append(StageLog(
+                stage="connector", url=playlist_url, latency_s=lat,
+                error_class=FailureKind.NO_MEDIA_FOUND.value,
+                error="connector HLS fetch reported success but the "
+                      "file is missing or empty on disk "
+                      f"({result.get('path', '') or 'no path'})"))
+            self._log_stage("connector", playlist_url, "", lat, 0,
+                            FailureKind.NO_MEDIA_FOUND,
+                            "reported success, nothing on disk")
+            return False
+        _path, size = landed
+        report.stages.append(StageLog(
+            stage="connector", url=playlist_url, latency_s=lat,
+            size_bytes=size, ok=True,
+            note="soundcloud connector stream (HLS) via direct "
+                 "backend"))
+        self._log_stage("connector", playlist_url, "", lat, size,
+                        FailureKind.OK, "")
+        merged = dict(result)
+        merged["title"] = title or str(result.get("title", "") or "")
+        merged["extractor"] = "soundcloud-connector"
+        self._fill_success(report, merged, size)
         return True
 
     # ── context-derived helpers ──────────────────────────────────────
@@ -1661,6 +1902,323 @@ class MediaDownloader:
             self._fill_success(report, result, size)
             return True
         return False
+
+    # ── stage 3a: rendered capture (B3) ─────────────────────────────
+
+    def _open_rendered_tab(self, page_url: str) -> Any:
+        """A rendered tab for the capture stage.
+
+        An injected factory wins (tests).  The production default
+        opens a real tab on the browser service in the shared
+        ``downloader`` session — the service's own persistent cookie
+        space, so a login the browser earned counts here — on THIS
+        thread (Playwright is thread-bound; a fresh service per
+        download mirrors ``/browser run``'s per-job service).  Raises
+        when the engine is unavailable: the stage classifies and
+        journals that, it never fakes a tab.
+        """
+        if self._rendered_tab_factory is not None:
+            return self._rendered_tab_factory(page_url)
+        from ..browser.service import BrowserService
+
+        data_dir: Any = None
+        settings = getattr(self.context, "settings", None) \
+            if self.context is not None else None
+        resolve = getattr(settings, "resolve", None)
+        if callable(resolve):
+            try:
+                data_dir = resolve("data/browser-service")
+            except Exception as e:  # service default is fine
+                record_failure("_open_rendered_tab.resolve", e)
+        service = BrowserService(data_dir=data_dir) \
+            if data_dir else BrowserService()
+        try:
+            tab = service.open_rendered_tab("downloader", page_url)
+        except Exception:
+            try:
+                service.shutdown()
+            except Exception as e:  # teardown is best-effort
+                record_failure("_open_rendered_tab.shutdown", e)
+            raise
+        return _RenderedCaptureTab(service, tab)
+
+    def _stage_rendered(self, report: DownloadReport, url: str,
+                        target_dir: Path, audio_only: bool,
+                        page_url: str, budget: dict[str, float]) -> bool:
+        """The driven-player capture stage.
+
+        Opens the page in a real rendered tab, starts playback,
+        harvests the media requests the player itself made from the
+        tab's network log (selected by the log's evidence — content
+        type, extension, size), and fetches the winner through the
+        tab's own session, so session-gated streams resolve with
+        the session's cookies.  HLS playlists are walked segment by
+        segment through the same session.  A log carrying DRM
+        license traffic ends the stage with the DRM reason — the
+        segments are encrypted and no rung downloads them.  Any
+        failure falls through to the static browser stage and the
+        honest report, exactly like a sibling stage.
+        """
+        page = page_url or url
+        page_path = urllib.parse.urlparse(page).path.lower()
+        if page_path.endswith(_MEDIA_EXTS):
+            # The target already names a media file — there is no
+            # player to drive.  Not engaged, like the kit stage on a
+            # non-direct descriptor: silent, no stage log.
+            return False
+        t0 = time.perf_counter()
+        try:
+            tab = self._open_rendered_tab(page)
+        except Exception as exc:  # noqa: BLE001 — a stage reports
+            lat = time.perf_counter() - t0
+            low = str(exc).lower()
+            kind = FailureKind.DEPENDENCY_MISSING \
+                if "playwright" in low else classify_failure(exc)
+            report.stages.append(StageLog(
+                stage="rendered", url=page, latency_s=lat,
+                error_class=kind.value, error=_err_text(exc),
+                note="rendered tab unavailable"))
+            self._log_stage("rendered", page, "", lat, 0, kind,
+                            _err_text(exc, 200))
+            return False
+        try:
+            self._try_start_playback(tab)
+            candidates, drm_url = self._poll_capture(
+                tab, budget, audio_only)
+            lat = time.perf_counter() - t0
+            if drm_url:
+                report.stages.append(StageLog(
+                    stage="rendered", url=page, latency_s=lat,
+                    error_class=FailureKind.SITE_ERROR.value,
+                    error="the page's player uses DRM-encrypted "
+                          "streams (license traffic in the tab's "
+                          f"network log: {drm_url[:120]}) — capture "
+                          "cannot take DRM media, and no rung "
+                          "downloads it",
+                    note="drm detected in network log"))
+                self._log_stage("rendered", page, "", lat, 0,
+                                FailureKind.SITE_ERROR,
+                                "drm license traffic in network log")
+                return False
+            if not candidates:
+                report.stages.append(StageLog(
+                    stage="rendered", url=page, latency_s=lat,
+                    error_class=FailureKind.NO_MEDIA_FOUND.value,
+                    error="the rendered player made no media "
+                          "requests the network log could capture",
+                    note="page played (or tried to) but exposed no "
+                         "media requests"))
+                self._log_stage("rendered", page, "", lat, 0,
+                                FailureKind.NO_MEDIA_FOUND,
+                                "no media in network log")
+                return False
+            report.stages.append(StageLog(
+                stage="rendered", url=page, latency_s=lat,
+                note=f"network log captured {len(candidates)} media "
+                     f"candidate(s); fetching through the tab "
+                     f"session"))
+            for cand in candidates:
+                if time.perf_counter() > budget["deadline"]:
+                    break
+                if self._fetch_capture_candidate(
+                        report, tab, cand, target_dir, audio_only,
+                        page):
+                    return True
+            return False
+        except Exception as exc:  # noqa: BLE001 — a stage reports
+            lat = time.perf_counter() - t0
+            kind = classify_failure(exc)
+            report.stages.append(StageLog(
+                stage="rendered", url=page, latency_s=lat,
+                error_class=kind.value, error=_err_text(exc),
+                note="rendered capture failed"))
+            self._log_stage("rendered", page, "", lat, 0, kind,
+                            _err_text(exc, 200))
+            return False
+        finally:
+            try:
+                tab.close()
+            except Exception as e:  # teardown never masks the stage
+                record_failure("_stage_rendered.close", e)
+
+    def _try_start_playback(self, tab: Any) -> None:
+        """Best-effort play press: players expose the control under
+        many shapes; each miss is expected, never an error.  A
+        player that starts on its own is equally fine — the network
+        log is the evidence either way."""
+        click = getattr(tab, "click", None)
+        if callable(click):
+            for target in ("Play", "[aria-label='Play']",
+                           "button[aria-label*='play' i]",
+                           ".playButton", "#play"):
+                try:
+                    click(target)
+                    break
+                except Exception as exc:  # noqa: BLE001 — try next
+                    _log.debug("rendered capture: play target %r "
+                               "missed: %s", target, exc)
+        idle = getattr(tab, "wait_for_network_idle", None)
+        if callable(idle):
+            try:
+                idle(8_000)
+            except Exception as exc:  # noqa: BLE001 — settling is
+                # best-effort; the poll below is the real wait
+                _log.debug("rendered capture: network-idle wait "
+                           "ended early: %s", exc)
+
+    def _poll_capture(self, tab: Any, budget: dict[str, float],
+                      audio_only: bool) -> tuple[list[str], str]:
+        """Poll the tab's network log for media evidence.
+
+        Returns ``(candidates, drm_url)``: the selected media URLs
+        in preference order, and the DRM license URL when the log
+        carries one (candidates are then meaningless — encrypted
+        segments are not a download).  Waits out a bounded window
+        inside the chain's deadline: players fetch media lazily,
+        so the first empty read is not the verdict.
+        """
+        soft_deadline = min(budget["deadline"],
+                            time.perf_counter() + 25.0)
+        while True:
+            raw = tab.network_requests(limit=500)
+            entries = raw.get("requests", []) \
+                if isinstance(raw, dict) else []
+            drm_url = _drm_evidence(entries)
+            if drm_url:
+                return [], drm_url
+            candidates = _capture_candidates(
+                entries, audio_only=audio_only)
+            if candidates:
+                return candidates, ""
+            if time.perf_counter() >= soft_deadline:
+                return [], ""
+            time.sleep(1.5)
+
+    def _fetch_capture_candidate(self, report: DownloadReport,
+                                 tab: Any, media_url: str,
+                                 target_dir: Path, audio_only: bool,
+                                 page_url: str) -> bool:
+        """Fetch one captured media URL through the tab's session
+        (``session_fetch_bytes`` — the browser context's own request
+        stack, cookies riding along) and verify what landed."""
+        fetch = getattr(tab, "session_fetch_bytes", None)
+        if not callable(fetch):
+            report.stages.append(StageLog(
+                stage="rendered", url=media_url,
+                error_class=FailureKind.DEPENDENCY_MISSING.value,
+                error="the rendered tab cannot fetch through its "
+                      "session"))
+            return False
+        is_hls = urllib.parse.urlparse(
+            media_url).path.lower().endswith(".m3u8")
+        name = _safe_name(page_url if is_hls else media_url,
+                          audio_only)
+        if is_hls and "." not in name.rsplit("/", 1)[-1]:
+            name += ".mp3" if audio_only else ".ts"
+        dest = target_dir / name
+        t0 = time.perf_counter()
+        try:
+            if is_hls:
+                self._fetch_hls_via_session(tab, media_url, dest)
+            else:
+                data = fetch(media_url)
+                if not data:
+                    raise ValueError("session fetch returned no bytes")
+                dest.write_bytes(bytes(data))
+        except Exception as exc:  # noqa: BLE001 — try the next one
+            lat = time.perf_counter() - t0
+            kind = classify_failure(exc)
+            report.stages.append(StageLog(
+                stage="rendered", url=media_url, latency_s=lat,
+                error_class=kind.value, error=_err_text(exc),
+                note="captured media fetch failed"))
+            self._log_stage("rendered", media_url, "", lat, 0, kind,
+                            _err_text(exc, 200))
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError as e:
+                record_failure("_fetch_capture_candidate.unlink", e)
+            return False
+        lat = time.perf_counter() - t0
+        # Byte-level landing truth, same as the browser stage: an
+        # HTML page wearing a media name is an error page, and the
+        # size on disk is the only size that counts.
+        from ..tools.media import _looks_like_html
+
+        try:
+            actual = dest.stat().st_size if dest.is_file() else 0
+            with dest.open("rb") as fh:
+                head = fh.read(1024)
+        except OSError:
+            actual, head = 0, b""
+        if actual <= 0 or _looks_like_html(head):
+            why = ("session fetch reported bytes but no file is on "
+                   "disk" if actual <= 0 else
+                   "landed bytes are an HTML page, not media")
+            report.stages.append(StageLog(
+                stage="rendered", url=media_url, latency_s=lat,
+                size_bytes=actual,
+                error_class=FailureKind.NO_MEDIA_FOUND.value,
+                error=why, note="captured candidate was not media"))
+            self._log_stage("rendered", media_url, "", lat, actual,
+                            FailureKind.NO_MEDIA_FOUND, why)
+            try:
+                dest.unlink(missing_ok=True)
+            except OSError as e:
+                record_failure("_fetch_capture_candidate.unlink#2", e)
+            return False
+        report.stages.append(StageLog(
+            stage="rendered", url=media_url, latency_s=lat,
+            size_bytes=actual, ok=True,
+            note="captured from the tab's network log; fetched "
+                 "through the tab session"))
+        self._log_stage("rendered", media_url, "", lat, actual,
+                        FailureKind.OK, "")
+        self._fill_success(report, {
+            "path": str(dest), "bytes": actual, "title": dest.stem,
+            "extractor": "rendered-capture"}, actual)
+        return True
+
+    def _fetch_hls_via_session(self, tab: Any, playlist_url: str,
+                               dest: Path) -> None:
+        """Walk an HLS playlist through the tab's session: master →
+        media playlist → segments in order, concatenated.  Raises
+        on any failure — a partial concatenation is deleted by the
+        caller, never delivered as the track."""
+        fetch = tab.session_fetch_bytes
+        raw = fetch(playlist_url)
+        text = bytes(raw).decode("utf-8", errors="replace")
+        if "#EXT-X-STREAM-INF" in text:
+            variant = _hls_variant_url(text, playlist_url)
+            if not variant:
+                raise ValueError("HLS master playlist names no "
+                                 "variant")
+            raw = fetch(variant)
+            text = bytes(raw).decode("utf-8", errors="replace")
+            playlist_url = variant
+        segments: list[str] = []
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#EXT-X-MAP:"):
+                m = re.search(r'URI="([^"]+)"', line)
+                if m:
+                    segments.append(urllib.parse.urljoin(
+                        playlist_url, m.group(1)))
+                continue
+            if line.startswith("#"):
+                continue
+            segments.append(urllib.parse.urljoin(playlist_url, line))
+        if not segments:
+            raise ValueError("HLS playlist carried no segments")
+        if len(segments) > 4096:
+            raise ValueError(
+                f"HLS playlist carries {len(segments)} segments — "
+                "beyond the capture cap")
+        with dest.open("wb") as fh:
+            for seg in segments:
+                fh.write(bytes(fetch(seg)))
 
     # ── stage 3: browser context ──────────────────────────────────────
 
@@ -2003,10 +2561,24 @@ class MediaDownloader:
     def _finish_failure(self, report: DownloadReport) -> None:
         kinds = [s.error_class for s in report.stages if s.error_class]
         notes = " ".join(s.note for s in report.stages).lower()
+        errors = " ".join(s.error for s in report.stages).lower()
         browser_opened = any(
             s.stage == "browser" and "page opened" in (s.note or "")
             for s in report.stages)
-        if FailureKind.BOT_BLOCK.value in kinds:
+        if "drm-encrypted" in errors or "drm detected" in notes:
+            # The rendered player itself proved the stream is
+            # DRM-encrypted (license traffic in its network log):
+            # that is the cause, stated plainly — no rung downloads
+            # DRM media, and more trying would not change it.
+            report.failure = FailureKind.SITE_ERROR
+            report.likely_cause = (
+                "the media is DRM-encrypted — the site's own player "
+                "asked a license server for decryption keys, and no "
+                "download rung can take DRM-protected streams")
+            report.hint = ("play it in the source's own app, or find "
+                           "the same title on a source that serves "
+                           "the file")
+        elif FailureKind.BOT_BLOCK.value in kinds:
             report.failure = FailureKind.BOT_BLOCK
             report.likely_cause = (
                 "the site is blocking automated downloads (bot check / "
@@ -2212,3 +2784,131 @@ def _safe_name(url: str, audio_only: bool) -> str:
     if not name or "." not in name:
         name = (name or "media") + (".mp3" if audio_only else ".bin")
     return name or "media.bin"
+
+
+# ── rendered capture: network-log evidence (B3) ─────────────────────
+
+
+class _RenderedCaptureTab:
+    """A live rendered tab plus the browser service that owns it.
+
+    The capture stage talks to the duck-typed tab surface
+    (``network_requests`` / ``session_fetch_bytes`` / ``click`` /
+    ``close``); this wrapper adds the service teardown a bare tab
+    cannot do itself, so one download never leaks a browser.
+    """
+
+    def __init__(self, service: Any, tab: Any) -> None:
+        self._service = service
+        self._tab = tab
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._tab, name)
+
+    def close(self) -> None:
+        try:
+            self._tab.close()
+        finally:
+            self._service.shutdown()
+
+
+#: URL markers of DRM license acquisition in a network log: the
+#: player asked a license server for decryption keys, which means
+#: the media segments themselves are encrypted.
+_DRM_URL_MARKERS = ("widevine", "fairplay", "playready")
+
+_CAPTURE_AUDIO_EXTS = (".mp3", ".m4a", ".aac", ".ogg", ".opus",
+                       ".wav", ".flac")
+_CAPTURE_VIDEO_EXTS = (".mp4", ".webm", ".mov", ".mkv")
+
+
+def _drm_evidence(entries: list[dict[str, Any]]) -> str:
+    """The first DRM license URL in a tab network log, or "".
+
+    A Widevine/FairPlay/PlayReady license request is the log's own
+    proof that the stream is DRM-encrypted: capture reports it as
+    DRM instead of fetching segments it cannot decrypt.
+    """
+    for entry in entries or []:
+        url = str((entry or {}).get("url", "") or "")
+        low = url.lower()
+        if any(marker in low for marker in _DRM_URL_MARKERS):
+            return url
+    return ""
+
+
+def _capture_candidates(entries: list[dict[str, Any]], *,
+                        audio_only: bool = False) -> list[str]:
+    """Media URLs from a tab network log, in preference order.
+
+    The log's own evidence decides: response entries with a media
+    content type, or a media extension on the URL path, with a
+    successful status when the entry carries one.  Ranking prefers
+    the kind the caller asked for (audio files, then HLS playlists,
+    then video files for an audio request; mirrored otherwise) and
+    the larger declared content length inside a class — a segment
+    is not the stream when the whole file is also there.  Preview
+    URLs are excluded: a preview is not the track, on any rung.
+    """
+    audio_files: list[tuple[int, str]] = []
+    video_files: list[tuple[int, str]] = []
+    playlists: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for entry in entries or []:
+        url = str((entry or {}).get("url", "") or "")
+        if not url.lower().startswith(("http://", "https://")):
+            continue
+        status = (entry or {}).get("status")
+        if isinstance(status, int) and status >= 400:
+            continue
+        key = url.split("#", 1)[0]
+        if key in seen:
+            continue
+        path = urllib.parse.urlparse(url).path.lower()
+        if "/preview/" in path:
+            continue
+        if _drm_evidence([entry]):
+            continue
+        ctype = str((entry or {}).get("content_type", "") or "").lower()
+        try:
+            size = int((entry or {}).get("content_length") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if path.endswith(".m3u8") or "mpegurl" in ctype:
+            playlists.append((size, key))
+        elif path.endswith(_CAPTURE_AUDIO_EXTS) \
+                or ctype.startswith("audio/"):
+            audio_files.append((size, key))
+        elif path.endswith(_CAPTURE_VIDEO_EXTS) \
+                or ctype.startswith("video/"):
+            video_files.append((size, key))
+        else:
+            continue
+        seen.add(key)
+    audio_files.sort(key=lambda pair: -pair[0])
+    video_files.sort(key=lambda pair: -pair[0])
+    playlists.sort(key=lambda pair: -pair[0])
+    if audio_only:
+        ordered = audio_files + playlists + video_files
+    else:
+        ordered = video_files + playlists + audio_files
+    return [url for _size, url in ordered[:8]]
+
+
+def _hls_variant_url(master_text: str, base_url: str) -> str:
+    """The highest-bandwidth variant URL from an HLS master
+    playlist (the first variant when bandwidths are absent)."""
+    best_url = ""
+    best_bw = -1
+    pending_bw = 0
+    for line in master_text.splitlines():
+        line = line.strip()
+        if line.startswith("#EXT-X-STREAM-INF:"):
+            m = re.search(r"BANDWIDTH=(\d+)", line)
+            pending_bw = int(m.group(1)) if m else 0
+        elif line and not line.startswith("#"):
+            if pending_bw > best_bw:
+                best_bw = pending_bw
+                best_url = urllib.parse.urljoin(base_url, line)
+            pending_bw = 0
+    return best_url

@@ -787,6 +787,12 @@ class PlaybackEngine:
         - netnaija: scrape the post page for the direct MP3, then download
         - url: download via media_download (yt-dlp or direct HTTP)
         - spotify / boomplay: honest refusal (DRM / protected streams)
+
+        A protection-blocked soundcloud/audiomack/netnaija download
+        falls back to YouTube ONCE — and says so in the result
+        (``note`` + ``substituted_from``/``substitute_reason``): the
+        landed file is a different recording of the song, never the
+        requested item itself, and callers must not label it as such.
         """
         try:
             kind = str(item.get("kind", ""))
@@ -948,7 +954,15 @@ class PlaybackEngine:
                     "youtube_fallback_attempted": True}
         _log.info("youtube fallback succeeded for %r", query)
         return {"ok": True, "path": path, "title": title,
-                "note": f"via YouTube ({source_label} was blocked)"}
+                "note": f"via YouTube ({source_label} was blocked)",
+                # Structured substitution facts: the file at ``path``
+                # is NOT the requested item's own recording — it is a
+                # YouTube copy fetched because the source blocked the
+                # original.  Callers that were handed ONE specific
+                # track (a URL, a pick) must not pass it off as that
+                # track; see runtime_media's single-send path.
+                "substituted_from": source_label,
+                "substitute_reason": sc_error}
 
     def _add_youtube(self, target: str, title: str = "") -> list[dict[str, Any]]:
         """Enqueue a YouTube URL or search query (audio extracted at play)."""

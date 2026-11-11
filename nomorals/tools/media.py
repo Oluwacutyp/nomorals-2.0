@@ -560,7 +560,9 @@ def register(registry: Any) -> None:
         page_url: str = "",
     ) -> dict[str, Any]:
         """Download with the full fallback chain: direct (yt-dlp, retry +
-        backoff) → proxy lab → browser-context fetch → honest failure.
+        backoff) → kit → connector streams (SoundCloud) → proxy lab →
+        rendered-player capture → browser-context fetch → honest
+        failure.
 
         ``page_url`` is the source page for the browser stage (e.g. the
         YouTube watch page or a download-blog post) when it differs from

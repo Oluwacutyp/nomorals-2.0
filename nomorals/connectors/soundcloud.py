@@ -17,7 +17,11 @@ Capabilities:
 * ``stream_url`` — the playable stream for a track. Prefers progressive
   MP3 (plays in mpv/ffplay directly); falls back to HLS (mpv plays it)
   when only HLS transcodings exist. Fails fast when a track is not
-  streamable at all (private, geo/preview-restricted, removed).
+  streamable at all (private, geo/preview-restricted, removed) — with
+  the block classified (``SoundCloudError.reason``: preview / drm /
+  region / login / private), never a bare "protected". The track
+  payload's ``track_authorization`` token is forwarded on the
+  transcoding call, as api-v2 expects for authorization-gated tracks.
 * ``playlist_tracks`` / ``user_tracks`` — expand a playlist or artist
   page into playable track summaries
 
@@ -31,6 +35,7 @@ from __future__ import annotations
 
 import os
 import re
+import urllib.parse
 from typing import Any
 
 from ..core.logging_setup import get_logger
@@ -43,7 +48,17 @@ from .base import (
 )
 from .registry import register_connector
 
-__all__ = ["SoundCloudConnector", "SoundCloudError"]
+__all__ = [
+    "SoundCloudConnector",
+    "SoundCloudError",
+    "BLOCK_PREVIEW",
+    "BLOCK_DRM",
+    "BLOCK_REGION",
+    "BLOCK_LOGIN",
+    "BLOCK_PRIVATE",
+    "block_reason_text",
+    "classify_block",
+]
 
 _log = get_logger(__name__)
 
@@ -72,6 +87,71 @@ _client_id_cache: str = ""
 
 #: Normalized track kinds the generic ``search`` accepts.
 _SEARCH_KINDS = ("track", "playlist", "user", "album")
+
+#: Structured block classes — WHY a track will not stream in full.
+#: Callers (resolver, playback, the download ladder) carry the class,
+#: not a guessed sentence, and the user surface renders it with
+#: :func:`block_reason_text`.  Classes:
+#: ``preview`` — SoundCloud serves only a ~30 s preview (policy
+#: PREVIEW/SNIP, or the stream it handed back IS a preview);
+#: ``drm`` — the stream is DRM-protected;
+#: ``region`` — the rights holder blocks the track in this region
+#: (policy BLOCK/DENY, or an explicit geo refusal);
+#: ``login`` — the stream needs an authorized session (the track's
+#: ``track_authorization`` or a signed-in account);
+#: ``private`` — the track is private or removed.
+BLOCK_PREVIEW = "preview"
+BLOCK_DRM = "drm"
+BLOCK_REGION = "region"
+BLOCK_LOGIN = "login"
+BLOCK_PRIVATE = "private"
+
+_BLOCK_REASON_TEXT = {
+    BLOCK_PREVIEW: "SoundCloud only serves a ~30-second preview of "
+                   "this track",
+    BLOCK_DRM: "this track's SoundCloud stream is DRM-protected",
+    BLOCK_REGION: "SoundCloud blocks this track in this region",
+    BLOCK_LOGIN: "SoundCloud wants a signed-in account for this track",
+    BLOCK_PRIVATE: "this track is private or has been removed",
+}
+
+
+def block_reason_text(reason: str) -> str:
+    """The human sentence for a structured block class ("" if none)."""
+    return _BLOCK_REASON_TEXT.get(str(reason or ""), "")
+
+
+def classify_block(*, policy: str = "", status: int = 0,
+                   text: str = "") -> str:
+    """Classify a SoundCloud block into a :data:`BLOCK_*` class.
+
+    Evidence, in order: the api-v2 ``policy`` on the track payload,
+    the HTTP status of the refused stream call, and markers in the
+    API's own error text.  Returns "" when nothing identifies the
+    block — an unclassified refusal is reported as-is, never dressed
+    up as a class it didn't earn.
+    """
+    pol = str(policy or "").upper()
+    low = str(text or "").lower()
+    if "drm" in low or "protected content" in low:
+        return BLOCK_DRM
+    if pol in ("PREVIEW", "SNIP"):
+        return BLOCK_PREVIEW
+    if "preview" in low and ("only" in low or "30" in low):
+        return BLOCK_PREVIEW
+    if pol in ("BLOCK", "DENY"):
+        return BLOCK_REGION
+    if any(marker in low for marker in (
+            "not available in your country", "geo", "region",
+            "territory")):
+        return BLOCK_REGION
+    if status in (401, 403) or any(marker in low for marker in (
+            "unauthorized", "authorization", "login", "log in",
+            "sign in", "authenticated")):
+        return BLOCK_LOGIN
+    if status == 404 or "private" in low or "not found" in low:
+        return BLOCK_PRIVATE
+    return ""
 
 
 class SoundCloudError(ConnectorError):
@@ -412,10 +492,12 @@ class SoundCloudConnector(Connector):
         chosen = (progressive or hls or [None])[0]
         if chosen is None:
             policy = str(full.get("policy", ""))
+            reason = classify_block(policy=policy) or BLOCK_PRIVATE
             raise SoundCloudError(
-                f"\"{summary['title']}\" has no playable stream "
-                f"(policy={policy or 'unknown'}): the track is private, "
-                "removed, or SoundCloud restricts it to previews only",
+                f"\"{summary['title']}\" has no playable stream: "
+                f"{block_reason_text(reason)} "
+                f"(policy={policy or 'unknown'})",
+                reason=reason,
             )
         stream_api_url = str(chosen.get("url", ""))
         if not stream_api_url:
@@ -423,7 +505,14 @@ class SoundCloudConnector(Connector):
                 f"\"{summary['title']}\" has a transcoding entry but no "
                 "stream URL — SoundCloud changed its API shape"
             )
-        data = self._api_raw_url(stream_api_url)
+        # Authorization-gated tracks carry a per-track token in the
+        # payload; api-v2 expects it forwarded on the transcoding
+        # call alongside client_id — without it those calls refuse
+        # even with a valid client_id.
+        data = self._api_raw_url(
+            stream_api_url,
+            track_authorization=str(
+                full.get("track_authorization", "") or ""))
         final = str(data.get("url", ""))
         if not final:
             raise SoundCloudError(
@@ -433,7 +522,9 @@ class SoundCloudConnector(Connector):
         if "/preview/" in final:
             raise SoundCloudError(
                 f"\"{summary['title']}\" is preview-only on SoundCloud "
-                f"(~30s); falling back to full-track sources"
+                f"(~30s): {block_reason_text(BLOCK_PREVIEW)}; falling "
+                "back to full-track sources",
+                reason=BLOCK_PREVIEW,
             )
         fmt = chosen.get("format") or {}
         return {
@@ -477,21 +568,37 @@ class SoundCloudConnector(Connector):
             f"{text!r} is not a track id or soundcloud.com URL"
         )
 
-    def _api_raw_url(self, url: str) -> dict[str, Any]:
-        """GET a full api-v2 URL (transcoding endpoints)."""
+    def _api_raw_url(self, url: str,
+                     track_authorization: str = "") -> dict[str, Any]:
+        """GET a full api-v2 URL (transcoding endpoints).
+
+        ``track_authorization`` — the per-track token from the track
+        payload — is forwarded when present: api-v2 expects it
+        alongside ``client_id`` for authorization-gated tracks, and
+        those stream calls refuse without it.
+        """
         client_id = self._client_id()
         sep = "&" if "?" in url else "?"
+        wire = f"{url}{sep}client_id={client_id}"
+        if track_authorization:
+            wire += (f"&track_authorization="
+                     f"{urllib.parse.quote(track_authorization, safe='')}")
         try:
-            resp = self.http.get(f"{url}{sep}client_id={client_id}",
-                                 headers={"User-Agent": _UA})
+            resp = self.http.get(wire, headers={"User-Agent": _UA})
         except Exception as exc:  # noqa: BLE001 - network layer is opaque
             raise SoundCloudError(
                 f"soundcloud stream lookup failed: {exc}") from exc
         if not resp.ok:
+            reason = classify_block(status=resp.status,
+                                    text=resp.text[:200])
+            detail = ""
+            if reason:
+                detail = f" — {block_reason_text(reason)}"
             raise SoundCloudError(
                 f"soundcloud stream lookup failed ({resp.status}): "
-                f"{resp.text[:200]}",
+                f"{resp.text[:200]}{detail}",
                 status_code=resp.status,
+                reason=reason,
             )
         try:
             data = resp.json()
@@ -582,6 +689,16 @@ class SoundCloudConnector(Connector):
             "likes_count": int(raw.get("likes_count") or 0),
             "policy": str(raw.get("policy", "")),
             "streamable": bool(raw.get("streamable", False)),
+            #: WHY SoundCloud won't serve this track in full, when it
+            #: won't — a BLOCK_* class from the payload's own evidence
+            #: (policy / streamable), "" for a freely streamable one.
+            #: Search/resolve consumers carry it to the user surface
+            #: instead of collapsing every block to "protected".
+            "block_reason": classify_block(
+                policy=str(raw.get("policy", ""))) if (
+                    not raw.get("streamable", False)
+                    or str(raw.get("policy", "")).upper()
+                    in ("PREVIEW", "SNIP", "BLOCK", "DENY")) else "",
             "kind": "track",
             "_full": src if full is not None else None,
         }

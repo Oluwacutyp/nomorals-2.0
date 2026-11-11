@@ -414,26 +414,37 @@ def test_resolve_result_shape():
 # ── preview-only detection + fall-through ───────────────────────────────
 
 
-def test_track_result_rejects_preview_policies():
-    for policy in ("PREVIEW", "SNIP", "BLOCK"):
+def test_track_result_marks_preview_policies_blocked():
+    # A policy-blocked track is FOUND but not downloadable, and the
+    # block's class rides the result (preview policy vs region) so
+    # the user surface names the specific block. (Downloads
+    # expansion B1: blocked tracks used to raise and vanish into a
+    # generic failure.)
+    for policy, block in (("PREVIEW", "preview"), ("SNIP", "preview"),
+                          ("BLOCK", "region")):
         tr = _track(title="T", permalink="https://soundcloud.com/a/t")
         tr["policy"] = policy
-        with pytest.raises(ResolutionError) as ei:
-            SourceResolver._track_result(tr, "SoundCloud API")
-        assert "preview" in str(ei.value).lower()
-    # ALLOW and empty policy still pass
+        out = SourceResolver._track_result(tr, "SoundCloud API")
+        assert out.ok and out.kind == "soundcloud"
+        assert out.downloadable is False
+        assert out.block_reason == block
+        assert out.preview_only is (block == "preview")
+    # ALLOW and empty policy still pass as downloadable finds.
     for policy in ("ALLOW", ""):
         tr = _track(title="T", permalink="https://soundcloud.com/a/t")
         tr["policy"] = policy
         out = SourceResolver._track_result(tr, "SoundCloud API")
         assert out.ok and out.kind == "soundcloud"
+        assert out.downloadable is True
 
 
-def test_track_result_rejects_preview_flag():
+def test_track_result_marks_preview_flag_blocked():
     tr = _track(title="T", permalink="https://soundcloud.com/a/t")
     tr["preview"] = True
-    with pytest.raises(ResolutionError):
-        SourceResolver._track_result(tr, "SoundCloud API")
+    out = SourceResolver._track_result(tr, "SoundCloud API")
+    assert out.ok and out.downloadable is False
+    assert out.block_reason == "preview"
+    assert out.preview_only is True
 
 
 def test_track_list_skips_preview_only_first_track():

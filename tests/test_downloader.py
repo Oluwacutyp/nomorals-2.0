@@ -117,6 +117,9 @@ class OrderingTests(unittest.TestCase):
         # between direct and proxy (same patching pattern as its
         # sibling stages).  The pinned intent is unchanged — strict
         # stage order, browser LAST.
+        # B2/B3 fixture update: the chain gained the connector stage
+        # (after kit) and the rendered capture stage (after proxy),
+        # stubbed the same way; browser is still LAST.
         order = []
 
         def direct(*a, **k):
@@ -128,9 +131,21 @@ class OrderingTests(unittest.TestCase):
             report.stages.append(StageLog(stage="kit", note="mocked"))
             return False
 
+        def connector(report, *a, **k):
+            order.append("connector")
+            report.stages.append(StageLog(stage="connector",
+                                         note="mocked"))
+            return False
+
         def proxy(report, *a, **k):
             order.append("proxy")
             report.stages.append(StageLog(stage="proxy", note="mocked"))
+            return False
+
+        def rendered(report, *a, **k):
+            order.append("rendered")
+            report.stages.append(StageLog(stage="rendered",
+                                          note="mocked"))
             return False
 
         def browser(report, *a, **k):
@@ -140,16 +155,28 @@ class OrderingTests(unittest.TestCase):
 
         with patch("nomorals.tools.media.download", side_effect=direct):
             with patch.object(self.dl, "_stage_kit", side_effect=kit):
-                with patch.object(self.dl, "_stage_proxy", side_effect=proxy):
-                    with patch.object(self.dl, "_stage_browser",
-                                      side_effect=browser):
-                        with patch.object(self.dl, "_proxy_pool",
-                                           return_value=None):
-                            report = self.dl.download("https://x.test/a.mp3")
-        self.assertEqual(order, ["direct", "kit", "proxy", "browser"])
+                with patch.object(self.dl, "_stage_connector",
+                                  side_effect=connector):
+                    with patch.object(self.dl, "_stage_proxy",
+                                      side_effect=proxy):
+                        with patch.object(self.dl, "_stage_rendered",
+                                          side_effect=rendered):
+                            with patch.object(self.dl, "_stage_browser",
+                                              side_effect=browser):
+                                with patch.object(
+                                        self.dl, "_proxy_pool",
+                                        return_value=None):
+                                    report = self.dl.download(
+                                        "https://x.test/a.mp3")
+        self.assertEqual(
+            order,
+            ["direct", "kit", "connector", "proxy", "rendered",
+             "browser"])
         self.assertFalse(report.ok)
-        self.assertEqual(report.tried(),
-                         ["direct", "kit", "proxy", "browser"])
+        self.assertEqual(
+            report.tried(),
+            ["direct", "kit", "connector", "proxy", "rendered",
+             "browser"])
 
     def test_proxy_skipped_when_pool_missing_chain_continues(self):
         # Pass #76 fixture update: kit stage stubbed like its siblings;

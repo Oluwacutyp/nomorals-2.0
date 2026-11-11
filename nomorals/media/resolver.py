@@ -203,6 +203,12 @@ class ResolvedAudio:
     errors: list[str] = field(default_factory=list)
     hint: str = ""
     downloadable: bool = True  # False for Spotify (DRM, device playback)
+    #: WHY a found-but-blocked hit cannot be delivered, as a class
+    #: (the SoundCloud connector's vocabulary: preview / drm / region
+    #: / login / private; "drm" for Spotify-class protection).  ""
+    #: when the hit is downloadable or the block is unclassified —
+    #: callers render the class, never a guessed sentence.
+    block_reason: str = ""
     #: True when the hit is a ~30s PREVIEW (iTunes/Deezer class): the
     #: track was identified, but the only audio the source serves is
     #: a preview clip.  Preview hits are never downloadable, never
@@ -625,9 +631,15 @@ class SourceResolver:
         out: list[ResolvedAudio] = []
         for tr in tracks or []:
             try:
-                out.append(self._track_result(tr, "SoundCloud search"))
+                cand = self._track_result(tr, "SoundCloud search")
             except ResolutionError:
                 continue
+            # Blocked finds are not candidates (the sweep's contract);
+            # they reach the surface through the resolve chain's
+            # found-but-blocked slot, with their class attached.
+            if cand.downloadable is False:
+                continue
+            out.append(cand)
         return out
 
     def _youtube_search_many(self, query: str,
@@ -874,6 +886,7 @@ class SourceResolver:
             result.source_name = out.source_name
             result.downloadable = out.downloadable
             result.preview_only = out.preview_only
+            result.block_reason = out.block_reason
             result.extra_tracks = out.extra_tracks
             if out.hint and not result.hint:
                 result.hint = out.hint
@@ -890,6 +903,7 @@ class SourceResolver:
             result.source_name = first_blocked.source_name
             result.downloadable = False
             result.preview_only = first_blocked.preview_only
+            result.block_reason = first_blocked.block_reason
             result.extra_tracks = first_blocked.extra_tracks
             if first_blocked.hint and not result.hint:
                 result.hint = first_blocked.hint
@@ -1210,15 +1224,30 @@ class SourceResolver:
         if not permalink:
             raise ResolutionError("soundcloud-api",
                                   "track has no permalink URL")
-        # Preview-only tracks (~30s clips) are useless — fall through to
-        # full-track sources (YouTube, Audiomack, etc.) instead of
-        # silently downloading a preview.
+        # Preview-only tracks (~30s clips) are useless as a download —
+        # but the FIND is a fact: return it found-but-blocked with the
+        # block's class, so the chain keeps going to full-track
+        # sources AND the caller can name the specific block (preview
+        # policy vs region vs …) instead of a generic "protected".
         reason = cls._preview_reason(tr)
         if reason:
-            raise ResolutionError(
-                "soundcloud-api",
-                f"track {tr.get('title', '')!r} is preview-only "
-                f"({reason}); trying full-track sources")
+            policy = str(tr.get("policy") or "").upper()
+            block = str(tr.get("block_reason") or "")
+            if not block:
+                block = "region" if policy in ("BLOCK", "DENY") \
+                    else "preview"
+            out = ResolvedAudio(
+                ok=True, path_or_url=permalink,
+                title=str(tr.get("title") or permalink),
+                artist=str(tr.get("artist") or ""),
+                duration=float(tr.get("duration_ms") or 0) / 1000.0,
+                kind="soundcloud", source_name=source_name,
+                downloadable=False,
+                preview_only=(block == "preview"),
+                block_reason=block)
+            out.hint = (f"SoundCloud serves no full stream for this "
+                        f"track ({reason})")
+            return out
         return ResolvedAudio(
             ok=True, path_or_url=permalink,
             title=str(tr.get("title") or permalink),
@@ -1467,7 +1496,7 @@ class SourceResolver:
         return ResolvedAudio(
             ok=True, path_or_url=c.url, title=c.title, artist=c.artist,
             kind="boomplay", source_name="Boomplay search",
-            downloadable=False,
+            downloadable=False, block_reason="drm",
             hint="Boomplay streams are protected — open in the Boomplay app")
 
     # ── strategies: leftovers ─────────────────────────────────────────
@@ -1538,7 +1567,7 @@ class SourceResolver:
                                   f"not a Spotify URI or link: {url!r}")
         out = ResolvedAudio(ok=True, path_or_url=uri, title=uri,
                             kind="spotify", source_name="Spotify link",
-                            downloadable=False)
+                            downloadable=False, block_reason="drm")
         out.hint = ("Spotify serves no downloadable stream — it plays on "
                     "your linked Spotify device, not as a file in chat.")
         return out

@@ -860,6 +860,8 @@ class RuntimeMediaMixin:
                          "artist": c.artist or "",
                          "duration": c.duration or 0.0,
                          "downloadable": c.downloadable,
+                         "block_reason": str(
+                             getattr(c, "block_reason", "") or ""),
                          "preview_only": bool(
                              getattr(c, "preview_only", False))}
                         for c in (cands or [])]
@@ -887,6 +889,8 @@ class RuntimeMediaMixin:
                     # metadata — or a PREVIEW) must not be attempted
                     # as if it were downloadable.
                     first_item["downloadable"] = resolution.downloadable
+                    first_item["block_reason"] = str(
+                        getattr(resolution, "block_reason", "") or "")
                     first_item["preview_only"] = bool(
                         getattr(resolution, "preview_only", False))
                     merged = self._merge_search_attempts(
@@ -2585,6 +2589,27 @@ class RuntimeMediaMixin:
             if is_bot_detection_error(reason):
                 msg += f"\n{BOT_COOKIE_SHORT_HELP}"
             return msg, False
+        if dl.get("substituted_from"):
+            # The engine could not have THIS track — its source
+            # blocked it — and fetched a different recording (a
+            # YouTube copy) instead.  This path exists to deliver
+            # one SPECIFIC item (a pasted URL, a pick-list choice):
+            # passing the substitute off as that item would be a
+            # silent swap, so it is refused here, by name.  The
+            # by-name fall-through path is where substitutes are
+            # allowed — and there they are declared.
+            self._drop_matching_queued(engine, item)
+            label = str(dl.get("substituted_from") or "the source")
+            why = self._play_clean_reason(
+                dl.get("substitute_reason") or dl.get("note") or "")
+            why_part = f" ({why})" if why else ""
+            title = str(item.get("title") or "that track")
+            return (
+                f"{label} has that exact track blocked{why_part} — "
+                f"and I won't swap in a different recording for it: "
+                f"you asked for this track. Ask for “{title}” by "
+                "name and I'll fetch the best copy from any source, "
+                "declared as the substitute it is."), False
         path = dl["path"]
         # Verify what arrived, via the shared acceptance contract
         # (Phase 2): a preview-length file for a full-length track —
@@ -2979,6 +3004,57 @@ class RuntimeMediaMixin:
                 "preview; a preview is not the song, so I didn't "
                 "send it.")
 
+    @staticmethod
+    def _play_substitution_note(
+            winner: Any,
+            prejudged_blocks: list[tuple[dict[str, Any], str]]) -> str:
+        """The substitution declaration for a delivered copy: the
+        requested match was pre-judged blocked on its own source and
+        a DIFFERENT source's recording is what landed.  "" when the
+        winner is from the same source as every blocked match (that
+        source served the song after all — no substitution).  Never
+        raises."""
+        try:
+            from ...media.picklist import _KIND_LABELS
+
+            winner_kind = str((winner or {}).get("kind", "") or "")
+            for blocked_item, blocked_reason in prejudged_blocks:
+                blocked_kind = str(
+                    (blocked_item or {}).get("kind", "") or "")
+                if blocked_kind == winner_kind:
+                    continue
+                blocked_label = _KIND_LABELS.get(
+                    blocked_kind, "") or blocked_kind or "the source"
+                winner_label = _KIND_LABELS.get(
+                    winner_kind, "") or winner_kind or "another source"
+                detail = str(blocked_reason or "").removeprefix(
+                    "not downloadable — ")
+                if detail.startswith("not downloadable"):
+                    detail = "that copy is not downloadable"
+                return (f"substitute copy — the {blocked_label} "
+                        f"original wasn't obtainable ({detail}); "
+                        f"this is {winner_label}'s copy of the song")
+            return ""
+        except Exception:  # noqa: BLE001
+            return ""
+
+    @staticmethod
+    def _play_block_sentence(block_reason: Any) -> str:
+        """The human sentence for a structured block class
+        (preview / drm / region / login / private) — the connector
+        vocabulary's own text, so every surface names a block the
+        same way.  "" when the block is unclassified: an unclassified
+        refusal is reported as-is, never dressed in a class it
+        didn't earn.  Never raises."""
+        try:
+            reason = str(block_reason or "").strip()
+            if not reason:
+                return ""
+            from ...connectors.soundcloud import block_reason_text
+            return block_reason_text(reason)
+        except Exception:  # noqa: BLE001
+            return ""
+
     @classmethod
     def _play_blocked_line(cls, item: Any, reason: Any) -> str:
         """One found-but-blocked fact for a user reply: the track,
@@ -3137,6 +3213,12 @@ class RuntimeMediaMixin:
         gets the found-but-blocked report plus a pick-list of the
         rest, and their pick downloads exactly what they chose.
         Without ``match`` the behaviour is the historical one.
+        A match a source PRE-JUDGED blocked (its block classified
+        before any attempt — preview policy, DRM, region, login)
+        that is then served by a DIFFERENT source's copy is a
+        substitution too: the delivered line declares it and names
+        the specific block, and the file's tags carry the same
+        declaration.
 
         Right-artifact law (owner, 2026-11-05): among confident
         matches the CANONICAL recording is attempted first — a
@@ -3226,6 +3308,12 @@ class RuntimeMediaMixin:
                 -pair[0]))
             attempt_items = [it for _score, it in confident]
         outcomes: dict[str, str] = {}
+        # Matches a source PRE-JUDGED undownloadable (never attempted:
+        # its block was known before any byte moved).  When a
+        # different source's copy is what lands, the delivery must
+        # SAY it is a substitute and why — a policy-blocked track may
+        # not be silently swapped for another source's recording.
+        prejudged_blocks: list[tuple[dict[str, Any], str]] = []
         verify_notes: list[str] = []
         youtube_bot_blocked = False
         for attempt in (search_attempts or []):
@@ -3246,10 +3334,20 @@ class RuntimeMediaMixin:
                     "already attempted via fallback — blocked"
                 continue
             if item.get("downloadable") is False:
-                outcomes[name] = "not downloadable (protected streams)"
+                # The specific block, when the source classified it
+                # (preview policy vs DRM vs region vs login) — the
+                # generic "protected streams" survives only for
+                # blocks no source classified.
+                block_sentence = self._play_block_sentence(
+                    item.get("block_reason"))
+                blocked_reason = (
+                    f"not downloadable — {block_sentence}"
+                    if block_sentence else
+                    "not downloadable (protected streams)")
+                outcomes[name] = blocked_reason
+                prejudged_blocks.append((item, blocked_reason))
                 if gated:
-                    blocked_matches.append(
-                        (item, "not downloadable (protected streams)"))
+                    blocked_matches.append((item, blocked_reason))
                 continue
             # Progress note per candidate: counts as a heartbeat when
             # this runs as a background job; a no-op synchronously.
@@ -3303,6 +3401,12 @@ class RuntimeMediaMixin:
                 # the chat gets the delivered item's line, no receipt.
                 self._play_log_tried(search_attempts, outcomes)
                 note = dl.get("note")
+                if not note:
+                    # No engine-level note — but a pre-judged blocked
+                    # match from another source makes this delivery a
+                    # substitution, and it is declared, not silent.
+                    note = self._play_substitution_note(
+                        item, prejudged_blocks)
                 # Right-artifact labeling: an edit-marked winner is
                 # delivered AS an edit of the requested track — the
                 # caption, the final line and the file's own tags all
@@ -3334,7 +3438,8 @@ class RuntimeMediaMixin:
                     send_path = self._delivery_path(
                         path, str(dl_title), win_artist)
                     send_path = self._tag_delivery_copy(
-                        send_path, str(dl_title), win_artist)
+                        send_path, str(dl_title), win_artist,
+                        comment=str(note or ""))
                     line = f"🎵 {dl_title}"
                     if win_artist and win_artist.lower() \
                             not in str(dl_title).lower():
