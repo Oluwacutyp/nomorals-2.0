@@ -31,6 +31,33 @@ _TEMP_SMS_TTL_S = 7200.0
 _MAX_BODY_CHARS = 2000
 
 
+def _attach_approval_receipt(result: dict[str, Any],
+                             approver: Any) -> None:
+    """Attach a run's consequential verdicts to its result IN PLACE.
+
+    The receipt names every consequential verdict, and a stop at an
+    approval says WHY — owner denied / no answer / no channel —
+    never a bare denial. Shared by the model-driven runner and the
+    recipe-replay runner: both doors report the same way.
+    """
+    outcomes = getattr(approver, "outcomes", None) or []
+    if not outcomes:
+        return
+    result["consequential_approvals"] = list(outcomes)
+    last = outcomes[-1]
+    if result.get("stopped_reason") == "approval denied / no approver":
+        verdict_lines = {
+            "denied": "approval denied by owner",
+            "timeout": "approval timed out (no owner answer)",
+            "no_channel": "approval impossible (no owner channel)",
+        }
+        line = verdict_lines.get(str(last.get("verdict", "")))
+        if line:
+            result["stopped_reason"] = (
+                f"{line}: {last.get('kind', '')} on "
+                f"{last.get('url', '')} — run stopped")
+
+
 class RuntimeReachMixin:
     """RuntimeReachMixin for :class:`PartnerRuntime`."""
 
@@ -312,6 +339,10 @@ class RuntimeReachMixin:
             rest = parts[1].strip() if len(parts) > 1 else ""
             return self._control_browser_run(
                 rest, chat_key=chat_key, message=message)
+        if parts and parts[0].lower() == "recipe":
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            return self._control_browser_recipe(
+                rest, chat_key=chat_key, message=message)
         if parts and parts[0].lower() in ("approve", "deny"):
             rest = parts[1].strip() if len(parts) > 1 else ""
             return self._control_browser_approval(
@@ -327,6 +358,8 @@ class RuntimeReachMixin:
                     "       /browser run <url> [goal] — drive a live tab "
                     "with the agent loop (owner-only, background job)\n"
                     "       /browser run status [job] — job progress\n"
+                    "       /browser recipe list|show|replay|delete — "
+                    "compiled drive recipes (owner-only)\n"
                     "       /browser approve <id> — let a paused run do "
                     "its consequential step (owner-only)\n"
                     "       /browser deny <id> — stop that run at the "
@@ -669,21 +702,141 @@ class RuntimeReachMixin:
         if not url.startswith(("http://", "https://")):
             return "give a full URL starting with http:// or https://"
 
-        job, duplicate = self.start_browser_run(
-            url, goal, chat_key=chat_key, force=force)
+        try:
+            job, duplicate = self.start_browser_run(
+                url, goal, chat_key=chat_key, force=force)
+        except ValueError as exc:
+            return str(exc)
         if duplicate:
             return (f"browser run already running: job {job.job_id} — "
                     f"{url} (goal: {goal}). "
                     f"/browser run status {job.job_id} for progress. "
                     "Add --new to start a fresh one.")
-        return (f"browser run started: job {job.job_id} — {url} "
-                f"(goal: {goal}). "
-                f"/browser run status {job.job_id} for progress. "
-                "I'll ping you on wall / cleared / blocked / done.")
+        lines = [f"browser run started: job {job.job_id} — {url} "
+                 f"(goal: {goal}). "
+                 f"/browser run status {job.job_id} for progress. "
+                 "I'll ping you on wall / cleared / blocked / done."]
+        if getattr(job, "recipe_name", ""):
+            lines.append(f"📋 replaying recipe {job.recipe_name} — "
+                         "compiled from an earlier drive on this "
+                         "site, no model time spent.")
+        if getattr(job, "recipe_offer", ""):
+            lines.append(str(job.recipe_offer))
+        return "\n".join(lines)
+
+    def _control_browser_recipe(self, tail: str, *, chat_key: str = "",
+                                message: Any = None) -> str:
+        """Owner-only: ``/browser recipe`` — the compiled-drive
+        catalogue (navigator A5).
+
+        Recipes are compiled automatically from successful drives.
+        ``replay`` starts a job that replays the recipe on a live
+        tab: consequential steps still go through the run's
+        approver, a stale recipe refuses loudly, and a parameter
+        the recipe needs must be supplied as ``key=value`` — it is
+        never guessed.
+        """
+        if message is None or not self._is_operator(message):
+            return ("browser recipes are owner-only — run it from "
+                    "the owner's chat.")
+        store = self._browser_recipe_store()
+        if store is None:
+            return ("browser recipes need the home database — "
+                    "storage is off in this session.")
+        parts = (tail or "").strip().split()
+        if not parts:
+            return ("usage: /browser recipe list — saved recipes\n"
+                    "       /browser recipe show <name>\n"
+                    "       /browser recipe replay <name> "
+                    "[key=value ...]\n"
+                    "       /browser recipe delete <name>")
+        verb = parts[0].lower()
+        if verb == "list":
+            recipes = store.list_all()
+            if not recipes:
+                return ("no browser recipes yet — a successful drive "
+                        "compiles one automatically.")
+            lines = ["browser recipes:"]
+            for rec in recipes:
+                flag = (" (stale — " + (rec.last_error or "page changed")
+                        [:80] + ")") if rec.stale else ""
+                trust = "trusted" if rec.trusted else "untrusted"
+                lines.append(f"  {rec.name} v{rec.version} — {rec.goal} "
+                             f"({rec.site}, {rec.successes} ok / "
+                             f"{rec.failures} fail, {trust}){flag}")
+            return "\n".join(lines)
+        if verb == "show":
+            if len(parts) < 2:
+                return "usage: /browser recipe show <name>"
+            rec = store.get(parts[1])
+            if rec is None:
+                return f"no browser recipe {parts[1]!r}."
+            lines = [f"recipe {rec.name} v{rec.version} — {rec.goal}",
+                     f"site: {rec.site} · origin: {rec.origin}",
+                     f"steps: {len(rec.steps)} · successes: "
+                     f"{rec.successes} · failures: {rec.failures}",
+                     "stale: " + ("yes — " + rec.last_error
+                                   if rec.stale else "no"),
+                     "trusted: " + ("yes" if rec.trusted else "no")]
+            if rec.slots:
+                lines.append("parameters: "
+                             + ", ".join(sorted(rec.slots)))
+            for i, step in enumerate(rec.steps):
+                mark = " ⚠️ consequential" if step.consequential else ""
+                lines.append(f"  {i + 1}. {step.kind} "
+                             f"{step.label or step.target}{mark}")
+            return "\n".join(lines)
+        if verb == "delete":
+            if len(parts) < 2:
+                return "usage: /browser recipe delete <name>"
+            if store.delete(parts[1]):
+                return f"deleted browser recipe {parts[1]!r}."
+            return f"no browser recipe {parts[1]!r}."
+        if verb == "replay":
+            if len(parts) < 2:
+                return ("usage: /browser recipe replay <name> "
+                        "[key=value ...]")
+            name = parts[1]
+            rec = store.get(name)
+            if rec is None:
+                return f"no browser recipe {name!r}."
+            params: dict[str, str] = {}
+            for token in parts[2:]:
+                if "=" not in token:
+                    return (f"bad parameter {token!r} — use key=value, "
+                            "e.g. /browser recipe replay "
+                            f"{name} search=shoes")
+                key, value = token.split("=", 1)
+                params[key.strip()] = value
+            first = rec.steps[0] if rec.steps else None
+            url = (first.target if first is not None
+                   and first.kind == "goto" and first.target
+                   else rec.url_pattern or rec.site)
+            if not str(url).startswith(("http://", "https://")):
+                return (f"recipe {name!r} names no start URL — it "
+                        "cannot replay.")
+            try:
+                job, duplicate = self.start_browser_run(
+                    str(url), rec.goal, chat_key=chat_key, recipe=name,
+                    recipe_params=params)
+            except ValueError as exc:
+                return str(exc)
+            if duplicate:
+                return (f"browser run already running: job {job.job_id} "
+                        f"— {url} (goal: {rec.goal}).")
+            return (f"📋 replaying recipe {name} v{rec.version} — job "
+                    f"{job.job_id} ({url}, goal: {rec.goal}). "
+                    f"/browser run status {job.job_id} for progress.")
+        return ("usage: /browser recipe list|show <name>|replay <name> "
+                "[key=value ...]|delete <name>")
 
     def start_browser_run(self, url: str, goal: str, *,
                           chat_key: str = "",
-                          force: bool = False) -> tuple[Any, bool]:
+                          force: bool = False,
+                          recipe: str | None = None,
+                          recipe_params: dict[str, str] | None = None,
+                          use_recipe: bool = True
+                          ) -> tuple[Any, bool]:
         """Start ONE wired browser-run job — the single entry every
         door shares: the ``/browser run`` verb and the conversational
         drive tool (coremind's ``drive`` intent) both start runs
@@ -694,9 +847,52 @@ class RuntimeReachMixin:
         the run was asked for. Everything the loop touches is built
         inside the runner, on the job's own thread.
 
+        Navigator A5 — recipes: ``recipe=<name>`` replays that
+        compiled recipe on a live tab instead of running the model
+        loop (a stale recipe refuses with ValueError, never a
+        silent model-driven fall-through). Otherwise, when a
+        matching recipe has earned trust (``TRUSTED_SUCCESSES``
+        consecutive replays) the run replays it automatically; a
+        matching recipe that has NOT earned trust is OFFERED on the
+        job (``job.recipe_offer``) while the run proceeds
+        model-driven. ``use_recipe=False`` skips the lookup
+        entirely. ``recipe_params`` supplies the recipe's slots.
+
         Returns ``(job, duplicate)`` — ``duplicate`` is True when a
         live job for the same URL+goal was returned instead.
         """
+        store = self._browser_recipe_store()
+        chosen: Any = None
+        offer = ""
+        if recipe:
+            if store is None:
+                raise ValueError(
+                    "recipes need the home database — storage is off "
+                    "in this session.")
+            chosen = store.get(recipe)
+            if chosen is None:
+                raise ValueError(
+                    f"no browser recipe {recipe!r} — /browser recipe "
+                    "list shows what exists.")
+            if chosen.stale:
+                raise ValueError(
+                    f"recipe {chosen.name!r} is stale "
+                    f"({chosen.last_error or 'page changed'}) — it "
+                    "will not replay. Drive the site model-driven "
+                    "and a fresh run will re-compile it, or delete it.")
+        elif use_recipe and store is not None:
+            candidate = store.find_for(url=url, labels=[], goal=goal)
+            if candidate is not None:
+                if candidate.trusted:
+                    chosen = candidate
+                else:
+                    offer = (f"📋 recipe {candidate.name!r} "
+                             f"v{candidate.version} matches this "
+                             "site/goal "
+                             f"({candidate.successes} successes) but "
+                             "has not earned trust yet — /browser "
+                             f"recipe replay {candidate.name} to use "
+                             "it.")
 
         def _run_brain() -> Any:
             # The real brain, shared by the decider and the vision
@@ -765,31 +961,73 @@ class RuntimeReachMixin:
                 on_wall_outcome=job.wall_event,
                 cancel_requested=job.cancel_requested)
             result = loop.run(url, goal=goal)
-            if approver.outcomes:
-                # The receipt names the consequential verdicts, and
-                # a stop at an approval says WHY — owner denied /
-                # no answer / no channel — never a bare denial.
-                result["consequential_approvals"] = list(
-                    approver.outcomes)
-                last = approver.outcomes[-1]
-                if result.get("stopped_reason") == \
-                        "approval denied / no approver":
-                    verdict_lines = {
-                        "denied": "approval denied by owner",
-                        "timeout": "approval timed out "
-                                   "(no owner answer)",
-                        "no_channel": "approval impossible "
-                                      "(no owner channel)",
-                    }
-                    line = verdict_lines.get(str(last["verdict"]))
-                    if line:
-                        result["stopped_reason"] = (
-                            f"{line}: {last['kind']} on "
-                            f"{last['url']} — run stopped")
+            _attach_approval_receipt(result, approver)
             return result
 
-        return self._browser_run_jobs().start(
-            url, goal, _runner, force=force)
+        if chosen is not None:
+            runner = self._replay_runner_for(
+                chosen, dict(recipe_params or {}), chat_key=chat_key,
+                url=url, goal=goal)
+        else:
+            runner = _runner
+        job, duplicate = self._browser_run_jobs().start(
+            url, goal, runner, force=force)
+        if not duplicate:
+            if chosen is not None:
+                job.recipe_name = chosen.name
+            if offer:
+                job.recipe_offer = offer
+        return job, duplicate
+
+    def _replay_runner_for(self, recipe: Any, params: dict[str, str],
+                           *, chat_key: str, url: str, goal: str) -> Any:
+        """A job runner that replays a compiled recipe on a live tab
+        instead of running the model loop. Built on the job's thread
+        like the model runner: the service, the tab and the approver
+        are all constructed here, and a consequential recipe step
+        goes through the SAME approver the loop would hand it to —
+        a recipe never smuggles one past the gate."""
+
+        def _replay(job: Any) -> dict[str, Any]:
+            from ...browser.loop_wiring import RenderedTabDriver
+            from ...browser.recipe_replay import replay_recipe
+
+            service = self._browser_service_for_run_job(job.job_id)
+            tab = service.open_rendered_tab(
+                f"browser-run-{job.job_id}", url)
+            approver = self._browser_run_approver(
+                task_label=f"browser recipe {recipe.name} {url}",
+                owner_chat=chat_key or "")
+            result = replay_recipe(
+                recipe, driver=RenderedTabDriver(tab),
+                approve=approver, slots=params, goal=goal,
+                on_progress=job.note_progress,
+                cancel_requested=job.cancel_requested,
+                store=self._browser_recipe_store())
+            _attach_approval_receipt(result, approver)
+            return result
+
+        return _replay
+
+    def _browser_recipe_store(self) -> Any:
+        """The durable recipe store for this runtime (cached; None
+        when the home database is off — recipes simply stay off,
+        and drives proceed model-driven exactly as before)."""
+        if getattr(self, "_browser_recipe_store_tried", False):
+            return getattr(self, "_browser_recipe_store_inst", None)
+        self._browser_recipe_store_tried = True
+        store: Any = None
+        db = getattr(getattr(self, "context", None), "db", None)
+        if db is not None:
+            try:
+                from ...browser.recipes import DurableRecipeStore
+
+                store = DurableRecipeStore(db)
+            except Exception as exc:  # noqa: BLE001 - recipes never gate
+                record_failure("runtime_reach.recipe_store", exc)
+                store = None
+        self._browser_recipe_store_inst = store
+        return store
 
     def _browser_run_status(self, arg: str) -> str:
         """``/browser run status [job]`` — job progress, no new loop."""
@@ -825,7 +1063,8 @@ class RuntimeReachMixin:
 
             mgr = BrowserJobManager(
                 notifier=self._takeover_notifier(),
-                db=getattr(getattr(self, "context", None), "db", None))
+                db=getattr(getattr(self, "context", None), "db", None),
+                recipe_store=self._browser_recipe_store())
             self._browser_run_jobs_inst = mgr
         return mgr
 

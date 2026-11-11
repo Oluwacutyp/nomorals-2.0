@@ -236,6 +236,15 @@ class BrowserRunJob:
     #: retained at finish so status views and outcome reports can
     #: cite them — before this the record died with the result).
     approvals: list[dict[str, Any]] = field(default_factory=list)
+    #: Navigator A5: the recipe this run auto-compiled into
+    #: (``""`` when the run compiled nothing — blocked / failed /
+    #: cancelled, or no recipe store attached). Set before
+    #: :meth:`finish` so the done note can name it.
+    recipe_name: str = ""
+    #: Navigator A5: the offer text when a matching recipe exists
+    #: but has not earned trust yet — the run proceeds model-driven
+    #: and the owner is told the recipe is there to replay.
+    recipe_offer: str = ""
     created_at: float = field(default_factory=time.time)
     started_at: float = 0.0
     finished_at: float = 0.0
@@ -417,6 +426,10 @@ class BrowserRunJob:
             if self.approvals:
                 done_note += (f" Consequential steps: "
                               f"{_approvals_summary(self.approvals)}")
+            if self.recipe_name:
+                done_note += (f" Compiled recipe: {self.recipe_name} "
+                              "(/browser recipe show "
+                              f"{self.recipe_name})")
             self.note("done", done_note)
         self._changed()
         with self._lock:
@@ -475,12 +488,17 @@ class BrowserJobManager:
     """Registry + threads for browser-run jobs. One per runtime."""
 
     def __init__(self, *, notifier: Notifier | None = None,
-                 db: Any = None) -> None:
+                 db: Any = None,
+                 recipe_store: Any = None) -> None:
         self._notifier = notifier
         self._lock = threading.Lock()
         self._jobs: dict[str, BrowserRunJob] = {}
         self._keys: dict[tuple[str, str], str] = {}
         self._records: BrowserRunRecordStore | None = None
+        #: Navigator A5: the durable recipe store a completed run
+        #: auto-compiles into (None = recipes off in this runtime;
+        #: the run proceeds exactly as before).
+        self._recipe_store = recipe_store
         if db is not None:
             try:
                 self._records = BrowserRunRecordStore(db)
@@ -618,7 +636,54 @@ class BrowserJobManager:
                          exc_info=True)
             job.fail(exc)
             return
+        self._maybe_compile_recipe(job, result)
         job.finish(result)
+
+    def _maybe_compile_recipe(self, job: BrowserRunJob,
+                              result: dict[str, Any]) -> str:
+        """Navigator A5: a COMPLETED run teaches. After the runner
+        returns (and before the record closes, so the done note can
+        name the recipe), compile the run's trace into the durable
+        recipe store — but only a run that actually completed its
+        goal: a trace of verified steps and a stopped reason that is
+        not a block / cancel / denial / failure. Fail-open by
+        design: a compile error is recorded in the failure ledger
+        and the run's outcome stands exactly as the runner left it.
+        """
+        store = self._recipe_store
+        if store is None:
+            return ""
+        try:
+            from .recipes import (
+                compile_recipe,
+                recipe_name_for,
+                run_compilable,
+            )
+
+            if not run_compilable(result.get("trace"),
+                                  str(result.get("stopped_reason", "")
+                                      or "")):
+                return ""
+            trace = result["trace"]
+            approvals = result.get("consequential_approvals")
+            if not isinstance(approvals, list):
+                approvals = []
+            name = recipe_name_for(job.url, job.goal)
+            recipe = compile_recipe(
+                name=name, goal=job.goal, trace=trace,
+                start_url=job.url,
+                approvals=[dict(a) for a in approvals
+                           if isinstance(a, dict)])
+            store.save(recipe)
+        except Exception as exc:  # noqa: BLE001 - compile never gates
+            record_failure("browser.jobs.recipe_compile", exc)
+            return ""
+        with job._lock:
+            job.recipe_name = name
+        job.note("recipe_compiled",
+                 f"compiled recipe {name} from this run "
+                 f"({len(recipe.steps)} steps, v{recipe.version})")
+        return name
 
     # -- cancellation -----------------------------------------------------------
     def cancel(self, job_id_or_prefix: str) -> dict[str, Any]:

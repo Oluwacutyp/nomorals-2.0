@@ -179,12 +179,16 @@ from .receipts import (
     ReadBackVerifier,
     verify_consequential,
 )
+from .recipe_replay import RecipeReplayError, replay_recipe
 from .recipes import (
+    DurableRecipeStore,
     Recipe,
     RecipeStep,
     RecipeStore,
     compile_recipe,
     layout_similarity,
+    recipe_name_for,
+    run_compilable,
     to_skill_manifest,
 )
 from .session_health import (
@@ -282,8 +286,10 @@ __all__ = [
     "RUNG_TOTP",
     "ReadBackVerifier",
     "Recipe",
+    "RecipeReplayError",
     "RecipeStep",
     "RecipeStore",
+    "DurableRecipeStore",
     "Resolution",
     "STILL_FAIL_KINDS",
     "SessionHealth",
@@ -369,10 +375,13 @@ __all__ = [
     "playwright_usable",
     "pacing_line",
     "parallel_reads",
+    "recipe_name_for",
     "register_strategy",
     "replay_or_raise",
+    "replay_recipe",
     "republish_events",
     "restore_solved_session",
+    "run_compilable",
     "save_solved_session",
     "resolve_candidates",
     "sha256_file",

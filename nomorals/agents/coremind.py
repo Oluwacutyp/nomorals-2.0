@@ -2895,8 +2895,11 @@ class CoreMind:
                     "what to do there.")
         goal = str((intent.meta or {}).get("goal") or "").strip() \
             or "browse"
-        job, duplicate = runtime.start_browser_run(
-            url, goal, chat_key=chat_key)
+        try:
+            job, duplicate = runtime.start_browser_run(
+                url, goal, chat_key=chat_key)
+        except ValueError as exc:
+            return str(exc)
 
         def _report() -> str:
             job.wait()
@@ -2911,6 +2914,12 @@ class CoreMind:
                     f"(job {job.job_id}). I'll report back here "
                     "when it lands; /browser run status "
                     f"{job.job_id} tracks it meanwhile.")
+            if getattr(job, "recipe_name", ""):
+                note += (f" 📋 replaying recipe {job.recipe_name} — "
+                         "compiled from an earlier drive on this "
+                         "site, no model time spent.")
+            if getattr(job, "recipe_offer", ""):
+                note += "\n" + str(job.recipe_offer)
         return self._send_async(chat_key, _report, job_id, note,
                                 kind="drive")
 
@@ -2926,6 +2935,9 @@ class CoreMind:
             lines.append(f"stopped: {job.stopped_reason}")
         if job.error:
             lines.append(f"error: {job.error}")
+        if getattr(job, "recipe_name", ""):
+            lines.append(f"recipe: {job.recipe_name} "
+                         "(compiled from an earlier drive)")
         for entry in getattr(job, "approvals", []) or []:
             verdict = str(entry.get("verdict", "") or "")
             by = str(entry.get("answered_by", "") or "")
