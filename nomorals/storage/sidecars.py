@@ -1504,6 +1504,44 @@ _register(_S(
         "The native JSON path serves the default."),
 ))
 
+_register(_S(
+    name="identity-documents", verdict="ported", kind="sqlite-file",
+    modules=("identity/documents.py",),
+    tables=("identity_documents",),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (B9 lane): "
+        "IdentityTracker's single table routes through the seam "
+        "(identity-documents__identity_documents) behind its "
+        "unchanged owner-gated API. Pickup is by INJECTED port, "
+        "not the ambient: identity/ is an unmapped package "
+        "(layer L0, stdlib only), so documents.py cannot import "
+        "storage — the composition layer builds the port with "
+        "sidecar_port() (the DDL lives in the module) and passes "
+        "it as port=. A ':memory:' tracker's port imports "
+        "nothing — there is no file. VAULT/ENCRYPTION REVIEW "
+        "(recorded with this port, 2026-11-11): the module "
+        "never stores a raw document number — number_ref is a "
+        "'vault:'-prefixed reference string, validated at "
+        "construction and again at add() on both rungs, and "
+        "there is no raw-number field in the schema. Nothing "
+        "is encrypted at rest on the native rung either: the "
+        "SQLite file holds the reference string, owner id, "
+        "dates and free-text notes in plaintext — the module's "
+        "contract is reference indirection (never hold the "
+        "secret), not encryption. The seam receives exactly "
+        "the values the native file receives (no field is "
+        "decrypted for storage, no new field appears), so the "
+        "port does not weaken the at-rest posture. Two "
+        "pre-existing gaps are recorded, not fixed by this "
+        "port (identical on the native rung): notes is free "
+        "text — a caller could paste a raw number into it and "
+        "nothing validates note content; and on the seam rung "
+        "the references and notes inherit the document-store "
+        "deployment's access control rather than the local "
+        "file's. The expiry index stays a native-path concern. "
+        "The native sqlite3 path serves the SQLite default."),
+))
+
 
 # ── residue: contained domain file stores, classified, port queued ────────
 #
@@ -1547,10 +1585,6 @@ _residue("household", "household/household.py",
          "multi-member shared records whose write flows are "
          "audited as a set; the port reviews its shared-write "
          "composition first.")
-_residue("identity-documents", "identity/documents.py",
-         ("identity_documents",),
-         "identity document registry — sensitive records; its port "
-         "pass carries the vault/encryption review with it.")
 _residue("marketing-send", "marketing/send.py",
          ("send_queue", "send_log", "send_providers", "send_templates",
           "send_variants", "send_suppressions", "send_blocklist",

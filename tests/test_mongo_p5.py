@@ -46,6 +46,8 @@ P5 settles the stores that live BESIDE the central database:
   (attached_rows hybrid).
   The B10 lane (immune-corpus, injected port) follows the same
   pattern below.
+  The B9 lane (identity-documents, injected port, vault review
+  recorded) follows the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -254,7 +256,9 @@ class TestSidecarRegistry:
             # residue Batch 2, health-timeline lane:
             "health-timeline",
             # residue Batch 2, B10 lane:
-            "immune-corpus"}
+            "immune-corpus",
+            # residue Batch 2, B9 lane:
+            "identity-documents"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -5254,3 +5258,153 @@ class TestImmuneCorpusPort:
         assert len(seam.exemplars()) == 8
         assert "seed-only" in seam.degraded_reason
         assert rung.store.count("immune-corpus__exemplars") == 0
+
+
+class TestIdentityDocumentsPort:
+    NOW = 1_800_000_000.0  # fixed reference time for expiry math
+    DAY = 86400.0
+
+    @staticmethod
+    def _port_for(path, rung):
+        # identity/ is layer L0: the composition layer (this test)
+        # builds the port and injects it — the module never imports
+        # storage.
+        from nomorals.identity.documents import _DDL
+        from nomorals.storage.sidecars import sidecar_port
+
+        return sidecar_port("identity-documents", _DDL,
+                            ("identity_documents",),
+                            None if path is None else str(path),
+                            store=rung.store)
+
+    @classmethod
+    def _doc(cls, doc_id, expiry, doc_type="passport",
+             owner_id="owner"):
+        from nomorals.identity.documents import IdentityDocument
+
+        return IdentityDocument(
+            id=doc_id, owner_id=owner_id, doc_type=doc_type,
+            issuing_country="NG",
+            number_ref=f"vault:identity/{doc_id}/1",
+            expiry_ts=expiry, issued_ts=cls.NOW - 365 * cls.DAY,
+            notes="")
+
+    def _scenario(self, tracker) -> dict:
+        from nomorals.identity.documents import IdentityDocument
+
+        tracker.add(self._doc("soon", self.NOW + 10 * self.DAY),
+                    owner=True)
+        tracker.add(self._doc("mid", self.NOW + 45 * self.DAY,
+                              doc_type="visa", owner_id="other"),
+                    owner=True)
+        tracker.add(self._doc("far", self.NOW + 400 * self.DAY),
+                    owner=True)
+        tracker.add(self._doc("old", self.NOW - 20 * self.DAY),
+                    owner=True)
+        got = tracker.get("soon", owner=True)
+        duplicate = False
+        try:
+            tracker.add(self._doc("soon", self.NOW + 10 * self.DAY),
+                        owner=True)
+        except ValueError:
+            duplicate = True
+        denied = False
+        try:
+            tracker.get("soon")  # owner defaults False → denied
+        except PermissionError:
+            denied = True
+        raw_rejected = False
+        try:
+            IdentityDocument(
+                id="raw", owner_id="owner", doc_type="passport",
+                issuing_country="NG", number_ref="A12345678",
+                expiry_ts=self.NOW + self.DAY)
+        except ValueError:
+            raw_rejected = True
+        checklist = tracker.renewal_checklist("far", owner=True)
+        return {
+            "got": (got.doc_type, got.number_ref, got.expiry_ts),
+            "list": [d.id for d in tracker.list(owner=True)],
+            "list_owner": [d.id for d in tracker.list(
+                "other", owner=True)],
+            "within_30": [d.id for d in tracker.expiring_within(
+                30, now=self.NOW, owner=True)],
+            "within_60": [d.id for d in tracker.expiring_within(
+                60, now=self.NOW, owner=True)],
+            "overdue": [d.id for d in tracker.overdue(
+                now=self.NOW, owner=True)],
+            "checklist_orders": [s["order"] for s in checklist],
+            "missing": tracker.get("nope", owner=True),
+            "duplicate": duplicate,
+            "denied": denied,
+            "raw_rejected": raw_rejected,
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.identity.documents import IdentityTracker
+
+        path = tmp_path / "identity.db"
+        tracker = IdentityTracker(str(path),
+                                  port=self._port_for(path, rung))
+        observed = self._scenario(tracker)
+        assert observed["got"] == (
+            "passport", "vault:identity/soon/1",
+            self.NOW + 10 * self.DAY)
+        assert observed["list"] == ["old", "soon", "mid", "far"]
+        assert observed["list_owner"] == ["mid"]
+        assert observed["within_30"] == ["old", "soon"]
+        assert observed["within_60"] == ["old", "soon", "mid"]
+        assert observed["overdue"] == ["old"]
+        assert observed["checklist_orders"] == [1, 2, 3, 4]
+        assert observed["missing"] is None
+        assert observed["duplicate"] is True
+        assert observed["denied"] is True
+        assert observed["raw_rejected"] is True
+        tracker.close()
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.identity.documents import IdentityTracker
+
+        path = tmp_path / "identity.db"
+        native = IdentityTracker(str(path))
+        native.add(self._doc("kept", self.NOW + 90 * self.DAY),
+                   owner=True)
+        native.close()
+
+        tracker = IdentityTracker(str(path),
+                                  port=self._port_for(path, rung))
+        got = tracker.get("kept", owner=True)
+        assert got is not None
+        assert got.number_ref == "vault:identity/kept/1"
+        assert rung.store.count(
+            "identity-documents__identity_documents") == 1
+        doc = rung.store.get(
+            "identity-documents__identity_documents", "kept")
+        assert doc is not None and doc["_id"] == "kept"
+        # the vault review's claim, pinned mechanically: the stored
+        # document carries exactly the table's non-PK columns plus
+        # the store's managed fields — the vault reference rides
+        # verbatim and no raw-number field exists on the seam,
+        # exactly as in the native file.
+        assert doc["number_ref"] == "vault:identity/kept/1"
+        assert set(doc) == {
+            "_id", "owner_id", "doc_type", "issuing_country",
+            "number_ref", "expiry_ts", "issued_ts", "notes",
+            "expires_at"}
+        # the document's own expiry_ts is DATA, never the store's
+        # managed TTL: the seam never invents an expires_at, so an
+        # overdue document stays readable on the seam exactly as
+        # it does in the native file.
+        assert doc["expires_at"] is None
+        again = IdentityTracker(str(path),
+                                port=self._port_for(path, rung))
+        assert [d.id for d in again.list(owner=True)] == ["kept"]
+        assert rung.store.count(
+            "identity-documents__identity_documents") == 1
+        # a ':memory:' tracker on the seam imports nothing, still works
+        mem = IdentityTracker(port=self._port_for(None, rung))
+        mem.add(self._doc("mem", self.NOW + 5 * self.DAY), owner=True)
+        assert mem.get("mem", owner=True).number_ref == \
+            "vault:identity/mem/1"
