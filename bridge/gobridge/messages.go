@@ -262,6 +262,10 @@ func textOf(m *waE2E.Message) string {
 		return m.GetImageMessage().GetCaption()
 	case m.GetVideoMessage() != nil:
 		return m.GetVideoMessage().GetCaption()
+	case m.GetLiveLocationMessage() != nil:
+		// A live-location share's caption is its text, the
+		// same way a photo's caption is.
+		return m.GetLiveLocationMessage().GetCaption()
 	}
 	return ""
 }
@@ -341,6 +345,80 @@ func mediaKindOf(m *waE2E.Message) string {
 		return "sticker"
 	}
 	return ""
+}
+
+// locationOf extracts the wire "location" object for an
+// inbound event: the position the SENDER supplied in a
+// location share, in the shape the Python adapter stamps
+// into message meta (the M6/M9 inbound seam).  Two proto
+// shapes carry one:
+//
+//   - LocationMessage — a static pin; with name/address set
+//     it is WhatsApp's venue form.  Its IsLive flag can also
+//     mark the opening frame of a live share.
+//   - LiveLocationMessage — one update of a running live
+//     share (the protocol keeps no period on the update; the
+//     share simply goes quiet when it ends).
+//
+// Field honesty: the protos are all-optional pointers, so a
+// field rides ONLY when the source message actually carries
+// it — name/address/accuracy are absent from the wire object
+// when absent from the message, never zero-filled into fake
+// precision.  Coordinates are the exception that proves the
+// object: without BOTH degrees there is no location at all
+// (nil), and degrees failing the send side's own shape rule
+// (locationShapeError — non-finite or out of range) drop the
+// object too: broadcast marshals the whole event as one JSON
+// line, and a NaN coordinate would take the entire message
+// down with it.
+func locationOf(m *waE2E.Message) map[string]any {
+	if m == nil {
+		return nil
+	}
+	if loc := m.GetLocationMessage(); loc != nil {
+		if loc.DegreesLatitude == nil ||
+			loc.DegreesLongitude == nil {
+			return nil
+		}
+		lat, lon := loc.GetDegreesLatitude(),
+			loc.GetDegreesLongitude()
+		if locationShapeError(lat, lon, true, true) != "" {
+			return nil
+		}
+		out := map[string]any{
+			"lat": lat, "lon": lon,
+			"live": loc.GetIsLive(),
+		}
+		if name := loc.GetName(); name != "" {
+			out["name"] = name
+		}
+		if address := loc.GetAddress(); address != "" {
+			out["address"] = address
+		}
+		if loc.AccuracyInMeters != nil {
+			out["accuracy"] = loc.GetAccuracyInMeters()
+		}
+		return out
+	}
+	if live := m.GetLiveLocationMessage(); live != nil {
+		if live.DegreesLatitude == nil ||
+			live.DegreesLongitude == nil {
+			return nil
+		}
+		lat, lon := live.GetDegreesLatitude(),
+			live.GetDegreesLongitude()
+		if locationShapeError(lat, lon, true, true) != "" {
+			return nil
+		}
+		out := map[string]any{
+			"lat": lat, "lon": lon, "live": true,
+		}
+		if live.AccuracyInMeters != nil {
+			out["accuracy"] = live.GetAccuracyInMeters()
+		}
+		return out
+	}
+	return nil
 }
 
 var unsafeIDChars = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
@@ -724,6 +802,12 @@ func (b *bridge) onMessage(v *events.Message) {
 			"view_once": isViewOnce,
 			"ts":        tsMs,
 		}
+		// The owner's own pin is the WhatsApp Flow B shape:
+		// he arms a mark, then drops the pin from this same
+		// account — it must cross the wire like anyone's.
+		if loc := locationOf(msg); loc != nil {
+			out["location"] = loc
+		}
 		b.stampQuoted(ctx, out, msg)
 		b.remember(chat, &remembered{
 			incoming: false, text: out["text"].(string),
@@ -771,6 +855,9 @@ func (b *bridge) onMessage(v *events.Message) {
 		"mentions":  mentionList,
 		"view_once": isViewOnce,
 		"ts":        tsMs,
+	}
+	if loc := locationOf(msg); loc != nil {
+		out["location"] = loc
 	}
 	b.stampQuoted(ctx, out, msg)
 	if v.Info.ID != "" {

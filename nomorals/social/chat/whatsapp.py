@@ -27,6 +27,15 @@ Protocol (one JSON object per line):
     # "quoted_media":[{"path","mime","kind"}].  Without them a
     # reply-media command (/sticker on a replied photo) can see
     # THAT a message was quoted but never WHAT was quoted.
+    # when the message IS a location share (a static pin, a
+    # venue, or one update of a live share), message and
+    # own_message events also carry
+    # "location":{"lat":<deg>,"lon":<deg>,"live":<bool>} — plus
+    # "name"/"address" (a venue pin) and "accuracy" (metres)
+    # ONLY when the sender's message itself carried them:
+    # absent fields stay absent, never zero-filled.  The
+    # adapter stamps it as meta["location"], the shape the
+    # runtime's inbound-location seam (M6/M9) reads.
     # a chat whose id ends in "@newsletter" is a CHANNEL (kind
     # "channel"); "@g.us" is a group.  The adapter derives the
     # kind from the JID (see _kind_for_jid), so a bridge build
@@ -470,6 +479,41 @@ def _wa_stamp_quoted(msg: ChatMessage, obj: dict[str, Any]) -> None:
     quoted_text = str(obj.get("quoted_text") or "")
     if quoted_text:
         msg.meta["quoted_text"] = quoted_text
+
+
+def _wa_stamp_location(msg: ChatMessage, obj: dict[str, Any]) -> None:
+    """Carry a bridge event's location share onto the delivered
+    message as ``meta["location"]`` — the inbound shape the
+    partner runtime's location seam reads (M6/M9): an armed
+    pending /map mark completes from it first, then the
+    LiveLocationBroker evaluates it, exactly as a Telegram pin
+    flows.  The position is the one the SENDER supplied in the
+    share, never anything this adapter went and got.
+
+    Shape discipline mirrors the Telegram adapter's: the
+    coordinates must parse as numbers and pass the one
+    location shape rule, or nothing is stamped (a bridge
+    claiming a location it cannot back must not feed the
+    seam).  ``accuracy`` rides only when the source message
+    actually carried one — absent stays absent, never
+    zero-filled into fake precision."""
+    loc = obj.get("location")
+    if not isinstance(loc, dict) or not loc:
+        return
+    try:
+        lat = float(loc["lat"])
+        lon = float(loc["lon"])
+    except (KeyError, TypeError, ValueError):
+        return
+    if location_shape_error(lat, lon):
+        return
+    stamped: dict[str, Any] = {
+        "lat": lat, "lon": lon, "live": bool(loc.get("live"))}
+    accuracy = loc.get("accuracy")
+    if (isinstance(accuracy, (int, float))
+            and not isinstance(accuracy, bool) and accuracy >= 0):
+        stamped["accuracy"] = float(accuracy)
+    msg.meta["location"] = stamped
 
 
 def _whatsapp_poll_shape_error(question: str,
@@ -1262,6 +1306,10 @@ class WhatsAppAdapter(ChatAdapter):
                 turn.meta["from_owner"] = True
                 turn.meta["self_chat"] = True
                 _wa_stamp_quoted(turn, obj)
+                # A pin dropped in the self-chat is the
+                # WhatsApp shape of Flow B: it must reach the
+                # runtime's location seam like any pin.
+                _wa_stamp_location(turn, obj)
                 if ts and (time.time() - ts) > STALE_INBOUND_S:
                     # Offline-delivered at (re)connect: the owner
                     # typed this while the surface was down. It is
@@ -1294,6 +1342,7 @@ class WhatsAppAdapter(ChatAdapter):
                 turn.meta["from_owner"] = True
                 turn.meta["owner_command"] = True
                 _wa_stamp_quoted(turn, obj)
+                _wa_stamp_location(turn, obj)
                 if ts and (time.time() - ts) > STALE_INBOUND_S:
                     # Offline-delivered at (re)connect, like the
                     # self-chat above: observed, never executed.
@@ -1324,6 +1373,13 @@ class WhatsAppAdapter(ChatAdapter):
             # The sender IS the owner — flag it for group recognition.
             msg.meta["from_owner"] = True
             _wa_stamp_quoted(msg, obj)
+            # Stamped for the record; the echo stays
+            # persist-only (incoming=False), so the runtime's
+            # location seam does not act on it — the same
+            # discipline as the Telegram userbot's own-message
+            # echoes.  The seam acts where his messages are
+            # owner turns: the self-chat above.
+            _wa_stamp_location(msg, obj)
             self._deliver(handler, msg)
         elif kind == "call_offer":
             # Personal surface feed (chat & privacy wave): a call
@@ -1535,6 +1591,7 @@ class WhatsAppAdapter(ChatAdapter):
             if _wa_missed:
                 wa_msg.meta["media_unavailable"] = _wa_missed
             _wa_stamp_quoted(wa_msg, obj)
+            _wa_stamp_location(wa_msg, obj)
             _alt = str((obj.get("from") or {}).get("alt") or "").strip()
             if _alt:
                 # The sender's other addressing form (LID ↔ phone
