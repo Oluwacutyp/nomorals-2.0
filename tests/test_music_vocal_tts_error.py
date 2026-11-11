@@ -6,8 +6,10 @@ came from a bare ``EOFError`` (``wave.open`` on 0 bytes) raised inside
 the vocal TTS chain and formatted with ``f"... ({exc})"``. These tests
 pin: the real reason always surfaces, the system backend prefers
 espeak-ng (the proven /tts engine) on every platform, an empty
-``--stdout`` falls back to ``-w`` file output, and the "sent audio"
-line says instrumental-only when vocals were skipped.
+``--stdout`` falls back to ``-w`` file output, and the /music report
+carries the instrumental-only qualifier when vocals were skipped.
+(The delivery itself carries no "sent … to this chat" narration —
+presentation law, ae8b3ddb; see TestSentLineReflectsVocals.)
 """
 
 from __future__ import annotations
@@ -220,8 +222,19 @@ class TestViaEspeakFallback:
 
 
 class TestSentLineReflectsVocals:
-    """The 'sent audio + score' line must not imply a full song when
-    the vocal track was skipped."""
+    """The /music report must not imply a full song when the vocal
+    track was skipped — and must not narrate the delivery.
+
+    At this suite's birth (bc56dd0b) the report ended with a
+    "sent audio + score to this chat." line carrying the qualifier
+    as a parenthetical. The presentation ship ae8b3ddb (owner Law 2:
+    'sent … to this chat' receipts never post) removed the narration
+    line and made the qualifier its own line — "⚠ instrumental only
+    — the vocal track was skipped". The honesty doctrine is
+    unchanged (a skipped vocal still says so in words; a rendered
+    vocal still shows its 🎤 note); these pins follow the current
+    wording and additionally pin the narration's ABSENCE, matching
+    tests/test_no_meta_narration.py."""
 
     def _run_music(self, vocal_path, vocal_note):
         from types import SimpleNamespace
@@ -252,15 +265,18 @@ class TestSentLineReflectsVocals:
         text = self._run_music(
             "", "TTS vocal failed (EOFError) — vocal track skipped")
         assert "🎤 TTS vocal failed (EOFError)" in text
-        assert "sent audio + score to this chat." in text
         assert "instrumental only" in text
         assert "vocal track skipped" in text
+        # No delivery narration (presentation law, ae8b3ddb).
+        assert "to this chat." not in text
 
     def test_rendered_vocal_has_no_instrumental_qualifier(self):
         text = self._run_music(
             "/tmp/song_with_vocals.wav", "sung vocal: 4 line(s)")
-        assert "sent audio + score to this chat." in text
+        # The rendered vocal shows its note; no qualifier, no narration.
+        assert "🎤 sung vocal: 4 line(s)" in text
         assert "instrumental only" not in text
+        assert "to this chat." not in text
 
     def test_novocals_has_no_instrumental_qualifier(self):
         from types import SimpleNamespace
@@ -285,3 +301,4 @@ class TestSentLineReflectsVocals:
             text = rt._control_music("What Life pop novocals",
                                      "telegram:123")
         assert "instrumental only" not in text
+        assert "to this chat." not in text
