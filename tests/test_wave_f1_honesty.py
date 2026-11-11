@@ -409,6 +409,15 @@ class _OkGateway:
         pass
 
 
+class _RecordingGateway(_OkGateway):
+    def __init__(self):
+        super().__init__()
+        self.typing_calls = []
+
+    def typing(self, *a, **k):
+        self.typing_calls.append((a, k))
+
+
 def _runtime(gateway):
     from nomorals.agents.partner_runtime import PartnerRuntime
 
@@ -422,7 +431,13 @@ def _runtime(gateway):
 
 
 def _group_chat():
-    return SimpleNamespace(kind=ChatKind.GROUP, key="telegram:1")
+    # A minimal ChatRef stand-in: it must carry ChatRef's required
+    # fields (platform, chat_id) — since 77afbf0e ("typing delay off
+    # for userbot owner DM + personal bot", owner order) _send_long
+    # consults _typing_enabled(chat), which reads chat.platform.
+    # The honesty assertions below are unchanged from Wave F1.
+    return SimpleNamespace(platform="telegram", chat_id="1",
+                           kind=ChatKind.GROUP, key="telegram:1")
 
 
 class SendHonestyTest(unittest.TestCase):
@@ -448,6 +463,22 @@ class SendHonestyTest(unittest.TestCase):
         note = rt._send_long_checked("telegram", _group_chat(), "hello " * 2000)
         self.assertEqual(note, "")
         self.assertGreater(len(gw.sent), 1, "long text must go out in chunks")
+
+    def test_send_long_typing_gate_never_suppresses_delivery(self):
+        # The _typing_enabled gate (77afbf0e) may silence the typing
+        # indicator — e.g. on the owner-only personal bot — but it
+        # must never suppress, drop or mis-count the sends
+        # themselves: delivery accounting stays exactly honest.
+        gw = _RecordingGateway()
+        rt = _runtime(gw)
+        chat = SimpleNamespace(platform="telegram-personal",
+                               chat_id="1", kind=ChatKind.DM,
+                               key="telegram-personal:1")
+        sent = rt._send_long("telegram-personal", chat, "hello " * 1000)
+        self.assertGreater(len(gw.sent), 1, "long text must go out in chunks")
+        self.assertEqual(sent, len(gw.sent))
+        self.assertEqual(gw.typing_calls, [],
+                         "personal bot: typing simulation is owner-off")
 
 
 if __name__ == "__main__":
