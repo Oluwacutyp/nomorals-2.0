@@ -533,7 +533,8 @@ class MediaDownloader:
                  kit_downloader: Any | None = None,
                  ledger: Any | None = None,
                  cookie_store: Any | None = None,
-                 source_registry: Any | None = None) -> None:
+                 source_registry: Any | None = None,
+                 artifact_store: Any | None = None) -> None:
         self.context = context
         self.profile = profile or detect_profile()
         self._connector_factory = connector_factory
@@ -563,6 +564,14 @@ class MediaDownloader:
         # shared DEFAULT_REGISTRY; tests may inject their own.
         self._source_registry_injected = source_registry
         self._source_registry_cache: Any = None
+        # Artifact store (WS4 P5): where a landed download registers
+        # as a WS1 artifact so the exploration loop can cite the
+        # media Devon actually fetched.  An injected store wins;
+        # when none is injected, _artifact_store() lazily builds the
+        # runtime's construction over the context's database — None
+        # only where there is no database to register into.
+        self._artifact_store_injected = artifact_store
+        self._artifact_store_cache: Any = None
 
     # ── download-kit accessors (Pass #76) ─────────────────────────────
 
@@ -648,6 +657,117 @@ class MediaDownloader:
                 via="download")
         except Exception as e:  # intake never breaks downloads
             record_failure("_intake_exploration", e)
+
+    # ── artifact registration (WS4 P5) ─────────────────────────────
+
+    def _artifact_store(self) -> Any | None:
+        """The WS1 artifact store over the context's database — the
+        runtime's construction (the context's database plus a
+        BlobStore in a ``blobs`` directory beside the db file),
+        built lazily and best-effort like :meth:`source_registry`:
+        an injected store wins; a context without a database has
+        nowhere to register and yields None.  The documents
+        body-text extractor is NOT wired here (media may not import
+        the documents engine's layer) — the store backfills document
+        bodies lazily through any stronger instance's searches,
+        exactly as its own contract states."""
+        if self._artifact_store_cache is not None:
+            return self._artifact_store_cache
+        if self._artifact_store_injected is not None:
+            self._artifact_store_cache = self._artifact_store_injected
+            return self._artifact_store_cache
+        try:
+            db = getattr(self.context, "db", None) \
+                if self.context is not None else None
+            if db is None:
+                return None
+            from ..storage.artifacts import ArtifactStore
+            from ..storage.blob import BlobStore
+            db_path = getattr(db, "path", None)
+            blob_dir = (Path(db_path).parent / "blobs" if db_path
+                        else Path("data/blobs"))
+            self._artifact_store_cache = ArtifactStore(
+                db, BlobStore(db, blob_dir))
+        except Exception as e:  # registration is bookkeeping; its
+            # absence never sinks a download
+            record_failure("_artifact_store", e)
+            return None
+        return self._artifact_store_cache
+
+    def _register_download_artifact(self, report: DownloadReport) -> None:
+        """Artifact registration (WS4 P5): a landed download becomes
+        a WS1 artifact, so the exploration loop can cite the media
+        Devon actually fetched — feed citations resolve through
+        this store, and an unregistered download is invisible to it.
+
+        Follows the store's producer idiom (the chat-inbound
+        registration, WS1-P6): dedup is BY CONTENT within the
+        download origin — the blob layer already dedups bytes, and
+        re-downloading identical bytes must not mint a duplicate
+        artifact row either; the first registration wins, and a row
+        the same bytes earned under another origin does not block
+        this origin's own record.  Only completed downloads
+        register: this runs at the :meth:`_succeed` seam, which
+        failed chains never reach.  Best-effort bookkeeping: a
+        store failure is journaled via ``record_failure`` and never
+        turns a real download outcome into a different one."""
+        try:
+            if not report.ok or not report.path:
+                return
+            path = Path(report.path)
+            if not path.is_file():
+                return
+            store = self._artifact_store()
+            if store is None:
+                return
+            digest = _sha256_of(path)
+            if not digest:
+                return
+            for existing in store.find_by_content_hash(digest):
+                if (existing.metadata or {}).get(
+                        "origin") == "download":
+                    return  # first registration wins
+            import mimetypes
+            filename = path.name
+            mime = mimetypes.guess_type(filename)[0] or ""
+            kind = "file"
+            for prefix, label in (("video/", "video"),
+                                  ("audio/", "audio"),
+                                  ("image/", "image")):
+                if mime.startswith(prefix):
+                    kind = label
+                    break
+            winner = next(
+                (s.stage for s in reversed(report.stages) if s.ok), "")
+            metadata: dict[str, Any] = {
+                "origin": "download",
+                "filename": filename,
+                "name": filename,
+                "title": report.title or filename,
+                "source_url": report.url,
+                "source_path": str(path),
+                "host": urllib.parse.urlsplit(report.url or "").netloc,
+                "size_bytes": report.size_bytes,
+                "sha256": digest,
+                "extractor": report.extractor or "",
+                "stage": winner,
+                "ts": time.time(),
+            }
+            if report.resolved_url and \
+                    report.resolved_url != report.url:
+                metadata["resolved_url"] = report.resolved_url
+            store.put_file(
+                path, type=kind, creator="media_downloader",
+                mime=mime, metadata=metadata,
+                provenance={
+                    "source_type": "tool",
+                    "source_id": "media_downloader",
+                    "source_timestamp": time.time(),
+                })
+            _log.info("download registered as artifact url=%s "
+                      "sha256=%s", report.url, digest[:16])
+        except Exception as e:  # bookkeeping never breaks downloads
+            record_failure("_register_download_artifact", e)
 
     # ── rule learning (Pass #87) ──────────────────────────────────
 
@@ -810,6 +930,7 @@ class MediaDownloader:
             report, ok=True, latency_s=time.perf_counter() - started)
         self._learn_from_success(report, format_facts)
         self._intake_exploration(report)
+        self._register_download_artifact(report)
         try:
             if report.ok and report.path:
                 digest = _sha256_of(Path(report.path))
