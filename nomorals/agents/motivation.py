@@ -36,6 +36,19 @@ delivered to the owner's chats as a photo through the gateway.
 The notifier text remains the record + fallback channel; when
 the card renderer itself is unavailable, the published words
 carry a line naming that the card couldn't be rendered.
+
+Formats (2026-11-11): the presented image has two formats —
+the makers ``card`` and a mock ``chat`` screen (the piece
+staged as a conversation with Devon through the mock-screens
+organ, via ``social.chat.mock_formats``).  Selection:
+an explicit per-run format wins, then the
+``settings.motivation.format`` pref — ``card`` (default),
+``chat``, or ``rotate`` (the two alternate by Lagos day and
+window).  The chat format falls back to the card when it
+can't render; the card keeps its original contract (a dead
+renderer is the named text degradation).  The run's result,
+marker and ledger entries all name the format that actually
+delivered.
 """
 
 from __future__ import annotations
@@ -463,6 +476,63 @@ def _render_piece_card(context: Any, item: dict[str, Any],
     return path
 
 
+#: The presented-image formats a run can pick.  ``card`` is
+#: the makers design; ``chat`` is the mock-screen staging.
+IMAGE_FORMATS: tuple[str, ...] = ("card", "chat")
+
+
+def _resolve_format(prefs: dict[str, Any], window: str,
+                    explicit: str, *, day_ordinal: int) -> str:
+    """Which image format this run presents in: an explicit
+    per-run pick (the tool's ``format``) wins, then the
+    ``settings.motivation.format`` pref — ``chat``/``screen``
+    for the mock conversation, ``rotate``/``alternate`` to
+    alternate the two by Lagos day + window (so morning and
+    evening differ, and days alternate), anything else the
+    card default."""
+    want = str(explicit or "").strip().lower()
+    if want in ("chat", "screen"):
+        return "chat"
+    if want == "card":
+        return "card"
+    pref = str(prefs.get("format") or "").strip().lower()
+    if pref in ("chat", "screen"):
+        return "chat"
+    if pref in ("rotate", "alternate", "both"):
+        slot = int(day_ordinal) + (0 if window == "morning" else 1)
+        return "chat" if slot % 2 else "card"
+    return "card"
+
+
+def _render_piece_screen(context: Any, window: str, piece: str,
+                         theme: str) -> Path:
+    """Render the piece as a mock chat screen (the piece
+    staged as a conversation with Devon) through the
+    mock-screens organ.  Raises on any failure — the caller
+    falls back to the card format, then to the named text
+    degradation.  The PNG lives beside the card files so
+    the gateway's file send can carry it."""
+    from ..social.chat.mock_formats import (
+        motivation_screen,
+        render_screen_image,
+    )
+
+    ws = getattr(getattr(context, "settings", None),
+                 "workspace_dir", "")
+    if not ws:
+        raise RuntimeError("no workspace directory for the screen")
+    folder = Path(ws) / "motivation_cards"
+    folder.mkdir(parents=True, exist_ok=True)
+    screen = motivation_screen(piece, theme=theme, window=window)
+    out = render_screen_image(screen, media_dir=folder)
+    if not out.get("ok"):
+        raise RuntimeError(str(out.get("reason")
+                               or "the screen render failed"))
+    path = folder / f"motivation-{window}-chat.png"
+    path.write_bytes(out["data"])
+    return path
+
+
 def _deliver_card(context: Any, path: Path, caption: str) -> bool:
     """Send the card PNG to the owner's chats through the
     gateway — the morning pulse's audio-delivery shape:
@@ -566,14 +636,17 @@ def _ledger(context: Any, kind: str, summary: str, *, ok: bool = True,
 
 def run_motivation(context: Any, window: str = "morning", *,
                    force: bool = False, now: float | None = None,
-                   rng: random.Random | None = None) -> dict[str, Any]:
+                   rng: random.Random | None = None,
+                   format: str = "") -> dict[str, Any]:
     """One window's firing: compose from the ledger, deliver, re-arm.
 
     The re-arm is in a ``finally``: the chain continues even when a
     firing fails, and the daily backstop is the second net under it.
     ``force`` (owner's /motivation now) skips the day-part guards and
     the already-delivered check, but still marks served — a forced
-    piece spends its item/theme like any other.
+    piece spends its item/theme like any other.  ``format`` names
+    the presented-image format for this run (``card`` | ``chat``);
+    empty defers to the class pref (see :func:`_resolve_format`).
     """
     window = (window or "morning").strip().lower()
     if window not in WINDOW_DEFAULTS:
@@ -624,22 +697,42 @@ def run_motivation(context: Any, window: str = "morning", *,
         if theme:
             title += f" — {theme}"
 
-        # The card is the presented product (2026-11-10): the
-        # piece rendered as a PNG card and delivered as a
-        # photo.  Text is the NAMED degradation — when the
-        # renderer itself is unavailable the published words
-        # say the card couldn't be rendered.
+        # The presented image is the product (2026-11-10):
+        # the piece rendered in the run's format — the
+        # makers card or the mock chat screen — and
+        # delivered as a photo.  The chat rung falls back
+        # to the card when it can't render; the card path
+        # itself keeps its original contract exactly (a
+        # dead renderer is the NAMED text degradation, no
+        # silent format swap underneath it).
         piece = synthesized or str(
             (item.get("source") or {}).get("passage") or "")
+        fmt = _resolve_format(
+            prefs, window, format,
+            day_ordinal=lagos_now.date().toordinal())
         card_path: Path | None = None
         card_error = ""
-        try:
-            card_path = _render_piece_card(
-                context, item, window, piece, title)
-        except Exception as exc:  # noqa: BLE001 - named fallback
-            card_error = f"{type(exc).__name__}: {exc}"
-            _log.info("motivation: card render unavailable: %s",
-                      exc)
+        format_error = ""
+        used_format = "text"
+        attempts = (fmt,) if fmt == "card" else (fmt, "card")
+        for attempt in attempts:
+            try:
+                if attempt == "chat":
+                    card_path = _render_piece_screen(
+                        context, window, piece, theme)
+                else:
+                    card_path = _render_piece_card(
+                        context, item, window, piece, title)
+                used_format = attempt
+                break
+            except Exception as exc:  # noqa: BLE001 - next format rung
+                err = f"{type(exc).__name__}: {exc}"
+                card_error = err
+                if attempt == fmt:
+                    format_error = err
+                _log.info("motivation: %s render unavailable: %s",
+                          attempt, exc)
+        if card_path is None:
             body += ("\n\n🖼 (I couldn't render today's piece "
                      "as a card — here it is as words instead.)")
 
@@ -662,7 +755,10 @@ def run_motivation(context: Any, window: str = "morning", *,
         result["theme"] = theme
         result["source_type"] = (item.get("source") or {}).get("type")
         result["card_rendered"] = card_path is not None
-        if card_error:
+        result["format"] = used_format
+        if format_error and used_format != fmt:
+            result["format_error"] = format_error
+        if card_path is None and card_error:
             result["card_error"] = card_error
         card_sent = bool(card_path is not None and delivered
                          and _deliver_card(context, card_path,
@@ -677,13 +773,14 @@ def run_motivation(context: Any, window: str = "morning", *,
             "lagos_date": today, "ts": now_ts, "delivered": delivered,
             "item_id": served.get("id"), "theme": theme,
             "degraded_card": synthesized is None,
-            "card_sent": card_sent,
+            "card_sent": card_sent, "format": used_format,
         })
         _ledger(context, window,
                 f"{window} motivation delivered ({theme or 'no theme'}, "
                 f"{result['source_type'] or '?'})",
                 metadata={"item_id": served.get("id"),
-                          "degraded_card": synthesized is None})
+                          "degraded_card": synthesized is None,
+                          "format": used_format})
         if prefs.get("voice") and delivered:
             result["voice_sent"] = _send_voice(context, body)
         return result
@@ -852,15 +949,20 @@ def register(registry: Any) -> None:
             "action=status (armed rolls + ledger) | now (deliver a "
             "piece immediately) | history (recent pieces) | run "
             "(scheduler entry) | backstop (re-arm + catch-up). "
-            "window=morning|evening (default: current Lagos day-part)."
+            "window=morning|evening (default: current Lagos day-part). "
+            "format=card|chat names the presented image's format for "
+            "a run — the makers card, or the piece staged as a mock "
+            "chat screen (default: the class pref, card unless set)."
         ),
         capability=Capability.DB_READ,
         parameters={
             "action": "str — status|now|history|run|backstop|ensure",
             "window": "str — morning|evening (optional)",
+            "format": "str — card|chat (optional)",
         },
     )
-    def motivation(*, action: str = "", window: str = "") -> dict[str, Any]:
+    def motivation(*, action: str = "", window: str = "",
+                   format: str = "") -> dict[str, Any]:
         act = (action or "status").strip().lower()
         win = (window or "").strip().lower()
         if act == "status":
@@ -874,5 +976,6 @@ def register(registry: Any) -> None:
         if act in ("run", "now"):
             if win not in WINDOW_DEFAULTS:
                 win = _current_window(context, time.time())
-            return run_motivation(context, win, force=(act == "now"))
+            return run_motivation(context, win, force=(act == "now"),
+                                  format=format)
         return {"ok": False, "error": f"unknown action {act!r}"}

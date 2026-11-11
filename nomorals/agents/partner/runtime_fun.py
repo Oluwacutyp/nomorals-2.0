@@ -8,7 +8,8 @@ this mixin owns the live wiring:
   /catfact /numfact /advice /activity /history (text
   from health-checked source chains), /quote (a rendered
   PNG CARD from the makers bigquote design since 2026-11-10
-  — text only as the named degradation), /dog /cat /fox /meme
+  — text only as the named degradation; ``/quote chat``
+  names the mock-screen format instead), /dog /cat /fox /meme
   /nasa /pokemon (the picture ATTACHED through the expression
   send path, caption riding the media message — one message,
   so success returns "" and the kinds ride
@@ -121,21 +122,31 @@ class RuntimeFunMixin:
     def _fun_quote(self, tail: str, message=None):  # type: ignore[no-untyped-def]
         """/quote delivers a rendered PNG card (the makers
         bigquote design) — the words set on a backdrop, sent
-        as a photo.  Text is the NAMED degradation only: when
-        the renderer itself is unavailable the words post
-        with a line saying the card couldn't be rendered;
-        when the card rendered but the send couldn't land,
-        the words post as the delivery fallback.  With no
-        chat to land in (message is None) the text path is
-        the only shape there is."""
+        as a photo.  A leading format word names the mock-
+        screen rung instead: ``/quote chat …`` stages the
+        quote as a chat exchange (``card`` names the default
+        explicitly); a screen that can't render falls back
+        to the card inside the service.  Text is the NAMED
+        degradation only: when the renderer itself is
+        unavailable the words post with a line saying the
+        card couldn't be rendered; when the card rendered
+        but the send couldn't land, the words post as the
+        delivery fallback.  With no chat to land in (message
+        is None) the text path is the only shape there is."""
         service = self._fun_service()
+        fmt = ""
+        words = tail.split(None, 1)
+        if words and words[0].lower() in ("chat", "screen", "card"):
+            fmt = ("screen" if words[0].lower() in ("chat", "screen")
+                   else "card")
+            tail = words[1] if len(words) > 1 else ""
         if message is None:
             out = service.text("quote", tail)
             if out.get("ok"):
                 return str(out.get("text") or "")
             return str(out.get("reason") or "no /quote right now")
         out = service.quote_card(
-            tail,
+            tail, format=fmt,
             send=lambda ref, caption: self._expression_send(
                 message, ref, caption=caption))
         if out.get("sent"):

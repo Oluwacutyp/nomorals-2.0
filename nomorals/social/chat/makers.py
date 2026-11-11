@@ -2051,7 +2051,24 @@ class MakerService:
         passes "public" when the card is made in a group chat
         (the send seam then burns the brand mark in), "personal"
         in the owner's own DM.  The card bytes at rest are never
-        marked — the mark is a property of the send."""
+        marked — the mark is a property of the send.
+
+        One more format rides this same selection surface:
+        a leading ``screen``/``chat`` word on /qcard,
+        /fakemsg or /meme2 stages the entries as a mock chat
+        screen (the mock-screens organ, via
+        :mod:`.mock_formats`) instead of a card skin — an
+        additional rung, not a replacement; a screen that
+        can't render falls back to the card with the failure
+        named in ``screen_error``."""
+        first, _, rest = str(tail or "").strip().partition(" ")
+        if (kind in ("qcard", "fakemsg", "meme2")
+                and first.strip().lower() in ("screen", "chat")):
+            return self._card_screen(
+                kind, rest, reply_name=reply_name,
+                reply_text=reply_text, sender_name=sender_name,
+                avatars=avatars, backdrop=backdrop,
+                audience=audience, send=send)
         try:
             style, entries = parse_card_request(
                 kind, tail, reply_name=reply_name,
@@ -2085,6 +2102,60 @@ class MakerService:
                             audience=audience)
         out.update({"style": style, "drawn": drawn})
         return out
+
+    def _card_screen(self, kind: str, tail: str, *,
+                     reply_name: str = "", reply_text: str = "",
+                     sender_name: str = "",
+                     avatars: dict[int, Any] | None = None,
+                     backdrop: Any = None,
+                     audience: str = "",
+                     send) -> dict[str, Any]:
+        """The mock-screen rung of the card surface: parse
+        the entries with the card grammar, stage them as a
+        chat exchange, and deliver through the mock organ's
+        service (its MediaRef carries ``audience`` exactly
+        as the card's does, so the send seam's brand mark
+        behaves the same).  Any failure falls back to the
+        plain card — the stripped tail no longer leads with
+        the format word, so the fallback cannot loop — with
+        the screen's failure named in ``screen_error``."""
+        try:
+            _style, entries = parse_card_request(
+                kind, tail, reply_name=reply_name,
+                reply_text=reply_text, sender_name=sender_name)
+        except MakerError as exc:
+            return {"sent": False, "reason": str(exc)}
+        names = [str(e.get("name") or "") for e in entries]
+        try:
+            from .mock_formats import entries_screen, meme_screen
+            from .mock_screens import MockScreenService
+
+            if kind == "meme2":
+                screen = meme_screen(entries)
+                caption = "🖼 meme — as a chat"
+            else:
+                screen = entries_screen(entries, reaction="❤️")
+                caption = (f"💬 quote screen — "
+                           f"{names[0] if names else ''}")
+            out = MockScreenService(
+                media_dir=self.media_dir or "").render(
+                    screen, audience=audience,
+                    caption=_trim_caption(caption), send=send)
+        except Exception as exc:  # noqa: BLE001 - named, then fallback
+            out = {"sent": False, "reason": str(exc)[:160]}
+        if out.get("sent"):
+            return {"sent": True, "style": "screen",
+                    "format": "screen",
+                    "drawn": out.get("drawn") or {}}
+        fallback = self.card(
+            kind, tail, reply_name=reply_name,
+            reply_text=reply_text, sender_name=sender_name,
+            avatars=avatars, backdrop=backdrop,
+            audience=audience, send=send)
+        fallback["format"] = "card"
+        fallback["screen_error"] = str(
+            out.get("reason") or "the screen render failed")
+        return fallback
 
     # -- removebg -----------------------------------------------
     def removebg(self, data: bytes, *, send,

@@ -1215,20 +1215,27 @@ class FunService:
     # -- the quote CARD (the /quote product since 2026-11-10) --
     def quote_card(self, arg: str = "", *,
                    send: Callable[[Any, str], Any],
+                   format: str = "",
                    renderer: Callable[..., Any] | None = None,
                    backdrop_fn: Callable[..., Any] | None = None
                    ) -> dict[str, Any]:
-        """Fetch a quote → render its PNG card (the makers
-        ``bigquote`` design over a backdrop) → attach it.
+        """Fetch a quote → render it → attach it.
 
-        The card IS the /quote product now: text remains only
-        as the named degradation — when the renderer itself
-        is unavailable the result carries ``card_error`` and
-        the caller posts the words WITH that naming, never as
-        the silent default.  ``renderer`` / ``backdrop_fn``
-        are the test seams; the real ones are the makers
-        organ's (lazy import — makers borrows this module's
-        sniffers, so the import cannot ride the top)."""
+        The default format is the PNG card (the makers
+        ``bigquote`` design over a backdrop).  ``format`` =
+        "screen"/"chat" picks the mock-screen rung instead:
+        the quote staged as a chat exchange through the
+        mock-screens organ (see :mod:`.mock_formats`).  A
+        screen that can't render falls back to the card with
+        the failure named in ``screen_error`` — never a dead
+        end.  Text remains only as the named degradation —
+        when the renderer itself is unavailable the result
+        carries ``card_error`` and the caller posts the
+        words WITH that naming, never as the silent default.
+        ``renderer`` / ``backdrop_fn`` are the test seams;
+        the real ones are the makers organ's (lazy import —
+        makers borrows this module's sniffers, so the import
+        cannot ride the top)."""
         try:
             result, source = self._walk("quote", "quote", arg)
             if result is None:
@@ -1244,6 +1251,15 @@ class FunService:
                 return {"sent": False, "reason": (
                     "every /quote source answered empty — "
                     "try again in a bit")}
+            screen_error = ""
+            if str(format or "").strip().lower() in ("screen", "chat"):
+                out = self._quote_screen(
+                    quote_text, author, text=text, source=source,
+                    send=send)
+                if out.get("sent"):
+                    return out
+                screen_error = str(
+                    out.get("reason") or "the screen render failed")
             try:
                 if renderer is None or backdrop_fn is None:
                     from .makers import card_backdrop, render_card_png
@@ -1257,13 +1273,19 @@ class FunService:
                       "text": quote_text}],
                     backdrop=backdrop)
             except Exception as exc:  # noqa: BLE001 - named degradation
-                return {"sent": False, "card_error": str(exc)[:160],
-                        "text": text, "source": source,
-                        "author": author}
+                out = {"sent": False, "card_error": str(exc)[:160],
+                       "text": text, "source": source,
+                       "author": author}
+                if screen_error:
+                    out["screen_error"] = screen_error
+                return out
             if self.media_dir is None:
-                return {"sent": False,
-                        "reason": "no media dir configured",
-                        "text": text, "source": source}
+                out = {"sent": False,
+                       "reason": "no media dir configured",
+                       "text": text, "source": source}
+                if screen_error:
+                    out["screen_error"] = screen_error
+                return out
             digest = hashlib.sha256(data).hexdigest()[:16]
             dest = self.media_dir / f"quote_{digest}.png"
             dest.parent.mkdir(parents=True, exist_ok=True)
@@ -1279,14 +1301,55 @@ class FunService:
                 + (f"\n— {author}" if author else ""))
             outcome = send(ref, caption)
             if not getattr(outcome, "ok", False):
-                return {"sent": False,
-                        "reason": f"send failed: "
-                                  f"{getattr(outcome, 'error', '')}",
-                        "text": text, "source": source}
-            return {"sent": True, "source": source,
-                    "author": author, "drawn": drawn}
+                out = {"sent": False,
+                       "reason": f"send failed: "
+                                 f"{getattr(outcome, 'error', '')}",
+                       "text": text, "source": source}
+                if screen_error:
+                    out["screen_error"] = screen_error
+                return out
+            out = {"sent": True, "source": source,
+                   "author": author, "drawn": drawn}
+            if screen_error:
+                out["format"] = "card"
+                out["screen_error"] = screen_error
+            return out
         except Exception as exc:  # noqa: BLE001 - never breaks its host
             return {"sent": False, "reason": f"fun error: {exc}"[:160]}
+
+    def _quote_screen(self, quote_text: str, author: str, *,
+                      text: str, source: str,
+                      send: Callable[[Any, str], Any]
+                      ) -> dict[str, Any]:
+        """The quote as a mock chat screen, delivered through
+        the caller's send seam by the organ's own service
+        (its MediaRef/audience handling rides along).  Never
+        raises — a failure comes back as ``reason`` and the
+        caller falls back to the card."""
+        try:
+            from .mock_formats import quote_screen
+            from .mock_screens import MockScreenService
+
+            screen = quote_screen(quote_text, author or "Unknown")
+            caption = _trim_caption(
+                f"💬 “{quote_text}”"
+                + (f"\n— {author}" if author else ""))
+            out = MockScreenService(
+                media_dir=self.media_dir or "").render(
+                    screen, caption=caption, send=send)
+            if out.get("sent"):
+                return {"sent": True, "format": "screen",
+                        "source": source, "author": author,
+                        "drawn": out.get("drawn") or {}}
+            return {"sent": False,
+                    "reason": str(out.get("reason")
+                                  or "the screen render failed"),
+                    "text": text, "source": source,
+                    "author": author}
+        except Exception as exc:  # noqa: BLE001 - named, then fallback
+            return {"sent": False, "reason": str(exc)[:160],
+                    "text": text, "source": source,
+                    "author": author}
 
     def _history(self, arg: str) -> dict[str, Any]:
         today = self.today_fn()
