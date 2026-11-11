@@ -26,6 +26,7 @@ import html
 from contextlib import contextmanager
 from typing import Iterator
 from .failures import record_failure
+from .text_styles import small_caps_glyph
 
 __all__ = [
     "section", "cmd", "cta", "bar", "bold", "escape",
@@ -269,15 +270,12 @@ def table(headers: list[str], rows: list[list[str]]) -> str:
 
 
 #: Unicode small capitals for display titles (the XMD menu
-#: grammar).  ``s``/``x`` have no small-capital codepoint in the
-#: set these bots use and stay plain; ``q`` takes ǫ.
-_SMALL_CAPS: dict[str, str] = {
-    "a": "ᴀ", "b": "ʙ", "c": "ᴄ", "d": "ᴅ", "e": "ᴇ", "f": "ꜰ",
-    "g": "ɢ", "h": "ʜ", "i": "ɪ", "j": "ᴊ", "k": "ᴋ", "l": "ʟ",
-    "m": "ᴍ", "n": "ɴ", "o": "ᴏ", "p": "ᴘ", "q": "ǫ", "r": "ʀ",
-    "s": "s", "t": "ᴛ", "u": "ᴜ", "v": "ᴠ", "w": "ᴡ", "x": "x",
-    "y": "ʏ", "z": "ᴢ",
-}
+#: grammar).  The glyph table itself lives in the style engine
+#: (``text_styles.SMALLCAPS_GLYPHS`` — ONE source, shared with
+#: the fancy-text styler; this module's old private copy was a
+#: duplicate and is gone).  ``s``/``x`` have no small-capital
+#: codepoint in the set these bots use and stay plain; ``q``
+#: takes ǫ.
 
 
 def small_caps(text: str) -> str:
@@ -289,7 +287,7 @@ def small_caps(text: str) -> str:
     Never raises."""
     try:
         return "".join(
-            _SMALL_CAPS.get(ch.lower(), ch)
+            small_caps_glyph(ch.lower())
             if ch.isascii() and ch.isalpha() else ch
             for ch in str(text or ""))
     except Exception as exc:  # noqa: BLE001

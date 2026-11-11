@@ -40,6 +40,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from . import text_styles as _ts
+
 __all__ = [
     "BRAILLE_BLANK",
     "image_to_braille",
@@ -311,53 +313,38 @@ def restyle_piece(text: str, target: str) -> str | None:
 
 
 # ── fancy text ───────────────────────────────────────────────
+# The tables live in the style engine now (text_styles —
+# FontLibrary F3): generated from the Unicode blocks, ONE
+# source for every surface, a 97-name catalogue over them.
+# What remains here is the LEGACY view the /emojiart surface
+# has always served: the original 18 names with byte-identical
+# behaviour — fullwidth without the ideographic space, and
+# smallcaps in its lowercase-only form (capitals pass through).
 
-def _variant(base_upper: int, base_lower: int, base_digit: int,
-             exceptions: dict[str, str] | None = None
-             ) -> dict[str, str]:
-    table = dict(exceptions or {})
-    for i in range(26):
-        table.setdefault(chr(ord("A") + i), chr(base_upper + i))
-        table.setdefault(chr(ord("a") + i), chr(base_lower + i))
-    if base_digit:
-        for i in range(10):
-            table.setdefault(str(i), chr(base_digit + i))
-    return table
 
+_ENGINE_KEYS = {
+    "bold": "serif_bold", "italic": "serif_italic",
+    "bolditalic": "serif_bold_italic", "script": "script",
+    "fraktur": "fraktur", "doublestruck": "double_struck",
+    "monospace": "monospace", "sans": "sans",
+    "sansbold": "sans_bold",
+}
 
 _FANCY_TABLES: dict[str, dict[str, str]] = {
-    "bold": _variant(0x1D400, 0x1D41A, 0x1D7CE),
-    "italic": _variant(0x1D434, 0x1D44E, 0, {"h": "ℎ"}),
-    "bolditalic": _variant(0x1D468, 0x1D482, 0),
-    "script": _variant(0x1D49C, 0x1D4B6, 0, {
-        "B": "ℬ", "E": "ℰ", "F": "ℱ", "H": "ℋ", "I": "ℐ",
-        "L": "ℒ", "M": "ℳ", "R": "ℛ", "e": "ℯ", "g": "ℊ",
-        "o": "ℴ"}),
-    "fraktur": _variant(0x1D504, 0x1D51E, 0, {
-        "C": "ℭ", "H": "ℌ", "I": "ℑ", "R": "ℜ", "Z": "ℨ"}),
-    "doublestruck": _variant(0x1D538, 0x1D552, 0x1D7D8, {
-        "C": "ℂ", "H": "ℍ", "N": "ℕ", "P": "ℙ", "Q": "ℚ",
-        "R": "ℝ", "Z": "ℤ"}),
-    "monospace": _variant(0x1D670, 0x1D68A, 0x1D7F6),
-    "sans": _variant(0x1D5A0, 0x1D5BA, 0x1D7E2),
-    "sansbold": _variant(0x1D5D4, 0x1D5EE, 0x1D7EC),
-    "circled": _variant(0x24B6, 0x24D0, 0, {"0": "⓪"}),
-    "fullwidth": {chr(c): chr(c + 0xFEE0)
-                  for c in range(0x21, 0x7F)},
-    "smallcaps": dict(zip(
-        "abcdefghijklmnopqrstuvwxyz",
-        "ᴀʙᴄᴅᴇꜰɢʜɪᴊᴋʟᴍɴᴏᴘǫʀsᴛᴜᴠᴡxʏᴢ", strict=True)),
+    name: dict(_ts.BASE_MAPS[key])
+    for name, key in _ENGINE_KEYS.items()
 }
-for _i in range(1, 10):
-    _FANCY_TABLES["circled"][str(_i)] = chr(0x2460 + _i - 1)
+_FANCY_TABLES["circled"] = dict(_ts.BASE_MAPS["circled"])
+_FANCY_TABLES["fullwidth"] = {
+    k: v for k, v in _ts.BASE_MAPS["fullwidth"].items()
+    if k != " "}
+_FANCY_TABLES["smallcaps"] = dict(
+    _ts.BASE_MAPS["smallcaps_lower"])
 
 _DECORATIONS: dict[str, tuple[str, str]] = {
-    "sparkle": ("✨ ", " ✨"),
-    "stars": ("⋆★ ", " ★⋆"),
-    "hearts": ("♡ ", " ♡"),
-    "frame": ("【 ", " 】"),
-    "quotes": ("『 ", " 』"),
-    "waves": ("˗ˏˋ ", " ˎˊ˗"),
+    name: (_ts.WRAPPERS[name][1], _ts.WRAPPERS[name][2])
+    for name in ("sparkle", "stars", "hearts", "frame",
+                 "quotes", "waves")
 }
 
 FANCY_STYLES: tuple[str, ...] = tuple(_FANCY_TABLES) \

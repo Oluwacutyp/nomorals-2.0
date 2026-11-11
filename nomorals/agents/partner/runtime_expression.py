@@ -1375,17 +1375,32 @@ class RuntimeExpressionMixin:
                 lines.append(f"· {piece.get('name')}: "
                              f"{piece.get('text')}")
             return "\n".join(lines)
+        if head == "styles":
+            from ...social.chat import text_styles
+            names = text_styles.style_names()
+            return (f"fancy text styles — {len(names)} in my "
+                    f"catalogue (the original 18 answer to "
+                    f"their plain names too):\n"
+                    + " · ".join(names))
         if head == "fancy":
+            from ...social.chat import text_styles
             parts = rest.split(None, 1)
             if len(parts) < 2:
                 return ("usage: /emojiart fancy style "
-                        "words — styles: "
-                        + " · ".join(emoji_art.FANCY_STYLES))
+                        "words — /emojiart styles lists "
+                        "every style")
+            # the legacy 18 keep their exact behaviour; the
+            # full catalogue resolves through the style engine
             styled = emoji_art.fancy_text(parts[1], parts[0])
             if styled is None:
-                return (f"no style called '{parts[0]}' — "
-                        f"styles: "
-                        + " · ".join(emoji_art.FANCY_STYLES))
+                styled = text_styles.apply_style(
+                    parts[1], parts[0])
+            if styled is None:
+                near = text_styles.suggest_styles(parts[0])
+                hint = (" — did you mean: "
+                        + " · ".join(near)) if near else ""
+                return (f"no style called '{parts[0]}'{hint} — "
+                        f"/emojiart styles lists them all")
             return styled
         if head == "remix":
             verb = words[1].lower() if len(words) > 1 else ""
@@ -1436,6 +1451,7 @@ class RuntimeExpressionMixin:
                 f"({len(library)} pieces; topics: "
                 f"{', '.join(topics[:12])})\n"
                 "/emojiart fancy style words\n"
+                "/emojiart styles — the whole style catalogue\n"
                 "/emojiart remix invert|mirror|smaller|bigger"
                 "|ascii|braille|mosaic\n"
                 "/emojiart save name — keep the last piece")
