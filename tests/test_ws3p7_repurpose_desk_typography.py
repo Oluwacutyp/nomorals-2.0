@@ -403,6 +403,7 @@ def test_repurpose_surface_board_and_verbs(db, queue, tmp_path):
         db_path=str(tmp_path / "drafts.db"))
 
     board = fake._control_repurpose("")
+    board = board.text if hasattr(board, "text") else board
     assert "posted drafts" in board and "Shipped the new desk" in board
 
     out = fake._control_repurpose("post 1 thread")

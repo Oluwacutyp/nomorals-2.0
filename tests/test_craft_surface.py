@@ -127,12 +127,18 @@ def _pilots(testcase: unittest.TestCase):
 # ── the board ────────────────────────────────────────────────────
 
 
+def _text(reply):
+    """A board render's text — boards return actionable replies
+    since button lane 5; read the text half here."""
+    return reply.text if hasattr(reply, "text") else reply
+
+
 class BoardTests(unittest.TestCase):
 
     def test_board_renders_derived_levels_with_basis(self):
         _tmp_, db, library, grants = _pilots(self)
         rt = CraftRuntime(db, library, grants)
-        board = rt._control_craft("")
+        board = _text(rt._control_craft(""))
         self.assertIn("craft — the cooperative board", board)
         # health's records earn L2, and the earning facts ride
         self.assertIn("Health — level L2 (tool-executed)", board)
@@ -146,11 +152,11 @@ class BoardTests(unittest.TestCase):
         self.assertIn("open items:", board)
         self.assertIn("open items across the board:", board)
         # the full board is also the bare command + the board verb
-        self.assertEqual(board, rt._control_craft("board"))
+        self.assertEqual(board, _text(rt._control_craft("board")))
 
     def test_board_names_greenfield_and_absences(self):
         _tmp_, db, library, grants = _pilots(self)
-        board = CraftRuntime(db, library, grants)._control_craft("")
+        board = _text(CraftRuntime(db, library, grants)._control_craft(""))
         # hospitality is seed-known only: named greenfield, in
         # words, on the board — never hidden, never a quiet zero
         self.assertIn("Hospitality", board)
@@ -171,7 +177,7 @@ class BoardTests(unittest.TestCase):
         db = _tmp_db(self)
         library = _empty_library(tmp)
         grants = CompetenceGrantStore(tmp / "grants.json")
-        board = CraftRuntime(db, library, grants)._control_craft("")
+        board = _text(CraftRuntime(db, library, grants)._control_craft(""))
         self.assertIn("craft — the cooperative board", board)
         # the taxonomy still names its domains; each reads
         # unlevelled with its absences in words
@@ -371,7 +377,7 @@ class NoInternalIdsTests(unittest.TestCase):
             research_fn=_research, blob_dir=tmp / "blobs2",
             grants=grants, now=time.time())
         outputs = [
-            rt._control_craft(""),
+            _text(rt._control_craft("")),
             rt._control_craft("coverage"),
             rt._control_craft(
                 "intake studio: design a poster series"),
@@ -462,8 +468,8 @@ class RuntimeDispatchTests(unittest.TestCase):
         cls._tmp.cleanup()
 
     def test_owner_dispatch_renders_the_board(self):
-        reply = self.runtime.handle_control(
-            "/craft", "telegram:1", message=None)
+        reply = _text(self.runtime.handle_control(
+            "/craft", "telegram:1", message=None))
         self.assertIn("craft — the cooperative board", reply)
         self.assertNotIn("unknown command", reply)
 

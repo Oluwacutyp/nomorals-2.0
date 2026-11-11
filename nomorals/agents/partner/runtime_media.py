@@ -98,8 +98,8 @@ class RuntimeMediaMixin:
         """ /music draft <topic> [style] — the artist's notebook: a full
         song draft (lyrics + cadence + melody contour + emotional arc +
         artist notes). The draft is inspectable and revisable. """
-        from ...media.song_draft import draft_song, render_notebook, save_draft
         from ...media.music import STYLES
+        from ...media.song_draft import draft_song, render_notebook, save_draft
         words = (tail or "").strip().split()
         if not words:
             return ("usage: /music draft <topic> [style]\n"
@@ -133,7 +133,7 @@ class RuntimeMediaMixin:
 
     def _control_music_revise(self, tail: str, chat_key: str = "") -> str:
         """ /music revise <note> — revise the active draft in plain words. """
-        from ...media.song_draft import revise_draft, render_notebook, save_draft, load_draft
+        from ...media.song_draft import load_draft, render_notebook, revise_draft, save_draft
         note = (tail or "").strip()
         if not note:
             return "usage: /music revise <note> — e.g. /music revise make the chorus hit harder"
@@ -157,8 +157,8 @@ class RuntimeMediaMixin:
     def _control_music_perform(self, chat_key: str = "") -> str:
         """ /music perform — perform the active draft: beat + vocals shaped
         together from the draft's own melody contours. """
-        from ...media.song_draft import load_draft
         from ...media.draft_perform import perform_draft
+        from ...media.song_draft import load_draft
         path = self._active_draft_path(chat_key)
         if not path:
             return "no active draft — start one with /music draft <topic>"
@@ -217,8 +217,7 @@ class RuntimeMediaMixin:
         Lyrics come from MusicCreator's real engine; the bed is AI-generated.
         Fails honestly when the model isn't installed — never fake audio.
         """
-        from ...media.ace_step import (
-            ACEModelUnavailable, make_bed, parse_bed_request)
+        from ...media.ace_step import ACEModelUnavailable, make_bed, parse_bed_request
         from ...media.music import STYLES
 
         req = parse_bed_request(f"bed {tail}", STYLES)
@@ -258,10 +257,13 @@ class RuntimeMediaMixin:
         Honest labeling: "AI-generated instrumental + AI vocals."
         Fails honestly when a stage can't run — never fake audio.
         """
-        from ...media.vocals import (
-            RVCVoiceRegistry, VocalModelUnavailable,
-            make_full_song, parse_full_request)
         from ...media.music import STYLES
+        from ...media.vocals import (
+            RVCVoiceRegistry,
+            VocalModelUnavailable,
+            make_full_song,
+            parse_full_request,
+        )
 
         req = parse_full_request(f"/music full {tail}", STYLES)
         if req is None:
@@ -558,8 +560,8 @@ class RuntimeMediaMixin:
         disclosure, checklist) — the USER clicks submit on the
         distributor. Splits are mandatory and must sum to 100.
         """
-        from ...media import distribute as _dist
         from ...finance.ledger import Ledger
+        from ...media import distribute as _dist
 
         tail = (tail or "").strip()
         if tail.lower() in ("legal", "terms"):
@@ -575,8 +577,8 @@ class RuntimeMediaMixin:
 
     def _distribute_answer(self, chat_key: str, text: str) -> str | None:
         """Advance a pending /distribute draft. None when no draft pending."""
-        from ...media import distribute as _dist
         from ...finance.ledger import Ledger
+        from ...media import distribute as _dist
 
         draft = _dist.pending_draft(chat_key)
         if draft is None:
@@ -603,8 +605,7 @@ class RuntimeMediaMixin:
         is a bot-check.  Chat users are on phones: they get the short
         /cookies pointer, never the yt-dlp command dump.  CLI users
         CAN run commands, so they get the full FAQ-grounded help."""
-        from ...media.cookies import (
-            BOT_COOKIE_HELP, BOT_COOKIE_SHORT_HELP, is_bot_detection_error)
+        from ...media.cookies import BOT_COOKIE_HELP, BOT_COOKIE_SHORT_HELP, is_bot_detection_error
         msg = f"{prefix}: {exc}"
         if is_bot_detection_error(exc):
             msg += f"\n{BOT_COOKIE_SHORT_HELP if chat is not None else BOT_COOKIE_HELP}"
@@ -635,8 +636,8 @@ class RuntimeMediaMixin:
         # owner wins; otherwise the dispatch's in-flight owner
         # (play_owner_var) applies; "" keeps the chat slot.
         owner_key = owner_key or play_owner_var.get("")
-        from ...media.playback import PlaybackEngine
         from ...connectors.wiring import wire_streaming_adapters
+        from ...media.playback import PlaybackEngine
 
         # chat never wired these before (only `nm music` did) — share the
         # same wiring so Spotify/SoundCloud work from the DM too.
@@ -741,11 +742,15 @@ class RuntimeMediaMixin:
                 # nomorals/media/resolver.py tries local file → yt-dlp
                 # (universal) → SoundCloud API (with yt-dlp fallback) →
                 # text search, recording every attempt.  Never raises.
-                from ...media.resolver import SourceResolver
                 from ...media.picklist import (
-                    is_specific, parse_title_artist, search_query_for,
-                    PickCache, format_picklist, PICK_LIMIT,
+                    PICK_LIMIT,
+                    PickCache,
+                    format_picklist,
+                    is_specific,
+                    parse_title_artist,
+                    search_query_for,
                 )
+                from ...media.resolver import SourceResolver
                 low_r = rest.lower()
                 _is_urlish = low_r.startswith(("http://", "https://",
                                                "spotify:"))
@@ -821,9 +826,8 @@ class RuntimeMediaMixin:
                         # Chat users are on phones: the resolver's
                         # full yt-dlp command dump is not actionable
                         # there — shorten to the /cookies pointer.
-                        from ...media.cookies import (
-                            BOT_COOKIE_HELP as _FULL_HELP,
-                            BOT_COOKIE_SHORT_HELP as _SHORT_HELP)
+                        from ...media.cookies import BOT_COOKIE_HELP as _FULL_HELP
+                        from ...media.cookies import BOT_COOKIE_SHORT_HELP as _SHORT_HELP
                         msg = msg.replace(_FULL_HELP, _SHORT_HELP)
                     return msg
                 added = []
@@ -1010,8 +1014,8 @@ class RuntimeMediaMixin:
         number-reply hook.  Single-use: the pick-list is consumed on a
         successful pick.  Never raises.
         """
-        from ...media.playback import PlaybackEngine
         from ...media.picklist import PickCache
+        from ...media.playback import PlaybackEngine
 
         parts = (rest or "").split()
         if len(parts) < 2:
@@ -1087,7 +1091,7 @@ class RuntimeMediaMixin:
         string when a pending pick-list and a bare number both match,
         else None.  Never raises.
         """
-        from ...media.picklist import PickCache, PICK_LIMIT
+        from ...media.picklist import PICK_LIMIT, PickCache
 
         text = (message.text or "").strip()
         if not text.isdigit():
@@ -1139,8 +1143,7 @@ class RuntimeMediaMixin:
 
     def _play_forced_spotify(self, engine: Any, query: str) -> str:
         """`/play spotify:<query>` — Spotify only, honest when not linked."""
-        from ...connectors.wiring import (spotify_connector, spotify_linked,
-                                          spotify_link_help)
+        from ...connectors.wiring import spotify_connector, spotify_link_help, spotify_linked
         if not query:
             return "play spotify:<what> — give me a song or artist to search."
         if not spotify_linked(self.context):
@@ -1292,7 +1295,7 @@ class RuntimeMediaMixin:
         reg = MediaDownloader(self.context).source_registry()
         return render_status_text(reg.status())
 
-    def _control_explore(self, tail: str, chat_key: str = "") -> str:
+    def _control_explore(self, tail: str, chat_key: str = "") -> Any:
         """/explore — the exploration board (WS4 P3): Devon
         watches the video field she fetches from.
 
@@ -1323,7 +1326,13 @@ class RuntimeMediaMixin:
                                 re-propose it)
 
         Owner-only (CONTROL_COMMANDS, never PUBLIC_COMMANDS).
-        Text-complete: no buttons anywhere on this surface.
+        Buttons (button-fix lane 5, reversing the earlier
+        text-complete stance as an explicit decision): the board
+        carries its four real moves (run / trends / candidates /
+        niches) and the niches view carries Adopt / Dismiss per
+        proposal — every payload is the typed verb for the same
+        act, tap-tested by effect; the text stays complete without
+        them.
         """
         from ...media.explore import board as explore_board
         from ...media.explore.jobs import run_sweep_cycle
@@ -1339,7 +1348,22 @@ class RuntimeMediaMixin:
             return explore_board.render_explore_candidates(
                 self.context)
         if verb == "niches":
-            return explore_board.render_explore_niches(self.context)
+            rendered = explore_board.render_explore_niches(
+                self.context)
+            from ...media.explore.niches import proposal_board_order
+
+            store = explore_board.resolve_store(self.context)
+            proposals = proposal_board_order(store)
+            if not proposals:
+                return rendered
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            buttons: list[tuple[str, str]] = []
+            for i in range(1, len(proposals) + 1):
+                buttons.append(
+                    (f"✅ Adopt #{i}", f"explore adopt {i}"))
+                buttons.append(
+                    (f"🗑 Dismiss #{i}", f"explore dismiss {i}"))
+            return actionable(rendered, grid_layout([buttons]))
         if verb in ("adopt", "dismiss"):
             from ...media.explore import niches as explore_niches
 
@@ -1354,9 +1378,15 @@ class RuntimeMediaMixin:
             return explore_board.render_niche_act(act(store, ref),
                                                   verb)
         if verb == "":
-            return explore_board.render_explore_board(
+            rendered = explore_board.render_explore_board(
                 self.context,
                 scheduler=getattr(self, "_scheduler", None))
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            buttons = [("▶️ Run sweep", "explore run"),
+                       ("📈 Trends", "explore trends"),
+                       ("🎯 Candidates", "explore candidates"),
+                       ("🧩 Niches", "explore niches")]
+            return actionable(rendered, grid_layout([buttons]))
         return ("usage: /explore [run | trends | candidates | "
                 "niches | adopt <ref> | dismiss <ref>]\n"
                 "bare /explore is the board: last sweep, what's "
@@ -1892,8 +1922,7 @@ class RuntimeMediaMixin:
         Returns "" — the ack already posted (this kind family is
         MEDIA_DELIVERED).  Never raises.
         """
-        from ...core.jobs import (
-            current_job, report_progress, shared_registry)
+        from ...core.jobs import current_job, report_progress, shared_registry
 
         # Measured progress (Play & Downloads P1): ONE tracker per
         # download operation.  Its renders ride the EXISTING ack
@@ -2567,8 +2596,7 @@ class RuntimeMediaMixin:
         Never raises.
         """
         from ...core.jobs import report_progress
-        from ...media.cookies import (
-            BOT_COOKIE_SHORT_HELP, is_bot_detection_error)
+        from ...media.cookies import BOT_COOKIE_SHORT_HELP, is_bot_detection_error
         # Progress note: counts as a heartbeat when this runs as a
         # background job; a no-op on the synchronous path.
         report_progress(
@@ -3228,8 +3256,7 @@ class RuntimeMediaMixin:
         final line and file tags SAY it's an edit of the requested
         track — never passed off as the original.
         """
-        from ...media.cookies import (
-            BOT_COOKIE_SHORT_HELP, is_bot_detection_error)
+        from ...media.cookies import BOT_COOKIE_SHORT_HELP, is_bot_detection_error
 
         title = str(first_item.get("title") or "audio")
         items: list[dict[str, Any]] = []
@@ -3281,8 +3308,7 @@ class RuntimeMediaMixin:
         q_title = ""
         q_artist = ""
         if gated:
-            from ...media.picklist import (
-                is_confident_match, match_confidence)
+            from ...media.picklist import is_confident_match, match_confidence
 
             q_title = str((match or ("", ""))[0] or "")
             q_artist = str((match or ("", ""))[1] or "")
@@ -3572,8 +3598,7 @@ class RuntimeMediaMixin:
         owner_key = owner_key or play_owner_var.get("")
         try:
             from ...media.cookies import BOT_COOKIE_SHORT_HELP
-            from ...media.picklist import (
-                PICK_LIMIT, PickCache, format_picklist)
+            from ...media.picklist import PICK_LIMIT, PickCache, format_picklist
             from ...media.resolver import ResolvedAudio
 
             cands = [
@@ -3763,8 +3788,7 @@ class RuntimeMediaMixin:
         * ``/produce harder|faster|slower|…`` → iterate on the last production
         """
         from ...media.producer import Producer, describe_to_profile
-        from ...media.taste import (load_taste, modify_profile,
-                                    last_production_profile)
+        from ...media.taste import last_production_profile, load_taste, modify_profile
 
         tail = (tail or "").strip()
         store = load_taste(getattr(self, "context", None))
@@ -4217,9 +4241,9 @@ class RuntimeMediaMixin:
            she actually hears (tempo, key, loudness) instead of
            shrugging.
         """
+        from ...accounts.vault import VaultLockedError, open_vault
         from ...audio.fingerprint import describe_audio, match_local_db
         from ...connectors.registry import create_connector
-        from ...accounts.vault import VaultLockedError, open_vault
 
         audio_path = self._sham_find_audio(message)
         if not audio_path:
@@ -4364,8 +4388,7 @@ class RuntimeMediaMixin:
         heard = str(entry.get("heard") or "")
         try:
             if action == "find":
-                from ...social.chat.base import (
-                    ChatKind, ChatMessage, ChatRef, MediaRef)
+                from ...social.chat.base import ChatKind, ChatMessage, ChatRef, MediaRef
                 platform, _, cid = (chat_key or "").partition(":")
                 msg = ChatMessage(
                     chat=ChatRef(platform=platform or "telegram",
@@ -4461,9 +4484,8 @@ class RuntimeMediaMixin:
         profile.  "I like this" / "too slow" right after a production →
         taste feedback.  Returns a reply or None; never raises.
         """
-        from ...media.taste import (detect_feedback, detect_produce_intent,
-                                    load_taste, mood_hint)
         from ...media.producer import Producer, describe_to_profile
+        from ...media.taste import detect_feedback, detect_produce_intent, load_taste, mood_hint
 
         text = (getattr(message, "text", None) or "").strip()
         if not text or text.startswith("/"):
@@ -4615,8 +4637,7 @@ class RuntimeMediaMixin:
                 from ...media.videogen import capability_report
                 return capability_report()
             if action == "list":
-                from ...media.motion_studio._core import ledger_status, \
-                    read_ledger
+                from ...media.motion_studio._core import ledger_status, read_ledger
                 ledger = read_ledger(limit=10)
                 if not ledger:
                     return "no studio renders yet."
@@ -4637,6 +4658,7 @@ class RuntimeMediaMixin:
 
     def _video_studio_gen(self, tail: str) -> str:
         import re
+
         from ...media.videogen import generate
         # /video gen "<prompt>" [--backend X] [--seconds N] [--seed N]
         #   [--model NAME] [--lora NAME[:W]] [--lora NAME2 ...]
@@ -4671,6 +4693,7 @@ class RuntimeMediaMixin:
 
     def _video_studio_motion(self, tail: str) -> str:
         import shlex
+
         from ...media.motion_studio import studio
         try:
             parts = shlex.split(tail)
@@ -4744,7 +4767,7 @@ class RuntimeMediaMixin:
         import shlex
         from pathlib import Path
 
-        from ...media.director import Director, DirectorError, STYLE_PACKS
+        from ...media.director import STYLE_PACKS, Director, DirectorError
 
         usage = (
             "🎬 /director — coverage → breakdown + design → shoot → QA\n"
@@ -5268,7 +5291,7 @@ class RuntimeMediaMixin:
                         message: Any = None) -> str:
         """Generate an image from a text prompt via the generative backend."""
         try:
-            from ...media_edit.generate import get_backend, GenerativeEditError
+            from ...media_edit.generate import GenerativeEditError, get_backend
         except ImportError as exc:
             return f"image generation unavailable: {exc}"
         try:
@@ -5294,8 +5317,8 @@ class RuntimeMediaMixin:
             return "image generation failed: backend returned no images"
         # Save the first image to the workspace and report the path
         try:
-            from pathlib import Path
             import time
+            from pathlib import Path
             out_dir = Path(self.context.settings.resolve("data/media/generated"))
             out_dir.mkdir(parents=True, exist_ok=True)
             # Nanosecond stamp: a 1-second name made any two generations
@@ -5387,8 +5410,7 @@ class RuntimeMediaMixin:
                 if t == "--seed" and i + 1 < len(toks):
                     kwargs["seed"] = int(toks[i + 1]); i += 2
                 elif t == "--ar" and i + 1 < len(toks):
-                    from ...media.imggen.pipeline import (
-                        resolve_aspect_ratio)
+                    from ...media.imggen.pipeline import resolve_aspect_ratio
 
                     w, h = resolve_aspect_ratio(toks[i + 1])
                     kwargs["width"], kwargs["height"] = w, h; i += 2
@@ -5447,7 +5469,7 @@ class RuntimeMediaMixin:
 
             pipe = ShortPipeline()
             if action == "niches":
-                from ...media.contentops.niches import list_niches, get_niche
+                from ...media.contentops.niches import get_niche, list_niches
 
                 lines = ["🎬 niches:"]
                 for name in list_niches():
@@ -5537,6 +5559,7 @@ class RuntimeMediaMixin:
         graphics under a neural label.
         """
         import re
+
         from ...media.videogen import request_hero_clip
         text = " ".join(toks)
         seconds = 5.0
@@ -5611,7 +5634,7 @@ class RuntimeMediaMixin:
 
     def _control_apps(self, tail: str) -> str:
         """/apps [list|stacks|build <name> --stack …|info <name>]."""
-        from ...builders.app_builder import AppBuilder, STACKS
+        from ...builders.app_builder import STACKS, AppBuilder
 
         tail = (tail or "").strip()
         tokens = tail.split() if tail else []
@@ -5886,8 +5909,8 @@ def _resolve_play_title(context: Any, title: str) -> str:
         record_failure("runtime_media._resolve_play_title:3762", e)
     # 3. SoundCloud search (keyless, auto client_id)
     try:
-        from ...connectors import create_connector
         from ...accounts.vault import open_vault
+        from ...connectors import create_connector
         vault = open_vault(getattr(context, "db", None), context=context,
                            actor="soundcloud-search")
         sc = create_connector("soundcloud", vault)

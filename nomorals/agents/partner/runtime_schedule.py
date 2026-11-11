@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import time
 from typing import Any, Callable
+
 from .failures import record_failure
 
 
@@ -405,7 +406,7 @@ class RuntimeScheduleMixin:
         return scheduler
 
     # ── notifications ────────────────────────────────────────────────────────
-    def _control_notify(self, arg: str) -> str:
+    def _control_notify(self, arg: str) -> Any:
         """notifications — recent alerts, with delivery states.
 
         /notify [n]            — the board above (unchanged)
@@ -435,8 +436,18 @@ class RuntimeScheduleMixin:
 
             tail = text[len("decisions"):].strip()
             limit = int(tail) if tail.isdigit() else 15
-            return inspection.render_decisions(
-                notifier.decision_journal(limit=limit))
+            entries = notifier.decision_journal(limit=limit)
+            rendered = inspection.render_decisions(entries)
+            if not entries:
+                return rendered
+            # One Why button per board row — the payload is the
+            # typed chain-walk for that row (same journal, same
+            # newest-first numbering _notify_why resolves).
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            buttons = [
+                (f"❓ Why #{idx}", f"notify why decision {idx}")
+                for idx in range(1, len(entries) + 1)]
+            return actionable(rendered, grid_layout([buttons]))
         if low == "why" or low.startswith("why "):
             return self._notify_why(notifier, text[3:].strip())
         limit = int(text) if text.isdigit() else 10

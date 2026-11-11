@@ -90,11 +90,17 @@ def _seeded(testcase: unittest.TestCase, store: GlossaryStore,
 # ── the board ────────────────────────────────────────────────────
 
 
+def _text(reply):
+    """A board render's text — boards return actionable replies
+    since button lane 5; read the text half here."""
+    return reply.text if hasattr(reply, "text") else reply
+
+
 class BoardTests(unittest.TestCase):
 
     def test_board_renders_scopes_counts_and_location(self):
         store = _seeded(self, _file_store(self))
-        out = GlossaryRuntime(store)._control_glossary("")
+        out = _text(GlossaryRuntime(store)._control_glossary(""))
         self.assertIn("Translation glossaries", out)
         self.assertIn("legal — 4 entries", out)
         self.assertIn("owner: 2", out)
@@ -110,12 +116,12 @@ class BoardTests(unittest.TestCase):
 
     def test_board_over_the_database_backend(self):
         store = _seeded(self, _db_store(self))
-        out = GlossaryRuntime(store)._control_glossary("board")
+        out = _text(GlossaryRuntime(store)._control_glossary("board"))
         self.assertIn("translate_glossary table", out)
         self.assertIn("legal — 4 entries", out)
 
     def test_board_on_an_empty_store_says_so(self):
-        out = GlossaryRuntime(_file_store(self))._control_glossary("")
+        out = _text(GlossaryRuntime(_file_store(self))._control_glossary(""))
         self.assertIn("no glossaries yet", out)
         self.assertIn("the store is empty", out)
 
@@ -127,7 +133,7 @@ class ListTests(unittest.TestCase):
 
     def test_list_groups_by_glossary_and_scope(self):
         store = _seeded(self, _file_store(self))
-        out = GlossaryRuntime(store)._control_glossary("list")
+        out = _text(GlossaryRuntime(store)._control_glossary("list"))
         self.assertIn("legal · owner scope", out)
         self.assertIn("bank → Banco Central", out)
         self.assertIn("court → tribunal", out)
@@ -139,20 +145,20 @@ class ListTests(unittest.TestCase):
 
     def test_list_one_scope_across_glossaries(self):
         store = _seeded(self, _file_store(self))
-        out = GlossaryRuntime(store)._control_glossary("list global")
+        out = _text(GlossaryRuntime(store)._control_glossary("list global"))
         self.assertIn("filing → expediente", out)
         self.assertIn("treat → premio", out)
         self.assertNotIn("bank → Banco Central", out)
 
     def test_list_one_glossary(self):
         store = _seeded(self, _file_store(self))
-        out = GlossaryRuntime(store)._control_glossary("list pets")
+        out = _text(GlossaryRuntime(store)._control_glossary("list pets"))
         self.assertIn("treat → premio", out)
         self.assertNotIn("bank", out)
 
     def test_list_unknown_glossary_answers_in_words(self):
         store = _seeded(self, _file_store(self))
-        out = GlossaryRuntime(store)._control_glossary("list ghost")
+        out = _text(GlossaryRuntime(store)._control_glossary("list ghost"))
         self.assertIn("no glossary named 'ghost'", out)
         self.assertIn("legal", out)
 
@@ -290,8 +296,8 @@ class CopyTests(unittest.TestCase):
         store = _seeded(self, _file_store(self))
         rt = GlossaryRuntime(store)
         outputs = [
-            rt._control_glossary(""),
-            rt._control_glossary("list"),
+            _text(rt._control_glossary("")),
+            _text(rt._control_glossary("list")),
             rt._control_glossary("set legal owner fine = multa"),
             rt._control_glossary("del legal owner fine"),
             rt._control_glossary("del legal owner ghost"),

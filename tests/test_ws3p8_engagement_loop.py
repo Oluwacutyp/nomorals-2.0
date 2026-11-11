@@ -740,6 +740,7 @@ class TestEngageSurface:
         runtime, queue_path = self._runtime(tmp_path, db)
 
         board = runtime._control_engage("")
+        board = board.text if hasattr(board, "text") else board
         assert "Ada Lovelace" in board
         assert "needs you" in board
         item_id = store.items()[0]["id"]

@@ -6,6 +6,7 @@ import json
 import os
 import time
 from typing import Any
+
 from .failures import record_failure
 
 
@@ -691,10 +692,15 @@ class RuntimeSystemMixin:
         grant: ``toolhub`` is not a public kind, so non-owners are
         denied before dispatch.
         """
-        from ...social.chat.hub import (bin_usage_text, format_bin_result,
-                                        hub_help_text, hub_text,
-                                        keyboard_for_screen, lookup_bin,
-                                        proxy_intro_text)
+        from ...social.chat.hub import (
+            bin_usage_text,
+            format_bin_result,
+            hub_help_text,
+            hub_text,
+            keyboard_for_screen,
+            lookup_bin,
+            proxy_intro_text,
+        )
 
         parts = (tail or "").split(None, 1)
         verb = parts[0].lower() if parts else ""
@@ -801,8 +807,7 @@ class RuntimeSystemMixin:
         message or adapter edit fails, the flow continues and the
         summary still returns — progress never blocks results.
         """
-        from ...social.chat.hub import (PROXY_COOLDOWN_S, CooldownStore,
-                                        proxy_intro_text)
+        from ...social.chat.hub import PROXY_COOLDOWN_S, CooldownStore, proxy_intro_text
         from ...social.chat.progress import ProgressReporter
         from ...tools.proxylab import ProxyLab
 
@@ -1624,7 +1629,15 @@ class RuntimeSystemMixin:
             return app, None
 
         if verb in ("list", "board", ""):
-            return careers_surface.render_pipeline_board(store)
+            text = careers_surface.render_pipeline_board(store)
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            buttons: list[tuple[str, str]] = [
+                ("📋 Stages", "careers stages")]
+            for i, app in enumerate(store.list()[:15], 1):
+                buttons.append(
+                    (f"🚀 #{i} {app.company[:18]}",
+                     f"careers move {app.id}"))
+            return actionable(text, grid_layout([buttons]))
         if verb == "stages":
             return careers_surface.render_stages()
         if verb == "add":
@@ -1652,6 +1665,23 @@ class RuntimeSystemMixin:
                 (i for i in range(1, len(tokens))
                  if tokens[i].lower() in STAGES), None)
             if stage_at is None:
+                # A bare ref with no stage opens the app's action
+                # card: one button per stage (each the typed move
+                # for that stage) plus Remove — the board's Move
+                # buttons land here, and typed `/careers move <app>`
+                # gets the same card instead of a usage line.
+                app, _error = _resolve(rest) if rest else (None, None)
+                if app is not None:
+                    from ...social.chat.tgbot_buttons import actionable, grid_layout
+                    buttons = [
+                        (stage, f"careers move {app.id} {stage}")
+                        for stage in STAGES if stage != app.stage]
+                    buttons.append(
+                        ("🗑 Remove", f"careers remove {app.id}"))
+                    text = (f"**{app.company} — {app.role}** is at "
+                            f"**{app.stage}** — move it, or remove "
+                            "it:")
+                    return actionable(text, grid_layout([buttons]))
                 return ("usage: /careers move <app> <stage> [note] — "
                         f"stages: {', '.join(STAGES)}")
             ref = " ".join(tokens[:stage_at])
@@ -1810,7 +1840,17 @@ class RuntimeSystemMixin:
             return "\n".join(lines)
 
         if verb in ("", "list"):
-            return _board()
+            text = _board()
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            shown = run_sync(tracker.list_ideas(user, limit=100))[:15]
+            buttons: list[tuple[str, str]] = []
+            for pos in range(1, len(shown) + 1):
+                buttons.append((f"💡 #{pos}", f"ideas show {pos}"))
+                buttons.append(
+                    (f"🌱 Grow #{pos}", f"ideas develop {pos}"))
+            if buttons:
+                return actionable(text, grid_layout([buttons]))
+            return text
         if verb == "add":
             if not rest:
                 return ("usage: /ideas add <title> [| <detail>] — the "
@@ -1840,10 +1880,21 @@ class RuntimeSystemMixin:
                     + (("\n" + idea.description)
                        if idea.description else ""))
             if record is None:
-                return (head + "\n\nnot developed yet — /ideas develop "
+                body = (head + "\n\nnot developed yet — /ideas develop "
                         "grows it (expansion, connections, research, "
                         "a verdict)")
-            return head + "\n\n" + render_record(record)
+                label = "🌱 Develop it"
+            else:
+                body = head + "\n\n" + render_record(record)
+                label = "🌱 Develop again"
+            all_ideas = run_sync(tracker.list_ideas(user, limit=100))
+            pos = next((n for n, i in enumerate(all_ideas, start=1)
+                        if i.idea_id == idea.idea_id), None)
+            if pos is None:
+                return body
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            return actionable(body, grid_layout(
+                [[(label, f"ideas develop {pos}")]]))
         if verb == "develop":
             trigger = ""
             match = _re.search(r"\bwhen\s+(.+)$", rest,
@@ -2232,6 +2283,29 @@ class RuntimeSystemMixin:
         verb = parts[0].lower() if parts else "show"
         rest = parts[1].strip() if len(parts) > 1 else ""
 
+        def _render(day: str) -> Any:
+            """One day's record with its acts as buttons: Make,
+            Skip/Unskip (the day's own recorded state decides
+            which), Export, and the other day's view — each the
+            typed verb for the rendered day, date carried."""
+            text = render_day(self.context, day,
+                              tracker=self._goal_tracker(),
+                              artifact_store=self._artifact_store())
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            buttons: list[tuple[str, str]] = [
+                ("✍️ Make drafts", f"day make {day}")]
+            if store.skipped(day):
+                buttons.append(("▶️ Unskip", f"day unskip {day}"))
+            else:
+                buttons.append(
+                    ("⏭ Skip tonight", f"day skip {day}"))
+            buttons.append(("📎 Export", f"day export {day}"))
+            if day == today_key():
+                buttons.append(("🌅 Yesterday", "day yesterday"))
+            else:
+                buttons.append(("🌅 Today", "day"))
+            return actionable(text, grid_layout([buttons]))
+
         def _day_arg() -> str | None:
             if not rest:
                 return today_key()
@@ -2254,13 +2328,9 @@ class RuntimeSystemMixin:
             day = _day_arg()
             if day is None:
                 return "usage: /day show <YYYY-MM-DD>"
-            return render_day(self.context, day,
-                              tracker=self._goal_tracker(),
-                              artifact_store=self._artifact_store())
+            return _render(day)
         if verb == "yesterday":
-            return render_day(self.context, yesterday_key(),
-                              tracker=self._goal_tracker(),
-                              artifact_store=self._artifact_store())
+            return _render(yesterday_key())
         if verb in ("make", "derive"):
             day = _day_arg()
             if day is None:
@@ -2320,8 +2390,13 @@ class RuntimeSystemMixin:
         """
         from ...social.drafts import reviewable_drafts
         from ...social.series import (
-            KIND_DRAFT, KIND_POST, KIND_SHORT, SeriesStore,
-            render_calendar, stamp_draft)
+            KIND_DRAFT,
+            KIND_POST,
+            KIND_SHORT,
+            SeriesStore,
+            render_calendar,
+            stamp_draft,
+        )
 
         db = self.context.db
         queue = self._draft_queue()
@@ -2346,9 +2421,31 @@ class RuntimeSystemMixin:
         try:
             text = (tail or "").strip()
             low = text.lower()
+
+            def _series_buttons() -> list[tuple[str, str]]:
+                """One open button per series — the payload is the
+                typed open for that series; a name too long for
+                the callback budget is skipped, never shipped
+                broken (it stays reachable by typing)."""
+                from ...social.chat.tgbot_buttons import check_callback_data
+                out: list[tuple[str, str]] = []
+                for s in store.list_series():
+                    payload = f"calendar series {s['name']}"
+                    try:
+                        check_callback_data(payload)
+                    except ValueError:
+                        continue
+                    out.append((f"📚 {s['name']}", payload))
+                return out
+
             if not text or low == "list":
-                return render_calendar(db, queue, shorts=_shorts(),
-                                       store=store)
+                board = render_calendar(db, queue, shorts=_shorts(),
+                                        store=store)
+                buttons = _series_buttons()
+                if not buttons:
+                    return board
+                from ...social.chat.tgbot_buttons import actionable, grid_layout
+                return actionable(board, grid_layout([buttons]))
             if low == "series":
                 series = store.list_series()
                 if not series:
@@ -2362,7 +2459,12 @@ class RuntimeSystemMixin:
                     lines.append(
                         f"  • **{s['name']}**{obj} —"
                         f" {len(members)} piece(s)")
-                return "\n".join(lines)
+                buttons = _series_buttons()
+                if not buttons:
+                    return "\n".join(lines)
+                from ...social.chat.tgbot_buttons import actionable, grid_layout
+                return actionable("\n".join(lines),
+                                  grid_layout([buttons]))
             if low.startswith("series "):
                 name = text[len("series "):].strip()
                 s = _series_named(name)
@@ -2478,9 +2580,14 @@ class RuntimeSystemMixin:
         """
         from ..dayrecord import brain_llm_fn, today_key
         from ..repurpose import (
-            FORM_POST, FORM_SHORT_SCRIPT, FORM_THREAD,
-            day_source, posted_draft_sources, repurpose_source,
-            short_sources)
+            FORM_POST,
+            FORM_SHORT_SCRIPT,
+            FORM_THREAD,
+            day_source,
+            posted_draft_sources,
+            repurpose_source,
+            short_sources,
+        )
 
         db = self.context.db
         queue = self._draft_queue()
@@ -2540,7 +2647,28 @@ class RuntimeSystemMixin:
                              " post · every result lands on"
                              " /drafts for review — nothing posts"
                              " itself.")
-                return "\n".join(lines)
+                buttons: list[tuple[str, str]] = []
+                for i in range(1, len(posted) + 1):
+                    buttons.append(
+                        (f"🎬 Short #{i}", f"repurpose post {i} short"))
+                    buttons.append(
+                        (f"🧵 Thread #{i}",
+                         f"repurpose post {i} thread"))
+                for i in range(1, len(shorts) + 1):
+                    buttons.append(
+                        (f"📝 Post #{i}", f"repurpose short {i} post"))
+                if day_source(db, today_key()) is not None:
+                    buttons.append(
+                        ("📔 Day → short", "repurpose day short"))
+                    buttons.append(
+                        ("📔 Day → thread", "repurpose day thread"))
+                    buttons.append(
+                        ("📔 Day → post", "repurpose day post"))
+                if not buttons:
+                    return "\n".join(lines)
+                from ...social.chat.tgbot_buttons import actionable, grid_layout
+                return actionable("\n".join(lines),
+                                  grid_layout([buttons]))
             parts = text.split()
             head = parts[0].lower()
             if head == "post" and len(parts) == 3:
@@ -2647,7 +2775,19 @@ class RuntimeSystemMixin:
                     truth = platform_truth(manager.adapters)
                 except Exception:  # noqa: BLE001 - board stands alone
                     truth = None
-                return render_board(store, truth=truth)
+                text = render_board(store, truth=truth)
+                from ...social.chat.tgbot_buttons import actionable, grid_layout
+                buttons: list[tuple[str, str]] = []
+                for idx in range(1, min(len(items), 10) + 1):
+                    buttons.append((f"👁 {idx}", f"engage show {idx}"))
+                    buttons.append(
+                        (f"✍️ {idx}", f"engage reply {idx}"))
+                    buttons.append(
+                        (f"🙈 {idx}", f"engage ignore {idx}"))
+                    buttons.append((f"✅ {idx}", f"engage done {idx}"))
+                if buttons:
+                    return actionable(text, grid_layout([buttons]))
+                return text
 
             if verb in ("show", "reply", "ignore", "done"):
                 if not rest:
@@ -2707,7 +2847,7 @@ class RuntimeSystemMixin:
         finally:
             queue.close()
 
-    def _control_cases(self, tail: str) -> str:
+    def _control_cases(self, tail: str) -> Any:
         """/cases — outcome stewardship, owner surface (doc 15 P6).
 
         /cases              — the board: cases needing attention
@@ -2770,7 +2910,23 @@ class RuntimeSystemMixin:
                 case, store.receipts(case.id), contract)
 
         if verb in ("list", ""):
-            return render_case_board(store)
+            text = render_case_board(store)
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            from ..outcome_steward import ack_changed, ack_snapshot
+            buttons: list[tuple[str, str]] = []
+            for idx, case in enumerate(case_board(store)[:10], 1):
+                buttons.append((f"🔍 {idx}", f"cases {idx}"))
+                quiet = (ack_snapshot(case) is not None
+                         and not ack_changed(case))
+                if quiet:
+                    continue
+                if case.state in ("open", "investigating"):
+                    buttons.append(
+                        (f"🔄 Verify {idx}", f"cases verify {idx}"))
+                buttons.append((f"👁 Ack {idx}", f"cases ack {idx}"))
+            if buttons:
+                return actionable(text, grid_layout([buttons]))
+            return text
         if verb == "show" or verb.isdigit():
             case, err = resolve_ordinal(rest if verb == "show"
                                         else verb)
@@ -2872,7 +3028,7 @@ class RuntimeSystemMixin:
             journal=journal, immune_states=immune_states,
             antibody_stores=antibody_stores)
 
-    def _control_runs(self, tail: str) -> str:
+    def _control_runs(self, tail: str) -> Any:
         """/runs — the live-work ticket board, owner surface
         (public-surface fix 5; doc 18 P2 + doc 20 P1 projections,
         composed by agents/ticket_board.py).
@@ -2930,7 +3086,20 @@ class RuntimeSystemMixin:
             return rows[n - 1], ""
 
         if verb in ("list", ""):
-            return render_board(board)
+            text = render_board(board)
+            if not rows:
+                return text
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            buttons: list[tuple[str, str]] = [
+                ("📊 Coverage", "runs coverage")]
+            for row in [r for r in rows if r["live"]][:10]:
+                buttons.append(
+                    (f"🔍 #{row['ordinal']}", f"runs {row['ordinal']}"))
+                if row["family"] == "run":
+                    buttons.append(
+                        (f"⛔ Stop #{row['ordinal']}",
+                         f"runs stop {row['ordinal']}"))
+            return actionable(text, grid_layout([buttons]))
         if verb == "coverage":
             return render_coverage(board)
         if verb == "show" or verb.isdigit():
@@ -3000,7 +3169,7 @@ class RuntimeSystemMixin:
                 "coverage — <n> is the number from /runs")
 
     # ── world model: /worldmodel ─────────────────────────────────────
-    def _control_worldmodel(self, tail: str) -> str:
+    def _control_worldmodel(self, tail: str) -> Any:
         """/worldmodel — the world model board, owner surface (the
         readers pass, 2026-11-10): the provenance-tagged, versioned
         facts the system holds about its codebase, runtime and work
@@ -3028,7 +3197,29 @@ class RuntimeSystemMixin:
         topic = (tail or "").strip()
         if topic:
             return render_topic(world, topic)
-        return render_world(world)
+        text = render_world(world)
+        facts = world.facts()
+        if not facts:
+            return text
+        # One drill-down button per area the board itself shows —
+        # the same grouping render_world derives (key prefix, or
+        # "general"). The topic view is the board's only operation;
+        # an area whose name cannot fit the callback budget stays
+        # reachable by typing, never shipped broken.
+        areas = sorted({fact.key.split(":", 1)[0] if ":" in fact.key
+                        else "general" for fact in facts})
+        from ...social.chat.tgbot_buttons import actionable, check_callback_data, grid_layout
+        buttons: list[tuple[str, str]] = []
+        for area in areas:
+            payload = f"worldmodel {area}"
+            try:
+                check_callback_data(payload)
+            except ValueError:
+                continue
+            buttons.append((f"🌍 {area}", payload))
+        if not buttons:
+            return text
+        return actionable(text, grid_layout([buttons]))
 
     # ── craft cooperative: /craft ────────────────────────────────────
     def _craft_stores(self) -> tuple[Any, Any]:
@@ -3047,7 +3238,7 @@ class RuntimeSystemMixin:
             grants = CompetenceGrantStore()
         return library, grants
 
-    def _control_craft(self, tail: str) -> str:
+    def _control_craft(self, tail: str) -> Any:
         """/craft — the craft cooperative board (docs 22+23, the
         chat surface over the shipped craft machinery).
 
@@ -3102,8 +3293,22 @@ class RuntimeSystemMixin:
         library, grants = self._craft_stores()
         db = getattr(self.context, "db", None)
         if verb in ("", "board", "list"):
-            return render_board(coverage_report(
-                db, library=library, grants=grants))
+            report = coverage_report(db, library=library,
+                                     grants=grants)
+            text = render_board(report)
+            if not report.domains:
+                return text
+            from ...social.chat.tgbot_buttons import actionable, check_callback_data, grid_layout
+            buttons: list[tuple[str, str]] = [
+                ("📊 Coverage", "craft coverage")]
+            for row in report.domains[:15]:
+                payload = f"craft status {row.domain}"
+                try:
+                    check_callback_data(payload)
+                except ValueError:
+                    continue
+                buttons.append((f"🔧 {row.title[:18]}", payload))
+            return actionable(text, grid_layout([buttons]))
         if verb == "coverage":
             return render_coverage(coverage_report(
                 db, library=library, grants=grants))
@@ -3148,7 +3353,7 @@ class RuntimeSystemMixin:
                 or os.path.expanduser("~/.nomorals"))
         return GlossaryStore(db, home)
 
-    def _control_glossary(self, tail: str) -> str:
+    def _control_glossary(self, tail: str) -> Any:
         """/glossary — the translation glossary board (docs 19+21
         T2's management surface over the shipped store).
 
@@ -3194,7 +3399,19 @@ class RuntimeSystemMixin:
                  "del <glossary> [scope] <term> — scope is one of "
                  "owner, domain, global")
         if verb in ("", "board"):
-            return self._glossary_board(store)
+            text = self._glossary_board(store)
+            from ...social.chat.tgbot_buttons import actionable, check_callback_data, grid_layout
+            buttons: list[tuple[str, str]] = []
+            for gid in store.glossary_ids():
+                payload = f"glossary list {gid}"
+                try:
+                    check_callback_data(payload)
+                except ValueError:
+                    continue
+                buttons.append((f"📖 {gid}", payload))
+            if buttons:
+                return actionable(text, grid_layout([buttons]))
+            return text
         if verb == "list":
             return self._glossary_list(store, rest)
         if verb == "set":
@@ -3236,7 +3453,7 @@ class RuntimeSystemMixin:
             + " in all. /glossary list shows every entry.")
         return "\n".join(lines)
 
-    def _glossary_list(self, store: Any, rest: str) -> str:
+    def _glossary_list(self, store: Any, rest: str) -> Any:
         from ...llm.glossary import SCOPES
 
         want_glossary = ""
@@ -3289,7 +3506,34 @@ class RuntimeSystemMixin:
                             f"{row.target_lang or 'any'})")
                 lines.append(
                     f"  {row.source_term} → {row.target_term}{pair}")
-        return "\n".join(lines)
+        # One Del button per entry the del verb can actually
+        # remove: any-pair rows only (the verb removes the
+        # any-pair entry; pair-specific rows answer in words and
+        # get no button), payload carrying glossary + scope +
+        # term, budget-checked — an over-budget term stays
+        # reachable by typing, never shipped broken.
+        from ...social.chat.tgbot_buttons import actionable, check_callback_data, grid_layout
+        buttons: list[tuple[str, str]] = []
+        for gid, scope, rows in groups:
+            for row in rows:
+                if row.source_lang or row.target_lang:
+                    continue
+                payload = (f"glossary del {gid} {scope} "
+                           f"{row.source_term}")
+                try:
+                    check_callback_data(payload)
+                except ValueError:
+                    continue
+                buttons.append(
+                    (f"🗑 {row.source_term[:16]}", payload))
+                if len(buttons) >= 12:
+                    break
+            if len(buttons) >= 12:
+                break
+        text = "\n".join(lines)
+        if not buttons:
+            return text
+        return actionable(text, grid_layout([buttons]))
 
     def _glossary_set(self, store: Any, rest: str) -> str:
         from ...llm.glossary import SCOPES
@@ -3947,6 +4191,7 @@ class RuntimeSystemMixin:
         when = start.get("dateTime") or start.get("date") or ""
         try:
             from datetime import datetime
+
             from ..weather import _zone
             dt = datetime.fromisoformat(str(when).replace("Z", "+00:00"))
             if dt.tzinfo is not None:
@@ -3999,6 +4244,7 @@ class RuntimeSystemMixin:
     def _gcal_parse_time(raw: str, tz_name: str):
         """Parse "YYYY-MM-DD [HH:MM]"; naive → owner's timezone."""
         from datetime import datetime
+
         from ..weather import _zone
         raw = (raw or "").strip()
         dt = None

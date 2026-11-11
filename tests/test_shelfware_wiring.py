@@ -43,8 +43,14 @@ from nomorals.storage.db import Database
 from nomorals.tools.registry import ToolRegistry
 
 
+def _text(reply):
+    """A board render's text — boards return actionable replies
+    since button lane 5; read the text half here."""
+    return reply.text if hasattr(reply, "text") else reply
+
+
 def _ordinal_of(board_text: str, marker: str) -> int:
-    for line in board_text.splitlines():
+    for line in _text(board_text).splitlines():
         if marker in line:
             head = line.split(".", 1)[0].strip()
             if head.isdigit():
@@ -91,7 +97,7 @@ class RunsSurfaceTests(unittest.TestCase):
     # ── the board ────────────────────────────────────────────────
 
     def test_board_renders_every_family_through_the_handler(self):
-        board = self.runtime._control_runs("")
+        board = _text(self.runtime._control_runs(""))
         self.assertIn("wire the shelfware cluster", board)
         self.assertIn("board-keeper", board)
         self.assertIn("[run · contract]", board)
@@ -184,7 +190,7 @@ class RunsSurfaceTests(unittest.TestCase):
         deadline = time.time() + 10
         board = ""
         while time.time() < deadline:
-            board = self.runtime._control_runs("")
+            board = _text(self.runtime._control_runs(""))
             if "read the page" in board:
                 break
             time.sleep(0.05)

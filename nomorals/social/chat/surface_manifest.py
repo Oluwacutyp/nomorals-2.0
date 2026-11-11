@@ -828,6 +828,389 @@ SURFACES: tuple[Surface, ...] = (
         tests=("tests/test_ws3p2_draft_review.py",
                "tests/test_draft_button_taps.py"),
     ),
+    # ── button-fix lane 5: the thirteen boards of the audit's
+    # §4 missing-buttons census. Each board's buttons carry the
+    # typed verb for the same act (tap state == typed state,
+    # harness-pinned in tests/test_board_button_taps.py); boards
+    # (or views) whose honest interaction is display-only are
+    # recorded in each entry's operation text, not buttoned.
+    Surface(
+        id="careers",
+        title="Career pipeline board + per-application move card",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_careers",
+        card_type="board (styled text with action buttons)",
+        actions=(
+            ActionRef("careers.stages", "navigate", "control:careers",
+                      "careers stages"),
+            ActionRef("careers.open-move", "navigate",
+                      "control:careers", "careers move app_0123456789ab"),
+            ActionRef("careers.move", "callback", "control:careers",
+                      "careers move app_0123456789ab applied"),
+            ActionRef("careers.remove", "callback", "control:careers",
+                      "careers remove app_0123456789ab"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="a board tap opens the application's move card "
+                  "(one button per stage + Remove); a stage tap runs "
+                  "the typed /careers move for that application; "
+                  "note/next/attach stay typed (free-text acts)",
+        receipt=_RECEIPT,
+        fallback="every button payload is the typed command itself "
+                 "(/careers move <app> <stage>); on WhatsApp a "
+                 ">3-button board goes out in the bridges' list form",
+        tests=("tests/test_careers_pipeline.py",
+               "tests/test_board_button_taps.py"),
+    ),
+    Surface(
+        id="ideas",
+        title="Ideas board + idea detail (develop cell)",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_ideas",
+        card_type="board (styled text with action buttons)",
+        actions=(
+            ActionRef("ideas.show", "navigate", "control:ideas",
+                      "ideas show 1"),
+            ActionRef("ideas.develop", "callback", "control:ideas",
+                      "ideas develop 1"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="a board tap opens one idea (ideas show <n>) or "
+                  "grows it (ideas develop <n> — the development "
+                  "cell's real run); the detail view carries the "
+                  "same Develop act",
+        receipt=_RECEIPT,
+        fallback="every button payload is the typed command itself; "
+                 "on WhatsApp a >3-button board goes out in the "
+                 "bridges' list form",
+        tests=("tests/test_ws3p5_idea_development.py",
+               "tests/test_board_button_taps.py"),
+    ),
+    Surface(
+        id="day",
+        title="Day record view (make / skip / export)",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_day",
+        card_type="board (styled text with action buttons)",
+        actions=(
+            ActionRef("day.make", "callback", "control:day",
+                      "day make 2026-11-11"),
+            ActionRef("day.skip", "callback", "control:day",
+                      "day skip 2026-11-11"),
+            ActionRef("day.unskip", "callback", "control:day",
+                      "day unskip 2026-11-11"),
+            ActionRef("day.export", "callback", "control:day",
+                      "day export 2026-11-11"),
+            ActionRef("day.yesterday", "navigate", "control:day",
+                      "day yesterday"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="the rendered day's acts ride the view, dated: "
+                  "make derives its drafts, skip/unskip follows the "
+                  "day's own recorded skip state, export files it; "
+                  "tell stays typed (free text)",
+        receipt=_RECEIPT,
+        fallback="every button payload is the typed command itself "
+                 "(/day make|skip|unskip|export <date>)",
+        tests=("tests/test_ws3p4_dayrecord.py",
+               "tests/test_board_button_taps.py"),
+    ),
+    Surface(
+        id="calendar",
+        title="Content calendar board + series list",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_calendar",
+        card_type="board (styled text with navigation buttons)",
+        actions=(
+            ActionRef("calendar.open-series", "navigate",
+                      "control:calendar", "calendar series Alpha"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="one open button per series on the board and on "
+                  "the series list (a series name too long for the "
+                  "callback budget is skipped, never shipped "
+                  "broken); the series detail view is display-only "
+                  "by adjudication — attach stays typed (it names "
+                  "pieces by numbers from other boards)",
+        receipt=_RECEIPT,
+        fallback="the button payload is the typed command itself "
+                 "(/calendar series <name>)",
+        tests=("tests/test_ws3p6_content_cell.py",
+               "tests/test_board_button_taps.py"),
+    ),
+    Surface(
+        id="repurpose",
+        title="Repurpose board (one asset, other forms)",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_repurpose",
+        card_type="board (styled text with action buttons)",
+        actions=(
+            ActionRef("repurpose.post-short", "callback",
+                      "control:repurpose", "repurpose post 1 short"),
+            ActionRef("repurpose.post-thread", "callback",
+                      "control:repurpose", "repurpose post 1 thread"),
+            ActionRef("repurpose.short-post", "callback",
+                      "control:repurpose", "repurpose short 1 post"),
+            ActionRef("repurpose.day", "callback",
+                      "control:repurpose", "repurpose day short"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="per-source form buttons run the typed "
+                  "repurposing for that source; every result lands "
+                  "as a fresh draft on /drafts — a tap posts "
+                  "nothing, exactly like the typed verb",
+        receipt=_RECEIPT,
+        fallback="every button payload is the typed command itself "
+                 "(/repurpose post|short|day …)",
+        tests=("tests/test_ws3p7_repurpose_desk_typography.py",
+               "tests/test_board_button_taps.py"),
+    ),
+    Surface(
+        id="engage",
+        title="Engagement board (replies & comments triage)",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_engage",
+        card_type="board (styled text with action buttons)",
+        actions=(
+            ActionRef("engage.show", "navigate", "control:engage",
+                      "engage show 1"),
+            ActionRef("engage.reply", "callback", "control:engage",
+                      "engage reply 1"),
+            ActionRef("engage.ignore", "callback", "control:engage",
+                      "engage ignore 1"),
+            ActionRef("engage.done", "callback", "control:engage",
+                      "engage done 1"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="the board's four per-item acts as buttons for "
+                  "the first ten items (show triages, reply drafts "
+                  "onto /drafts, ignore/done settle the item) — "
+                  "each the typed verb for that board number",
+        receipt=_RECEIPT,
+        fallback="every button payload is the typed command itself "
+                 "(/engage show|reply|ignore|done <n>)",
+        tests=("tests/test_ws3p8_engagement_loop.py",
+               "tests/test_board_button_taps.py"),
+    ),
+    Surface(
+        id="cases",
+        title="Outcome cases board (verify / ack)",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_cases",
+        card_type="board (styled text with action buttons)",
+        actions=(
+            ActionRef("cases.open", "navigate", "control:cases",
+                      "cases 1"),
+            ActionRef("cases.verify", "callback", "control:cases",
+                      "cases verify 1"),
+            ActionRef("cases.ack", "callback", "control:cases",
+                      "cases ack 1"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="per-case buttons follow the board's own "
+                  "sections: open cases offer Verify + Ack, closed "
+                  "unacknowledged offer Ack, acknowledged-quiet "
+                  "cases offer Open only — a settled case never "
+                  "gets a Verify button (verify on it is a refusal)",
+        receipt=_RECEIPT,
+        fallback="every button payload is the typed command itself "
+                 "(/cases <n>|verify <n>|ack <n>)",
+        tests=("tests/test_board_button_taps.py",),
+    ),
+    Surface(
+        id="runs",
+        title="Live-work ticket board (stop / coverage)",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_runs",
+        card_type="board (styled text with action buttons)",
+        actions=(
+            ActionRef("runs.coverage", "navigate", "control:runs",
+                      "runs coverage"),
+            ActionRef("runs.open", "navigate", "control:runs",
+                      "runs 1"),
+            ActionRef("runs.stop", "callback", "control:runs",
+                      "runs stop 1"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="live tickets offer Open, and run-family tickets "
+                  "offer Stop through the one cancellation facade "
+                  "(healing tickets get no Stop — they close "
+                  "through the immune loop, and the typed verb "
+                  "refuses); settled tickets are record display "
+                  "and carry no buttons by adjudication",
+        receipt=_RECEIPT,
+        fallback="every button payload is the typed command itself "
+                 "(/runs <n>|stop <n>|coverage)",
+        tests=("tests/test_shelfware_wiring.py",
+               "tests/test_board_button_taps.py"),
+    ),
+    Surface(
+        id="worldmodel",
+        title="World model board (per-area drill-down)",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_worldmodel",
+        card_type="board (styled text with navigation buttons)",
+        actions=(
+            ActionRef("worldmodel.topic", "navigate",
+                      "control:worldmodel", "worldmodel runtime"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="the board is an index of areas: one drill-down "
+                  "button per area the board itself shows, opening "
+                  "that area's facts in full; the model holds no "
+                  "owner acts, so nothing else is buttoned — the "
+                  "empty map carries no buttons",
+        receipt=_RECEIPT,
+        fallback="the button payload is the typed command itself "
+                 "(/worldmodel <topic>)",
+        tests=("tests/test_worldmodel_readers.py",
+               "tests/test_board_button_taps.py"),
+    ),
+    Surface(
+        id="craft",
+        title="Craft cooperative board (coverage / status)",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_craft",
+        card_type="board (styled text with navigation buttons)",
+        actions=(
+            ActionRef("craft.coverage", "navigate", "control:craft",
+                      "craft coverage"),
+            ActionRef("craft.status", "navigate", "control:craft",
+                      "craft status software"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="Coverage plus one status button per domain the "
+                  "board lists (the field's claim read from its "
+                  "records); intake stays typed (it names a goal "
+                  "in free text) and execution stays with the "
+                  "surfaces that run work",
+        receipt=_RECEIPT,
+        fallback="every button payload is the typed command itself "
+                 "(/craft coverage|status <field>)",
+        tests=("tests/test_craft_surface.py",
+               "tests/test_board_button_taps.py"),
+    ),
+    Surface(
+        id="glossary",
+        title="Translation glossary board + entry list",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_glossary",
+        card_type="board (styled text with action buttons)",
+        actions=(
+            ActionRef("glossary.list", "navigate", "control:glossary",
+                      "glossary list legal"),
+            ActionRef("glossary.del", "callback", "control:glossary",
+                      "glossary del legal owner bank"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="the board opens each glossary's entries; the "
+                  "entry list carries one Del per removable entry "
+                  "(any-pair rows only — pair-specific rows get "
+                  "none, the verb answers those in words); set "
+                  "stays typed (term = translation is free text)",
+        receipt=_RECEIPT,
+        fallback="every button payload is the typed command itself "
+                 "(/glossary list|del …); an over-budget term is "
+                 "skipped, never shipped broken",
+        tests=("tests/test_glossary_surface.py",
+               "tests/test_board_button_taps.py"),
+    ),
+    Surface(
+        id="notify-decisions",
+        title="Notification decisions board (why chain)",
+        producer="nomorals.agents.partner.runtime_schedule:"
+                 "RuntimeScheduleMixin._control_notify",
+        card_type="board (styled text with navigation buttons)",
+        actions=(
+            ActionRef("notify.why-decision", "navigate",
+                      "control:notify", "notify why decision 1"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="one Why button per decisions-board row, walking "
+                  "that decision's whole chain (producer, fact, "
+                  "decision, routing, release checks, ack) — the "
+                  "board's only operation; the row numbering is "
+                  "the journal's newest-first order, shared with "
+                  "/notify why decision <n>",
+        receipt=_RECEIPT,
+        fallback="the button payload is the typed command itself "
+                 "(/notify why decision <n>)",
+        tests=("tests/test_board_button_taps.py",),
+    ),
+    Surface(
+        id="explore",
+        title="Exploration board + niches (adopt / dismiss)",
+        producer="nomorals.agents.partner.runtime_media:"
+                 "RuntimeMediaMixin._control_explore",
+        card_type="board (styled text with action buttons)",
+        actions=(
+            ActionRef("explore.run", "callback", "control:explore",
+                      "explore run"),
+            ActionRef("explore.trends", "navigate", "control:explore",
+                      "explore trends"),
+            ActionRef("explore.candidates", "navigate",
+                      "control:explore", "explore candidates"),
+            ActionRef("explore.niches", "navigate", "control:explore",
+                      "explore niches"),
+            ActionRef("explore.adopt", "callback", "control:explore",
+                      "explore adopt 1"),
+            ActionRef("explore.dismiss", "callback", "control:explore",
+                      "explore dismiss 1"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="the board carries its four real moves (run a "
+                  "sweep now, trends, candidates, niches); the "
+                  "niches view carries the owner's two acts per "
+                  "proposal (adopt flips the overlay + scaffolds a "
+                  "draft plugin; dismiss records the refusal) — "
+                  "reversing the surface's earlier text-complete "
+                  "stance as an explicit decision",
+        receipt=_RECEIPT,
+        fallback="every button payload is the typed command itself "
+                 "(/explore run|trends|candidates|niches|adopt|"
+                 "dismiss …)",
+        tests=("tests/test_ws4p3_explore_autonomy.py",
+               "tests/test_board_button_taps.py"),
+    ),
 )
 
 
