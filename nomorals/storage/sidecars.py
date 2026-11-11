@@ -541,6 +541,40 @@ _register(_S(
         "follows the domain's disposition."),
 ))
 
+_register(_S(
+    name="maps-gazetteer", verdict="pinned", kind="sqlite-file",
+    modules=("maps/gazetteer.py",),
+    tables=("gazetteer_packs", "gazetteer_entries",
+            "gazetteer_staging", "gazetteer_staging_corrupt",
+            "gazetteer_build_state"),
+    reason=(
+        "the gazetteer index (gazetteer.sqlite3) is derived data "
+        "by design: it lives IN the packs directory, is built "
+        "from the pack tiles by `nm maps index`, is keyed per "
+        "pack by the pack digest, and is disposable — a corrupt "
+        "index file is deleted and rebuilt, because the packs "
+        "are the source of truth (Atlas doctrine: packs are the "
+        "basemap, local-first). No owner data lives here — "
+        "marks live in maps/marks.json and the map receipt "
+        "store. Porting a rebuildable index into the document "
+        "store would fork it from the packs it indexes and "
+        "strand it when the packs move."),
+))
+
+_register(_S(
+    name="maps-routing-graphs", verdict="pinned", kind="sqlite-file",
+    modules=("maps/routing.py",),
+    tables=("routing_graphs", "routing_nodes", "routing_arcs"),
+    reason=(
+        "the routing graph store (routing.sqlite3) is the same "
+        "Atlas shape as the gazetteer index: a disposable cache "
+        "of road graphs extracted from pack tiles, living IN "
+        "the packs directory, keyed by (pack digest, corridor) "
+        "cache keys, and rebuilt from the packs on demand. It "
+        "holds no owner data and no state the packs cannot "
+        "reproduce."),
+))
+
 # ── classified non-stores ─────────────────────────────────────────────────
 
 _register(_S(
@@ -554,13 +588,25 @@ _register(_S(
 
 _register(_S(
     name="sidecar-readers", verdict="reader", kind="none",
-    modules=("search/sources.py", "tools/vision.py"),
+    modules=("search/sources.py", "tools/vision.py",
+             "agents/healing_ticket.py", "agents/repair_pipeline.py",
+             "goals/providers.py", "maps/mbtiles.py"),
     reason=(
         "read-only consumers of other stores' files, owning no "
-        "state: federated search reads the books library file, the "
-        "vision tool resolves inbox:<id> references from the inbox "
-        "file. Their reads follow the target store's disposition "
-        "(books-library / workspace-inbox below)."),
+        "state of their own: federated search reads the books "
+        "library file, the vision tool resolves inbox:<id> "
+        "references from the inbox file, the healing ticket and "
+        "the repair pipeline read the pinned incident journal's "
+        "file read-only (observation writes nothing — the ticket "
+        "is an envelope over the journal, never a parallel "
+        "store), the goals provider reads the health timeline's "
+        "file read-only (health is L5, above goals' L4, so the "
+        "store cannot be imported; its DDL mirror is pinned by "
+        "the goals P6 suite), and the mbtiles reader streams "
+        "builder-emitted pack artifacts — an interchange file, "
+        "converted into packs, never a store. Their reads follow "
+        "the target store's disposition (books-library / "
+        "workspace-inbox / incidents)."),
 ))
 
 # ── Database-class hybrids (own Database instance on an own file) ─────────
@@ -642,6 +688,12 @@ _residue("audio-fingerprints", "audio/fingerprint.py", ("hashes", "tracks"),
          "audio fingerprint hashes per track in fingerprints.db; "
          "hash rows are lookup-keyed blobs, document-shaped but "
          "bulk-binary in character.")
+_residue("audio-melodic", "audio/melodic.py", ("works",),
+         "the melody catalog (SongRecon class-3): enrolled works "
+         "— segmented melody and chroma per work — in melodies.db "
+         "under the audio home, a deliberate sibling of the "
+         "fingerprint catalog (class-1), kept separate so a work "
+         "can never masquerade as a recording.")
 _residue("audio-overviews", "audio/overview.py", ("overviews",),
          "generated audio overviews in overviews.db.")
 _residue("audio-keyterms", "audio/pipeline.py", ("keyterms",),
@@ -679,6 +731,15 @@ _residue("identity-documents", "identity/documents.py",
          ("identity_documents",),
          "identity document registry — sensitive records; its port "
          "pass carries the vault/encryption review with it.")
+_residue("immune-corpus", "immune/corpus.py", (),
+         "the self-corpus: Devon's harvested self-evidence "
+         "(verified-fix and owner-directed-receipt exemplars, "
+         "each with provenance and the corpus version that "
+         "admitted it) as one versioned JSON file in the settings "
+         "home's data/ dir, written atomically (tmp+replace) by "
+         "CorpusStore. Its only sqlite touch is a read-only "
+         "harvest of the pinned incident journal's verified "
+         "fixes.", kind="json-file")
 _residue("calendar-integration", "integrations/calendar_integration.py",
          ("sync_cursors",),
          "calendar sync cursors: small, but a cursor is only valid "
