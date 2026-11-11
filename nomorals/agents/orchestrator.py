@@ -483,6 +483,113 @@ class MasterOrchestrator:
         plan.steps = repaired[: self.max_steps]
         return plan
 
+    # ── bench mode (Lane 4: planner-only) ─────────────────────────────────
+    def bench_plan(
+        self,
+        goal: str,
+        monitor: Any,
+        *,
+        plan: Plan | None = None,
+        base_revision: str = "",
+        now: float | None = None,
+    ) -> dict[str, Any]:
+        """Bench mode: decompose a goal into BENCH TASKS and
+        register them on a bench run — and nothing more.
+
+        The orchestrator is PLANNER-ONLY here (multi-cursor
+        bench dossier, Wall 1): its executor, handlers,
+        checkpoints and mid-flight re-evaluation do not run,
+        because execution state for bench work is owned by the
+        bench monitor alone — claims, staging, verification and
+        promotion are the monitor's organs (agents/bench). A
+        re-evaluation of a bench plan is a proposal to the
+        monitor between promotions (a new plan generation), never
+        this class mutating a live run.
+
+        Each plan step becomes one bench task: the step's goal
+        is the task's instructions, its declared ``writes``
+        payload is the task's write-set, and its ``acceptance``
+        payload is the task's acceptance. A step that declares
+        no write-set or no acceptance is SKIPPED with the reason
+        recorded — the monitor refuses unfenceable specs and
+        this adapter never invents either field. A step whose
+        plan dependency was skipped is skipped with it. The run
+        also registers as a mission (bench wiring), so the
+        owner's surfaces read it like any other long work.
+
+        Returns ``{"run_id", "mission_id", "tasks", "skipped",
+        "plan_error"}`` — task keys map to bench task ids; the
+        bench work itself has not started."""
+        from .bench.model import TaskSpec
+        from .bench.wiring import register_run_as_mission
+
+        plan = plan if plan is not None else self.plan(goal)
+        run = monitor.open_run(goal, base_revision, now=now)
+        run_id = run["id"]
+        registered: dict[str, str] = {}
+        skipped: list[dict[str, str]] = []
+        skipped_names: set[str] = set()
+        remaining = list(plan.steps)
+        while remaining:
+            progressed = False
+            for step in list(remaining):
+                if any(dep in skipped_names
+                       for dep in step.depends_on):
+                    skipped.append({
+                        "step": step.name,
+                        "reason": "dependency_not_registered"})
+                    skipped_names.add(step.name)
+                    remaining.remove(step)
+                    progressed = True
+                    continue
+                if any(dep not in registered
+                       and dep in {s.name for s in plan.steps}
+                       for dep in step.depends_on):
+                    continue  # a plan dep registers first
+                remaining.remove(step)
+                progressed = True
+                writes = step.payload.get("writes")
+                acceptance = step.payload.get("acceptance")
+                if not writes:
+                    skipped.append({"step": step.name,
+                                    "reason": "no_write_set"})
+                    skipped_names.add(step.name)
+                    continue
+                if not acceptance:
+                    skipped.append({"step": step.name,
+                                    "reason": "no_acceptance"})
+                    skipped_names.add(step.name)
+                    continue
+                spec = TaskSpec(
+                    instructions=step.goal,
+                    acceptance=tuple(str(a) for a in acceptance),
+                    role=str(step.role or "coder"),
+                    write_set=tuple(str(w) for w in writes),
+                    deps=tuple(dep for dep in step.depends_on
+                               if dep in registered))
+                task = monitor.register_task(run_id, step.name,
+                                             spec, now=now)
+                registered[step.name] = task["id"]
+            if not progressed:
+                for step in remaining:
+                    skipped.append({
+                        "step": step.name,
+                        "reason": "dependency_not_registered"})
+                break
+        monitor.store.append_event(
+            run_id, "", "plan_registered", "orchestrator",
+            detail={"goal": goal,
+                    "tasks": sorted(registered),
+                    "skipped": skipped,
+                    "planner_model": plan.model},
+            now=now)
+        mission_id = register_run_as_mission(monitor.db, run,
+                                             now=now)
+        return {"run_id": run_id, "mission_id": mission_id,
+                "tasks": registered, "skipped": skipped,
+                "plan_error": str(getattr(plan, "plan_error", "")
+                                  or "")}
+
     # ── execution ────────────────────────────────────────────────────────────
     def run(
         self,

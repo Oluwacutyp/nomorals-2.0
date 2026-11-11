@@ -90,6 +90,7 @@ __all__ = [
     "normalize_entry",
     "write_sets_overlap",
     "overlapping_entries",
+    "entry_within",
 ]
 
 # ── run + task states ─────────────────────────────────────────────
@@ -141,6 +142,10 @@ EVENT_KINDS = frozenset({
     # Lane 3 — the verifier cursor.
     "verification_started", "verdict_recorded", "task_returned",
     "verification_escalated", "verification_timeout",
+    # Lane 4 — contracts, swarm spawning, planner registration.
+    "contract_defined", "contract_challenged", "contract_revised",
+    "task_suspended", "task_rebased", "task_spawned",
+    "plan_registered",
 })
 
 #: The verdict vocabulary — the delegation claim verdicts, reused
@@ -268,6 +273,32 @@ def write_sets_overlap(mine: Sequence[str],
                        theirs: Sequence[str]) -> bool:
     """True when two declared write-sets can touch the same file."""
     return bool(overlapping_entries(mine, theirs))
+
+
+def entry_within(entry: str, write_set: Sequence[str]) -> bool:
+    """True when ``entry`` is fully covered by ``write_set`` —
+    the swarm-spawning containment rule (Lane 4): a child task's
+    write-set entry is within its parent's fenced write-set when
+    some parent entry equals it (a file), covers it (a subtree
+    the entry sits under), or claims the whole tree. A subtree
+    child is within only a subtree (or all) parent that contains
+    it — a single file never contains a subtree."""
+    kind, val = normalize_entry(entry)
+    for parent in write_set:
+        pkind, pval = normalize_entry(parent)
+        if pkind == "all":
+            return True
+        if kind == "all":
+            continue
+        if pkind == "file":
+            if kind == "file" and val == pval:
+                return True
+            continue
+        # The parent claims a subtree: it contains an equal or
+        # deeper file/subtree entry.
+        if val == pval or val.startswith(pval + "/"):
+            return True
+    return False
 
 
 # ── delegation mapping ────────────────────────────────────────────
@@ -459,6 +490,19 @@ class BenchStore:
         row = self.db.query_one(
             "SELECT * FROM bench_runs WHERE id = ?", (str(run_id),))
         return _run_dict(row) if row is not None else None
+
+    def list_runs(self, state: str = "") -> list[dict[str, Any]]:
+        """Every run on this store, oldest first, optionally
+        filtered by state — the verifier pool's and the wiring
+        cycle's population (Lane 4)."""
+        if state:
+            rows = self.db.query(
+                "SELECT * FROM bench_runs WHERE state = ?"
+                " ORDER BY created_at ASC", (str(state),))
+        else:
+            rows = self.db.query(
+                "SELECT * FROM bench_runs ORDER BY created_at ASC")
+        return [_run_dict(row) for row in rows]
 
     def close_run(self, run_id: str,
                   *, now: float | None = None) -> dict[str, Any] | None:

@@ -27,25 +27,42 @@ never see each other's unfinished work.
   nothing promotes without a ``supported`` verdict for the
   current candidate ref, and a verifier can never verify its
   own work (the delegation store's independence law).
-
-Orchestrator/surface wiring is Lane 4.
+- :mod:`.contracts` — Lane 4: contract-first decomposition.
+  A contract is a bench task whose promoted artifact is the
+  shared interface; generations publish on promotion, tasks
+  bind to a generation, a challenge suspends the bound tasks
+  and reopens the contract, and the revision rebases every
+  binding onto the new generation.
+- :mod:`.pool` — Lane 4: the verifier pool — assignment of
+  submitted tasks to verifier cursors that are never their
+  worker, on a JobRegistry cadence.
+- :mod:`.wiring` — Lane 4: the composed bench
+  (:func:`build_bench` / :class:`BenchRuntime`) and the
+  mission registration that puts bench runs on the owner's
+  surfaces. The orchestrator's planner-only bench mode lives
+  on ``MasterOrchestrator.bench_plan``; run-ticket bench refs
+  (``bench:`` / ``bench-task:``) live in ``agents/run_ticket``.
 """
 
 from __future__ import annotations
 
+from .contracts import BenchContracts
 from .integration import BenchIntegrator, promotion_key
 from .model import (
     BenchError,
     BenchStore,
     TaskSpec,
     contract_kwargs,
+    entry_within,
     write_sets_overlap,
 )
 from .monitor import BenchMonitor
+from .pool import VerifierPool
 from .staging import BenchViews, StagingArea, StagingManager
 from .verifier import BenchVerifier, VerifyRequest
 
 __all__ = [
+    "BenchContracts",
     "BenchError",
     "BenchIntegrator",
     "BenchMonitor",
@@ -55,8 +72,10 @@ __all__ = [
     "StagingArea",
     "StagingManager",
     "TaskSpec",
+    "VerifierPool",
     "VerifyRequest",
     "contract_kwargs",
+    "entry_within",
     "promotion_key",
     "write_sets_overlap",
 ]

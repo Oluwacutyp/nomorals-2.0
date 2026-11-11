@@ -56,6 +56,16 @@ claims also create the task's staging area, releases discard
 it, expiries quarantine it, and the watchdog's stall detection
 reads artifact change in the staging tree as progress.
 
+Lane 4 adds two monitor powers, both exercised through the
+same claim machinery: an optional **claim guard** (a predicate
+the wiring layer injects — the contract organ's, refusing
+claims on tasks bound to a challenged contract; the monitor
+stays the only writer, the guard only ever says no) and
+**swarm spawning** (:meth:`BenchMonitor.spawn`): a cursor
+subdivides its own fenced write-set among child tasks the
+monitor registers, the partition checked disjoint and contained
+before any child exists.
+
 Layer: agents (L5) — imports core (L1) and the agents/missions
 peers it composes.
 """
@@ -65,6 +75,7 @@ from __future__ import annotations
 import os
 import threading
 import time
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from ...core.errors import ValidationError
@@ -88,6 +99,7 @@ from .model import (
     BenchStore,
     TaskSpec,
     contract_kwargs,
+    entry_within,
     overlapping_entries,
 )
 
@@ -157,13 +169,23 @@ class BenchMonitor:
     def __init__(self, db: Any, *,
                  lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
                  stall_after_s: float = DEFAULT_STALL_AFTER_S,
-                 staging: Any = None) -> None:
+                 staging: Any = None,
+                 claim_guard: Callable[..., dict[str, Any] | None]
+                 | None = None) -> None:
         self.db = db
         self.store = BenchStore(db)
         self.leases = LeaseStore(db)
         self.delegation = DelegationStore(db)
         self.lease_ttl_s = float(lease_ttl_s)
         self.stall_after_s = float(stall_after_s)
+        #: Lane 4: an optional claim guard, ``guard(run_id,
+        #: task) -> refusal | None``, consulted before any claim
+        #: is granted and in readiness. The wiring layer injects
+        #: the contract organ's guard (a task bound to a
+        #: challenged contract is suspended); a monitor without
+        #: one claims exactly as Lanes 1–3 did. The guard never
+        #: writes — refusal is its only power.
+        self.claim_guard = claim_guard
         #: Lane 2: the staging manager (``bench/staging.py``), or
         #: None — a monitor without one claims exactly as Lane 1
         #: did; with one, claims create staging areas, submits
@@ -204,11 +226,42 @@ class BenchMonitor:
         graph = TaskGraph(name="bench:" + str(run_id),
                           mission_id=str(run_id))
         existing = self.store.list_tasks(run_id)
-        for task in existing:
-            graph.add(Task(name=task["key"], role=task["role"],
-                           mission_id=str(run_id)),
-                      depends_on=[self._dep_key(existing, d)
-                                  for d in task["deps"]])
+        # Existing tasks enter the graph in dependency order:
+        # the store lists by (created_at, key), and a task whose
+        # key sorts before its dep's would otherwise be added
+        # before the dep exists and refused as unknown — the
+        # graph is a validation view, so it is built in the
+        # order the deps demand (Lane 4, found by swarm
+        # spawning: children sort before their parent).
+        added: set[str] = set()
+        pending = list(existing)
+        while pending:
+            progressed = False
+            for task in list(pending):
+                dep_keys = [self._dep_key(existing, d)
+                            for d in task["deps"]]
+                if any(dep_key not in added
+                       and dep_key != task["key"]
+                       for dep_key in dep_keys):
+                    continue
+                graph.add(Task(name=task["key"], role=task["role"],
+                               mission_id=str(run_id)),
+                          depends_on=dep_keys)
+                added.add(task["key"])
+                pending.remove(task)
+                progressed = True
+            if not progressed:
+                # Unreachable for store-written tasks (deps were
+                # validated at their own registration); add the
+                # rest in stored order and let the graph's own
+                # refusal speak, exactly as before.
+                for task in pending:
+                    graph.add(
+                        Task(name=task["key"], role=task["role"],
+                             mission_id=str(run_id)),
+                        depends_on=[self._dep_key(existing, d)
+                                    for d in task["deps"]])
+                break
         try:
             graph.add(Task(name=str(key), role=spec.role,
                            mission_id=str(run_id),
@@ -235,7 +288,10 @@ class BenchMonitor:
     def ready_tasks(self, run_id: str) -> list[dict[str, Any]]:
         """Claimable tasks whose deps are ALL promoted — the
         promotion-gated readiness rule (dossier §2.4). A dep that
-        is merely done or submitted does not unblock."""
+        is merely done or submitted does not unblock. A task the
+        claim guard refuses (Lane 4: bound to a challenged
+        contract) is not ready either — suspension is a
+        readiness fact, not a surprise at claim time."""
         tasks = self.store.list_tasks(run_id)
         by_key = {t["key"]: t for t in tasks}
         out: list[dict[str, Any]] = []
@@ -244,6 +300,9 @@ class BenchMonitor:
                 continue
             if all(by_key.get(dep, {}).get("state") == TASK_PROMOTED
                    for dep in task["deps"]):
+                if self.claim_guard is not None \
+                        and self.claim_guard(run_id, task):
+                    continue
                 out.append(task)
         return out
 
@@ -330,6 +389,21 @@ class BenchMonitor:
                 {"claimed": False, "reason": "not_claimable",
                  "state": task["state"], "task_id": task["id"],
                  "holder": task["holder"]})
+        if self.claim_guard is not None:
+            # Lane 4: the injected guard's refusal (e.g. the
+            # task's contract stands challenged) is consulted
+            # BEFORE the dep check and journaled like every
+            # other refusal — suspension is the specific,
+            # actionable reason (a challenged contract also
+            # unpromotes its dep edge, and "deps_unpromoted"
+            # would bury the cause). Suspension is a fact on
+            # the record, never a silent wait.
+            guard_refusal = self.claim_guard(run_id, task)
+            if guard_refusal:
+                refusal = {"claimed": False,
+                           "task_id": task["id"]}
+                refusal.update(guard_refusal)
+                return self._refuse(task, cursor_id, now, refusal)
         unpromoted = self._unpromoted_deps(task)
         if unpromoted:
             return self._refuse(
@@ -496,6 +570,143 @@ class BenchMonitor:
                     if k not in ("claimed", "reason")},
             now=now)
         return refusal
+
+    # -- swarm spawning (Lane 4) ----------------------------------------
+
+    def spawn(self, run_id: str, parent_key: str, spawner_id: str,
+              generation: int,
+              children: Sequence[tuple[str, TaskSpec]], *,
+              now: float | None = None) -> dict[str, Any]:
+        """Subdivide a claimed task's fenced write-set among
+        child tasks (swarm spawning): the spawner keeps its own
+        task; the children are ordinary bench tasks on the same
+        run, each depending on the parent (so none is claimable
+        until the parent's own candidate — the decomposition
+        itself, or the work it still does — is promoted and its
+        file leases are released).
+
+        The partition is enforced BEFORE any child exists:
+
+        - the spawner must be the parent's live claimant at
+          ``generation`` (the lease store's fence — a superseded
+          spawner spawns nothing);
+        - every child write-set entry must lie WITHIN the
+          parent's write-set (:func:`model.entry_within`) — an
+          escaping entry is refused, named;
+        - the children's write-sets must be pairwise DISJOINT —
+          an overlap is refused naming both children and the
+          colliding entries;
+        - every child's role must resolve in the role registry
+          (``BUILTIN_ROLES``, aliases included) — the stored
+          spec carries the canonical role name.
+
+        Refusals are returned (``{"spawned": False, "reason",
+        ...}``) and nothing is half-registered: validation of
+        the whole partition precedes the first registration.
+        Malformed specs raise :class:`BenchError`, as
+        registration does."""
+        now = time.time() if now is None else float(now)
+        spawner_id = str(spawner_id or "").strip()
+        parent = self.store.get_task(run_id, parent_key)
+        if parent is None:
+            return {"spawned": False, "reason": "unknown_task",
+                    "run_id": str(run_id), "key": str(parent_key)}
+        if parent["holder"] != spawner_id or not self.leases.check(
+                task_resource(parent["id"]), spawner_id,
+                int(generation), now=now):
+            return {"spawned": False, "reason": "stale_generation",
+                    "task_id": parent["id"]}
+        if not children:
+            return {"spawned": False, "reason": "no_children",
+                    "task_id": parent["id"]}
+        from ..role_specs import BUILTIN_ROLES, ROLE_ALIASES
+        prepared: list[tuple[str, TaskSpec]] = []
+        seen_keys: set[str] = set()
+        for key, spec in children:
+            key = str(key)
+            if key == str(parent_key) or key in seen_keys \
+                    or self.store.get_task(run_id, key) is not None:
+                return {"spawned": False, "reason": "duplicate_key",
+                        "child": key, "task_id": parent["id"]}
+            seen_keys.add(key)
+            spec.validate()
+            role = str(spec.role or "")
+            canonical = role if role in BUILTIN_ROLES \
+                else ROLE_ALIASES.get(role)
+            if canonical is None:
+                return {"spawned": False, "reason": "unknown_role",
+                        "child": key, "role": role,
+                        "task_id": parent["id"]}
+            escapes = [entry for entry in spec.write_set
+                       if not entry_within(entry,
+                                           parent["write_set"])]
+            if escapes:
+                return {"spawned": False,
+                        "reason": "write_set_escape",
+                        "child": key, "entries": escapes,
+                        "parent_write_set":
+                            list(parent["write_set"]),
+                        "task_id": parent["id"]}
+            prepared.append((key, TaskSpec(
+                instructions=spec.instructions,
+                acceptance=tuple(spec.acceptance), role=canonical,
+                write_set=tuple(spec.write_set),
+                read_set=tuple(spec.read_set),
+                deps=tuple(spec.deps))))
+        for index, (key_a, spec_a) in enumerate(prepared):
+            for key_b, spec_b in prepared[index + 1:]:
+                hits = overlapping_entries(spec_a.write_set,
+                                           spec_b.write_set)
+                if hits:
+                    return {"spawned": False,
+                            "reason": "partition_overlap",
+                            "children": [key_a, key_b],
+                            "files": hits,
+                            "task_id": parent["id"]}
+        # Registration in dependency order (a child may depend
+        # on a sibling): repeat passes until every child is in;
+        # a pass with no progress means a cycle or an unknown
+        # dep — registration's own refusal, raised as BenchError.
+        registered: dict[str, str] = {}
+        pending = list(prepared)
+        while pending:
+            progressed = False
+            for key, spec in list(pending):
+                blockers = [dep for dep in spec.deps
+                            if dep in seen_keys
+                            and dep not in registered]
+                if blockers:
+                    continue
+                deps = tuple(
+                    dict.fromkeys(
+                        (str(parent_key),)
+                        + tuple(d for d in spec.deps
+                                if d != str(parent_key))))
+                child = self.register_task(
+                    run_id, key,
+                    TaskSpec(instructions=spec.instructions,
+                             acceptance=spec.acceptance,
+                             role=spec.role,
+                             write_set=spec.write_set,
+                             read_set=spec.read_set, deps=deps),
+                    now=now)
+                registered[key] = child["id"]
+                self.store.append_event(
+                    run_id, child["id"], "task_spawned", spawner_id,
+                    generation=int(generation),
+                    detail={"parent": str(parent_key),
+                            "parent_task_id": parent["id"],
+                            "write_set": list(spec.write_set)},
+                    now=now)
+                pending.remove((key, spec))
+                progressed = True
+            if not progressed:
+                raise BenchError(
+                    "spawn partition has unresolvable child "
+                    "dependencies (cycle or unknown dep): "
+                    + ", ".join(key for key, _ in pending))
+        return {"spawned": True, "parent": str(parent_key),
+                "task_id": parent["id"], "children": registered}
 
     # -- heartbeat / progress ------------------------------------------
 

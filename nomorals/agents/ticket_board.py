@@ -49,7 +49,7 @@ _TERMINAL = {
     "failed", "error", "succeeded", "success", "closed", "verified",
     "rejected", "expired", "resolved", "retired", "healed",
     "stopped", "finished", "dead", "exhausted", "unhonored",
-    "not_found", "refused",
+    "not_found", "refused", "promoted",
 }
 
 #: Keys inside projected detail structures that carry internal ids —

@@ -9,6 +9,7 @@
 - `coding-loop` — The coding loop — inspect, change, prove: How code changes are made in this repo: read first, smallest real change, tests as proof. (topics: coding, editing, tests, verification)
 - `content-cell` — The content delivery cell — research, draft, fact-check, deliver, receipt: Every cooperative content job runs as one delegation contract — researcher, drafter, skeptic, verifier, delivery steward — with a readable receipt per piece. (topics: content, drafts, shorts, weekly, publishing, receipts, series, calendar)
 - `failure-triage` — Failure triage — evidence before verdicts: How failures are diagnosed: read the real record, suspect the environment first, never guess a cause. (topics: debugging, failures, triage, incidents)
+- `multi-cursor-bench` — The multi-cursor bench — parallel cursors, one monitor, no shared unfinished work: How several coding cursors work one job in parallel: fenced claims, staged candidates, an independent verifier's veto, contract-first decomposition for coupled work, and serial promotion. (topics: bench, multi-cursor, parallel agents, verification, contracts, swarm)
 ## browser
 
 - `web-browsing-handoff` — Web browsing — the ladder and the handoff: How Devon browses: presentation ladder first, consent handled honestly, owner takeover last. (topics: browser, webnav, screenshots, webshot, handoff)

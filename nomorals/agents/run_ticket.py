@@ -44,7 +44,13 @@ instance (doc 18 P4: coremind's job records — including its
 admission queue, which queues with a record instead of shedding —
 live on the instance and its durable state file; the projection
 reads them through the mind's record accessors and constructs
-nothing).
+nothing). Bench references ride the same discipline (Lane 4):
+``bench:<run_id>`` and ``bench-task:<task_id>`` resolve against
+the bench tables by direct SQL — states, verdicts and open
+escalations read from the monitor's journal and the verifier's
+verdict rows; a bench ticket's leases are the records the claim
+itself wrote onto the task row (the same lease authority's
+grants), so the ref-keyed lease read does not apply to them.
 
 The evidence field speaks doc 24's grade vocabulary
 (:mod:`nomorals.core.proof_grade`): a contract's
@@ -76,6 +82,7 @@ nothing).
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -128,6 +135,8 @@ _REF_KINDS = {
     "watch": "computer_watch",
     "task": "task",
     "mind": "coremind_job",
+    "bench": "bench_run",
+    "bench-task": "bench_task",
 }
 
 _LEASES_NO_DB = ("leases live in the doc 18 P3 lease authority's "
@@ -1039,6 +1048,257 @@ def _coremind_ticket(row: dict[str, Any], mind: Any,
     return ticket
 
 
+def _json_list(value: Any) -> list:
+    try:
+        data = json.loads(value or "[]")
+    except (TypeError, ValueError):
+        return []
+    return list(data) if isinstance(data, list) else []
+
+
+def _json_obj(value: Any) -> dict[str, Any]:
+    try:
+        data = json.loads(value or "{}")
+    except (TypeError, ValueError):
+        return {}
+    return dict(data) if isinstance(data, dict) else {}
+
+
+def _bench_lease_view(records: list) -> list[dict[str, Any]]:
+    """A bench task's lease records as the board may show them:
+    the file resources a claim fences (paths, not ids) and the
+    task lease itself — whose resource name embeds the task id,
+    so it renders as the words "task lease" (the board law:
+    internal ids never print)."""
+    out: list[dict[str, Any]] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        resource = str(record.get("resource") or "")
+        if resource.startswith("bench-task:"):
+            resource = "task lease"
+        elif resource.startswith("bench-file:"):
+            resource = resource[len("bench-file:"):]
+        out.append({"resource": resource,
+                    "generation": record.get("generation"),
+                    "expires_at": record.get("expires_at")})
+    return out
+
+
+def _bench_task_verdicts(db: Any, task_id: str) -> list[dict[str, Any]]:
+    """One bench task's verdict rows, oldest first (``_rows``
+    reads newest-first). The verdict words are the delegation
+    vocabulary, verbatim."""
+    rows = _rows(db, "bench_verdicts", "task_id = ?", (task_id,),
+                 limit=50)
+    rows.reverse()
+    return [{"verdict": row.get("verdict"),
+             "verifier": row.get("verifier"),
+             "at": row.get("created_at")} for row in rows]
+
+
+def _bench_open_escalations(db: Any,
+                            run_id: str) -> dict[str, dict[str, Any]]:
+    """The run's OPEN verifier escalations, by task id: a
+    ``verification_escalated`` journal event (Lane 3 — the
+    arbiter it names is the owner) that no later verdict,
+    promotion or requeue has answered. An escalation the work
+    has since moved past is history, not an open ask."""
+    task_rows = _rows(db, "bench_tasks", "run_id = ?", (run_id,),
+                      limit=200)
+    keys = {str(t.get("id")): str(t.get("key") or "")
+            for t in task_rows}
+    events = _rows(db, "bench_events", "run_id = ?", (run_id,),
+                   limit=500)
+    events.sort(key=lambda e: int(e.get("id") or 0))
+    open_map: dict[str, dict[str, Any]] = {}
+    for event in events:
+        task_id = str(event.get("task_id") or "")
+        kind = str(event.get("kind") or "")
+        if kind == "verification_escalated":
+            detail = _json_obj(event.get("detail"))
+            open_map[task_id] = {
+                "task": keys.get(task_id, ""),
+                "reason": str(event.get("reason") or ""),
+                "arbiter": str(detail.get("arbiter") or ""),
+                "at": event.get("created_at")}
+        elif kind in ("verdict_recorded", "task_promoted",
+                      "task_requeued"):
+            open_map.pop(task_id, None)
+    return open_map
+
+
+def _bench_run_ticket(db: Any, row: dict[str, Any],
+                      now: float) -> ExecutionTicket:
+    run_id = str(row.get("id") or "")
+    goal = str(row.get("goal") or "").strip()
+    ticket = ExecutionTicket(
+        ref=f"bench:{run_id}", kind="bench_run",
+        label=goal[:60] or "bench run",
+        status=str(row.get("state") or ""), read_at=now)
+    ticket.fill("purpose", str(row.get("goal") or ""), "bench")
+    ticket.fill("actors",
+                {"integration_owner": "bench-monitor",
+                 "verifier": "bench-verifier", "arbiter": "owner"},
+                "bench")
+    _no_owner_chat(ticket, "bench run")
+    task_rows = _rows(db, "bench_tasks", "run_id = ?", (run_id,),
+                      limit=200)
+    write_sets = sorted({entry for task in task_rows
+                         for entry in _json_list(task.get("write_set"))})
+    ticket.fill("capabilities",
+                {"tasks": len(task_rows), "write_sets": write_sets},
+                "bench")
+    ticket.fill("fencing",
+                {"base_revision": row.get("base_revision"),
+                 "promoted_revision": row.get("promoted_revision")},
+                "bench")
+    verdicts_by_task: dict[str, str] = {}
+    for task in task_rows:
+        verdicts = _bench_task_verdicts(db, str(task.get("id")))
+        verdicts_by_task[str(task.get("key"))] = (
+            str(verdicts[-1]["verdict"]) if verdicts
+            else "unverified")
+    ticket.fill("evidence", {"verdicts_by_task": verdicts_by_task},
+                "bench_verdicts")
+    ticket.mark_absent(
+        "acceptance",
+        "acceptance is declared per bench task, not per run — "
+        "see the bench-task tickets")
+    ticket.mark_absent(
+        "budget",
+        "a bench run carries no budget record — its bounds are "
+        "the cursors' claim leases and the verifier's attempt "
+        "budget, neither of which is a budget on the run row")
+    by_state: dict[str, int] = {}
+    for task in task_rows:
+        state = str(task.get("state") or "")
+        by_state[state] = by_state.get(state, 0) + 1
+    ticket.fill("liveness",
+                {"status": row.get("state"),
+                 "created_at": row.get("created_at"),
+                 "closed_at": row.get("closed_at") or None,
+                 "tasks_by_state": by_state,
+                 "age_s": _age(now, row.get("created_at"))},
+                "bench")
+    ticket.fill(
+        "cancel",
+        _cancel_from_state(
+            "", None,
+            "bench runs close through the monitor's close_run; "
+            "no cancellation is recorded on a run"),
+        "bench")
+    leases: list = []
+    for task in task_rows:
+        leases.extend(_json_list(task.get("leases")))
+    ticket.fill("leases", _bench_lease_view(leases), "bench")
+    escalations = _bench_open_escalations(db, run_id)
+    ticket.detail = {
+        "tasks": [
+            {"key": task.get("key"), "state": task.get("state"),
+             "holder": task.get("holder") or "",
+             "verdict": verdicts_by_task.get(str(task.get("key")))}
+            for task in task_rows],
+        "escalations": sorted(escalations.values(),
+                              key=lambda e: float(e.get("at") or 0)),
+    }
+    for task in task_rows:
+        ticket.related_refs.append(f"bench-task:{task.get('id')}")
+    try:
+        for mission in MissionStore(db).list(limit=200):
+            state = mission.state or {}
+            metadata = mission.metadata or {}
+            if state.get("bench_run_id") == run_id \
+                    or metadata.get("bench_run_id") == run_id:
+                ticket.related_refs.append(f"mission:{mission.id}")
+                break
+    except Exception:  # noqa: BLE001 - registration unread
+        pass
+    return ticket
+
+
+def _bench_task_ticket(db: Any, row: dict[str, Any],
+                       now: float) -> ExecutionTicket:
+    task_id = str(row.get("id") or "")
+    run_id = str(row.get("run_id") or "")
+    key = str(row.get("key") or "")
+    ticket = ExecutionTicket(
+        ref=f"bench-task:{task_id}", kind="bench_task",
+        label=f"bench task: {key}",
+        status=str(row.get("state") or ""), read_at=now)
+    ticket.fill("purpose", str(row.get("instructions") or ""),
+                "bench")
+    actors: dict[str, Any] = {"verifier": "bench-verifier",
+                              "integration_owner": "bench-monitor"}
+    if row.get("holder"):
+        actors = {"worker": row["holder"], **actors}
+    ticket.fill("actors", actors, "bench")
+    _no_owner_chat(ticket, "bench task")
+    ticket.fill("capabilities",
+                {"role": row.get("role"),
+                 "write_set": _json_list(row.get("write_set")),
+                 "read_set": _json_list(row.get("read_set"))},
+                "bench")
+    fencing: dict[str, Any] = {
+        "claim_generation": int(row.get("claim_generation") or 0),
+        "base_revision": row.get("base_revision") or ""}
+    if row.get("state") == "promoted" and row.get("candidate_ref"):
+        # Only a promoted candidate is a peer-visible revision —
+        # the bench's invisibility rule binds this projection
+        # exactly as it binds BenchStore.peer_view.
+        fencing["candidate_ref"] = row["candidate_ref"]
+    ticket.fill("fencing", fencing, "bench")
+    verdicts = _bench_task_verdicts(db, task_id)
+    ticket.fill("evidence",
+                {"verdicts": verdicts,
+                 "latest_verdict": (verdicts[-1]["verdict"]
+                                    if verdicts else None)},
+                "bench_verdicts")
+    ticket.fill("acceptance", _json_list(row.get("acceptance")),
+                "bench")
+    ticket.mark_absent(
+        "budget",
+        "bench tasks carry no budget record — the verifier's "
+        "attempt budget bounds their verdicts, not a budget on "
+        "the task row")
+    ticket.fill("liveness",
+                {"state": row.get("state"),
+                 "attempts": int(row.get("attempts") or 0),
+                 "last_seen": row.get("last_seen") or None,
+                 "submitted_at": row.get("submitted_at") or None,
+                 "stalled": bool(row.get("stalled")),
+                 "age_s": _age(now, row.get("updated_at"))},
+                "bench")
+    ticket.fill(
+        "cancel",
+        _cancel_from_state(
+            "", None,
+            "bench tasks are released or requeued through the "
+            "monitor; no cancellation is recorded on a task"),
+        "bench")
+    ticket.fill("leases",
+                _bench_lease_view(_json_list(row.get("leases"))),
+                "bench")
+    binding = None
+    binding_rows = _rows(db, "bench_task_contracts",
+                         "task_id = ?", (task_id,))
+    if binding_rows:
+        binding = {
+            "contract": binding_rows[0].get("contract_key"),
+            "generation": int(binding_rows[0].get("generation")
+                              or 0)}
+    escalation = _bench_open_escalations(db, run_id).get(task_id)
+    ticket.detail = {
+        "deps": _json_list(row.get("deps")),
+        "contract": binding,
+        "escalations": [escalation] if escalation else [],
+    }
+    ticket.related_refs.append(f"bench:{run_id}")
+    if row.get("contract_id"):
+        ticket.related_refs.append(f"contract:{row['contract_id']}")
+    return ticket
+
+
 # ── the read API ──────────────────────────────────────────────────
 
 
@@ -1147,6 +1407,30 @@ def ticket_for(ref: str, db: Any = None, *,
         _apply_cancel_receipt(ticket, db)
         _apply_help(ticket, db)
         return ticket.to_dict()
+    if kind == "bench_run":
+        if db is None:
+            return _not_found(ref, "reading a bench-run ticket "
+                                   "needs a database handle")
+        rows = _rows(db, "bench_runs", "id = ?", (ident,))
+        if not rows:
+            return _not_found(ref, "no bench_runs row with id "
+                                   f"{ident!r} exists")
+        ticket = _bench_run_ticket(db, rows[0], now)
+        _apply_cancel_receipt(ticket, db)
+        _apply_help(ticket, db)
+        return ticket.to_dict()
+    if kind == "bench_task":
+        if db is None:
+            return _not_found(ref, "reading a bench-task ticket "
+                                   "needs a database handle")
+        rows = _rows(db, "bench_tasks", "id = ?", (ident,))
+        if not rows:
+            return _not_found(ref, "no bench_tasks row with id "
+                                   f"{ident!r} exists")
+        ticket = _bench_task_ticket(db, rows[0], now)
+        _apply_cancel_receipt(ticket, db)
+        _apply_help(ticket, db)
+        return ticket.to_dict()
     if kind == "coremind_job":
         if coremind is None:
             return _not_found(ref, "coremind job records live on a "
@@ -1208,6 +1492,12 @@ def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
         for row in _rows(db, "computer_watch_records", "1 = 1", (),
                          limit=limit):
             tickets.append(_watch_ticket(row, now))
+        for row in _rows(db, "bench_runs", "1 = 1", (),
+                         limit=limit):
+            tickets.append(_bench_run_ticket(db, row, now))
+        for row in _rows(db, "bench_tasks", "1 = 1", (),
+                         limit=limit):
+            tickets.append(_bench_task_ticket(db, row, now))
     reg = registry if registry is not None else shared_registry()
     for snap in reg.list():
         tickets.append(_job_ticket(snap, tool_registry, now))
@@ -1215,7 +1505,12 @@ def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
         for row in coremind.job_records():
             tickets.append(_coremind_ticket(row, coremind, now))
     for ticket in tickets:
-        _apply_leases(ticket, db, now)
+        # Bench tickets fill their leases from the bench task
+        # rows themselves (the claim's own records of the same
+        # authority's grants) — the ref-keyed read does not
+        # apply to them.
+        if ticket.kind not in ("bench_run", "bench_task"):
+            _apply_leases(ticket, db, now)
     leases_held = sum(len(ticket.leases or []) for ticket in tickets)
     lease_holders = sum(1 for ticket in tickets if ticket.leases)
     by_source: dict[str, int] = {}
@@ -1247,6 +1542,10 @@ def ticket_coverage(db: Any, *, registry: JobRegistry | None = None,
     if coremind is not None:
         first_line += (f" · coremind jobs "
                        f"{by_source.get('coremind_job', 0)}")
+    if by_source.get("bench_run") or by_source.get("bench_task"):
+        first_line += (f" · bench runs "
+                       f"{by_source.get('bench_run', 0)} · bench "
+                       f"tasks {by_source.get('bench_task', 0)}")
     summary = [first_line]
     for name in TICKET_FIELDS:
         count = absent_totals.get(name, 0)
