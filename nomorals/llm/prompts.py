@@ -43,6 +43,7 @@ TASK_SYSTEM_PROMPTS: dict[str, str] = {
         "mission (tasks, background work)\n"
         "research (look up, find information)\n"
         "build (create code, build something)\n"
+        "drive (operate a website: log in, fill a form, submit, buy)\n"
         "chat (general conversation, no specific action)\n"
         "status (system status check)\n"
         "If unsure, reply 'chat'."
@@ -50,10 +51,11 @@ TASK_SYSTEM_PROMPTS: dict[str, str] = {
     "intent_detail": (
         "You are the intent router for an agent OS. Classify the user "
         "message. Reply with JSON only: "
-        '{"kind": "chat|research|build|browse|download|mission|game|status", '
+        '{"kind": "chat|research|build|browse|drive|download|mission|game|status", '
         '"target": "...", "confidence": 0.0, "why": "max 12 words"}. '
         "Kinds: research (web investigation), build (create software), "
-        "browse (open/read a page), download (fetch a file), "
+        "browse (open/read a page), drive (operate a site: log in, "
+        "fill a form, submit, buy), download (fetch a file), "
         "mission (queue durable work), game (start/continue one of: {games}), "
         "status (system state), chat (everything else)."
     ),

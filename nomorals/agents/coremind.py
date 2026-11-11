@@ -128,6 +128,7 @@ _DISPATCH_READONLY_KINDS = frozenset({
 #: Intent kinds with side effects (retry conservatively).
 _DISPATCH_WRITE_KINDS = frozenset({
     "build", "account", "mission", "download", "multi", "finance_log",
+    "drive",
 })
 
 
@@ -403,6 +404,26 @@ _RE_BUILD_NOUN = re.compile(
     r"game engine|bot net|webapp)\b", re.I)
 _RE_BROWSE = re.compile(r"\b(open|visit|browse|go to|check out|check|look at|see)\b", re.I)
 _RE_URL = re.compile(r"\bhttps?://[^\s)\"']+", re.I)
+#: Acting ON a site (vs reading it): the verbs that mean "do
+#: something there" — the drive intent's trigger when a URL rides
+#: along. Account creation is deliberately absent: signup has its
+#: own organ (the accounts driver) and keeps its lane.
+_RE_DRIVE_ACT = re.compile(
+    r"\b(drive|navigate|log ?in|fill (in|out)|submit|click|press|"
+    r"checkout|buy|purchase|book|reserve|order|apply (for|on)|"
+    r"post (on|to)|upload (to|on)|add .{0,24} to cart)\b", re.I)
+#: A drive ask with no URL yet: the imperative itself, or
+#: drive/navigate tied to a site-shaped noun within the sentence.
+_RE_DRIVE_ASK = re.compile(
+    r"^\s*(drive|navigate)\b|\b(drive|navigate)\b[^.]{0,40}\b"
+    r"(site|website|page|browser|form|shop|store|checkout)\b", re.I)
+#: A status ask about a browser drive already in flight.
+_RE_DRIVE_STATUS = re.compile(
+    r"(?:\bhow'?s\b|\bstatus\b|\bprogress\b|\bdid\b|\bis\b)"
+    r".{0,40}\b(browser|drive|driving)\b"
+    r"|\b(browser run|drive)\b.{0,20}\b(status|progress|done|finished)\b",
+    re.I)
+_RE_JOB_ID = re.compile(r"\bbr-[0-9a-f]{6,}\b")
 _RE_DOWNLOAD = re.compile(
     r"\b(download|get me|fetch|grab|pull|save (me|to disk))\b", re.I)
 _RE_DOWNLOAD_NOUN = re.compile(
@@ -582,9 +603,18 @@ def _llm_intent_interpret(text: str, context: Any = None) -> Intent | None:
             "build": ("build", 0.85, "coding", "LLM interpreted as build intent"),
             "status": ("status", 0.85, "mind", "LLM interpreted as status intent"),
             "mode": ("mode", 0.9, "modes", "LLM interpreted as agent-mode switch"),
+            "drive": ("drive", 0.85, "browser", "LLM interpreted as site-driving intent"),
         }
         if kind in kind_map:
             k, conf, route, why = kind_map[kind]
+            if k == "drive":
+                m = _RE_URL.search(text)
+                if m:
+                    return Intent("drive", conf, target=m.group(0),
+                                  action="start", route=route, why=why,
+                                  meta={"goal": _drive_goal(text, m)})
+                return Intent("drive", conf, action="ask", route=route,
+                              why=why)
             return Intent(k, conf, target=text.strip()[:200], route=route, why=why)
         return None
     except Exception:  # noqa: BLE001
@@ -607,7 +637,7 @@ def _clean_topic(text: str, verb: re.Pattern) -> str:
 class Intent:
     """One Core Mind decision.  ``why`` is the inspectable provenance."""
 
-    kind: str                      # chat|research|build|browse|download|mission|game|status|multi|fastchat
+    kind: str                      # chat|research|build|browse|drive|download|mission|game|status|multi|fastchat
     confidence: float              # 0..1
     target: str = ""               # topic / url / goal payload
     action: str = ""               # game: start|resume|board|economy|ask
@@ -641,23 +671,29 @@ def _game_intent(text: str, live_game: str | None) -> Intent | None:
     an alias, so "game", "this game is boring", "football game", "I played
     a game last night" all fall through to conversation.
     """
-    name = _find_game_alias(text)
+    # A URL is not prose: words inside it (a host named shop.test,
+    # a path segment reading "buy") are not game signals — scanning
+    # them made "drive https://shop.test … and buy the thing" grow
+    # a phantom game-economy candidate that hijacked the ask into
+    # a multi. Every scan below runs on the prose beside the URLs.
+    prose = _RE_URL.sub(" ", text)
+    name = _find_game_alias(prose)
     # hypotheticals ("we should play some games") are conversation, not a
     # launch — strip them before the play-verb test
     imperative = re.sub(r"\b(?:should|would|could|might)\s+(?:to\s+)?"
-                        r"(?:play|start|begin|open)\b", "", text, flags=re.I)
+                        r"(?:play|start|begin|open)\b", "", prose, flags=re.I)
     has_play = bool(_RE_PLAY.search(imperative))
     # "story" is a narrative word first, a game second: "tell me a story",
     # "write a story", "bedtime story" are never the story game unless
     # there is an explicit play verb ("play the story game") or the game
     # is already live in this chat.
     if name == "story" and not has_play and live_game != "story":
-        if _RE_NARRATIVE_GUARD.search(text):
+        if _RE_NARRATIVE_GUARD.search(prose):
             name = None
-    has_continue = bool(_RE_CONTINUE.search(text))
-    has_board = bool(_RE_BOARD.search(text))
-    has_econ = bool(_RE_ECONOMY.search(text))
-    has_shop = bool(_RE_SHOPPLAY.search(text))
+    has_continue = bool(_RE_CONTINUE.search(prose))
+    has_board = bool(_RE_BOARD.search(prose))
+    has_econ = bool(_RE_ECONOMY.search(prose))
+    has_shop = bool(_RE_SHOPPLAY.search(prose))
 
     # viewing intents are safe anywhere in an owner DM — they never launch
     if has_board:
@@ -666,11 +702,19 @@ def _game_intent(text: str, live_game: str | None) -> Intent | None:
     if has_econ and not has_play:
         action = "economy"
         target = ""
-        m = re.search(r"\bbuy\s+(.+)", text, re.I)
+        m = re.search(r"\bbuy\s+(.+)", prose, re.I)
         if m and (live_game or name == "shop"):
             target = f"buy {m.group(1).strip()}"
         elif name == "shop" and has_play:
             pass  # falls through to start below
+        elif _RE_URL.search(text):
+            # "buy" inside a URL-carrying message is the WEB
+            # errand's own verb ("drive https://… and buy the
+            # thing"), not the in-game economy's — the bare
+            # economy reading needs a game context (a name or a
+            # live room, handled above) before it may claim a
+            # message that is plainly about a site.
+            pass  # falls through: no game signal survives
         else:
             return Intent("game", 0.85, target=target, action=action, route="games",
                           why="economy intent (balance/coins/buy)")
@@ -1202,6 +1246,10 @@ def _url_intent(text: str) -> tuple[Intent | None, str]:
     if _RE_DOWNLOAD.search(text):
         return Intent("download", 0.85, target=url, route="media",
                       why=f"download verb + URL"), url
+    if _RE_DRIVE_ACT.search(text):
+        return Intent("drive", 0.88, target=url, action="start",
+                      route="browser", why="drive verb + URL",
+                      meta={"goal": _drive_goal(text, m)}), url
     if _RE_BROWSE.search(text) or re.search(
             r"\b(screenshot|summary|summarize|read|what'?s on|what does)\b", text, re.I):
         return Intent("browse", 0.85, target=url, route="browser",
@@ -1217,6 +1265,39 @@ def _browse_intent(text: str) -> Intent | None:
     if site and _RE_BROWSE.search(text):
         return Intent("browse", 0.7, target=site.group(0), route="browser",
                       why=f"browse verb + site “{site.group(0)}”")
+    return None
+
+
+def _drive_goal(text: str, url_match: re.Match) -> str:
+    """The owner's goal in their own words: the message with the
+    URL lifted out and the imperative wrapper trimmed. Falls back
+    to the run verb's own default (``browse``) when nothing else
+    was said."""
+    goal = (text[:url_match.start()] + " " + text[url_match.end():])
+    goal = " ".join(goal.split()).strip(" .,-—")
+    goal = re.sub(r"^(please\s+)?(can|could) you\s+", "", goal,
+                  flags=re.I)
+    goal = re.sub(r"^(drive|navigate|go to|open|use)\b[:\s]*", "",
+                  goal, flags=re.I).strip(" .,-—")
+    goal = re.sub(r"^and\s+", "", goal, flags=re.I)
+    return goal or "browse"
+
+
+def _drive_intent(text: str) -> Intent | None:
+    """A drive ask that carries no URL yet, or a status ask about
+    a drive already running. URL-carrying drives are claimed
+    inside :func:`_url_intent` — they must outrank the browse
+    reading of the same message."""
+    if _RE_URL.search(text):
+        return None
+    if _RE_DRIVE_STATUS.search(text):
+        m = _RE_JOB_ID.search(text)
+        return Intent("drive", 0.85, target=m.group(0) if m else "",
+                      action="status", route="browser",
+                      why="browser drive status ask")
+    if _RE_DRIVE_ASK.search(text):
+        return Intent("drive", 0.6, action="ask", route="browser",
+                      why="drive verb with no URL — asking which site")
     return None
 
 
@@ -1343,7 +1424,7 @@ def understand(text: str, *, live_game: str | None = None) -> list[Intent]:
                _book_intent, _music_intent, _play_media_intent,
                _research_intent, _account_intent, _email_intent, _build_intent,
                _finance_intent, _image_intent, _video_intent, _avatar_intent,
-               _transcript_edit_intent, _mode_intent):
+               _transcript_edit_intent, _mode_intent, _drive_intent):
         if fn is _game_intent:
             it = fn(text, live_game)
         else:
@@ -1829,7 +1910,8 @@ class CoreMind:
             return Intent(kind, min(conf, 0.95),
                           target=str(data.get("target", ""))[:300],
                           route={"research": "research_swarm", "build": "coding",
-                                 "browse": "browser", "download": "media",
+                                 "browse": "browser", "drive": "browser",
+                                 "download": "media",
                                  "mission": "directives", "game": "games",
                                  "status": "mind"}.get(kind, "brain"),
                           why=f"model: {str(data.get('why', ''))[:80]}")
@@ -1932,6 +2014,14 @@ class CoreMind:
             if re.fullmatch(r"(yes|yep|sure|ok|okay|go|start it)", t):
                 return None  # ambiguous even so — stay quiet, keep pending
             return None
+        if pending.get("kind") == "drive":
+            m = _RE_URL.search(text)
+            if not m:
+                return None  # no URL in the answer — not an answer
+            return Intent("drive", 0.85, target=m.group(0),
+                          action="start", route="browser",
+                          why="answered drive clarification",
+                          meta={"goal": _drive_goal(text, m)})
         if pending.get("kind") in ("research", "build", "download", "browse", "mission"):
             if pending.get("kind") == "mission":
                 return Intent("mission", 0.85, target=t, action="add",
@@ -2025,6 +2115,10 @@ class CoreMind:
             return "build what? one line on what it should do and I'll start."
         if intent.kind in ("download", "browse"):
             return "give me the URL (or the exact file name) and I'll get it."
+        if intent.kind == "drive":
+            return ("which site, and what should I do there? give me "
+                    "the URL and the goal in your words — e.g. 'drive "
+                    "https://shop.test and buy the thing'.")
         if intent.kind == "mission":
             return "what should the mission actually accomplish?"
         return "can you be more specific?"
@@ -2038,6 +2132,7 @@ class CoreMind:
             "build": self._dispatch_build,
             "account": self._dispatch_account,
             "browse": self._dispatch_browse,
+            "drive": self._dispatch_drive,
             "download": self._dispatch_download,
             "mission": self._dispatch_mission,
             "status": self._dispatch_status,
@@ -2699,6 +2794,158 @@ class CoreMind:
             f"{max_mb:.0f} MB).",
             kind="download")
 
+    # ── drive: the conversational door to /browser run ─────────────
+    def _drive_gate_refusal(self, message: Any) -> str | None:
+        """The live gate for starting a drive from conversation.
+
+        Mirrors the gates the surfaces themselves stand behind:
+        owner-only (the verb's own rule); a degraded brain stays
+        observe-only, so no drive starts; and a standing owner
+        stop on the origin's personal platform halts the start —
+        the same pairing-registry check the acknowledgment path
+        makes, failing closed when it cannot be read. Returns the
+        one plain refusal line, or None when the drive may start.
+        """
+        runtime = self.runtime
+        if runtime is None:
+            return ("drives start from my live chat runtime — this "
+                    "console has no browser job registry. In chat "
+                    "you can just ask me, or use /browser run "
+                    "<url> [goal].")
+        try:
+            if not runtime._is_operator(message):
+                return ("driving a site is owner-only — ask me from "
+                        "your own DM and I'll take it on.")
+        except Exception as exc:  # noqa: BLE001 - a guard
+            record_failure("coremind.drive_gate_operator", exc)
+            return ("I couldn't verify that ask came from you, so "
+                    "no drive started.")
+        try:
+            from .notifier import resolve_brain_gate
+
+            gate = resolve_brain_gate(self.context)
+        except Exception as exc:  # noqa: BLE001 - a guard
+            record_failure("coremind.drive_gate_brain", exc)
+            gate = None
+        if gate is not None and gate.degraded_now:
+            return ("my brain is degraded right now — I stay "
+                    "observe-only until it answers again, so I "
+                    "won't start a drive. I can still read a page "
+                    "for you.")
+        platform = str(getattr(getattr(message, "chat", None),
+                               "platform", "") or "")
+        if platform:
+            try:
+                from .partner.brain_gate import is_personal_platform
+
+                personal = is_personal_platform(platform)
+            except Exception as exc:  # noqa: BLE001 - a guard
+                record_failure("coremind.drive_gate_platform", exc)
+                personal = False
+            if personal:
+                try:
+                    svc, rec = runtime._chatops_personal_account(
+                        platform)
+                    if rec is not None and \
+                            svc["registry"].owner_stopped(platform):
+                        return (f"{platform} is under your standing "
+                                "stop — it stays halted until you "
+                                "start it again; no drive started.")
+                except Exception as exc:  # noqa: BLE001 - a guard
+                    record_failure("coremind.drive_gate_stop", exc)
+                    return ("I couldn't verify your standing stop "
+                            f"for {platform} just now, so I won't "
+                            "start a drive blind. Nothing started.")
+        return None
+
+    def _dispatch_drive(self, intent: Intent, job_id: str,
+                        chat_key: str, message: Any) -> str:
+        """NL door to the browser navigator: same job, same loop,
+        same approver as ``/browser run`` — started from the
+        owner's words instead of the verb.
+
+        The run itself is the runtime's shared starter
+        (``start_browser_run``); this dispatch adds the
+        conversational gates and the report-back: a mind job waits
+        on the browser job and delivers its outcome — the page it
+        ended on, what it did, why it stopped, and every
+        consequential verdict — into THIS chat when the run lands.
+        """
+        runtime = self.runtime
+        if intent.action == "status":
+            if runtime is None:
+                return ("browser runs live in my chat runtime — "
+                        "no registry in this console.")
+            try:
+                if not runtime._is_operator(message):
+                    return ("browser run status is owner-only — "
+                            "ask from your own DM.")
+            except Exception as exc:  # noqa: BLE001 - a guard
+                record_failure("coremind.drive_status_operator", exc)
+                return "I couldn't verify that ask came from you."
+            return runtime._browser_run_status(
+                (intent.target or "").strip())
+        refusal = self._drive_gate_refusal(message)
+        if refusal is not None:
+            return refusal
+        m = _RE_URL.search(intent.target or "")
+        url = m.group(0) if m else self._browse_url(intent.target)
+        if not url.startswith(("http://", "https://")):
+            return ("give me a full URL to drive — https://… — and "
+                    "what to do there.")
+        goal = str((intent.meta or {}).get("goal") or "").strip() \
+            or "browse"
+        job, duplicate = runtime.start_browser_run(
+            url, goal, chat_key=chat_key)
+
+        def _report() -> str:
+            job.wait()
+            return self._drive_report(job)
+
+        if duplicate:
+            note = (f"🚗 that drive is already running — job "
+                    f"{job.job_id} ({url}, goal: {goal}). I'll "
+                    "report its outcome here when it lands.")
+        else:
+            note = (f"🚗 driving {url} — goal: {goal} "
+                    f"(job {job.job_id}). I'll report back here "
+                    "when it lands; /browser run status "
+                    f"{job.job_id} tracks it meanwhile.")
+        return self._send_async(chat_key, _report, job_id, note,
+                                kind="drive")
+
+    def _drive_report(self, job: Any) -> str:
+        """The drive's outcome for the origin chat: the page it
+        ended on, the goal it served, why it stopped, and the
+        consequential verdicts — never a bare 'done'."""
+        status = str(getattr(job, "status", "") or "")
+        lines = [f"page: {job.final_url or job.url}",
+                 f"goal: {job.goal}",
+                 f"steps: {job.steps} · wall: {job.wall_outcome}"]
+        if job.stopped_reason:
+            lines.append(f"stopped: {job.stopped_reason}")
+        if job.error:
+            lines.append(f"error: {job.error}")
+        for entry in getattr(job, "approvals", []) or []:
+            verdict = str(entry.get("verdict", "") or "")
+            by = str(entry.get("answered_by", "") or "")
+            suffix = f" (by {by})" if by else ""
+            lines.append(
+                f"consequential: {entry.get('kind', 'step')} on "
+                f"{entry.get('url', '')} — {verdict}{suffix}")
+        if status == "failed":
+            return (f"❌ drive failed — job {job.job_id}\n"
+                    + "\n".join(lines))
+        if status == "done":
+            head = f"🏁 drive done — job {job.job_id}"
+        elif status == "blocked":
+            head = f"⛔ drive stopped — job {job.job_id}"
+        elif status == "cancelled":
+            head = f"✋ drive cancelled — job {job.job_id}"
+        else:
+            head = f"🏁 drive {status} — job {job.job_id}"
+        return "\n".join([head, *lines])
+
     def _directives(self):
         from .directives import DirectivesAgent
 
@@ -3309,7 +3556,7 @@ def run_goal(context: Any, goal: str, *, json_out: bool = False) -> str:
     intent = mind.decide(goal, allow_model=True)
     if intent.kind == "chat":
         line = f"no goal signal in “{goal[:60]}” — say what you want done " \
-               "(research/build/browse/download/mission/game)."
+               "(research/build/browse/drive/download/mission/game)."
         return json.dumps({"intent": intent.to_dict(), "reply": line}) if json_out else line
     if intent.action == "ask":
         line = f"need one more detail: {mind._question_for(intent)}"
@@ -3321,7 +3568,8 @@ def run_goal(context: Any, goal: str, *, json_out: bool = False) -> str:
     job_id = mind._new_job(intent)
     try:
         fn = {"research": mind._dispatch_research, "build": mind._dispatch_build,
-              "browse": mind._dispatch_browse, "download": mind._dispatch_download,
+              "browse": mind._dispatch_browse, "drive": mind._dispatch_drive,
+              "download": mind._dispatch_download,
               "mission": mind._dispatch_mission, "status": mind._dispatch_status,
               "multi": mind._dispatch_multi}[intent.kind]
         # run the inner work synchronously: swap the async wrapper
@@ -3380,6 +3628,10 @@ def _summarize_orchestration(result: Any, *, max_steps: int = 8) -> str:
 def _dispatch_inline(mind: CoreMind, fn: Callable, intent: Intent, job_id: str) -> str:
     """Execute a dispatch job's inner work on the calling thread."""
     if intent.kind == "mission":
+        return fn(intent, job_id, "console", None)
+    if intent.kind == "drive":
+        # The dispatch itself answers honestly without a runtime
+        # (drives start from the live chat runtime, not a console).
         return fn(intent, job_id, "console", None)
     # heavy organs: replicate the job() closure synchronously
     if intent.kind == "research":

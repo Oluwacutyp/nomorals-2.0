@@ -669,6 +669,35 @@ class RuntimeReachMixin:
         if not url.startswith(("http://", "https://")):
             return "give a full URL starting with http:// or https://"
 
+        job, duplicate = self.start_browser_run(
+            url, goal, chat_key=chat_key, force=force)
+        if duplicate:
+            return (f"browser run already running: job {job.job_id} — "
+                    f"{url} (goal: {goal}). "
+                    f"/browser run status {job.job_id} for progress. "
+                    "Add --new to start a fresh one.")
+        return (f"browser run started: job {job.job_id} — {url} "
+                f"(goal: {goal}). "
+                f"/browser run status {job.job_id} for progress. "
+                "I'll ping you on wall / cleared / blocked / done.")
+
+    def start_browser_run(self, url: str, goal: str, *,
+                          chat_key: str = "",
+                          force: bool = False) -> tuple[Any, bool]:
+        """Start ONE wired browser-run job — the single entry every
+        door shares: the ``/browser run`` verb and the conversational
+        drive tool (coremind's ``drive`` intent) both start runs
+        here, so the decider, the vision escalator, the challenge
+        ladder and the approver selection (ActingApprover by
+        default, the approval broker under
+        ``partner.browser_require_approval``) are identical however
+        the run was asked for. Everything the loop touches is built
+        inside the runner, on the job's own thread.
+
+        Returns ``(job, duplicate)`` — ``duplicate`` is True when a
+        live job for the same URL+goal was returned instead.
+        """
+
         def _run_brain() -> Any:
             # The real brain, shared by the decider and the vision
             # escalator; None when unavailable (the heuristic and
@@ -759,17 +788,8 @@ class RuntimeReachMixin:
                             f"{last['url']} — run stopped")
             return result
 
-        job, duplicate = self._browser_run_jobs().start(
+        return self._browser_run_jobs().start(
             url, goal, _runner, force=force)
-        if duplicate:
-            return (f"browser run already running: job {job.job_id} — "
-                    f"{url} (goal: {goal}). "
-                    f"/browser run status {job.job_id} for progress. "
-                    "Add --new to start a fresh one.")
-        return (f"browser run started: job {job.job_id} — {url} "
-                f"(goal: {goal}). "
-                f"/browser run status {job.job_id} for progress. "
-                "I'll ping you on wall / cleared / blocked / done.")
 
     def _browser_run_status(self, arg: str) -> str:
         """``/browser run status [job]`` — job progress, no new loop."""

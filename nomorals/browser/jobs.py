@@ -199,6 +199,16 @@ Runner = Callable[["BrowserRunJob"], dict[str, Any]]
 Notifier = Callable[[str, str], None]
 
 
+def _approvals_summary(approvals: list[dict[str, Any]]) -> str:
+    """One compact clause per consequential verdict: kind + verdict."""
+    parts = []
+    for entry in approvals:
+        kind = str(entry.get("kind", "") or "step")
+        verdict = str(entry.get("verdict", "") or "")
+        parts.append(f"{kind} {verdict}".strip())
+    return "; ".join(parts)
+
+
 def _norm_key(url: str, goal: str) -> tuple[str, str]:
     return (str(url or "").strip(),
             " ".join(str(goal or "").split()).casefold())
@@ -221,6 +231,11 @@ class BrowserRunJob:
     wall_detection: str = ""
     events: list[dict[str, Any]] = field(default_factory=list)
     trace: list[dict[str, Any]] = field(default_factory=list)
+    #: Consequential-step verdicts the run's approver recorded
+    #: (the runner's ``consequential_approvals`` result entry,
+    #: retained at finish so status views and outcome reports can
+    #: cite them — before this the record died with the result).
+    approvals: list[dict[str, Any]] = field(default_factory=list)
     created_at: float = field(default_factory=time.time)
     started_at: float = 0.0
     finished_at: float = 0.0
@@ -345,6 +360,10 @@ class BrowserRunJob:
             trace = result.get("trace")
             if isinstance(trace, list):
                 self.trace = trace
+            approvals = result.get("consequential_approvals")
+            if isinstance(approvals, list):
+                self.approvals = [dict(entry) for entry in approvals
+                                  if isinstance(entry, dict)]
             self.finished_at = time.time()
             blocked = self.stopped_reason.startswith("blocked:")
             cancelled = self._cancel_requested.is_set() \
@@ -389,12 +408,16 @@ class BrowserRunJob:
                       f"{self.stopped_reason} — final URL: "
                       f"{self.final_url or self.url}")
         else:
-            self.note("done",
-                      f"🏁 browser run {self.job_id} done: "
-                      f"{self.steps} steps, stopped: "
-                      f"{self.stopped_reason}, final URL: "
-                      f"{self.final_url or self.url}, "
-                      f"wall: {self.wall_outcome}")
+            done_note = (
+                f"🏁 browser run {self.job_id} done: "
+                f"{self.steps} steps, stopped: "
+                f"{self.stopped_reason}, final URL: "
+                f"{self.final_url or self.url}, "
+                f"wall: {self.wall_outcome}")
+            if self.approvals:
+                done_note += (f" Consequential steps: "
+                              f"{_approvals_summary(self.approvals)}")
+            self.note("done", done_note)
         self._changed()
         with self._lock:
             self._done.set()
@@ -432,6 +455,13 @@ class BrowserRunJob:
                 f"final URL: {self.final_url or self.url}",
                 f"wall: {self.wall_outcome}",
             ]
+            if self.approvals:
+                lines.append("approvals:")
+                for entry in self.approvals:
+                    lines.append(
+                        f"  {entry.get('kind', 'step')} on "
+                        f"{entry.get('url', '')} — "
+                        f"{entry.get('verdict', '')}")
             recent = self.events[-5:]
         if recent:
             lines.append("events:")
