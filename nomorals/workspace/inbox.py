@@ -21,6 +21,12 @@ Design notes:
 * **Crash-safe.** Items flip to ``processing`` inside a transaction (only one
   sweeper wins); on startup anything stuck in ``processing`` for >30 min goes
   back to ``pending``.
+* **Backend-aware (Mongo P5).** The store is this module's own
+  ``inbox.db`` through the Database class; when a document store is
+  resolved it attaches to that handle and the three tables route via
+  ``attached_rows`` (the claim becomes the seam's compare-and-swap),
+  with the file's rows imported once. The SQLite default runs the
+  native statements byte-for-byte.
 * **Room-aware, with fallback.** A ``RoomProvider`` supplies
   ``rooms/<slug>/inbox/`` and ``rooms/<slug>/files/`` paths (the interface
   Prompt 05 needs); without one everything falls back to the global inbox.
@@ -51,6 +57,7 @@ from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from ..core.text import truncate
 from ..storage.db import Database
+from ..storage.rowstore import attached_rows
 
 log = get_logger(__name__)
 
@@ -499,6 +506,7 @@ class Inbox:
         room_provider: RoomProvider | None = None,
         vision: Callable[[bytes, str, str], dict[str, Any]] | None = None,
         min_confidence: float = 0.5,
+        store: Any = None,
     ) -> None:
         self.root = Path(root).resolve()
         self.dir = self.root / "inbox"
@@ -511,6 +519,7 @@ class Inbox:
 
         self.db = db or Database(self.dir / "inbox.db")
         self._ensure_schema()
+        self._attach_seam(db, store)
         self._recover_stale()  # crash recovery, once per startup
 
         #: classifier confidence below this → needs_input (review queue).
@@ -578,14 +587,92 @@ class Inbox:
         self._add_column("inbox_items", "owner_note", "TEXT DEFAULT ''")
         self._add_column("inbox_items", "content_hash", "TEXT DEFAULT ''")
 
+    # ── the document seam (Mongo program P5, workspace-inbox) ──────────
+
+    def _attach_seam(self, given_db: Database | None, store: Any) -> None:
+        """Attach the resolved document store to this inbox's handle.
+
+        The inbox owns ``inbox.db`` through the Database class; its
+        port attaches the resolved store (an explicit ``store``, or —
+        when the inbox built its own handle — the boot ambient) to
+        that handle, after which the three tables route via
+        :func:`attached_rows` and the file's rows import once. A
+        caller-supplied handle keeps the attachment its owner gave it
+        (boot attaches the central handle): attached_rows still picks
+        that up per call, and no import runs against a file this
+        inbox does not own. With nothing resolved, every method below
+        runs its native SQL byte-for-byte.
+        """
+        resolved = store
+        if resolved is None and given_db is None:
+            from ..storage.docstore import ambient_document_store
+            resolved = ambient_document_store()
+        if resolved is None:
+            return
+        self.db.document_store = resolved
+        self._import_file_rows(resolved)
+
+    def _import_file_rows(self, store: Any) -> None:
+        """One-time lazy import of inbox.db's rows into the seam.
+
+        Mirrors SidecarPort.ensure_imported's contract: completion is
+        recorded in the store's meta collection, a store that is
+        already live is adopted (never overwritten), and every write
+        is an upsert by id through the same attached_rows tables the
+        live path uses. Rows are read off this inbox's own handle
+        after _ensure_schema, so a pre-ALTER file reads with its
+        added columns defaulted, exactly as the native path sees it.
+        """
+        meta = store.get("workspace-inbox__meta", "import")
+        if meta and meta.get("done"):
+            return
+        tables = {name: attached_rows(self.db, name)
+                  for name in ("inbox_items", "inbox_history", "inbox_rules")}
+        counts: dict[str, int] = {}
+        if not any(store.count(name) for name in tables):
+            for name, table in tables.items():
+                rows = self.db.query(f'SELECT * FROM "{name}" ORDER BY rowid')
+                for row in rows:
+                    table.put(dict(row))
+                counts[name] = len(rows)
+        store.put("workspace-inbox__meta", "import",
+                  {"done": True, "tables": counts, "at": time.time()})
+
+    def _items_table(self):
+        """The seam-backed inbox_items table, or None on the SQLite
+        default, where the native statements run unchanged."""
+        return attached_rows(self.db, "inbox_items")
+
+    def _history_table(self):
+        return attached_rows(self.db, "inbox_history")
+
+    def _rules_table(self):
+        return attached_rows(self.db, "inbox_rules")
+
     def _recover_stale(self) -> None:
         """Crash recovery: `processing` older than 30 min → `pending`, once."""
         cutoff = time.time() - STALE_PROCESSING_S
+        now = time.time()
+        table = self._items_table()
+        if table is not None:
+            recovered = 0
+            for row in table.find({"status": "processing"}):
+                if float(row["updated_at"]) < cutoff:
+                    table.update(row["id"], {
+                        "status": "pending",
+                        "attempts": int(row["attempts"]) + 1,
+                        "updated_at": now})
+                    recovered += 1
+            if recovered:
+                log.warning(
+                    "inbox: recovered %d stale processing item(s) to pending",
+                    recovered)
+            return
         with self.db.transaction():
             cur = self.db.execute(
                 "UPDATE inbox_items SET status='pending', attempts=attempts+1,"
                 " updated_at=? WHERE status='processing' AND updated_at < ?",
-                (time.time(), cutoff),
+                (now, cutoff),
             )
         if cur.rowcount:
             log.warning("inbox: recovered %d stale processing item(s) to pending",
@@ -732,10 +819,18 @@ class Inbox:
         kind = kind_hint or self._detect_kind(dest)
         chash = content_hash_of(dest)
         if chash:
-            dup = self.db.query_one(
-                "SELECT id, name FROM inbox_items WHERE content_hash = ?"
-                " AND content_hash != '' AND status IN"
-                " ('pending', 'processing', 'done') LIMIT 1", (chash,))
+            dup = None
+            table = self._items_table()
+            if table is not None:
+                for row in table.find({"content_hash": chash}):
+                    if row["status"] in ("pending", "processing", "done"):
+                        dup = row
+                        break
+            else:
+                dup = self.db.query_one(
+                    "SELECT id, name FROM inbox_items WHERE content_hash = ?"
+                    " AND content_hash != '' AND status IN"
+                    " ('pending', 'processing', 'done') LIMIT 1", (chash,))
             if dup:
                 dest.unlink(missing_ok=True)
                 return self._insert(
@@ -771,6 +866,10 @@ class Inbox:
             status=status, room=room, result_summary=result_summary, error=error,
             content_hash=content_hash,
         )
+        table = self._items_table()
+        if table is not None:
+            table.put(item.to_dict())
+            return item
         with self.db.transaction():
             self.db.execute(
                 "INSERT INTO inbox_items (id, name, path, kind, mime, size_bytes,"
@@ -803,6 +902,16 @@ class Inbox:
 
     def list_items(self, status: str | None = None, room: str | None = None,
                    limit: int = 50) -> list[InboxItem]:
+        table = self._items_table()
+        if table is not None:
+            filter_: dict[str, Any] = {}
+            if status:
+                filter_["status"] = status
+            if room:
+                filter_["room"] = room
+            rows = table.find(filter_ or None)
+            rows.sort(key=lambda r: r["received_at"], reverse=True)
+            return [self._row_to_item(r) for r in rows[:limit]]
         sql = "SELECT * FROM inbox_items"
         clauses, params = [], []
         if status:
@@ -818,8 +927,12 @@ class Inbox:
         return [self._row_to_item(r) for r in self.db.query(sql, params)]
 
     def get_item(self, item_id: str) -> InboxItem:
-        row = self.db.query_one("SELECT * FROM inbox_items WHERE id = ?",
-                                (item_id,))
+        table = self._items_table()
+        if table is not None:
+            row = table.get(item_id)
+        else:
+            row = self.db.query_one("SELECT * FROM inbox_items WHERE id = ?",
+                                    (item_id,))
         if row is None:
             raise KeyError(f"no inbox item {item_id}")
         return self._row_to_item(row)
@@ -829,6 +942,11 @@ class Inbox:
         item = self.get_item(item_id)
         if item.status not in ("failed", "needs_input"):
             raise ValueError(f"item {item_id} is {item.status}; nothing to retry")
+        table = self._items_table()
+        if table is not None:
+            table.update(item_id, {"status": "pending", "error": "",
+                                   "updated_at": time.time()})
+            return self.get_item(item_id)
         with self.db.transaction():
             self.db.execute(
                 "UPDATE inbox_items SET status='pending', error='',"
@@ -837,6 +955,15 @@ class Inbox:
 
     def retry_all(self, status: str = "failed") -> int:
         """Re-queue every item in ``status``.  Returns how many."""
+        table = self._items_table()
+        if table is not None:
+            now = time.time()
+            count = 0
+            for row in table.find({"status": status}):
+                table.update(row["id"], {"status": "pending", "error": "",
+                                         "updated_at": now})
+                count += 1
+            return count
         with self.db.transaction():
             cur = self.db.execute(
                 "UPDATE inbox_items SET status='pending', error='',"
@@ -845,6 +972,11 @@ class Inbox:
 
     def set_priority(self, item_id: str, priority: int) -> InboxItem:
         """Owner-set triage priority — sweeps run higher first."""
+        table = self._items_table()
+        if table is not None:
+            table.update(item_id, {"priority": int(priority),
+                                   "updated_at": time.time()})
+            return self.get_item(item_id)
         with self.db.transaction():
             self.db.execute(
                 "UPDATE inbox_items SET priority=?, updated_at=? WHERE id=?",
@@ -858,6 +990,11 @@ class Inbox:
         item = self.get_item(item_id)
         combined = (item.owner_note + "\n" + line).strip() if item.owner_note \
             else line
+        table = self._items_table()
+        if table is not None:
+            table.update(item_id, {"owner_note": combined[:4000],
+                                   "updated_at": time.time()})
+            return self.get_item(item_id)
         with self.db.transaction():
             self.db.execute(
                 "UPDATE inbox_items SET owner_note=?, updated_at=? WHERE id=?",
@@ -866,6 +1003,18 @@ class Inbox:
 
     def search(self, query: str, limit: int = 50) -> list[InboxItem]:
         """Full-text-ish search over name / intent / summary / notes."""
+        table = self._items_table()
+        if table is not None:
+            needle = (query or "").strip().lower()
+            if not needle:
+                return []
+            rows = [r for r in table.all()
+                    if needle in (r["name"] or "").lower()
+                    or needle in (r["intent"] or "").lower()
+                    or needle in (r["result_summary"] or "").lower()
+                    or needle in (r["owner_note"] or "").lower()]
+            rows.sort(key=lambda r: r["received_at"], reverse=True)
+            return [self._row_to_item(r) for r in rows[:limit]]
         q = f"%{(query or '').strip()}%"
         if q == "%%":
             return []
@@ -879,9 +1028,14 @@ class Inbox:
         """Delete done rows (and their files, only inside the inbox tree)
         older than ``older_than_days``.  History is kept."""
         cutoff = time.time() - older_than_days * 86400
-        rows = self.db.query(
-            "SELECT id, path FROM inbox_items WHERE status='done'"
-            " AND updated_at < ?", (cutoff,))
+        table = self._items_table()
+        if table is not None:
+            rows = table.find({"status": "done",
+                               "updated_at": {"$lt": cutoff}})
+        else:
+            rows = self.db.query(
+                "SELECT id, path FROM inbox_items WHERE status='done'"
+                " AND updated_at < ?", (cutoff,))
         files, gone = 0, 0
         inbox_root = self.dir.resolve()
         for r in rows:
@@ -892,9 +1046,12 @@ class Inbox:
                     files += 1
             except OSError:  # noqa: BLE001 — already gone is fine
                 pass
-            with self.db.transaction():
-                self.db.execute("DELETE FROM inbox_items WHERE id=?",
-                                (r["id"],))
+            if table is not None:
+                table.delete(r["id"])
+            else:
+                with self.db.transaction():
+                    self.db.execute("DELETE FROM inbox_items WHERE id=?",
+                                    (r["id"],))
             gone += 1
         return {"rows": gone, "files": files}
 
@@ -931,10 +1088,19 @@ class Inbox:
         """Markdown-ish digest of what the inbox did in the last ``hours``
         — feeds the morning pulse / daily review.  Pure."""
         cutoff = time.time() - max(1.0, hours) * 3600
-        rows = self.db.query(
-            "SELECT * FROM inbox_items WHERE updated_at >= ?"
-            " AND status IN ('done', 'needs_input', 'failed', 'quarantined')"
-            " ORDER BY updated_at DESC LIMIT ?", (cutoff, limit))
+        table = self._items_table()
+        if table is not None:
+            rows = table.find({
+                "updated_at": {"$gte": cutoff},
+                "status": {"$in": ["done", "needs_input", "failed",
+                                   "quarantined"]}})
+            rows.sort(key=lambda r: r["updated_at"], reverse=True)
+            rows = rows[:limit]
+        else:
+            rows = self.db.query(
+                "SELECT * FROM inbox_items WHERE updated_at >= ?"
+                " AND status IN ('done', 'needs_input', 'failed', 'quarantined')"
+                " ORDER BY updated_at DESC LIMIT ?", (cutoff, limit))
         items = [self._row_to_item(r) for r in rows]
         if not items:
             return "📥 inbox digest: nothing processed in the window."
@@ -971,6 +1137,20 @@ class Inbox:
         shutil.move(item.path, str(dest))
         log.warning("inbox: quarantine released by owner: %s (%s)",
                     item.name, item.id)
+        now = time.time()
+        items_table = self._items_table()
+        history_table = self._history_table()
+        if items_table is not None:
+            items_table.update(item_id, {
+                "status": "pending", "path": str(dest), "error": "",
+                "result_summary": "released from quarantine by owner",
+                "updated_at": now})
+            history_table.put({
+                "id": new_short_id("hx"), "item_id": item_id,
+                "intent": "quarantined", "action": "release",
+                "started_at": now, "ended_at": now, "outcome": "released",
+                "detail": f"released from quarantine to {dest.name} by owner"})
+            return self.get_item(item_id)
         with self.db.transaction():
             self.db.execute(
                 "UPDATE inbox_items SET status='pending', path=?, error='',"
@@ -987,6 +1167,11 @@ class Inbox:
 
     def history(self, item_id: str | None = None,
                 limit: int = 50) -> list[dict[str, Any]]:
+        table = self._history_table()
+        if table is not None:
+            rows = table.find({"item_id": item_id} if item_id else None)
+            rows.sort(key=lambda r: r["started_at"], reverse=True)
+            return rows[:limit]
         sql = "SELECT * FROM inbox_history"
         params: list[Any] = []
         if item_id:
@@ -1009,6 +1194,17 @@ class Inbox:
             id=new_short_id("rule"), name=name, conditions=dict(conditions),
             intent=intent, params=dict(params or {}), enabled=enabled,
             priority=int(priority))
+        table = self._rules_table()
+        if table is not None:
+            table.put({
+                "id": rule.id, "name": rule.name,
+                "conditions_json": json.dumps(rule.conditions),
+                "intent": rule.intent,
+                "params_json": json.dumps(rule.params),
+                "enabled": int(rule.enabled), "priority": rule.priority,
+                "created_at": rule.created_at})
+            log.info("inbox: rule added: %s → %s (%s)", name, intent, rule.id)
+            return rule
         with self.db.transaction():
             self.db.execute(
                 "INSERT INTO inbox_rules (id, name, conditions_json, intent,"
@@ -1031,6 +1227,12 @@ class Inbox:
             created_at=float(row.get("created_at") or 0))
 
     def list_rules(self, *, enabled_only: bool = False) -> list[InboxRule]:
+        table = self._rules_table()
+        if table is not None:
+            rows = table.find({"enabled": 1} if enabled_only else None)
+            rows.sort(key=lambda r: (-int(r["priority"]),
+                                     float(r["created_at"])))
+            return [self._row_to_rule(r) for r in rows]
         sql = "SELECT * FROM inbox_rules"
         if enabled_only:
             sql += " WHERE enabled = 1"
@@ -1038,12 +1240,18 @@ class Inbox:
         return [self._row_to_rule(r) for r in self.db.query(sql)]
 
     def remove_rule(self, rule_id: str) -> bool:
+        table = self._rules_table()
+        if table is not None:
+            return table.delete(rule_id)
         with self.db.transaction():
             cur = self.db.execute("DELETE FROM inbox_rules WHERE id = ?",
                                   (rule_id,))
         return cur.rowcount == 1
 
     def set_rule_enabled(self, rule_id: str, enabled: bool) -> bool:
+        table = self._rules_table()
+        if table is not None:
+            return table.update(rule_id, {"enabled": int(enabled)})
         with self.db.transaction():
             cur = self.db.execute(
                 "UPDATE inbox_rules SET enabled = ? WHERE id = ?",
@@ -1109,6 +1317,18 @@ class Inbox:
                     return parsed[0], parsed[1], str(p)
         return None
 
+    def _update_item(self, item_id: str, fields: dict[str, Any],
+                     native_sql: str, native_params: tuple) -> None:
+        """One inbox_items UPDATE: via the seam when a store is
+        attached, else the call site's historical statement verbatim
+        (the MonitorAgent._upd shape)."""
+        table = self._items_table()
+        if table is not None:
+            table.update(item_id, fields)
+            return
+        with self.db.transaction():
+            self.db.execute(native_sql, native_params)
+
     def classify(self, item: InboxItem) -> str:
         """Intent for an item.
 
@@ -1120,11 +1340,13 @@ class Inbox:
         directive = self._directive_for(item)
         if directive:
             name, arg, target = directive
-            with self.db.transaction():
-                self.db.execute(
-                    "UPDATE inbox_items SET directive=?, directive_target=?,"
-                    " updated_at=? WHERE id=?",
-                    (f"@{name} {arg}".strip(), target, time.time(), item.id))
+            self._update_item(
+                item.id,
+                {"directive": f"@{name} {arg}".strip(),
+                 "directive_target": target, "updated_at": time.time()},
+                "UPDATE inbox_items SET directive=?, directive_target=?,"
+                " updated_at=? WHERE id=?",
+                (f"@{name} {arg}".strip(), target, time.time(), item.id))
             item.directive = f"@{name} {arg}".strip()
             item.directive_target = target
             intent = DIRECTIVE_INTENTS.get(name)
@@ -1133,10 +1355,11 @@ class Inbox:
                 return "needs_input"
             if name == "room" and arg:
                 item.room = sanitize_name(arg.split()[0])
-                with self.db.transaction():
-                    self.db.execute(
-                        "UPDATE inbox_items SET room=?, updated_at=? WHERE id=?",
-                        (item.room, time.time(), item.id))
+                self._update_item(
+                    item.id,
+                    {"room": item.room, "updated_at": time.time()},
+                    "UPDATE inbox_items SET room=?, updated_at=? WHERE id=?",
+                    (item.room, time.time(), item.id))
             return intent
         rule = self._rule_for(item)
         if rule is not None:
@@ -1145,10 +1368,11 @@ class Inbox:
                 item.room = sanitize_name(str(params["room"]))
             if params.get("note"):
                 self.annotate(item.id, str(params["note"]))
-            with self.db.transaction():
-                self.db.execute(
-                    "UPDATE inbox_items SET room=?, updated_at=? WHERE id=?",
-                    (item.room, time.time(), item.id))
+            self._update_item(
+                item.id,
+                {"room": item.room, "updated_at": time.time()},
+                "UPDATE inbox_items SET room=?, updated_at=? WHERE id=?",
+                (item.room, time.time(), item.id))
             log.info("inbox: rule %r matched %s → %s",
                      rule.name, item.name, rule.intent)
             return rule.intent
@@ -1186,6 +1410,18 @@ class Inbox:
 
     def _claim(self, item_id: str) -> bool:
         """Flip pending→processing; False if another sweeper won the race."""
+        table = self._items_table()
+        if table is not None:
+            # The seam's claim primitive (Mongo P4): one atomic
+            # compare-and-swap on the status field — exactly one of
+            # several competing sweepers presenting 'pending' wins.
+            row = table.get(item_id)
+            if row is None or row["status"] != "pending":
+                return False
+            new_row = {**row, "status": "processing",
+                       "attempts": int(row["attempts"]) + 1,
+                       "updated_at": time.time()}
+            return table.cas_row(item_id, {"status": "pending"}, new_row)
         with self.db.transaction():
             cur = self.db.execute(
                 "UPDATE inbox_items SET status='processing',"
@@ -1225,34 +1461,59 @@ class Inbox:
             new_path = str(dest)
         status = "done" if outcome == "processed" else outcome
         summary = redact_secrets(result.summary)
-        with self.db.transaction():
-            self.db.execute(
-                "UPDATE inbox_items SET status=?, path=?, intent=?,"
-                " action_taken=?, result_summary=?, error='', updated_at=?"
-                " WHERE id=?",
-                (status, new_path, intent, intent, summary, now, item.id))
-            self.db.execute(
-                "INSERT INTO inbox_history (id, item_id, intent, action,"
-                " started_at, ended_at, outcome, detail)"
-                " VALUES (?,?,?,?,?,?,?,?)",
-                (new_short_id("hx"), item.id, intent, intent,
-                 item.updated_at, now, outcome, summary[:2000]))
+        items_table = self._items_table()
+        history_table = self._history_table()
+        if items_table is not None:
+            items_table.update(item.id, {
+                "status": status, "path": new_path, "intent": intent,
+                "action_taken": intent, "result_summary": summary,
+                "error": "", "updated_at": now})
+            history_table.put({
+                "id": new_short_id("hx"), "item_id": item.id,
+                "intent": intent, "action": intent,
+                "started_at": item.updated_at, "ended_at": now,
+                "outcome": outcome, "detail": summary[:2000]})
+        else:
+            with self.db.transaction():
+                self.db.execute(
+                    "UPDATE inbox_items SET status=?, path=?, intent=?,"
+                    " action_taken=?, result_summary=?, error='', updated_at=?"
+                    " WHERE id=?",
+                    (status, new_path, intent, intent, summary, now, item.id))
+                self.db.execute(
+                    "INSERT INTO inbox_history (id, item_id, intent, action,"
+                    " started_at, ended_at, outcome, detail)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (new_short_id("hx"), item.id, intent, intent,
+                     item.updated_at, now, outcome, summary[:2000]))
         item.status, item.path, item.intent = status, new_path, intent
         item.action_taken, item.result_summary = intent, summary
         return item
 
     def _fail(self, item: InboxItem, intent: str, error: str) -> InboxItem:
         now = time.time()
-        with self.db.transaction():
-            self.db.execute(
-                "UPDATE inbox_items SET status='failed', intent=?, error=?,"
-                " updated_at=? WHERE id=?", (intent, error[:2000], now, item.id))
-            self.db.execute(
-                "INSERT INTO inbox_history (id, item_id, intent, action,"
-                " started_at, ended_at, outcome, detail)"
-                " VALUES (?,?,?,?,?,?,?,?)",
-                (new_short_id("hx"), item.id, intent, intent,
-                 item.updated_at, now, "failed", error[:2000]))
+        items_table = self._items_table()
+        history_table = self._history_table()
+        if items_table is not None:
+            items_table.update(item.id, {
+                "status": "failed", "intent": intent,
+                "error": error[:2000], "updated_at": now})
+            history_table.put({
+                "id": new_short_id("hx"), "item_id": item.id,
+                "intent": intent, "action": intent,
+                "started_at": item.updated_at, "ended_at": now,
+                "outcome": "failed", "detail": error[:2000]})
+        else:
+            with self.db.transaction():
+                self.db.execute(
+                    "UPDATE inbox_items SET status='failed', intent=?, error=?,"
+                    " updated_at=? WHERE id=?", (intent, error[:2000], now, item.id))
+                self.db.execute(
+                    "INSERT INTO inbox_history (id, item_id, intent, action,"
+                    " started_at, ended_at, outcome, detail)"
+                    " VALUES (?,?,?,?,?,?,?,?)",
+                    (new_short_id("hx"), item.id, intent, intent,
+                     item.updated_at, now, "failed", error[:2000]))
         log.error("inbox: item %s (%s) failed: %s", item.id, item.name, error)
         item.status, item.error = "failed", error[:2000]
         return item
@@ -1290,9 +1551,16 @@ class Inbox:
         if not self._sweep_lock.acquire(blocking=False):
             return {"swept": False, "reason": "sweep already running"}
         try:
-            pending = [self._row_to_item(r) for r in self.db.query(
-                "SELECT * FROM inbox_items WHERE status='pending'"
-                " ORDER BY priority DESC, received_at ASC")]
+            table = self._items_table()
+            if table is not None:
+                rows = table.find({"status": "pending"})
+                rows.sort(key=lambda r: (-int(r["priority"]),
+                                         float(r["received_at"])))
+                pending = [self._row_to_item(r) for r in rows]
+            else:
+                pending = [self._row_to_item(r) for r in self.db.query(
+                    "SELECT * FROM inbox_items WHERE status='pending'"
+                    " ORDER BY priority DESC, received_at ASC")]
             # a note that names another pending file must run BEFORE that
             # file's default intent consumes it (e.g. `@square photo.jpg`)
             by_path = {it.path: it for it in pending}
@@ -1638,6 +1906,18 @@ def _run_media_edit(src: Path, instruction: str, out_dir: Path) -> dict[str, Any
     raise ValueError(f"unsupported video op {name!r}")
 
 
+def _pending_row_for_path(inbox: Inbox, path: str) -> dict[str, Any] | None:
+    """The pending inbox_items row for a file path, via the seam when
+    a store is attached, else the historical query."""
+    table = attached_rows(inbox.db, "inbox_items")
+    if table is not None:
+        found = table.find({"path": path, "status": "pending"})
+        return found[0] if found else None
+    return inbox.db.query_one(
+        "SELECT id FROM inbox_items WHERE path=? AND status='pending'",
+        (path,))
+
+
 def _handle_media(inbox: Inbox, item: InboxItem, instruction: str) -> ActionResult:
     target = Path(item.directive_target or item.path)
     if not target.exists():
@@ -1660,33 +1940,46 @@ def _handle_media(inbox: Inbox, item: InboxItem, instruction: str) -> ActionResu
     # if a note directed this at another pending inbox file, don't process
     # that file a second time — mark it done as handled-via-note.
     if target != Path(item.path):
-        row = inbox.db.query_one(
-            "SELECT id FROM inbox_items WHERE path=? AND status='pending'",
-            (str(target),))
+        row = _pending_row_for_path(inbox, str(target))
         if row:
-            with inbox.db.transaction():
-                inbox.db.execute(
-                    "UPDATE inbox_items SET status='done', intent=?,"
-                    " action_taken=?, result_summary=?, updated_at=?"
-                    " WHERE id=?",
-                    (item.intent, item.intent,
-                     f"edited via {item.directive} from {item.name}",
-                     time.time(), row["id"]))
+            table = attached_rows(inbox.db, "inbox_items")
+            if table is not None:
+                table.update(row["id"], {
+                    "status": "done", "intent": item.intent,
+                    "action_taken": item.intent,
+                    "result_summary":
+                        f"edited via {item.directive} from {item.name}",
+                    "updated_at": time.time()})
+            else:
+                with inbox.db.transaction():
+                    inbox.db.execute(
+                        "UPDATE inbox_items SET status='done', intent=?,"
+                        " action_taken=?, result_summary=?, updated_at=?"
+                        " WHERE id=?",
+                        (item.intent, item.intent,
+                         f"edited via {item.directive} from {item.name}",
+                         time.time(), row["id"]))
     # consume sidecar notes (<stem>.md/.txt) so they aren't swept separately
     for ext in (".md", ".txt"):
         sc = target.parent / f"{target.stem}{ext}"
         if sc == Path(item.path):
             continue
-        row = inbox.db.query_one(
-            "SELECT id FROM inbox_items WHERE path=? AND status='pending'",
-            (str(sc),))
+        row = _pending_row_for_path(inbox, str(sc))
         if row:
-            with inbox.db.transaction():
-                inbox.db.execute(
-                    "UPDATE inbox_items SET status='done', intent='consumed',"
-                    " action_taken='consumed', result_summary=?, updated_at=?"
-                    " WHERE id=?",
-                    (f"sidecar for {item.directive}", time.time(), row["id"]))
+            table = attached_rows(inbox.db, "inbox_items")
+            if table is not None:
+                table.update(row["id"], {
+                    "status": "done", "intent": "consumed",
+                    "action_taken": "consumed",
+                    "result_summary": f"sidecar for {item.directive}",
+                    "updated_at": time.time()})
+            else:
+                with inbox.db.transaction():
+                    inbox.db.execute(
+                        "UPDATE inbox_items SET status='done', intent='consumed',"
+                        " action_taken='consumed', result_summary=?, updated_at=?"
+                        " WHERE id=?",
+                        (f"sidecar for {item.directive}", time.time(), row["id"]))
     return ActionResult(summary=f"edited → {artifact} ({instruction})",
                         notify=f"edited → {artifact}",
                         disposition="processed")

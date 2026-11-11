@@ -881,17 +881,6 @@ _register(_S(
     follows="fts",
 ))
 
-_register(_S(
-    name="workspace-inbox", verdict="residue", kind="database-file",
-    modules=("workspace/inbox.py",),
-    anchors=(("workspace/inbox.py", "inbox.db"),),
-    reason=(
-        "the workspace inbox owns inbox.db through the Database "
-        "class. A Database-class sidecar ports by attaching the "
-        "resolved store to its own handle and routing its tables "
-        "via attached_rows — the pattern is proven (P3/P4); this "
-        "organ's port is a later domain pass."),
-))
 
 _register(_S(
     name="shopping-deals", verdict="ported", kind="database-file",
@@ -935,12 +924,72 @@ _register(_S(
 ))
 
 _register(_S(
+    name="workspace-inbox", verdict="ported", kind="database-file",
+    modules=("workspace/inbox.py",),
+    tables=("inbox_items", "inbox_history", "inbox_rules"),
+    anchors=(("workspace/inbox.py", "inbox.db"),),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 1): the "
+        "workspace inbox owns inbox.db through the Database class, "
+        "so its port attaches the resolved store to its own handle "
+        "and routes its three tables via attached_rows (collections "
+        "carry the table names, the attached_rows convention) "
+        "behind its unchanged API; the pending→processing claim "
+        "becomes the seam's compare-and-swap, and the file's rows "
+        "import once through the same tables (completion marked "
+        "in the workspace-inbox__meta collection; a live store is "
+        "adopted, never overwritten). The idempotent ALTER seam "
+        "for older files stays a native-path concern — the seam "
+        "mapping derives from the handle's post-ALTER schema, so "
+        "pre-ALTER rows read with their columns defaulted. A "
+        "caller-supplied handle keeps its owner's attachment (the "
+        "boot-attached central handle included), picked up per "
+        "call. The native SQL path serves the SQLite default "
+        "byte-for-byte."),
+))
+
+_register(_S(
+    name="health-nutrition", verdict="ported", kind="sqlite-file",
+    modules=("health/nutrition.py",),
+    tables=("meals", "water"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 1): "
+        "NutritionStore's two tables route through the seam "
+        "(health-nutrition__meals; the AUTOINCREMENT water log "
+        "via put_raw with ids from the port's atomic counter, "
+        "seeded from the imported maximum) whenever a store is "
+        "resolved, behind its unchanged never-raises API; the "
+        "day reads and water totals re-express over finds in "
+        "Python. The native sqlite3 path serves the SQLite "
+        "default."),
+))
+
+_register(_S(
+    name="commerce-medusa", verdict="ported", kind="sqlite-file",
+    modules=("commerce/medusa.py",),
+    tables=("stores", "webhook_subscribers"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 1): "
+        "StoreManager's registry routes through the seam "
+        "(commerce-medusa__stores / __webhook_subscribers) "
+        "whenever a store is resolved, behind its unchanged "
+        "API; document ids carry the store ids verbatim — the "
+        "registry mirrors the external systems' own keys and "
+        "never forks from them. The native path's webhook_note "
+        "ALTER stays a native-path concern — the seam mapping "
+        "derives from the module's final-shape DDL, so pre-ALTER "
+        "rows import with the column defaulted. The native "
+        "sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
     name="health-timeline", verdict="residue", kind="database-file",
     modules=("health/timeline.py",),
     anchors=(("health/timeline.py", "timeline.db"),),
     reason=(
         "the health timeline owns timeline.db through the Database "
-        "class. Same disposition as workspace-inbox: a "
+        "class. Same disposition as workspace-inbox (ported in "
+        "Batch 2 by exactly this pattern): a "
         "Database-class sidecar awaiting its domain port pass."),
 ))
 
@@ -976,18 +1025,12 @@ _residue("audio-fingerprints", "audio/fingerprint.py", ("hashes", "tracks"),
 _residue("commerce-cart-recovery", "commerce/cart_recovery.py",
          ("carts", "cart_steps", "recoveries"),
          "abandoned-cart recovery flows and their step state.")
-_residue("commerce-medusa", "commerce/medusa.py",
-         ("stores", "webhook_subscribers"),
-         "Medusa commerce backend links and webhook subscribers — "
-         "state that mirrors an external system's registry.")
 _residue("health-challenges", "health/challenges.py",
          ("challenges", "challenge_members", "challenge_pbs", "squads",
           "streaks", "streak_freezes", "completions", "proofs"),
          "health challenge groups, streaks and proofs — the "
          "largest health sidecar, eight tables with cross-table "
          "streak flows; its port wants the domain pass to itself.")
-_residue("health-nutrition", "health/nutrition.py", ("meals", "water"),
-         "meal and water logs in nutrition.db.")
 _residue("health-training", "health/training.py",
          ("plans", "workout_log", "set_feedback"),
          "training plans, workout log and per-set feedback.")

@@ -21,7 +21,8 @@ P5 settles the stores that live BESIDE the central database:
   (audio-melodic, property-scam, property-value, social-voice,
   social-voice-notes, calendar-integration — the last with the
   cursor-continuity case its registry entry demands). The residue
-  Batch 2 B2 port (shopping-deals) is the shared-file shape: two
+  Batch 2 ports: workspace-inbox, health-nutrition and
+  commerce-medusa (slice 1), and the B2 port (shopping-deals) is the shared-file shape: two
   engines over one Database handle, six tables, one shared port —
   with the legacy price_snapshots adoption cases on the seam.
 * **Analytics** — the sync source is backend-aware: for seam-served
@@ -207,6 +208,8 @@ class TestSidecarRegistry:
             # residue Batch 1, slice 2:
             "health-coach", "health-form", "life-archive",
             "llm-cost-display", "marketing-aeo",
+            # residue Batch 2, slice 1:
+            "workspace-inbox", "health-nutrition", "commerce-medusa",
             # residue Batch 2, B2 (the shared-file group):
             "shopping-deals"}
 
@@ -2052,3 +2055,290 @@ class TestShoppingDealsPort:
             # import found only the engine's own (empty) table
             assert rung.store.count(
                 "shopping-deals__naija_price_snapshots") == 0
+
+
+# ---------------------------------------------------------------------------
+# residue Batch 2, slice 1: workspace-inbox, health-nutrition,
+# commerce-medusa
+# ---------------------------------------------------------------------------
+
+
+class TestWorkspaceInboxPort:
+    """workspace/inbox.py — the workspace inbox port (residue
+    Batch 2, slice 1): a Database-class organ, so the store
+    attaches to the Inbox's own Database handle and its three
+    tables route via attached_rows (collections carry the table
+    names). The pending→processing claim is the seam's
+    compare-and-swap."""
+
+    def _scenario(self, inbox) -> dict:
+        drop = inbox.dir / "digest-me.txt"
+        drop.write_text("alpha beta\ngamma\n")
+        item = inbox.intake(drop)
+        swept = inbox.sweep()
+        got = inbox.get_item(item.id)
+        rule = inbox.add_rule("pdfs", {"ext": [".pdf"]}, "summarize",
+                              priority=3)
+        inbox.set_rule_enabled(rule.id, False)
+        inbox.set_priority(item.id, 2)
+        inbox.annotate(item.id, "owner note")
+        again = inbox.get_item(item.id)
+        return {
+            "swept_counts": swept["counts"],
+            "status": got.status,
+            "summary": got.result_summary,
+            "intent": got.intent,
+            "attempts": got.attempts,
+            "priority": again.priority,
+            "note_has": "owner note" in again.owner_note,
+            "found": [i.name for i in inbox.search("digest-me")],
+            "rules": [(r.name, r.intent, r.enabled)
+                      for r in inbox.list_rules()],
+            "history": [(h["intent"], h["outcome"])
+                        for h in inbox.history(item.id)],
+            "digest_mentions": "digest-me.txt" in inbox.digest(hours=1.0),
+        }
+
+    def test_scenario_matches_across_rungs(self, rung, tmp_path):
+        from nomorals.workspace.inbox import Inbox
+
+        inbox = Inbox(tmp_path, store=rung.store)
+        assert self._scenario(inbox) == {
+            "swept_counts": {"done": 1},
+            "status": "done",
+            "summary": "3 lines, 17 bytes: alpha beta gamma",
+            "intent": "summarize",
+            "attempts": 1,
+            "priority": 2,
+            "note_has": True,
+            "found": ["digest-me.txt"],
+            "rules": [("pdfs", "summarize", False)],
+            "history": [("summarize", "processed")],
+            "digest_mentions": True,
+        }
+
+    def test_lazy_import_from_native_file(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.workspace.inbox import Inbox
+
+        native = Inbox(tmp_path)
+        drop = tmp_path / "kept.txt"
+        drop.write_text("kept body\n")
+        item = native.intake(drop)
+        native.sweep()
+        native.add_rule("pdfs", {"ext": [".pdf"]}, "summarize")
+
+        seam = Inbox(tmp_path, store=rung.store)
+        got = seam.get_item(item.id)
+        assert got.status == "done"
+        assert got.result_summary.startswith("2 lines")
+        assert len(seam.history(item.id)) == 1
+        assert [r.name for r in seam.list_rules()] == ["pdfs"]
+        assert rung.store.count("inbox_items") == 1
+        assert rung.store.count("inbox_history") == 1
+        assert rung.store.count("inbox_rules") == 1
+        marker = rung.store.get("workspace-inbox__meta", "import")
+        assert marker is not None and marker["done"] is True
+        # importing never overwrites: a second construction adopts
+        again = Inbox(tmp_path, store=rung.store)
+        assert again.get_item(item.id).status == "done"
+        assert rung.store.count("inbox_items") == 1
+        # the duplicate-content guard answers from the seam too:
+        # a twin drop with identical bytes resolves as a dropped
+        # duplicate — a new 'done' record naming the original,
+        # exactly the native contract — and the copy is discarded
+        twin = tmp_path / "kept-twin.txt"
+        twin.write_text("kept body\n")
+        dup = seam.intake(twin)
+        assert dup.id != item.id
+        assert dup.status == "done"
+        assert dup.result_summary.startswith("duplicate of kept.txt (")
+        assert item.id in dup.result_summary
+        assert not (tmp_path / "inbox" / "kept-twin.txt").exists()
+        assert rung.store.count("inbox_items") == 2
+
+    def test_claim_is_a_compare_and_swap(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("the native claim is pinned by test_inbox")
+        from nomorals.workspace.inbox import Inbox
+
+        seam = Inbox(tmp_path, store=rung.store)
+        drop = tmp_path / "race.txt"
+        drop.write_text("x\n")
+        item = seam.intake(drop)
+        assert seam._claim(item.id) is True
+        assert seam._claim(item.id) is False
+        other = Inbox(tmp_path, store=rung.store)
+        assert other._claim(item.id) is False
+        claimed = other.get_item(item.id)
+        assert claimed.status == "processing" and claimed.attempts == 1
+
+
+class TestNutritionStorePort:
+    """health/nutrition.py — NutritionStore port (residue Batch 2,
+    slice 1): two independent logs behind the unchanged
+    never-raises API; the AUTOINCREMENT water ids come from the
+    port's atomic counter, seeded from the imported maximum."""
+
+    def _scenario(self, store_) -> dict:
+        from nomorals.health.nutrition import MealItem, MealLog
+
+        item = MealItem(name="jollof rice", cal_low=450, cal_high=700,
+                        protein_g=(12, 18), carbs_g=(70, 95),
+                        fat_g=(15, 25))
+        log = MealLog(items=[item], answers={}, cal_low=450,
+                      cal_high=700)
+        meal_id = store_.save_meal(log, day="2026-11-10")
+        store_.log_water(250, day="2026-11-10")
+        total = store_.log_water(250, day="2026-11-10")
+        meals = store_.meals_on("2026-11-10")
+        return {
+            "saved": bool(meal_id),
+            "meals": len(meals),
+            "meal_items": [m["items"][0]["name"] for m in meals],
+            "cal": (meals[0]["cal_low"], meals[0]["cal_high"]),
+            "water_total": total,
+            "water_on": store_.water_on("2026-11-10"),
+            "recent": len(store_.recent_meals(5)),
+        }
+
+    def test_scenario_matches_across_rungs(self, rung, tmp_path):
+        from nomorals.health.nutrition import NutritionStore
+
+        store_ = NutritionStore(str(tmp_path / "nutrition.db"),
+                                store=rung.store)
+        assert self._scenario(store_) == {
+            "saved": True,
+            "meals": 1,
+            "meal_items": ["jollof rice"],
+            "cal": (450, 700),
+            "water_total": 500,
+            "water_on": 500,
+            "recent": 1,
+        }
+
+    def test_lazy_import_and_water_counter_continuity(self, rung,
+                                                      tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.health.nutrition import NutritionStore
+
+        path = str(tmp_path / "nutrition.db")
+        native = NutritionStore(path)
+        assert native.log_water(200, day="2026-11-09") == 200
+        assert native.log_water(300, day="2026-11-09") == 500
+
+        seam = NutritionStore(path, store=rung.store)
+        assert seam.water_on("2026-11-09") == 500
+        assert seam.log_water(100, day="2026-11-09") == 600
+        docs = rung.store.find("health-nutrition__water")
+        assert sorted(d["_id"] for d in docs) == ["1", "2", "3"]
+        # a second construction adopts — never re-imports, and the
+        # counter continues past the imported maximum
+        again = NutritionStore(path, store=rung.store)
+        assert again.log_water(50, day="2026-11-09") == 650
+        docs = rung.store.find("health-nutrition__water")
+        assert sorted(d["_id"] for d in docs) == ["1", "2", "3", "4"]
+
+    def test_seam_shape(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.health.nutrition import NutritionStore
+
+        store_ = NutritionStore(str(tmp_path / "nutrition.db"),
+                                store=rung.store)
+        assert self._scenario(store_)["saved"] is True
+        assert rung.store.count("health-nutrition__meals") == 1
+        assert rung.store.count("health-nutrition__water") == 2
+        meals = rung.store.find("health-nutrition__meals")
+        items = meals[0]["items_json"]
+        if isinstance(items, str):  # the sqlite-doc rung stores JSON text
+            import json
+
+            items = json.loads(items)
+        assert items[0]["name"] == "jollof rice"
+
+
+class TestMedusaStorePort:
+    """commerce/medusa.py — StoreManager port (residue Batch 2,
+    slice 1): the registry mirrors an external system's own keys,
+    so document ids carry the store ids verbatim."""
+
+    def _scenario(self, manager) -> dict:
+        from nomorals.commerce.medusa import Store
+
+        manager._save(Store(
+            id="store_0123456789abcdef", name="Suya Place",
+            status="ready", engine="medusa", api_url="http://api",
+            admin_url="http://api/app",
+            api_key_ref="medusa/store_0123456789abcdef/publishable",
+            webhook_secret_ref="medusa/store_0123456789abcdef/secret",
+            currency="NGN", created_at=1000.0))
+        manager._save(Store(
+            id="store_fedcba9876543210", name="Beta Shop",
+            status="failed", engine="medusa", api_url="",
+            admin_url="", api_key_ref="", webhook_secret_ref="",
+            currency="USD", created_at=2000.0))
+        got = manager.get("store_0123456789abcdef")
+        return {
+            "got_name": got.name if got else None,
+            "got_note": got.webhook_note if got else None,
+            "all": [s.id for s in manager.list()],
+            "ready": [s.id for s in manager.list(status="ready")],
+            "missing": manager.get("store_nope") is None,
+            "no_subscriber": manager.get_webhook_subscriber(
+                "store_0123456789abcdef") == "",
+        }
+
+    def test_scenario_matches_across_rungs(self, rung, tmp_path):
+        from nomorals.commerce.medusa import StoreManager
+
+        manager = StoreManager(str(tmp_path / "stores.db"),
+                               store=rung.store, now=lambda: 0.0)
+        assert self._scenario(manager) == {
+            "got_name": "Suya Place",
+            "got_note": "",
+            "all": ["store_0123456789abcdef", "store_fedcba9876543210"],
+            "ready": ["store_0123456789abcdef"],
+            "missing": True,
+            "no_subscriber": True,
+        }
+
+    def test_lazy_import_carries_external_ids_verbatim(self, rung,
+                                                       tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.commerce.medusa import Store, StoreManager
+
+        path = str(tmp_path / "stores.db")
+        native = StoreManager(path, now=lambda: 0.0)
+        native._save(Store(
+            id="store_0123456789abcdef", name="Suya Place",
+            status="ready", engine="medusa", api_url="http://api",
+            admin_url="http://api/app",
+            api_key_ref="medusa/store_0123456789abcdef/publishable",
+            webhook_secret_ref="medusa/store_0123456789abcdef/secret",
+            currency="NGN", created_at=1000.0))
+        conn = native._db
+        with conn:
+            conn.execute(
+                "INSERT INTO webhook_subscribers (store_id, code,"
+                " event, created_at) VALUES (?, ?, ?, ?)",
+                ("store_0123456789abcdef", "whsec_code",
+                 "cart.updated", 1500.0))
+
+        seam = StoreManager(path, store=rung.store, now=lambda: 0.0)
+        got = seam.get("store_0123456789abcdef")
+        assert got is not None and got.name == "Suya Place"
+        assert seam.get_webhook_subscriber(
+            "store_0123456789abcdef") == "whsec_code"
+        assert rung.store.count("commerce-medusa__stores") == 1
+        assert rung.store.count(
+            "commerce-medusa__webhook_subscribers") == 1
+        doc = rung.store.get("commerce-medusa__stores",
+                             "store_0123456789abcdef")
+        assert doc is not None and doc["_id"] == "store_0123456789abcdef"
+        again = StoreManager(path, store=rung.store, now=lambda: 0.0)
+        assert again.get("store_0123456789abcdef").name == "Suya Place"
+        assert rung.store.count("commerce-medusa__stores") == 1

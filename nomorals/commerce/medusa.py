@@ -220,37 +220,99 @@ CREATE TABLE IF NOT EXISTS webhook_subscribers (
 );
 """
 
+#: The seam-side DDL (Mongo program P5): the stores table in its final
+#: shape — _SCHEMA plus the webhook_note column the native path adds
+#: by ALTER — from which the seam mapping is derived. The native path
+#: keeps running _SCHEMA + ALTER verbatim; a pre-ALTER file's rows
+#: import with webhook_note defaulted, exactly as the ALTER leaves it.
+_PORT_DDL = """
+CREATE TABLE IF NOT EXISTS stores (
+    store_id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    engine TEXT NOT NULL,
+    api_url TEXT NOT NULL,
+    admin_url TEXT NOT NULL,
+    api_key_ref TEXT NOT NULL,
+    webhook_secret_ref TEXT NOT NULL,
+    currency TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    failure_reason TEXT NOT NULL DEFAULT '',
+    webhook_note TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS webhook_subscribers (
+    store_id TEXT PRIMARY KEY,
+    code TEXT NOT NULL,
+    event TEXT NOT NULL DEFAULT 'cart.updated',
+    created_at REAL NOT NULL
+);
+"""
+
 
 class StoreManager:
     """Provisions and manages Medusa/WooCommerce stores.
 
     ``http`` is injectable (tests pass a fake). ``vault`` stores API keys —
     this manager only ever keeps vault *references*.
+
+    The registry half (stores + webhook_subscribers) is a SQLite file
+    at ``db_path`` on the native path. When a document store is
+    resolved (Mongo program P5 — an explicit ``store`` or the boot
+    ambient), the same registry API runs over the seam instead
+    (registered in storage.sidecars as commerce-medusa), with document
+    ids carrying the store ids verbatim — the registry mirrors the
+    external systems' own keys and must never fork from them. The
+    file's existing rows are imported once, through the same mapping,
+    at first construction.
     """
 
     def __init__(self, db_path: str = "", *,
                  http: Any = None,
                  vault: Any = None,
-                 now: Callable[[], float] | None = None) -> None:
+                 now: Callable[[], float] | None = None,
+                 store: Any = None) -> None:
         import os
         path = db_path or os.path.expanduser("~/.nomorals/commerce/stores.db")
         os.makedirs(os.path.dirname(path), exist_ok=True)
-        self._db = sqlite3.connect(path)
-        self._db.row_factory = sqlite3.Row
-        self._db.executescript(_SCHEMA)
-        try:
-            self._db.execute(
-                "ALTER TABLE stores ADD COLUMN webhook_note TEXT NOT NULL DEFAULT ''")
-        except sqlite3.OperationalError:
-            pass
-        self._db.commit()
+        self._db = None
+        self._port = None
+        from ..storage.sidecars import sidecar_port
+        port = sidecar_port("commerce-medusa", _PORT_DDL,
+                            ("stores", "webhook_subscribers"), path,
+                            store=store)
+        if port is not None:
+            def write_stores(rows: list[dict[str, Any]]) -> int:
+                table = port.tables["stores"]
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+
+            def write_subscribers(rows: list[dict[str, Any]]) -> int:
+                table = port.tables["webhook_subscribers"]
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+
+            port.ensure_imported({"stores": write_stores,
+                                  "webhook_subscribers": write_subscribers})
+            self._port = port
+        else:
+            self._db = sqlite3.connect(path)
+            self._db.row_factory = sqlite3.Row
+            self._db.executescript(_SCHEMA)
+            try:
+                self._db.execute(
+                    "ALTER TABLE stores ADD COLUMN webhook_note TEXT NOT NULL DEFAULT ''")
+            except sqlite3.OperationalError:
+                pass
+            self._db.commit()
         self._http = http or _UrllibHttp()
         self._vault = vault
         self._now = now or time.time
 
     # ── registry ──
 
-    def _row_to_store(self, row: sqlite3.Row) -> Store:
+    def _row_to_store(self, row: Any) -> Store:
         return Store(
             id=row["store_id"], name=row["name"], status=row["status"],
             engine=row["engine"], api_url=row["api_url"],
@@ -262,6 +324,12 @@ class StoreManager:
         )
 
     def get(self, store_id: str) -> Store | None:
+        if self._port is not None:
+            try:
+                row = self._port.tables["stores"].get(store_id)
+            except Exception:  # noqa: BLE001
+                return None
+            return self._row_to_store(row) if row is not None else None
         try:
             row = self._db.execute(
                 "SELECT * FROM stores WHERE store_id = ?", (store_id,)
@@ -273,6 +341,14 @@ class StoreManager:
         return self._row_to_store(row)
 
     def list(self, *, status: str = "") -> list[Store]:
+        if self._port is not None:
+            try:
+                rows = self._port.tables["stores"].find(
+                    {"status": status} if status else None)
+            except Exception:  # noqa: BLE001
+                return []
+            rows.sort(key=lambda r: r["created_at"])
+            return [self._row_to_store(r) for r in rows]
         try:
             if status:
                 rows = self._db.execute(
@@ -286,6 +362,17 @@ class StoreManager:
         return [self._row_to_store(r) for r in rows]
 
     def _save(self, store: Store) -> None:
+        if self._port is not None:
+            self._port.tables["stores"].put({
+                "store_id": store.id, "name": store.name,
+                "status": store.status, "engine": store.engine,
+                "api_url": store.api_url, "admin_url": store.admin_url,
+                "api_key_ref": store.api_key_ref,
+                "webhook_secret_ref": store.webhook_secret_ref,
+                "webhook_note": store.webhook_note,
+                "currency": store.currency, "created_at": store.created_at,
+                "failure_reason": store.failure_reason})
+            return
         self._db.execute(
             """INSERT OR REPLACE INTO stores
                (store_id, name, status, engine, api_url, admin_url,
@@ -306,6 +393,12 @@ class StoreManager:
 
     def get_webhook_subscriber(self, store_id: str) -> str:
         """Return the generated subscriber code for a store ("" if none)."""
+        if self._port is not None:
+            try:
+                row = self._port.tables["webhook_subscribers"].get(store_id)
+            except Exception:  # noqa: BLE001
+                return ""
+            return (row["code"] or "") if row else ""
         try:
             row = self._db.execute(
                 "SELECT code FROM webhook_subscribers WHERE store_id = ?",
@@ -430,12 +523,17 @@ class StoreManager:
             store.webhook_secret_ref = f"medusa/{store.id}/webhook_secret"
         delivery_url = webhook_base.rstrip("/") + "/commerce/cart"
         code = generate_webhook_subscriber(delivery_url, webhook_secret)
-        self._db.execute(
-            """INSERT OR REPLACE INTO webhook_subscribers
-               (store_id, code, event, created_at)
-               VALUES (?, ?, 'cart.updated', ?)""",
-            (store.id, code, self._now()),
-        )
+        if self._port is not None:
+            self._port.tables["webhook_subscribers"].put({
+                "store_id": store.id, "code": code,
+                "event": "cart.updated", "created_at": self._now()})
+        else:
+            self._db.execute(
+                """INSERT OR REPLACE INTO webhook_subscribers
+                   (store_id, code, event, created_at)
+                   VALUES (?, ?, 'cart.updated', ?)""",
+                (store.id, code, self._now()),
+            )
         store.webhook_note = (
             "cart.updated subscriber generated — install "
             "src/subscribers/devon-cart-recovery.ts in the Medusa project "

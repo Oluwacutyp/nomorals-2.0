@@ -495,51 +495,116 @@ def _nutrition_db_path() -> str:
     return os.path.join(base, "health", "nutrition.db")
 
 
-class NutritionStore:
-    """SQLite store: completed meals + water. Never raises."""
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_DDL = (
+    "CREATE TABLE IF NOT EXISTS meals ("
+    " id TEXT PRIMARY KEY, day TEXT NOT NULL,"
+    " items_json TEXT NOT NULL,"
+    " cal_low INTEGER, cal_high INTEGER,"
+    " protein_lo REAL, protein_hi REAL,"
+    " carbs_lo REAL, carbs_hi REAL,"
+    " fat_lo REAL, fat_hi REAL,"
+    " created_at REAL);"
+    "CREATE TABLE IF NOT EXISTS water ("
+    " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+    " day TEXT NOT NULL, ml INTEGER NOT NULL,"
+    " created_at REAL);"
+    "CREATE INDEX IF NOT EXISTS idx_meals_day ON meals(day);"
+    "CREATE INDEX IF NOT EXISTS idx_water_day ON water(day)"
+)
 
-    def __init__(self, db_path: str = "") -> None:
+
+class NutritionStore:
+    """SQLite store: completed meals + water. Never raises.
+
+    Native path: a SQLite file at ``db_path``. When a document store
+    is resolved (Mongo program P5 — an explicit ``store`` or the boot
+    ambient), the same API runs over the seam instead (registered in
+    storage.sidecars as health-nutrition): meals are documents in
+    ``health-nutrition__meals``; the AUTOINCREMENT water log rides
+    ``put_raw`` with ids allocated by the port's atomic counter. The
+    file's existing rows are imported once, through the same mapping,
+    at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         import os
         import sqlite3
         self._db = None
+        self._port = None
+        self._imported_max_water = 0
         try:
             p = db_path or _nutrition_db_path()
             os.makedirs(os.path.dirname(p), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+            port = sidecar_port("health-nutrition", _DDL, ("meals",), p,
+                                store=store)
+            if port is not None:
+                self._import_into(port)
+                self._port = port
+                return
             self._db = sqlite3.connect(p)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS meals (
-                       id TEXT PRIMARY KEY, day TEXT NOT NULL,
-                       items_json TEXT NOT NULL,
-                       cal_low INTEGER, cal_high INTEGER,
-                       protein_lo REAL, protein_hi REAL,
-                       carbs_lo REAL, carbs_hi REAL,
-                       fat_lo REAL, fat_hi REAL,
-                       created_at REAL)""")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS water (
-                       id INTEGER PRIMARY KEY AUTOINCREMENT,
-                       day TEXT NOT NULL, ml INTEGER NOT NULL,
-                       created_at REAL)""")
-            self._db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_meals_day ON meals(day)")
-            self._db.execute(
-                "CREATE INDEX IF NOT EXISTS idx_water_day ON water(day)")
+            self._db.executescript(_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001
             _log.debug("nutrition store unavailable", exc_info=True)
             self._db = None
+            self._port = None
+
+    def _import_into(self, port: Any) -> None:
+        """The one-time lazy file import (see SidecarPort): meals go
+        through their RowTable; water rows keep their file ids via
+        put_raw, and the id counter is seeded from the imported
+        maximum so seam-allocated ids continue the file's sequence."""
+
+        def write_meals(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["meals"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        def write_water(rows: list[dict[str, Any]]) -> int:
+            for row in rows:
+                wid = int(row["id"])
+                self._imported_max_water = max(self._imported_max_water, wid)
+                port.put_raw("water", str(wid), {
+                    "id": wid, "day": row["day"], "ml": row["ml"],
+                    "created_at": row["created_at"]})
+            return len(rows)
+
+        def seed_counter(_counts: dict[str, int]) -> None:
+            doc = port.store.get(port.meta_collection, "counters") or {}
+            if int(doc.get("water") or 0) < self._imported_max_water:
+                port.store.put(port.meta_collection, "counters", {
+                    **doc, "water": self._imported_max_water})
+
+        port.ensure_imported({"meals": write_meals, "water": write_water},
+                             after_import=seed_counter)
 
     def save_meal(self, log: MealLog, day: str = "") -> str:
         """Persist a completed meal. Returns the meal id ("" on failure)."""
         import json as _json
         import uuid as _uuid
         try:
-            if self._db is None:
-                return ""
             day = day or time.strftime("%Y-%m-%d")
             mt = log.macro_totals
             mid = "meal_" + _uuid.uuid4().hex[:8]
+            if self._port is not None:
+                self._port.tables["meals"].put({
+                    "id": mid, "day": day,
+                    "items_json": _json.dumps(
+                        [i.__dict__ for i in log.items]),
+                    "cal_low": log.cal_low, "cal_high": log.cal_high,
+                    "protein_lo": mt["protein"][0],
+                    "protein_hi": mt["protein"][1],
+                    "carbs_lo": mt["carbs"][0], "carbs_hi": mt["carbs"][1],
+                    "fat_lo": mt["fat"][0], "fat_hi": mt["fat"][1],
+                    "created_at": time.time()})
+                return mid
+            if self._db is None:
+                return ""
             self._db.execute(
                 """INSERT INTO meals VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
                 (mid, day,
@@ -558,14 +623,17 @@ class NutritionStore:
         """Meals logged on a YYYY-MM-DD day. Never raises."""
         import json as _json
         try:
-            if self._db is None:
+            if self._port is not None:
+                rows = self._port.tables["meals"].find({"day": day})
+                rows.sort(key=lambda r: r["created_at"])
+            elif self._db is None:
                 return []
-            rows = self._db.execute(
-                "SELECT * FROM meals WHERE day = ? ORDER BY created_at",
-                (day,)).fetchall()
+            else:
+                rows = [dict(r) for r in self._db.execute(
+                    "SELECT * FROM meals WHERE day = ? ORDER BY created_at",
+                    (day,)).fetchall()]
             out = []
-            for r in rows:
-                d = dict(r)
+            for d in rows:
                 try:
                     d["items"] = _json.loads(d["items_json"] or "[]")
                 except Exception:  # noqa: BLE001
@@ -577,15 +645,19 @@ class NutritionStore:
 
     def recent_meals(self, limit: int = 10) -> list[dict[str, Any]]:
         try:
-            if self._db is None:
-                return []
             import json as _json
-            rows = self._db.execute(
-                "SELECT * FROM meals ORDER BY created_at DESC LIMIT ?",
-                (max(1, limit),)).fetchall()
+            if self._port is not None:
+                rows = self._port.tables["meals"].find()
+                rows.sort(key=lambda r: r["created_at"], reverse=True)
+                rows = rows[:max(1, limit)]
+            elif self._db is None:
+                return []
+            else:
+                rows = [dict(r) for r in self._db.execute(
+                    "SELECT * FROM meals ORDER BY created_at DESC LIMIT ?",
+                    (max(1, limit),)).fetchall()]
             out = []
-            for r in rows:
-                d = dict(r)
+            for d in rows:
                 try:
                     d["items"] = _json.loads(d["items_json"] or "[]")
                 except Exception:  # noqa: BLE001
@@ -598,9 +670,15 @@ class NutritionStore:
     def log_water(self, ml: int, day: str = "") -> int:
         """Log water intake (ml). Returns today's total ml (-1 if not logged)."""
         try:
+            day = day or time.strftime("%Y-%m-%d")
+            if self._port is not None:
+                wid = self._port.next_id("water")
+                self._port.put_raw("water", str(wid), {
+                    "id": wid, "day": day, "ml": max(0, int(ml)),
+                    "created_at": time.time()})
+                return self.water_on(day)
             if self._db is None:
                 return -1
-            day = day or time.strftime("%Y-%m-%d")
             self._db.execute(
                 "INSERT INTO water (day, ml, created_at) VALUES (?,?,?)",
                 (day, max(0, int(ml)), time.time()))
@@ -611,6 +689,9 @@ class NutritionStore:
 
     def water_on(self, day: str) -> int:
         try:
+            if self._port is not None:
+                return sum(int(r["ml"] or 0) for r in
+                           self._port.find_raw("water", {"day": day}))
             if self._db is None:
                 return 0
             row = self._db.execute(
