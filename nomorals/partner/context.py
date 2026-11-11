@@ -11,8 +11,10 @@ One system prompt, assembled in a strict order of authority:
 7. Platform notes (how this surface differs: Discord markdown, etc.).
 8. Output contract (send only the message; no stage directions).
 
-Everything is token-budgeted; when the budget is tight the memory and
-background blocks shrink first, because identity and state must survive.
+Everything is token-budgeted; when the budget is tight the
+registry-rendered reference blocks shrink first and per-turn context
+(memories, continuity) is spent before them, because identity and
+state must survive.
 """
 
 from __future__ import annotations
@@ -37,10 +39,20 @@ PLATFORM_NOTES: dict[str, str] = {
     "local": "This is the local console. Plain text, no markdown — same voice as everywhere else; you're texting, not filing a report.",
 }
 
-#: Shrink priority when the token budget is tight: blocks earlier in this
-#: order are truncated first. Identity, mood, relationship, gate, platform
-#: and the output contract are never shrunk — they are who she is.
-SHRINK_ORDER: tuple[str, ...] = ("background", "continuity", "memory", "dialogue")
+#: Shrink priority when the token budget is tight: blocks are given
+#: budget in this order, so when it runs out the LATER blocks are the
+#: ones truncated — earlier = kept first. Identity, mood, relationship,
+#: gate, platform and the output contract are never shrunk — they are
+#: who she is. The two registry-rendered reference blocks (capabilities,
+#: catalog) spend LAST: they render live registries, so their size
+#: grows monotonically with the system, and while they were protected
+#: they silently evicted the per-turn owner context — recalled
+#: memories and continuity — from owner prompts once the registries
+#: outgrew the fixed budget (capabilities f04d658d, catalog ee8383e2;
+#: caught by the w85c BrainGating pins). Reference material yields;
+#: per-turn context never does.
+SHRINK_ORDER: tuple[str, ...] = (
+    "background", "continuity", "memory", "dialogue", "capabilities", "catalog")
 
 
 class PartnerContextBuilder:
@@ -334,9 +346,11 @@ class PartnerContextBuilder:
         ]
         blocks = [(name, block) for name, block in blocks if block]
 
-        # Budget: identity/mood/relationship/gate/output/capabilities/
-        # catalog/platform/post_history are protected; the SHRINK_ORDER
-        # blocks are truncated in priority order when total exceeds budget.
+        # Budget: identity/mood/relationship/gate/output/platform/
+        # post_history are protected; the SHRINK_ORDER blocks are
+        # truncated in priority order when total exceeds budget, with
+        # the registry-rendered reference blocks (capabilities,
+        # catalog) last in line — see SHRINK_ORDER.
         shrinkable_names = set(SHRINK_ORDER)
         protected = [b for name, b in blocks if name not in shrinkable_names]
         by_name = {name: block for name, block in blocks if name in shrinkable_names}

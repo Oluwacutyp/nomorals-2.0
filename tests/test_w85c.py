@@ -10,7 +10,8 @@ Covers:
   relationship line and NO owner-private context (memories, continuity)
 * runtime: per-part typing in DMs AND groups, long-send chunk typing,
   typing while the brain is thinking, config switches respected
-* Discord adapter: typing indicator is refreshed, not fire-once
+* Discord adapter: typing is fire-and-forget per call; the runtime
+  keepalive's re-firing is what refreshes it
 """
 
 from __future__ import annotations
@@ -156,6 +157,22 @@ class PromptWiringTests(unittest.TestCase):
         # are both out of the prompt in restricted mode
         self.assertNotIn("in_love", text)
         self.assertNotIn("You are in a relationship with the person you're talking to", text)
+
+    def test_owner_context_outranks_registry_blocks(self) -> None:
+        """Regression pin (capabilities f04d658d + catalog ee8383e2):
+        the two registry-rendered reference blocks were budget-PROTECTED,
+        so as the live registries grew they silently evicted recalled
+        memories and continuity from owner prompts. Per-turn owner
+        context must spend BEFORE reference material at any budget —
+        here a deliberately tight one, so the pin holds whatever size
+        the registries reach next."""
+        p = self._parts()
+        tight = PartnerContextBuilder(total_budget=2500)
+        system = tight.build(persona=p.persona, mood=p.mood, relationship=p.relationship,
+                             memories=["memory-A"], continuity_lines=["thread-B"],
+                             platform="telegram")
+        self.assertIn("memory-A", system.content)
+        self.assertIn("thread-B", system.content)
 
 
 class _RecordingRouter:
@@ -501,7 +518,16 @@ class RuntimeTypingTest(unittest.TestCase):
 
 
 class DiscordTypingRefreshTest(unittest.TestCase):
-    """Discord clears typing after ~10s — the adapter must re-send it."""
+    """Discord clears typing after ~10s — somebody must re-send it.
+
+    Since 9be2748a (owner order 2026-11-01) that somebody is the
+    CALLER: adapter.typing is fire-and-forget (one call schedules one
+    send_typing and returns at once — the indicator never delays the
+    message it precedes), and the runtime's typing keepalive re-fires
+    it (pinned against the local adapter in RuntimeTypingTest). This
+    class pins the Discord half of that contract: every re-fire lands
+    exactly one more send_typing, resolved through the adapter's DM
+    channel path."""
 
     class _FakeChannel:
         def __init__(self) -> None:
@@ -520,7 +546,7 @@ class DiscordTypingRefreshTest(unittest.TestCase):
         async def create_dm(self) -> _FakeChannel:
             return self._channel
 
-    def test_refreshes_for_the_requested_duration(self) -> None:
+    def test_refire_refreshes_the_indicator(self) -> None:
         channel = self._FakeChannel()
         user = self._FakeUser(channel)
         bot = SimpleNamespace(guilds=[], get_users=lambda: iter(()),
@@ -529,7 +555,13 @@ class DiscordTypingRefreshTest(unittest.TestCase):
         async def fetch_user(uid: int):
             return user
 
+        async def fetch_channel(cid: int):
+            # DM chat ids are channel ids in this adapter; fetch_channel
+            # is the primary resolution, fetch_user the fallback.
+            return channel
+
         bot.fetch_user = fetch_user
+        bot.fetch_channel = fetch_channel
 
         loop = asyncio.new_event_loop()
         thread = threading.Thread(target=loop.run_forever, daemon=True)
@@ -539,14 +571,16 @@ class DiscordTypingRefreshTest(unittest.TestCase):
             adapter = DiscordAdapter(token="whatever.token.sig", media_dir="/tmp/nm-w85c-discord")
             adapter._bot = bot
             adapter._loop = loop
-            DiscordAdapter.TYPING_REFRESH = 0.05  # fast refresh for the test
-            try:
-                ok = adapter.typing(ChatRef(platform="discord", chat_id="1", kind=ChatKind.DM),
-                                    seconds=0.4)
-            finally:
-                DiscordAdapter.TYPING_REFRESH = 10.0
-            self.assertTrue(ok)
-            self.assertGreaterEqual(channel.calls, 2)
+            chat = ChatRef(platform="discord", chat_id="777", kind=ChatKind.DM)
+            # The keepalive's cadence, driven by hand: three re-fires.
+            for _ in range(3):
+                self.assertTrue(adapter.typing(chat, seconds=0.4))
+            # Fire-and-forget: the events land on the adapter loop
+            # asynchronously — wait for the scheduled coroutines.
+            deadline = time.time() + 5
+            while channel.calls < 3 and time.time() < deadline:
+                time.sleep(0.02)
+            self.assertEqual(channel.calls, 3)
         finally:
             loop.call_soon_threadsafe(loop.stop)
             thread.join(5)
