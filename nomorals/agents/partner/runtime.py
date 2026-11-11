@@ -75,6 +75,17 @@ _CARD_TAP_RE = re.compile(r"^/cardtap ([0-9A-Za-z_-]+) (\d+) (\d+)$")
 _DRAFT_CALLBACK_RE = re.compile(
     r"^/draft:(post|schedule|discard|edit|variants):([0-9A-Za-z_-]+)$")
 
+#: /proposals subcommands (show / approve / deny <id>): the
+#: catalog spec for "proposals" is (0, 0), so parse_control
+#: refuses ANY argument and the dispatch branch's own subcommand
+#: handling was unreachable from chat — intercepted pre-parse
+#: like the draft taps above, owner-gated the same way, and
+#: routed to PartnerRuntime._proposals_command (the one
+#: implementation the branch also uses).
+_PROPOSALS_SUB_RE = re.compile(r"^/proposals\s+(.+)$", re.IGNORECASE)
+_PROPOSALS_VERBS = frozenset({"show", "inspect", "view",
+                              "approve", "deny"})
+
 
 def _update_recovery_notice(receipt: dict) -> tuple[str, str]:
     """Owner-facing (title, body) for an update crash recovery that acted.
@@ -5794,6 +5805,21 @@ class PartnerRuntime(
             return self._draft_callback(
                 text.strip(), chat_key, message=message)
 
+        # /proposals <verb> …: see _PROPOSALS_SUB_RE — the (0, 0)
+        # catalog spec would error these before dispatch, so the
+        # subcommands (including the list buttons' taps, which
+        # re-enter as exactly this text) are routed here.
+        # Owner-only, same refusal as the draft taps: deciding a
+        # proposal is the owner's act.
+        _prop = _PROPOSALS_SUB_RE.match(text.strip())
+        if _prop is not None and _prop.group(1).split(None, 1)[0].lower() \
+                in _PROPOSALS_VERBS:
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            _handled = self._proposals_command(_prop.group(1))
+            if _handled is not None:
+                return _handled
+
         # Command stacking: one message, one command per line (see
         # split_command_stack). Checked before the single-command parse
         # so a stack whose first line would fail the whole-text arg
@@ -6686,22 +6712,14 @@ class PartnerRuntime(
             return "sent." if result.ok else f"send failed: {result.error}"
 
         if kind == "proposals":
-            # Allow /proposals approve <id> and /proposals deny <id> [reason]
-            # as natural subcommands. Deny takes an optional reason (required
-            # for upgrade tickets — UpgradeQueue.deny demands one).
-            parts = (arg or "").strip().split(None, 2)
-            if parts and parts[0] in ("approve", "deny"):
-                sub_id = parts[1] if len(parts) > 1 else ""
-                if not sub_id:
-                    return f"usage: /proposals {parts[0]} <proposal_id>"
-                if parts[0] == "approve":
-                    result = self.approve(sub_id)
-                else:
-                    result = self.deny(sub_id, parts[2] if len(parts) > 2 else "")
-                if result.get("ok"):
-                    return f"{parts[0]}d {sub_id} → {result.get('status', 'done')}"
-                err = result.get("error") or "no reason given"
-                return f"{parts[0]} failed: {err}"
+            # Subcommands (show / approve / deny) live in
+            # _proposals_command — reached from chat through the
+            # pre-parse interception (the catalog spec is (0, 0));
+            # this call keeps any other route that lands here with
+            # an argument on the same one implementation.
+            _handled = self._proposals_command(arg)
+            if _handled is not None:
+                return _handled
             rows = self.proposals()
             if not rows:
                 return "no pending proposals."
@@ -6717,8 +6735,42 @@ class PartnerRuntime(
                 lines.append("  proactive actions:")
                 for row in proactive[:10]:
                     lines.append(f"    {row['id']} [{row['kind']}→{row['platform']}:{row['chat_id']}] {str(row['content'])[:70]}")
-            lines.append("tip: /proposals approve <id> or /approve <id>  ·  /proposals deny <id> <reason>")
-            return "\n".join(lines)
+            lines.append("tip: /proposals show <id> reads one in full  ·  /proposals approve <id> or /approve <id>  ·  /proposals deny <id> <reason>")
+            text = "\n".join(lines)
+            # Telegram: the list itself carries the actions — one row
+            # per proposal (Inspect / Approve / Deny), each button the
+            # very command it names, run through this same dispatch and
+            # the shared approve/deny engine on tap. The callback
+            # budget is why Approve/Deny ride the short /approve and
+            # /deny verbs: "proposals approve upg_<ULID>" overflows
+            # Telegram's 47-byte payload limit, "approve upg_<ULID>"
+            # fits. Other surfaces keep the text list (the send
+            # channel's numbered fallback covers buttonless forms of
+            # this same reply where the platform takes buttons at all).
+            platform = str(
+                getattr(getattr(message, "chat", None), "platform", "")
+                or chat_key.split(":")[0] or "")
+            if platform.startswith("telegram") or platform in (
+                    "tg", "tgbot", "tgpersonal"):
+                try:
+                    from ...social.chat.tgbot_buttons import actionable
+
+                    btn_rows = []
+                    for row in upgrades[:10] + proactive[:10]:
+                        pid = str(row.get("id") or "")
+                        if not pid:
+                            continue
+                        btn_rows.append([
+                            (f"🔍 {pid}"[:28],
+                             f"proposals show {pid}"),
+                            ("✅ Approve", f"approve {pid}"),
+                            ("⛔ Deny", f"deny {pid}")])
+                    if btn_rows:
+                        return actionable(text, btn_rows)
+                except Exception as e:  # noqa: BLE001 - text list still lands
+                    record_failure(
+                        "runtime.PartnerRuntime.proposals.buttons", e)
+            return text
 
         if kind == "approve":
             result = self.approve(arg)
@@ -8419,6 +8471,39 @@ class PartnerRuntime(
              time.time()))
         return initiative.id
 
+    def _proposals_command(self, arg: str) -> str | None:
+        """The /proposals subcommands: ``show <id>`` (the
+        inspection view — the FULL proposal, readable before any
+        decision), ``approve <id>``, ``deny <id> [reason]`` (deny
+        takes an optional reason; upgrade tickets require one —
+        UpgradeQueue.deny demands it). Returns None when *arg* is
+        not a subcommand form, so the caller falls through to the
+        list. Approve/deny go through the shared engine
+        (:meth:`approve` / :meth:`deny`) — no parallel path."""
+        parts = (arg or "").strip().split(None, 2)
+        if not parts:
+            return None
+        verb = parts[0].lower()
+        if verb in ("show", "inspect", "view"):
+            sub_id = parts[1] if len(parts) > 1 else ""
+            if not sub_id:
+                return "usage: /proposals show <proposal_id>"
+            return self.proposal_detail(sub_id)
+        if verb in ("approve", "deny"):
+            sub_id = parts[1] if len(parts) > 1 else ""
+            if not sub_id:
+                return f"usage: /proposals {verb} <proposal_id>"
+            if verb == "approve":
+                result = self.approve(sub_id)
+            else:
+                result = self.deny(
+                    sub_id, parts[2] if len(parts) > 2 else "")
+            if result.get("ok"):
+                return f"{verb}d {sub_id} → {result.get('status', 'done')}"
+            err = result.get("error") or "no reason given"
+            return f"{verb} failed: {err}"
+        return None
+
     def proposals(self, status: str = "pending") -> list[dict[str, Any]]:
         """Everything awaiting owner approval, unified across both queues.
 
@@ -8452,6 +8537,147 @@ class PartnerRuntime(
             r["queue"] = "proactive"
             rows.append(r)
         return rows
+
+    # ── proposal inspection (/proposals show <id>) ─────────────────
+
+    @staticmethod
+    def _proposal_ts(value: Any) -> str:
+        """An epoch as a readable local stamp ("" when unusable)."""
+        try:
+            ts = float(value)
+        except (TypeError, ValueError):
+            return ""
+        if ts <= 0:
+            return ""
+        return time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+
+    def _find_pending_proposal(self, proposal_id: str):
+        """Resolve *proposal_id* among the PENDING proposals: exact
+        id first, then a unique id prefix (the same resolution
+        /upgrade show accepts). Returns ``(row, candidates)`` —
+        row None with a non-empty candidate list means the prefix
+        was ambiguous; the caller names the candidates rather
+        than silently showing some other proposal."""
+        pid = (proposal_id or "").strip()
+        if not pid:
+            return None, []
+        rows = self.proposals()
+        for row in rows:
+            if str(row.get("id") or "") == pid:
+                return row, []
+        matches = [r for r in rows
+                   if str(r.get("id") or "").startswith(pid)]
+        if len(matches) == 1:
+            return matches[0], []
+        return None, matches
+
+    def _decided_proposal_status(self, proposal_id: str) -> str:
+        """The decided status of a non-pending proposal id (either
+        queue), or "" when the id is unknown anywhere — so a show
+        on an already-decided proposal says so instead of reading
+        as unknown. Never raises."""
+        pid = (proposal_id or "").strip()
+        if not pid:
+            return ""
+        try:
+            from ..upgrade_queue import UpgradeQueue
+
+            row = UpgradeQueue(self.context).get(pid)
+            if row is not None and row.get("status") != "proposed":
+                return str(row.get("status") or "")
+        except Exception as e:  # noqa: BLE001 - lookup garnish only
+            record_failure("runtime.PartnerRuntime.proposal_detail.upgrade", e)
+        try:
+            row = self.context.db.query_one(
+                "SELECT * FROM proactive_log WHERE id = ?", (pid,))
+            if row is not None and row.get("status") != "pending":
+                return str(row.get("status") or "")
+        except Exception as e:  # noqa: BLE001 - lookup garnish only
+            record_failure("runtime.PartnerRuntime.proposal_detail.proactive", e)
+        return ""
+
+    def proposal_detail(self, proposal_id: str) -> str:
+        """The full inspection view for ONE proposal — everything
+        the list truncates away: the complete body, which system
+        filed it, its evidence/reasoning, when it was filed, and
+        in plain words what approving and what denying concretely
+        do. An id that isn't pending gets an honest line naming
+        the id (already-decided when it was decided, ambiguous
+        when a prefix matches several) — never a crash, never a
+        different proposal shown in its place."""
+        pid = (proposal_id or "").strip()
+        if not pid:
+            return "usage: /proposals show <proposal_id>"
+        row, candidates = self._find_pending_proposal(pid)
+        if row is None:
+            if candidates:
+                ids = ", ".join(
+                    str(r.get("id") or "") for r in candidates[:6])
+                return (f"{pid!r} matches more than one pending "
+                        f"proposal ({ids}) — use the full id.")
+            decided = self._decided_proposal_status(pid)
+            if decided:
+                return (f"proposal {pid} is not pending — it's "
+                        f"already {decided}.")
+            return (f"no pending proposal {pid!r} — /proposals "
+                    f"lists what's waiting.")
+        return self._render_proposal_detail(row)
+
+    def _render_proposal_detail(self, row: dict[str, Any]) -> str:
+        pid = str(row.get("id") or "")
+        if row.get("queue") == "upgrade":
+            from ..upgrade_chat import render_upgrade_show
+
+            when = self._proposal_ts(row.get("created_at"))
+            head = f"proposal {pid} — research upgrade ticket"
+            if when:
+                head += f" · filed {when}"
+            lines = [head, "", render_upgrade_show(row)]
+            claims = [str(c) for c in (row.get("claim_ids") or []) if c]
+            if claims:
+                lines += ["", f"evidence claims: {', '.join(claims)}"]
+            lines += [
+                "",
+                "if you approve: the patch plan above is applied "
+                "and its tests run (test-gated) — a failed apply is "
+                "recorded as failed, nothing half-lands silently.",
+                "if you deny: the ticket closes as denied and "
+                "nothing is applied — a reason is required "
+                "(/proposals deny <id> <reason>).",
+            ]
+            return "\n".join(lines)
+        kind = str(row.get("kind") or "message")
+        platform = str(row.get("platform") or "")
+        chat_id = str(row.get("chat_id") or "")
+        when = self._proposal_ts(
+            row.get("decided_at") or row.get("created_at"))
+        reason = str(row.get("reason") or "")
+        content = str(row.get("content") or "")
+        lines = [f"proposal {pid} — proactive queue · kind: {kind}"]
+        meta = []
+        if when:
+            meta.append(f"filed {when}")
+        if platform or chat_id:
+            meta.append(f"target {platform}:{chat_id}")
+        if meta:
+            lines.append(" · ".join(meta))
+        if reason:
+            lines += ["", f"filed as: {reason}"]
+        lines += ["", "full proposal:", content, ""]
+        if kind == "initiative":
+            lines.append(
+                "if you approve: the initiative RUNS — its action "
+                "executes now. The text above is its description; "
+                "it is not sent anywhere as a message.")
+            lines.append(
+                "if you deny: the action is discarded and never runs.")
+        else:
+            lines.append(
+                f"if you approve: the message above is sent to "
+                f"{platform}:{chat_id} exactly as written.")
+            lines.append(
+                "if you deny: it's discarded — nothing is sent.")
+        return "\n".join(lines)
 
     def approve(self, proposal_id: str) -> dict[str, Any]:
         # Upgrade tickets (upg_…) live in upgrade_proposals, not

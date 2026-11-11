@@ -74,6 +74,13 @@ class PackDef:
     kind: str                      # wrapped | native | hybrid
     entry: str = ""                # the wrapped feature's command
     entry_label: str = ""          # its button label
+    #: The typography surface class the pack's home card renders
+    #: under. A pack home is PRESENTED output (a deck, a cockpit,
+    #: a board), so the default is a presented class — this is
+    #: what carries the stamp; before the field existed, pack
+    #: families resolved to living_cards' chat default and pack
+    #: homes shipped unstamped (owner report, 2026-11-11).
+    surface_class: str = "menu"
     surfaces: tuple[str, ...] = ()
     verbs: tuple[str, ...] = ()    # native verbs (pack act …)
     session_scope: str = "owner"   # owner | chat
@@ -250,6 +257,22 @@ PACKS: tuple[PackDef, ...] = (
 )
 
 PACK_IDS: tuple[str, ...] = tuple(p.id for p in PACKS)
+
+# Every pack's home card renders as a living card of the pack's
+# family; register each pack's declared surface class with the
+# living-card renderer so a pack home carries its presented
+# class (and the stamp that class carries) BY CONSTRUCTION —
+# not by each home builder remembering to ask. (Deferred import
+# inside the call: living_cards does not import packs, and packs
+# stays importable without the card machinery at module top.)
+def _register_pack_surface_classes() -> None:
+    from .living_cards import register_family_class
+
+    for pack in PACKS:
+        register_family_class(pack.family, pack.surface_class)
+
+
+_register_pack_surface_classes()
 _BY_ID = {p.id: p for p in PACKS}
 
 

@@ -947,6 +947,20 @@ class Notifier:
         # at 3900 used to slice briefings mid-sentence and silently drop
         # the rest — the "briefings always get cut off" bug.
         text = banner(title, "🔔") + (f"\n{body}" if body else "")
+        # The stamp (typography law): a Notifier push is PRESENTED
+        # output by construction — briefings, alerts, digests and
+        # job reports are the only things this organ sends, and
+        # conversation never routes through it — so the signature
+        # is applied HERE, at the organ's one text funnel, and
+        # every push carries it. Idempotent (typography owns the
+        # rule): a body already closing with the stamp passes
+        # unchanged, and redelivery of a stored row never doubles.
+        try:
+            from ..social.chat.typography import apply_stamp
+
+            text = apply_stamp(text)
+        except Exception as exc:  # noqa: BLE001 - delivery never dies on it
+            record_failure("notifier._deliver.stamp", exc)
         partner = getattr(self.settings, "partner", None) if self.settings else None
         raw = getattr(partner, "owner_chats", "") or ""
         status: dict[str, Any] = {}
@@ -1141,6 +1155,17 @@ class Notifier:
             rendered = _render_doc(doc, platform)
             renders[cache_key] = rendered
         text, parse_mode = rendered.text, rendered.parse_mode
+        # The stamp on the Doc route too (see _deliver): the render
+        # is stamped per platform at this funnel — the cached
+        # Rendered itself is never mutated, and a Doc that already
+        # closes with the stamp (a Card stamped upstream) passes
+        # unchanged via apply_stamp's footer-position rule.
+        try:
+            from ..social.chat.typography import apply_stamp
+
+            text = apply_stamp(text)
+        except Exception as exc:  # noqa: BLE001 - delivery never dies on it
+            record_failure("notifier._deliver_doc_send.stamp", exc)
         use_buttons = True
         for _attempt in range(3):
             kw: dict[str, Any] = {}

@@ -75,7 +75,8 @@ _log = logging.getLogger(__name__)
 __all__ = [
     "FAMILY_GENERIC", "FAMILY_PROGRESS", "FAMILY_READINESS",
     "FAMILY_RESTART", "FAMILY_CREATION", "FAMILY_GAME",
-    "CARD_FAMILIES",
+    "CARD_FAMILIES", "FAMILY_CLASS_REGISTRATIONS",
+    "register_family_class", "family_surface_class",
     "CARD_UPDATE_FORMS",
     "Card", "CardStore", "CardHost", "RenderedCard", "RENDERERS",
     "render_card", "update_form",
@@ -108,6 +109,44 @@ CARD_FAMILIES: dict[str, str] = {
     FAMILY_CREATION: "chat",
     FAMILY_GAME: "game",
 }
+
+#: Family → surface class registrations from family OWNERS whose
+#: families are not built in here — the experience packs (packs.py
+#: registers each pack's declared surface class at import). A pack
+#: home card is PRESENTED output (a deck, a cockpit, a board), so
+#: its class must be a presented one; before this seam every pack
+#: family fell through to the "chat" default in _theme_text and
+#: pack homes rendered with no stamp and chat styling — the
+#: missing-stamp gap the owner reported (2026-11-11).
+FAMILY_CLASS_REGISTRATIONS: dict[str, str] = {}
+
+
+def register_family_class(family: str, surface_class: str) -> None:
+    """Register the typography surface class for one card family.
+
+    The class must be a real typography surface class — an
+    unknown class is refused loudly at registration time rather
+    than silently degrading the family's cards to chat later."""
+    from .typography import SURFACE_CLASSES
+
+    fam = str(family or "").strip()
+    cls = str(surface_class or "").strip().lower()
+    if not fam:
+        raise ValueError("register_family_class: family is empty")
+    if cls not in SURFACE_CLASSES:
+        raise ValueError(
+            f"register_family_class: {cls!r} is not a surface class")
+    FAMILY_CLASS_REGISTRATIONS[fam] = cls
+
+
+def family_surface_class(family: str) -> str:
+    """The typography surface class one card family renders
+    under: the built-in table first, then owner registrations,
+    then the chat default."""
+    fam = str(family or "")
+    return (CARD_FAMILIES.get(fam)
+            or FAMILY_CLASS_REGISTRATIONS.get(fam)
+            or "chat")
 
 #: How a card update reaches each platform: "edit" (the recorded
 #: message is edited in place) or "supersede" (a fresh send
@@ -402,7 +441,7 @@ class RenderedCard:
 def _theme_text(card: Card, *, phase_lines: list[str] | None = None,
                 ) -> str:
     """The card's text form under the typography theme system."""
-    theme = ThemeCard(CARD_FAMILIES.get(card.family, "chat"),
+    theme = ThemeCard(family_surface_class(card.family),
                       title=card.title)
     if card.status:
         theme.line(f"status: {card.status}")
