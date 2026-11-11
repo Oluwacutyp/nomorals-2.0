@@ -480,12 +480,13 @@ class Brain:
             record_failure("brain._classify", exc)
         return resp
 
-    def _context_budget(self) -> int:
-        """Token budget for the active serving provider's window.
+    def context_window(self) -> int:
+        """The active serving provider's advertised context window.
 
-        Prefers the broker card's advertised context length for the active
-        provider; falls back to a provider attribute; else the default.
-        Never raises.
+        Returns 0 when the window is UNKNOWN (no broker card, no
+        provider attribute) — callers that must distinguish "known
+        window" from "no metadata" use this; :meth:`_context_budget`
+        layers the send-fit fallback on top. Never raises.
         """
         try:
             router = self._get_router()
@@ -500,8 +501,17 @@ class Brain:
             if ctx_len > 0:
                 return ctx_len
         except Exception:  # noqa: BLE001
-            _log.debug("brain: budget lookup failed", exc_info=True)
-        return DEFAULT_CONTEXT_TOKENS
+            _log.debug("brain: window lookup failed", exc_info=True)
+        return 0
+
+    def _context_budget(self) -> int:
+        """Token budget for the active serving provider's window.
+
+        Prefers the broker card's advertised context length for the active
+        provider; falls back to a provider attribute; else the default.
+        Never raises.
+        """
+        return self.context_window() or DEFAULT_CONTEXT_TOKENS
 
     def _fit_for_send(self, messages: Sequence[Message],
                       task_kind: str) -> list[Message]:

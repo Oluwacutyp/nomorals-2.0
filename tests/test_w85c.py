@@ -175,6 +175,107 @@ class PromptWiringTests(unittest.TestCase):
         self.assertIn("thread-B", system.content)
 
 
+class _WindowRouter:
+    """Router double whose active provider advertises a context window,
+    in the shape Brain.context_window reads (active + get -> provider
+    carrying context_len). No chat surface: construction + budget only."""
+
+    def __init__(self, window: int) -> None:
+        self.active = "fake-7b"
+        self.broker = None
+        self._provider = SimpleNamespace(context_len=window)
+
+    def get(self, name: str) -> Any:
+        return self._provider
+
+
+class DerivedBudgetTests(unittest.TestCase):
+    """Power mode (owner directive 2026-11-10): no fixed prompt budget.
+
+    The builder's default used to be a hardcoded 4200-token ceiling;
+    as the live registries grew, the shrink walk silently truncated
+    owner prompts to fit it. The budget now derives from the serving
+    rung's real context window minus the reply reserve, the shrink
+    walk remains only as the genuine-overflow guard, and an unknown
+    window means assemble-in-full.
+    """
+
+    def _fat_build(self, builder: PartnerContextBuilder):
+        persona = default_persona()
+        return builder.build(
+            persona=persona,
+            mood=MoodEngine(persona.baselines),
+            relationship=Relationship(id="default", stage="in_love", trust=90),
+            memories=[f"memory-line-{i} " + "x" * 120 for i in range(12)],
+            continuity_lines=[f"thread-line-{i} " + "y" * 120 for i in range(6)],
+            platform="telegram",
+        )
+
+    def test_default_builder_assembles_everything_in_full(self) -> None:
+        builder = PartnerContextBuilder()
+        # No ceiling is imposed by default construction.
+        self.assertIsNone(builder.total_budget)
+        system = self._fat_build(builder)
+        # The assembled prompt EXCEEDS the old 4200 ceiling...
+        self.assertGreater(PartnerContextBuilder.total_tokens(system), 4200)
+        # ...and nothing was truncated to fit under it: the tail of
+        # every block survives — memory, continuity, and both
+        # registry-rendered reference blocks, whole.
+        self.assertIn("memory-line-11", system.content)
+        self.assertIn("thread-line-5", system.content)
+        self.assertIn("never claim you can't", system.content)
+        self.assertIn("self-description, not yours", system.content)
+
+    def test_budget_tracks_the_rung_window(self) -> None:
+        big = PartnerContextBuilder(budget_resolver=lambda: 131_072 - 512)
+        full = self._fat_build(big)
+        self.assertIn("self-description, not yours", full.content)
+        # A small real window engages the shrink walk as a genuine-
+        # overflow guard: reference material (catalog spends last) is
+        # cut, while per-turn owner context still lands whole.
+        small = PartnerContextBuilder(budget_resolver=lambda: 3000 - 512)
+        shrunk = self._fat_build(small)
+        self.assertLess(PartnerContextBuilder.total_tokens(shrunk),
+                        PartnerContextBuilder.total_tokens(full))
+        self.assertNotIn("self-description, not yours", shrunk.content)
+        self.assertIn("memory-line-11", shrunk.content)
+        self.assertIn("thread-line-5", shrunk.content)
+
+    def test_unknown_window_means_no_budget(self) -> None:
+        builder = PartnerContextBuilder(budget_resolver=lambda: None)
+        system = self._fat_build(builder)
+        self.assertIn("memory-line-11", system.content)
+        self.assertIn("self-description, not yours", system.content)
+
+    def test_responder_derives_budget_from_router_window(self) -> None:
+        from nomorals.partner.responder import PartnerResponder
+
+        persona = default_persona()
+
+        def budget_for(window: int):
+            responder = PartnerResponder(
+                _WindowRouter(window), persona, MoodEngine(persona.baselines),
+                Relationship(id="default", stage="in_love", trust=90),
+                None, None)
+            return responder._prompt_budget()
+
+        # budget = window - reply reserve (the responder's max_tokens,
+        # 512 by default) — two windows, two different budgets.
+        self.assertEqual(budget_for(8192), 8192 - 512)
+        self.assertEqual(budget_for(131_072), 131_072 - 512)
+
+    def test_responder_unknown_window_is_unbounded(self) -> None:
+        from nomorals.partner.responder import PartnerResponder
+
+        persona = default_persona()
+        responder = PartnerResponder(
+            _RecordingRouter(), persona, MoodEngine(persona.baselines),
+            Relationship(id="default", stage="in_love", trust=90),
+            None, None)
+        self.assertIsNone(responder._prompt_budget())
+        self.assertIsNone(responder.builder._effective_budget())
+
+
 class _RecordingRouter:
     def __init__(self) -> None:
         self.last_messages: list[Message] = []

@@ -449,7 +449,8 @@ class PartnerResponder:
         self.background = background
         self.max_tokens = max_tokens
         self.retries = max(0, int(retries))
-        self.builder = builder or PartnerContextBuilder()
+        self.builder = builder or PartnerContextBuilder(
+            budget_resolver=self._prompt_budget)
         self.rng = rng or random.Random()
         #: Dynamic voice feed (nomorals/partner/lexicon_feed.py). None means
         #: the static banks carry the whole voice — e.g. the owner disabled
@@ -463,6 +464,31 @@ class PartnerResponder:
         #: wiring.  Built on first use so a router swapped after
         #: construction is still honored until then.
         self._brain: Any = None
+
+    def _prompt_budget(self) -> int | None:
+        """Prompt budget derived from the serving rung's real window.
+
+        budget = window − reply reserve, where the window is the
+        active provider's advertised context length through the same
+        Brain seam that fits messages at send time, and the reserve
+        is this responder's own ``max_tokens`` — the output cap the
+        reply call itself requests. Re-resolved per reply, so a rung
+        swap or failover re-derives it. Unknown window → None: the
+        builder then assembles in full rather than evicting owner
+        context under an invented ceiling (the brain's send-time
+        fitting remains the backstop, and a genuinely oversized
+        prompt fails loudly at the provider instead of lying
+        quietly). Never raises.
+        """
+        try:
+            brain = self._brain_for_reply()
+            window_fn = getattr(brain, "context_window", None)
+            window = int(window_fn()) if callable(window_fn) else 0
+        except Exception:  # noqa: BLE001 — derivation never breaks a reply
+            return None
+        if window <= 0:
+            return None
+        return max(0, window - int(self.max_tokens))
 
     def _brain_for_reply(self) -> Any:
         """The Brain for this responder's router.  Never raises.

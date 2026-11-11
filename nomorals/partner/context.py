@@ -11,15 +11,19 @@ One system prompt, assembled in a strict order of authority:
 7. Platform notes (how this surface differs: Discord markdown, etc.).
 8. Output contract (send only the message; no stage directions).
 
-Everything is token-budgeted; when the budget is tight the
-registry-rendered reference blocks shrink first and per-turn context
-(memories, continuity) is spent before them, because identity and
-state must survive.
+The prompt carries NO fixed token ceiling. By default the builder
+assembles everything in full; when a budget is in force it comes from
+the serving rung's real context window (minus the reply reserve) via
+a resolver wired by the responder, and the shrink walk engages only
+on genuine overflow of that window — registry-rendered reference
+blocks shrink first and per-turn context (memories, continuity) is
+spent before them, because identity and state must survive. An
+explicit budget can still be supplied for callers that need one.
 """
 
 from __future__ import annotations
 
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from ..core.text import approx_token_count
 from ..llm.base import Message
@@ -56,10 +60,57 @@ SHRINK_ORDER: tuple[str, ...] = (
 
 
 class PartnerContextBuilder:
-    """Assembles the system prompt and budgets every block."""
+    """Assembles the system prompt and budgets every block.
 
-    def __init__(self, *, total_budget: int = 4200) -> None:
-        self.total_budget = max(1500, int(total_budget))
+    There is no built-in token ceiling: a fixed constant here was an
+    artificial limitation — as the live registries grew past it, the
+    shrink walk silently evicted recalled memories and continuity
+    from owner prompts (the w85c catch). The budget in force is, in
+    order:
+
+    * ``total_budget`` when a caller passes one explicitly (tests and
+      genuine callers keep this; the shrink contract below applies);
+    * else the value of ``budget_resolver`` at build time — the
+      responder wires it to the serving rung's real context window
+      minus the reply reserve, re-resolved per build so a rung swap
+      is honored;
+    * else NO budget: assembly includes everything, untruncated.
+
+    An unknown window resolves to no budget on purpose: the failure
+    mode to avoid is silent eviction. An oversized prompt errors
+    loudly at the provider (and the brain's send-time fitting is the
+    backstop); a quietly truncated one lies.
+    """
+
+    def __init__(
+        self,
+        *,
+        total_budget: int | None = None,
+        budget_resolver: Callable[[], int | None] | None = None,
+    ) -> None:
+        #: The explicit fixed budget, or None when none was imposed.
+        self.total_budget: int | None = (
+            max(1500, int(total_budget)) if total_budget is not None else None
+        )
+        self._budget_resolver = budget_resolver
+
+    def _effective_budget(self) -> int | None:
+        """The budget for THIS build, or None for assemble-in-full.
+
+        A resolver that fails or reports no window yields None —
+        assembly never breaks a reply and never invents a ceiling.
+        """
+        if self.total_budget is not None:
+            return self.total_budget
+        if self._budget_resolver is not None:
+            try:
+                value = self._budget_resolver()
+            except Exception:  # noqa: BLE001 — derivation never breaks assembly
+                return None
+            if value is None:
+                return None
+            return max(0, int(value))
+        return None
 
     # ── block renderers ──────────────────────────────────────────────────────
     @staticmethod
@@ -347,33 +398,39 @@ class PartnerContextBuilder:
         blocks = [(name, block) for name, block in blocks if block]
 
         # Budget: identity/mood/relationship/gate/output/platform/
-        # post_history are protected; the SHRINK_ORDER blocks are
-        # truncated in priority order when total exceeds budget, with
-        # the registry-rendered reference blocks (capabilities,
-        # catalog) last in line — see SHRINK_ORDER.
+        # post_history are protected; when a budget is in force the
+        # SHRINK_ORDER blocks are truncated in priority order on
+        # genuine overflow, with the registry-rendered reference
+        # blocks (capabilities, catalog) last in line — see
+        # SHRINK_ORDER. No budget in force = everything assembles
+        # in full.
         shrinkable_names = set(SHRINK_ORDER)
         protected = [b for name, b in blocks if name not in shrinkable_names]
         by_name = {name: block for name, block in blocks if name in shrinkable_names}
         protected_cost = sum(approx_token_count(b) for b in protected)
-        remaining = max(0, self.total_budget - protected_cost)
-        shrunk: dict[str, str] = {}
-        spent = 0
-        for name in SHRINK_ORDER:
-            block = by_name.get(name)
-            if not block:
-                continue
-            cost = approx_token_count(block)
-            if spent + cost > remaining:
-                # Truncate this block's lines until it fits.
-                lines = block.splitlines()
-                while lines and spent + approx_token_count("\n".join(lines)) > remaining:
-                    lines.pop()
-                block = "\n".join(lines)
-                if not block.strip():
+        budget = self._effective_budget()
+        if budget is None:
+            shrunk = dict(by_name)
+        else:
+            remaining = max(0, budget - protected_cost)
+            shrunk: dict[str, str] = {}
+            spent = 0
+            for name in SHRINK_ORDER:
+                block = by_name.get(name)
+                if not block:
                     continue
                 cost = approx_token_count(block)
-            shrunk[name] = block
-            spent += cost
+                if spent + cost > remaining:
+                    # Truncate this block's lines until it fits.
+                    lines = block.splitlines()
+                    while lines and spent + approx_token_count("\n".join(lines)) > remaining:
+                        lines.pop()
+                    block = "\n".join(lines)
+                    if not block.strip():
+                        continue
+                    cost = approx_token_count(block)
+                shrunk[name] = block
+                spent += cost
         # Reassemble in original order.
         ordered = [shrunk[name] if name in shrunk else block
                    for name, block in blocks
