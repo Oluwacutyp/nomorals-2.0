@@ -103,9 +103,23 @@ class JobLifecycleTests(unittest.TestCase):
                 gate.set()
             _wait_state(self.ctx, job_id, ("done",))
 
+    def _wait_delivery(self, timeout: float = 10.0) -> None:
+        # The worker persists the terminal state BEFORE it delivers
+        # (jobs._work: the durable row lands first, then _deliver
+        # notifies) — asserting on self.delivered the instant the
+        # state flips races the delivery. Wait for the delivery
+        # itself, on the same deadline idiom as _wait_state.
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.delivered:
+                return
+            time.sleep(0.05)
+        raise AssertionError("job finished but nothing was delivered")
+
     def test_completion_delivers_via_notifier(self) -> None:
         job_id = jobs.start(self.ctx, "bitcoin price")
         _wait_state(self.ctx, job_id, ("done",))
+        self._wait_delivery()
         kinds = [k for k, _t in self.delivered]
         self.assertIn("research", kinds)
         titles = [t for _k, t in self.delivered]
@@ -121,6 +135,7 @@ class JobLifecycleTests(unittest.TestCase):
         self.assertIn("engine exploded", failed["error"])
         self.assertIsNone(jobs.result(self.ctx, job_id))
         # the failure itself is delivered, never swallowed
+        self._wait_delivery()
         self.assertTrue(any("doomed query" in t for _k, t in self.delivered))
 
     def test_empty_query_fails_fast_with_clear_error(self) -> None:

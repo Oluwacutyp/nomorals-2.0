@@ -183,7 +183,12 @@ def test_gate_outsider_dm_gets_nothing():
 
 def test_gate_outsider_group_gets_public_games():
     g = grant_for(is_owner=False, chat_kind=ChatKind.GROUP)
-    allowed, _ = check_tool_call("game_join", grant=g)
+    # The gate sees real registry tool names (the tool loop passes
+    # call.name): joining is an ACTION of the one registered "games"
+    # tool. e1afe8c0 replaced the dead per-action names
+    # (game_move/game_join/…) in PUBLIC_GROUP_TOOLS with "games";
+    # this pin follows the name the boundary actually receives.
+    allowed, _ = check_tool_call("games", grant=g)
     assert allowed
     denied, reason = check_tool_call("social_send", grant=g)
     assert not denied

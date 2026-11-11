@@ -282,7 +282,11 @@ class SchedulerSpamTests(unittest.TestCase):
         gw = FakeGateway()
         sched, ctx = self._scheduler(gw)
         jid = self._add_failing_job(ctx)
-        with patch.object(sched, "_run_command",
+        # The payload path runs _run_command_report since Formatting
+        # F7 (e48ba77f); _run_command is only its string wrapper.
+        # Patching the wrapper left these scenarios failing at the
+        # context's missing tool registry instead of the seam.
+        with patch.object(sched, "_run_command_report",
                           side_effect=RuntimeError("boom")):
             sched._execute(dict(ctx.db.query_one(
                 "SELECT * FROM schedule_jobs WHERE id=?", (jid,))))
@@ -300,18 +304,19 @@ class SchedulerSpamTests(unittest.TestCase):
         gw = FakeGateway()
         sched, ctx = self._scheduler(gw)
         jid = self._add_failing_job(ctx)
-        with patch.object(sched, "_run_command",
+        with patch.object(sched, "_run_command_report",
                           side_effect=RuntimeError("boom")):
             sched._execute(dict(ctx.db.query_one(
                 "SELECT * FROM schedule_jobs WHERE id=?", (jid,))))
-        with patch.object(sched, "_run_command", return_value="ok"):
+        with patch.object(sched, "_run_command_report",
+                          return_value=("ok", None, None)):
             sched._execute(dict(ctx.db.query_one(
                 "SELECT * FROM schedule_jobs WHERE id=?", (jid,))))
         # force the success alert out of the dedupe window
         ctx.db.execute(
             "UPDATE notifications SET created_at=? WHERE kind='schedule'",
             (time.time() - 700,))
-        with patch.object(sched, "_run_command",
+        with patch.object(sched, "_run_command_report",
                           side_effect=RuntimeError("boom again")):
             sched._execute(dict(ctx.db.query_one(
                 "SELECT * FROM schedule_jobs WHERE id=?", (jid,))))

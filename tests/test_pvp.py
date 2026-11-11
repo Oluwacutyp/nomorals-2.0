@@ -313,8 +313,12 @@ class RaidTests(unittest.TestCase):
         self.assertTrue(any("victorious" in m for m in out))
         self.assertEqual(game.winner(room), "all")
         self.assertIsNone(self.engine.live("test:raid"))
-        # both players got win credit in the ledger output
-        joined = " ".join(self.sent)
+        # both players got win credit in the ledger output — the
+        # finish block travels in the move's RETURNED messages
+        # (audit r12, cb6fd5b3: callers deliver finish returns; the
+        # send callback carries engine-initiated traffic only), so
+        # the pin reads the full player-visible delivery.
+        joined = " ".join(list(out) + list(self.sent))
         self.assertIn("Ada", joined)
         self.assertIn("Bob", joined)
 

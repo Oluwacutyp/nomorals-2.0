@@ -15,12 +15,20 @@ class FakeDB:
         if "audit_log" in sql:
             self.audit.append(params)
         elif "kv_store" in sql:
-            self.kv[params[0]] = params[1]
+            # KVStore's upsert binds (key, value, kind, updated_at,
+            # expires_at) and its reads select that whole row back —
+            # the fake must store the full row shape or every read
+            # misses (the storage sweep, 75418251, widened the row
+            # beyond the {"value"}-only shape this fake once modeled).
+            self.kv[params[0]] = {
+                "value": params[1], "kind": params[2],
+                "updated_at": params[3], "expires_at": params[4],
+            }
 
     def query_one(self, sql, params=()):
         if "kv_store" in sql:
-            v = self.kv.get(params[0])
-            return {"value": v} if v is not None else None
+            row = self.kv.get(params[0])
+            return dict(row) if row is not None else None
         return None
 
     def audit_actions(self):

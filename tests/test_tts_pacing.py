@@ -317,7 +317,9 @@ class _FakeTools:
     def call(self, name, *args, **kwargs):
         self.calls.append(((name, args), kwargs))
         return _FakeOutcome(True, {
-            "path": "/tmp/fake-tts.mp3", "engine": "openai_compat",
+            # the speak contract hands back the voice-note-ready ogg
+            # path the handler's default send path consumes
+            "path": "/tmp/fake-tts.ogg", "engine": "openai_compat",
             "bytes": 2048, "seconds": 1.2,
             "dropped_sounds": ["laugh"], "pauses_ms": 550,
             "pauses_dropped": False,
@@ -338,7 +340,29 @@ class _FakeSendResult:
     ok = True
 
 
+class _FakeAdapter:
+    """The platform adapter the gateway resolves for a chat — the
+    voice transport sends through its send_media."""
+
+    name = "telegram"
+
+    def __init__(self):
+        self.media: list[object] = []
+
+    def send_media(self, chat, media):
+        self.media.append(media)
+        return _FakeSendResult()
+
+
 class _FakeGateway:
+    def __init__(self):
+        self.adapter = _FakeAdapter()
+
+    def _adapter_for(self, platform):
+        # ChatGateway._adapter_for (the seam _send_tts_voice_note
+        # calls since the per-surface voice transports, 502f8020)
+        return self.adapter
+
     def send_file(self, platform, chat, path, caption=""):
         return _FakeSendResult()
 
@@ -357,7 +381,14 @@ def test_control_tts_parses_options_and_reports_drops():
     assert kwargs["speed"] == 1.5
     assert kwargs["pace"] == "slow"
     assert "laugh" in reply and "dropped" in reply
-    assert "pauses 550ms" in reply
+    # 7729382f (no meta-narration, owner rule 2026-11-01) removed the
+    # success narration this pin once read ("pauses 550ms"): rendered
+    # pauses are not reported at all now. The reply is exactly the
+    # degradation report — and the note landed AS a voice note.
+    assert reply == ("[laugh] dropped (this engine can't laugh; "
+                     "/speak for real laughs)")
+    assert len(obj.gateway.adapter.media) == 1
+    assert obj.gateway.adapter.media[0].voice_note
 
 
 def test_control_tts_gap_option():

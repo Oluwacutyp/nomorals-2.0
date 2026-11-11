@@ -281,6 +281,13 @@ class FakeDB:
         self._rows = rows
 
     def query(self, sql, params=()):
+        if "FROM conversations" in sql:
+            # Since Mongo P3 (58a98928) the miner reads through
+            # ConversationLog: conversations() lists the conversation
+            # rows and the miner keeps only agent == "partner" ones.
+            # Model that table from the message rows' ids.
+            ids = {r["conversation_id"] for r in self._rows}
+            return [{"id": cid, "agent": "partner"} for cid in sorted(ids)]
         return self._rows
 
 

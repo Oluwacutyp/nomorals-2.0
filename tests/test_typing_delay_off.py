@@ -178,24 +178,29 @@ class TestTypingDelayOff(unittest.TestCase):
     def test_voice_reply_gated(self) -> None:
         # Voice path: the "recording" indicator is the same simulation —
         # gated chats send the voice note with no indicator.
+        # Pass #45 (ddc7e683) routed synthesis through the voice
+        # degradation ladder, whose rung 0 is the factory the
+        # composition root captures when the context is BUILT — so the
+        # fake engine only enters the ladder if the runtime is built
+        # under the patch. (Patching the pingpong module attribute
+        # after boot, as this test once did, leaves the ladder holding
+        # the real engine, which dies on this tool-less context.)
         with mock.patch(
             "nomorals.voice.pingpong.synthesize_voice_reply",
             return_value="/tmp/nm-test-reply.ogg"), mock.patch(
             "nomorals.voice.pingpong.ogg_duration", return_value=2.0):
-            sent = self.rt._send_voice_reply(
+            rt, adapters = _runtime(self.tmp.name)
+            sent = rt._send_voice_reply(
                 _msg("telegram-personal", "999"), ["hello voice"])
-        self.assertTrue(sent)
-        self.assertEqual(self.adapters["telegram-personal"].typing_calls, [])
-        self.assertEqual(len(self.adapters["telegram-personal"].media_sent), 1)
+            self.assertTrue(sent)
+            self.assertEqual(adapters["telegram-personal"].typing_calls, [])
+            self.assertEqual(len(adapters["telegram-personal"].media_sent), 1)
 
-        with mock.patch(
-            "nomorals.voice.pingpong.synthesize_voice_reply",
-            return_value="/tmp/nm-test-reply.ogg"), mock.patch(
-            "nomorals.voice.pingpong.ogg_duration", return_value=2.0):
-            sent = self.rt._send_voice_reply(
+            sent = rt._send_voice_reply(
                 _msg("telegram-bot", OTHER_ID), ["hello voice"])
-        self.assertTrue(sent)
-        self.assertGreaterEqual(len(self.adapters["telegram-bot"].typing_calls), 1)
+            self.assertTrue(sent)
+            self.assertGreaterEqual(
+                len(adapters["telegram-bot"].typing_calls), 1)
 
 
 if __name__ == "__main__":

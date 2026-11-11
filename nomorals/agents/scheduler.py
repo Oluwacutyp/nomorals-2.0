@@ -1919,6 +1919,14 @@ class Scheduler:
         if ok and silent_reason:
             alert = False  # scheduled silence: nothing to report
         if alert:
+            # Doc 15's semantic dedupe keys a job-class candidate on
+            # its attempt: with none, every failure episode of this
+            # job would collapse into one identity and a job that
+            # recovered and failed again would never page again.
+            # The execution's start stamp IS the episode's attempt —
+            # failure alerts fire once per episode, on its first run.
+            alert_meta = {"job": job_name, "ok": ok,
+                          "attempt": f"run:{started:.6f}"}
             try:
                 # The alert is the job's own report, and the job is
                 # passed through so the push gets ADAPTIVE buttons
@@ -1943,7 +1951,7 @@ class Scheduler:
                     self.notifier.publish(
                         "schedule", title, "", doc=report_doc,
                         output_kind="scheduled",
-                        output_meta={"job": job_name, "ok": ok},
+                        output_meta=alert_meta,
                     )
                 elif not ok:
                     from .job_reports import (command_failure_doc,
@@ -1964,7 +1972,7 @@ class Scheduler:
                         "schedule", title, "",
                         doc=_fail_doc,
                         output_kind="scheduled",
-                        output_meta={"job": job_name, "ok": ok},
+                        output_meta=alert_meta,
                         alert_hints={"failed": True, "subject": job_name},
                     )
                 else:
@@ -1975,7 +1983,7 @@ class Scheduler:
                     self.notifier.publish(
                         "schedule", title, body,
                         output_kind="scheduled",
-                        output_meta={"job": job_name, "ok": ok},
+                        output_meta=alert_meta,
                     )
             except Exception as exc:  # noqa: BLE001
                 record_failure("scheduler.execute_notify", exc)
