@@ -76,6 +76,12 @@ P5 settles the stores that live BESIDE the central database:
   seam-aware Library accessors; AUTOINCREMENT children ride
   next_id() counters seeded from the import) follows the same
   pattern below.
+  The residue Batch 3 C7 port (audio-fingerprints — hashes ride
+  inverted-index documents keyed by hash value, track_hashes
+  documents carry each track's pairs in offset order, a meta
+  counter keeps stats() exact; the batch's one agreed failure
+  exit, gated on a synthetic 100x2,000 vote benchmark) follows
+  the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -302,7 +308,9 @@ class TestSidecarRegistry:
             # residue Batch 3, C2 lane:
             "marketing-send",
             # residue Batch 3, C1 lane:
-            "books-library"}
+            "books-library",
+            # residue Batch 3, C7 lane:
+            "audio-fingerprints"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -330,8 +338,15 @@ class TestStatusCoherence:
         federation = status["sidecars"]
         assert set(federation["stores"]) == set(sidecars.SIDECAR_STORES)
         assert sum(federation["counts"].values()) == len(sidecars.SIDECAR_STORES)
-        for verdict in ("ported", "federated", "pinned", "residue"):
-            assert federation["counts"][verdict] >= 1
+        # NOTE (parent re-pin, C7 ship): Batch 3 is complete, so no
+        # store is residue anymore — the counts map carries only the
+        # verdicts the registry actually has. Pin the counts against
+        # the registry itself instead of assuming every verdict is
+        # populated.
+        expected: dict[str, int] = {}
+        for spec in sidecars.SIDECAR_STORES.values():
+            expected[spec.verdict] = expected.get(spec.verdict, 0) + 1
+        assert federation["counts"] == expected
 
 
 # ---------------------------------------------------------------------------
@@ -6909,17 +6924,26 @@ class TestTravelGroupsNamespace:
                                                     tmp_path):
         if rung.store is None:
             pytest.skip("native rung resolves no store")
-        from nomorals.storage.sidecars import sidecar_port
+        from nomorals.storage.sidecars import SidecarSpec, _register, sidecar_port
         from nomorals.travel.groups import _DDL, _TABLES
 
-        # NOTE (parent re-pin, C2 ship): this test used to pin
-        # "marketing-send" as the residue example; C2 ports it, so
-        # the residue example is now "audio-fingerprints" (the last
-        # Batch 3 residue until C7 lands).
-        with pytest.raises(ValueError, match="classified 'residue'"):
-            sidecar_port("audio-fingerprints", _DDL, _TABLES,
-                         str(tmp_path / "y.db"), store=rung.store,
-                         namespace_suffix="telegram_999")
+        # NOTE (parent re-pin, C7 ship): Batch 3 is complete — no
+        # registry store is residue anymore — so the refusal is
+        # pinned against a synthetic residue entry registered for
+        # this test and removed afterwards.
+        _register(SidecarSpec(
+            name="test-residue-example", verdict="residue",
+            kind="sqlite-file", modules=("travel/groups.py",),
+            tables=("group_trips",),
+            reason="test-only residue example"))
+        try:
+            with pytest.raises(ValueError,
+                               match="classified 'residue'"):
+                sidecar_port("test-residue-example", _DDL, _TABLES,
+                             str(tmp_path / "y.db"), store=rung.store,
+                             namespace_suffix="telegram_999")
+        finally:
+            sidecars.SIDECAR_STORES.pop("test-residue-example", None)
 
     def test_namespace_effective_name(self, rung, tmp_path):
         if rung.store is None:
@@ -7978,3 +8002,260 @@ A quixotic lamp burns on the far pier. Sailors swear it answers questions no one
         assert "self.library.iter_passages()" in src
         assert "self.library.passage_rows(" in src
         assert "self.library.book_titles()" in src
+
+
+class TestAudioFingerprintsPort:
+    """audio/fingerprint.py — the audio-fingerprints port (residue
+    Batch 3, C7, the batch's one agreed failure exit):
+    FingerprintDB routes through the seam whenever a store is
+    resolved — tracks rides its RowTable with ids from one atomic
+    meta counter (seeded by the import maximum), hashes rides
+    inverted-index documents keyed by hash VALUE (body
+    {"occurrences": [[track_id, offset_ms], ...]} in native rowid
+    order, duplicates preserved verbatim) — the document twin of
+    the native idx_hashes_hash, so a vote costs one get per
+    distinct query hash on both rungs — and track_hashes documents
+    carry each track's full pair list in offset order and hand
+    remove_track its exact scrub list. A meta counter keeps
+    stats() exact without scanning. The file's rows import once,
+    through the same mapping, at first construction. The native
+    sqlite3 path serves the SQLite default byte-for-byte. Class
+    separation is structural: nothing merges with
+    audio-melodic__works (SongRecon class-1 vs class-3). PERF GATE
+    (Batch 3 design dossier §C7, measured 2026-11-11): synthetic
+    100-track x 2,000-hash corpus, 300-distinct-hash vote, hot
+    hash in every track — ranked output identical on native /
+    sqlite-doc / mongod (100 candidates, track 42 score 1.0 with
+    300 coherent votes); vote medians native 0.0074s /
+    sqlite-doc 0.0079s (1.07x, inside the 3x gate) / mongo
+    0.1714s (23.16x — 300 sequential round trips, absolute 0.17s);
+    full numbers in ~/workspace/mongoC7-verify/gate_results.json."""
+
+    @staticmethod
+    def _tone(path, freqs, sr=11025, secs=6):
+        """Deterministic tone WAV, mirroring test_audio_fingerprint's
+        _tone_wav (same synthesis, so the same fingerprints)."""
+        import math
+        import wave
+        from array import array
+
+        n = int(sr * secs)
+        vals = array("d", [0.0]) * n
+        for i in range(n):
+            t = i / sr
+            vals[i] = sum(math.sin(2 * math.pi * f * t) * 0.25
+                          for f in freqs) * 0.9
+        pcm = array("h", (max(-32768, min(32767, int(s * 32767)))
+                          for s in vals))
+        with wave.open(str(path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(sr)
+            wf.writeframes(pcm.tobytes())
+
+    @staticmethod
+    def _store(path, rung):
+        from nomorals.audio.fingerprint import FingerprintDB
+
+        if rung.store is None:
+            return FingerprintDB(str(path))
+        return FingerprintDB(str(path), store=rung.store)
+
+    def _scenario(self, path, rung):
+        from nomorals.audio.fingerprint import fingerprint
+
+        a_wav = path.parent / "a.wav"
+        b_wav = path.parent / "b.wav"
+        c_wav = path.parent / "c.wav"
+        self._tone(a_wav, [440.0])
+        self._tone(b_wav, [660.0])
+        self._tone(c_wav, [440.0])  # identical to A: same hashes
+        fa, fb = fingerprint(a_wav), fingerprint(b_wav)
+        assert fa == fingerprint(c_wav), "A and C tones must coincide"
+        assert not ({h for h, _ in fa} & {h for h, _ in fb}), \
+            "A and B tones must share no hash"
+        db = self._store(path, rung)
+        ra = db.add_track(a_wav, title="Tone A", artist="synthetic")
+        rb = db.add_track(b_wav, title="Tone B", artist="synthetic")
+        rc = db.add_track(c_wav, title="Tone C", artist="synthetic")
+        out: dict = {}
+        out["ids"] = (ra["track_id"], rb["track_id"], rc["track_id"])
+        out["stats"] = (db.stats()["tracks"], db.stats()["hashes"])
+        out["track_hashes_a"] = db.track_hashes(1)
+        out["track_hashes_b"] = db.track_hashes(2)
+        out["track_hashes_c"] = db.track_hashes(3)
+        out["expected_a"] = fa
+        out["expected_b"] = fb
+        out["occ_first3"] = db.hash_occurrences(fa[:3])
+        ma = db.match(a_wav)
+        mb = db.match(b_wav)
+        mc = db.match(c_wav)
+        out["match_a"] = (ma["ok"], ma["track_id"], ma["score"])
+        out["match_b"] = (mb["ok"], mb["track_id"], mb["score"])
+        out["match_c"] = (mc["ok"], mc["track_id"], mc["score"])
+        out["ranked_a"] = [(r["track_id"], round(r["score"], 6))
+                           for r in db.rank_candidates(a_wav)]
+        out["list"] = [(t["track_id"], t["title"])
+                       for t in db.list_tracks()]
+        snap = db.catalog_snapshot()
+        out["catalog"] = (snap["tracks"], snap["hashes"],
+                          bool(snap["version"]))
+        out["removed_b"] = db.remove_track(2)
+        out["stats_after_remove"] = (db.stats()["tracks"],
+                                     db.stats()["hashes"])
+        out["th_b_after_remove"] = db.track_hashes(2)
+        out["occ_after_remove"] = db.hash_occurrences(fa[:3])
+        ma2 = db.match(a_wav)
+        out["match_a_after_remove"] = (ma2["ok"], ma2["track_id"],
+                                       ma2["score"])
+        r2 = db.add_track(b_wav, title="Tone B again",
+                          artist="synthetic")
+        out["readded_id"] = r2["track_id"]
+        out["stats_final"] = (db.stats()["tracks"],
+                              db.stats()["hashes"])
+        db.close()
+        return out
+
+    def test_conformance(self, rung, tmp_path):
+        out = self._scenario(tmp_path / "fp.db", rung)
+        fa = out["expected_a"]
+        fb = out["expected_b"]
+        n = len(fa)
+        assert n > 100, "tone must yield a real fingerprint"
+        assert out["ids"] == (1, 2, 3)
+        assert out["stats"] == (3, 3 * n)
+        # Stored pairs are exactly the pure function's output,
+        # millisecond-quantized the way the native schema stores
+        # offset_ms INTEGER — on every rung, the cross-rung
+        # identity pin.
+        fa_q = [(h, int(t * 1000) / 1000.0) for h, t in fa]
+        fb_q = [(h, int(t * 1000) / 1000.0) for h, t in fb]
+        assert out["track_hashes_a"] == fa_q
+        assert out["track_hashes_b"] == fb_q
+        assert out["track_hashes_c"] == fa_q
+        # occurrences: native rowid order = A's rows then C's rows,
+        # duplicates preserved verbatim (each tone repeats its 15
+        # distinct hashes across many offsets).
+        expected_occ = {}
+        for h, _t in fa[:3]:
+            expected_occ[h] = (
+                [(1, int(t * 1000)) for hh, t in fa if hh == h]
+                + [(3, int(t * 1000)) for hh, t in fa if hh == h])
+        assert out["occ_first3"] == expected_occ
+        assert out["match_a"] == (True, 1, 1.0)
+        assert out["match_b"] == (True, 2, 1.0)
+        # C's file is A's file: the tie breaks to the lower id.
+        assert out["match_c"] == (True, 1, 1.0)
+        assert out["ranked_a"] == [(1, 1.0), (3, 1.0)]
+        assert out["list"] == [(3, "Tone C"), (2, "Tone B"),
+                               (1, "Tone A")]
+        assert out["catalog"] == (3, 3 * n, True)
+        assert out["removed_b"] is True
+        assert out["stats_after_remove"] == (2, 2 * n)
+        assert out["th_b_after_remove"] == []
+        # B shared no hash with A, so removing it changes nothing
+        # here — but track 3 (identical to A) still stands, and
+        # its occurrences must still be listed after track 1's.
+        expected_after = {
+            h: ([(1, int(t * 1000)) for hh, t in fa if hh == h]
+                + [(3, int(t * 1000)) for hh, t in fa if hh == h])
+            for h, _t in fa[:3]}
+        assert out["occ_after_remove"] == expected_after
+        assert out["match_a_after_remove"] == (True, 1, 1.0)
+        assert out["readded_id"] == 4
+        assert out["stats_final"] == (3, 3 * n)
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.audio.fingerprint import FingerprintDB
+
+        # a native file first: two tones, ids 1-2.
+        path = tmp_path / "legacy.db"
+        native = self._store(path, SimpleNamespace(kind="native",
+                                                   store=None))
+        a_wav = tmp_path / "a.wav"
+        b_wav = tmp_path / "b.wav"
+        self._tone(a_wav, [440.0])
+        self._tone(b_wav, [660.0])
+        native.add_track(a_wav, title="Tone A", artist="synthetic")
+        native.add_track(b_wav, title="Tone B", artist="synthetic")
+        native.close()
+        assert FingerprintDB(str(path)).stats() == {
+            "ok": True, "tracks": 2, "hashes": 690}
+
+        seam = self._store(path, rung)
+        assert seam.stats() == {"ok": True, "tracks": 2, "hashes": 690}
+        # shape: one document per distinct hash value (15 + 15,
+        # disjoint), one track_hashes document per track, counters
+        # seeded from the import maximum / total.
+        assert rung.store.count("audio-fingerprints__tracks") == 2
+        assert rung.store.count("audio-fingerprints__hashes") == 30
+        assert rung.store.count("audio-fingerprints__track_hashes") == 2
+        marker = rung.store.get("audio-fingerprints__meta", "import")
+        assert marker and marker.get("done") is True
+        counters = rung.store.get("audio-fingerprints__meta", "counters")
+        assert int(counters["tracks"]) == 2
+        assert int(counters["hashes"]) == 690
+        # adopted, not overwritten: a second construction over the
+        # same store imports nothing twice, and the file itself is
+        # untouched by seam activity.
+        again = self._store(path, rung)
+        assert again.stats() == {"ok": True, "tracks": 2, "hashes": 690}
+        third_id = again.add_track(
+            b_wav, title="Tone B again",
+            artist="synthetic")["track_id"]
+        assert third_id == 3
+        assert again.stats() == {"ok": True, "tracks": 3, "hashes": 1035}
+        assert FingerprintDB(str(path)).stats() == {
+            "ok": True, "tracks": 2, "hashes": 690}
+
+    def test_native_byte_for_byte(self, tmp_path):
+        """The native path writes exactly the pre-port statements:
+        same tracks rows (minus the now() created stamp) and the
+        same hash rows in rowid order as a raw-sqlite reference
+        build over the same DDL."""
+        import sqlite3
+
+        from nomorals.audio.fingerprint import _DDL, FingerprintDB, _media_duration, fingerprint
+
+        a_wav = tmp_path / "a.wav"
+        b_wav = tmp_path / "b.wav"
+        self._tone(a_wav, [440.0])
+        self._tone(b_wav, [660.0])
+        fa, fb = fingerprint(a_wav), fingerprint(b_wav)
+        path = tmp_path / "native.db"
+        db = FingerprintDB(str(path))
+        db.add_track(a_wav, title="Tone A", artist="synthetic")
+        db.add_track(b_wav, title="Tone B", artist="synthetic")
+        db.close()
+
+        ref = tmp_path / "ref.db"
+        conn = sqlite3.connect(str(ref))
+        conn.executescript(_DDL)
+        for tid, (wav, title, pairs) in enumerate(
+                [(a_wav, "Tone A", fa), (b_wav, "Tone B", fb)], start=1):
+            conn.execute(
+                "INSERT INTO tracks (id, title, artist, source, "
+                "duration, created) VALUES (?,?,?,?,?,?)",
+                (tid, title, "synthetic", "devon",
+                 _media_duration(wav), 0.0))
+            conn.executemany(
+                "INSERT INTO hashes (track_id, hash, offset_ms) "
+                "VALUES (?,?,?)",
+                [(tid, h, int(t * 1000)) for h, t in pairs])
+        conn.commit()
+
+        got = sqlite3.connect(str(path))
+        assert got.execute(
+            "SELECT id, title, artist, source, duration FROM tracks "
+            "ORDER BY id").fetchall() == conn.execute(
+            "SELECT id, title, artist, source, duration FROM tracks "
+            "ORDER BY id").fetchall()
+        assert got.execute(
+            "SELECT track_id, hash, offset_ms FROM hashes ORDER BY "
+            "rowid").fetchall() == conn.execute(
+            "SELECT track_id, hash, offset_ms FROM hashes ORDER BY "
+            "rowid").fetchall()
+        conn.close()
+        got.close()

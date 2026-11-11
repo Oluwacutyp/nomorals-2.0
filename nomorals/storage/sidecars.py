@@ -1848,10 +1848,49 @@ def _residue(name: str, module: str, tables: tuple[str, ...],
         reason=clause + _RESIDUE_TAIL))
 
 
-_residue("audio-fingerprints", "audio/fingerprint.py", ("hashes", "tracks"),
-         "audio fingerprint hashes per track in fingerprints.db; "
-         "hash rows are lookup-keyed blobs, document-shaped but "
-         "bulk-binary in character.")
+_register(_S(
+    name="audio-fingerprints", verdict="ported", kind="sqlite-file",
+    modules=("audio/fingerprint.py",),
+    tables=("hashes", "tracks"),
+    reason=(
+        "ported in the Mongo residue Batch 3 pass (C7): "
+        "FingerprintDB routes through the seam "
+        "(audio-fingerprints__tracks / __hashes / __track_hashes) "
+        "whenever a store is resolved, behind its unchanged "
+        "never-raises API. tracks rides its RowTable with ids from "
+        "one atomic meta counter, seeded by the import maximum; "
+        "hashes rides inverted-index documents keyed by hash value "
+        "(body {occurrences: [[track_id, offset_ms], ...]} in native "
+        "rowid order, duplicates preserved verbatim) — the document "
+        "twin of the native idx_hashes_hash, so a vote costs one "
+        "get per distinct query hash on both rungs; track_hashes "
+        "documents carry each track's full pair list in offset "
+        "order and hand remove_track its exact scrub list; a meta "
+        "counter keeps stats() exact without scanning. The file's "
+        "existing rows import once, through the same mapping, at "
+        "first construction. The native sqlite3 path serves the "
+        "SQLite default byte-for-byte. Class separation is "
+        "structural: nothing merges with audio-melodic__works "
+        "(SongRecon class-1 vs class-3). PERF GATE (Batch 3 design "
+        "dossier §C7, measured 2026-11-11 on a synthetic "
+        "100-track x 2,000-hash corpus, 300-distinct-hash vote, "
+        "hot hash in every track; full numbers in "
+        "~/workspace/mongoC7-verify/gate_results.json): ranked "
+        "vote output identical on native / sqlite-doc / mongod "
+        "(100 candidates, track 42 score 1.0 with 300 coherent "
+        "votes) and hash_occurrences maps identical; vote "
+        "medians native 0.0074s / sqlite-doc 0.0079s (1.07x, "
+        "inside the 3x gate) / mongo 0.1714s (23.16x — 300 "
+        "sequential localhost round trips at ~0.55ms each, "
+        "absolute 0.17s and usable; a batched _id $in read is "
+        "the future optimization, not a design failure). "
+        "Enroll: native 0.85s / sqlite-doc 8.97s through the "
+        "organ's write path / mongo 17.10s as a w=1 bulk fixture "
+        "load (the organ's per-hash majority-write-concern "
+        "enroll path runs ~24ms/op, ~80 min for this corpus — "
+        "recorded remainder; production enrolls one track at "
+        "a time)."),
+))
 _register(_S(
     name="travel-groups", verdict="ported", kind="sqlite-file",
     modules=("travel/groups.py",),

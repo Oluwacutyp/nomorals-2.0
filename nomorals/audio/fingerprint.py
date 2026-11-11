@@ -793,6 +793,32 @@ def _default_db_path() -> str:
     return str(d / "fingerprints.db")
 
 
+#: The file's DDL, hoisted to a constant for the sidecar port
+#: (Mongo residue Batch 3, C7). Byte-identical to the statements
+#: :meth:`FingerprintDB._connect` runs — the port's mapping is
+#: derived from this, never a second hand-written shape.
+_DDL = (
+    "CREATE TABLE IF NOT EXISTS tracks ("
+    "id INTEGER PRIMARY KEY, title TEXT, artist TEXT, "
+    "source TEXT, duration REAL, created REAL);"
+    "CREATE TABLE IF NOT EXISTS hashes ("
+    "track_id INTEGER, hash INTEGER, offset_ms INTEGER);"
+    "CREATE INDEX IF NOT EXISTS idx_hashes_hash ON hashes(hash)"
+)
+
+#: Seam collection names for the inverted-index documents (C7).
+#: ``hashes`` documents are keyed by hash value, body
+#: ``{"occurrences": [[track_id, offset_ms], ...]}`` in native
+#: rowid order, duplicates preserved verbatim — the document twin
+#: of the native ``idx_hashes_hash`` inverted index. ``track_hashes``
+#: documents are keyed by track id, body ``{"pairs":
+#: [[hash, offset_ms], ...]}`` in offset order: one get serves
+#: :meth:`FingerprintDB.track_hashes` and hands
+#: :meth:`FingerprintDB.remove_track` its exact scrub list.
+_HASHES_COLLECTION = "hashes"
+_TRACK_HASHES_COLLECTION = "track_hashes"
+
+
 class FingerprintDB:
     """Devon's local recognition memory: fingerprints of her own
     productions, the user's music library, anything indexed via
@@ -801,12 +827,99 @@ class FingerprintDB:
     Matching is time-coherent: a track scores by the largest set of
     hashes that agree on ONE time offset (the Shazam idea) — random
     collisions don't form a coherent line. ``match()`` never raises.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as audio-fingerprints):
+    ``tracks`` rides its RowTable, ``hashes`` rides the inverted-index
+    documents above, and a meta counter keeps ``stats()`` exact
+    without scanning. The native sqlite3 path serves the SQLite
+    default byte-for-byte. Class separation is structural: these
+    collections are ``audio-fingerprints__*`` and never merge with
+    ``audio-melodic__works`` (SongRecon class-1 vs class-3).
     """
 
-    def __init__(self, db_path: str = "") -> None:
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self.db_path = db_path or _default_db_path()
         self._conn: sqlite3.Connection | None = None
         self._lock = threading.Lock()
+        self._port: Any = None
+        # The port attempt is best-effort by this organ's
+        # never-raises posture: a store that cannot be wired
+        # degrades to the native file path, loudly journaled.
+        # (sidecar_port returns None on the SQLite default, so
+        # the native path below is the common case.)
+        try:
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "audio-fingerprints", _DDL, ("tracks",),
+                None if self.db_path == ":memory:" else self.db_path,
+                store=store)
+            if port is not None:
+                self._import_into(port)
+                self._port = port
+                return
+        except Exception:  # noqa: BLE001 — degraded, not fatal
+            _log.warning("fingerprint: seam unavailable, "
+                         "running native", exc_info=True)
+            self._port = None
+
+    def _import_into(self, port: Any) -> None:
+        """One-time lazy import of fingerprints.db into the seam.
+
+        ``tracks`` ports as-is through its RowTable; ``hashes``
+        streams in rowid order and groups into the inverted-index
+        documents (rowid order preserved inside each occurrence
+        list) plus the per-track ``track_hashes`` documents (offset
+        order, stable). Counters are seeded from the imported
+        maximum track id and total hash rows, so seam-allocated ids
+        continue the file's sequence. Runs through ensure_imported:
+        one-time, idempotent — a live store is adopted, never
+        overwritten.
+        """
+        max_track = [0]
+        total_hashes = [0]
+
+        def write_tracks(rows: list[dict[str, Any]]) -> int:
+            table = port.tables["tracks"]
+            for row in rows:
+                max_track[0] = max(max_track[0], int(row["id"]))
+                table.put(row)
+            return len(rows)
+
+        def write_hashes(rows: list[dict[str, Any]]) -> int:
+            occurrences: dict[int, list[list[int]]] = {}
+            per_track: dict[int, list[list[int]]] = {}
+            for row in rows:
+                tid = int(row["track_id"])
+                h = int(row["hash"])
+                off = int(row["offset_ms"])
+                occurrences.setdefault(h, []).append([tid, off])
+                per_track.setdefault(tid, []).append([h, off])
+            for h, occ in occurrences.items():
+                port.put_raw(_HASHES_COLLECTION, str(h),
+                             {"occurrences": occ})
+            for tid, pairs in per_track.items():
+                pairs.sort(key=lambda pair: pair[1])
+                port.put_raw(_TRACK_HASHES_COLLECTION, str(tid),
+                             {"pairs": pairs})
+            total_hashes[0] = len(rows)
+            return len(rows)
+
+        def seed_counters(_counts: dict[str, int]) -> None:
+            doc = port.store.get(port.meta_collection, "counters") or {}
+            seeded = dict(doc)
+            if int(doc.get("tracks") or 0) < max_track[0]:
+                seeded["tracks"] = max_track[0]
+            if int(doc.get("hashes") or 0) < total_hashes[0]:
+                seeded["hashes"] = total_hashes[0]
+            if seeded != doc:
+                port.store.put(port.meta_collection, "counters", seeded)
+
+        port.ensure_imported(
+            {"tracks": write_tracks, "hashes": write_hashes},
+            after_import=seed_counters)
 
     def _connect(self) -> sqlite3.Connection:
         if self._conn is None:
@@ -825,6 +938,124 @@ class FingerprintDB:
             self._conn.commit()
         return self._conn
 
+    # -- seam accessors (C7) ------------------------------------------------
+    # Every read the voting code needs goes through one of these, so
+    # the native SQL and the inverted-index documents answer the
+    # same questions in the same order. All callers hold ``_lock``.
+
+    def _hash_rows(self, h: int) -> list[tuple[int, int]]:
+        """Occurrences of one hash, ``[(track_id, offset_ms), ...]``.
+
+        Native: the indexed lookup, rowid order. Seam: one get of
+        the inverted-index document, whose list preserves that
+        order (and duplicates) verbatim.
+        """
+        if self._port is not None:
+            doc = self._port.store.get(
+                "audio-fingerprints__" + _HASHES_COLLECTION, str(h))
+            if not doc:
+                return []
+            return [(int(tid), int(off))
+                    for tid, off in doc.get("occurrences") or []]
+        rows = self._connect().execute(
+            "SELECT track_id, offset_ms FROM hashes WHERE hash = ?",
+            (h,)).fetchall()
+        return [(int(tid), int(off)) for tid, off in rows]
+
+    def _track_meta(self, tid: int) -> tuple[str, str, str] | None:
+        """``(title, artist, source)`` for one track, or None."""
+        if self._port is not None:
+            row = self._port.tables["tracks"].get(tid)
+            if row is None:
+                return None
+            return (str(row["title"]), str(row["artist"]),
+                    str(row["source"]))
+        row = self._connect().execute(
+            "SELECT title, artist, source FROM tracks WHERE id = ?",
+            (tid,)).fetchone()
+        if not row:
+            return None
+        return (row[0], row[1], row[2])
+
+    def _all_track_rows(self) -> list[dict[str, Any]]:
+        """Every track row, id order — the catalog snapshot's input."""
+        if self._port is not None:
+            rows = self._port.tables["tracks"].all()
+            rows.sort(key=lambda r: int(r["id"]))
+            return rows
+        rows = self._connect().execute(
+            "SELECT id, title, artist, source, duration, created "
+            "FROM tracks ORDER BY id").fetchall()
+        return [{"id": r[0], "title": r[1], "artist": r[2],
+                 "source": r[3], "duration": r[4], "created": r[5]}
+                for r in rows]
+
+    def _hash_total(self) -> int:
+        """Total hash rows. Native: COUNT(*). Seam: the meta counter
+        (maintained by every seam write, seeded at import) — the
+        vote never scans for it."""
+        if self._port is not None:
+            doc = self._port.store.get(
+                self._port.meta_collection, "counters") or {}
+            return int(doc.get("hashes") or 0)
+        return int(self._connect().execute(
+            "SELECT COUNT(*) FROM hashes").fetchone()[0])
+
+    def _seam_write_hashes(self, tid: int,
+                           pairs: list[tuple[int, int]]) -> None:
+        """Write one track's hash rows into the inverted index.
+
+        Per distinct hash: get the occurrence document, append this
+        track's pairs, put. The track_hashes document carries the
+        full list in offset order. The meta counter advances by the
+        row count. Composition order is chosen so a crash leaves
+        extra occurrences for a track rather than a track missing
+        hashes — and the voting code already skips occurrences
+        whose track row is gone, so crash residue is inert.
+        """
+        port = self._port
+        seen: dict[int, list[list[int]]] = {}
+        for h, off in pairs:
+            seen.setdefault(h, []).append([tid, off])
+        for h, mine in seen.items():
+            doc = port.store.get(
+                "audio-fingerprints__" + _HASHES_COLLECTION, str(h))
+            occ = [list(p) for p in (doc.get("occurrences") or [])] \
+                if doc else []
+            occ.extend(mine)
+            port.put_raw(_HASHES_COLLECTION, str(h),
+                         {"occurrences": occ})
+        ordered = sorted(pairs, key=lambda pair: pair[1])
+        port.put_raw(_TRACK_HASHES_COLLECTION, str(tid),
+                     {"pairs": [[h, off] for h, off in ordered]})
+        if pairs:
+            port.store.inc(port.meta_collection, "counters",
+                           "hashes", float(len(pairs)))
+
+    def _seam_drop_hashes(self, tid: int,
+                          pairs: list[tuple[int, int]]) -> None:
+        """Scrub one track's pairs out of the inverted index (the
+        remove_track half). A document emptied of occurrences is
+        deleted outright. The meta counter retreats by the row count.
+        """
+        port = self._port
+        for h in {h for h, _off in pairs}:
+            doc = port.store.get(
+                "audio-fingerprints__" + _HASHES_COLLECTION, str(h))
+            if not doc:
+                continue
+            kept = [p for p in (doc.get("occurrences") or [])
+                    if int(p[0]) != tid]
+            if kept:
+                port.put_raw(_HASHES_COLLECTION, str(h),
+                             {"occurrences": kept})
+            else:
+                port.store.delete(
+                    "audio-fingerprints__" + _HASHES_COLLECTION, str(h))
+        if pairs:
+            port.store.inc(port.meta_collection, "counters",
+                           "hashes", float(-len(pairs)))
+
     def add_track(self, path: str | os.PathLike[str], *,
                   title: str = "", artist: str = "",
                   source: str = "devon") -> dict[str, Any]:
@@ -837,19 +1068,31 @@ class FingerprintDB:
                                   "audio too quiet or too short"}
             import time as _t
             duration = _media_duration(path)
+            created = _t.time()
+            pairs = [(h, int(t * 1000)) for h, t in hashes]
             with self._lock:
-                conn = self._connect()
-                cur = conn.execute(
-                    "INSERT INTO tracks (title, artist, source, duration, "
-                    "created) VALUES (?,?,?,?,?)",
-                    (title or Path(str(path)).stem,
-                     artist or "unknown", source, duration, _t.time()))
-                tid = cur.lastrowid
-                conn.executemany(
-                    "INSERT INTO hashes (track_id, hash, offset_ms) "
-                    "VALUES (?,?,?)",
-                    [(tid, h, int(t * 1000)) for h, t in hashes])
-                conn.commit()
+                if self._port is not None:
+                    tid = self._port.next_id("tracks")
+                    self._port.tables["tracks"].put({
+                        "id": tid,
+                        "title": title or Path(str(path)).stem,
+                        "artist": artist or "unknown",
+                        "source": source, "duration": duration,
+                        "created": created})
+                    self._seam_write_hashes(tid, pairs)
+                else:
+                    conn = self._connect()
+                    cur = conn.execute(
+                        "INSERT INTO tracks (title, artist, source, "
+                        "duration, created) VALUES (?,?,?,?,?)",
+                        (title or Path(str(path)).stem,
+                         artist or "unknown", source, duration, created))
+                    tid = cur.lastrowid
+                    conn.executemany(
+                        "INSERT INTO hashes (track_id, hash, offset_ms) "
+                        "VALUES (?,?,?)",
+                        [(tid, h, off) for h, off in pairs])
+                    conn.commit()
             return {"ok": True, "track_id": tid, "hashes": len(hashes),
                     "title": title or Path(str(path)).stem,
                     "duration_s": round(duration, 1)}
@@ -890,27 +1133,29 @@ class FingerprintDB:
         """Database size at a glance. Never raises."""
         try:
             with self._lock:
-                conn = self._connect()
-                tracks = conn.execute(
-                    "SELECT COUNT(*) FROM tracks").fetchone()[0]
-                hashes = conn.execute(
-                    "SELECT COUNT(*) FROM hashes").fetchone()[0]
+                if self._port is not None:
+                    tracks = self._port.tables["tracks"].count()
+                    hashes = self._hash_total()
+                else:
+                    conn = self._connect()
+                    tracks = conn.execute(
+                        "SELECT COUNT(*) FROM tracks").fetchone()[0]
+                    hashes = conn.execute(
+                        "SELECT COUNT(*) FROM hashes").fetchone()[0]
             return {"ok": True, "tracks": tracks, "hashes": hashes}
         except Exception as exc:  # noqa: BLE001
             record_failure("fingerprint.stats", exc)
             return {"ok": False, "tracks": 0, "hashes": 0}
 
-    def _catalog_snapshot_locked(
-            self, conn: sqlite3.Connection) -> dict[str, Any]:
+    def _catalog_snapshot_locked(self) -> dict[str, Any]:
         """Catalog stamp for a receipt; caller must hold ``_lock``."""
-        rows = conn.execute(
-            "SELECT id, title, artist, source, duration, created "
-            "FROM tracks ORDER BY id").fetchall()
-        hash_count = conn.execute(
-            "SELECT COUNT(*) FROM hashes").fetchone()[0]
+        rows = self._all_track_rows()
+        hash_count = self._hash_total()
         canonical = "\n".join(
             "|".join("" if value is None else str(value)
-                     for value in row)
+                     for value in (row["id"], row["title"],
+                                   row["artist"], row["source"],
+                                   row["duration"], row["created"]))
             for row in rows)
         canonical += f"\nhashes:{int(hash_count)}"
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -924,13 +1169,13 @@ class FingerprintDB:
         """Current local catalog size and version stamp. Never raises."""
         try:
             with self._lock:
-                return self._catalog_snapshot_locked(self._connect())
+                return self._catalog_snapshot_locked()
         except Exception as exc:  # noqa: BLE001
             record_failure("fingerprint.catalog_snapshot", exc)
             return {"version": "", "tracks": 0, "hashes": 0}
 
     def _receipt_locked(
-            self, conn: sqlite3.Connection, *,
+            self, *,
             status: str,
             query_hash: str,
             query_count: int,
@@ -941,7 +1186,7 @@ class FingerprintDB:
             catalog: dict[str, Any] | None = None,
             ) -> dict[str, Any]:
         """Assemble a local receipt; caller must hold ``_lock``."""
-        catalog = catalog or self._catalog_snapshot_locked(conn)
+        catalog = catalog or self._catalog_snapshot_locked()
         if winner is not None:
             return RecognitionReceipt(
                 status="matched",
@@ -1008,8 +1253,7 @@ class FingerprintDB:
             reason=reason,
         ).to_dict()
 
-    def _rank_locked(self, conn: sqlite3.Connection,
-                     hashes: Sequence[tuple[int, float]]
+    def _rank_locked(self, hashes: Sequence[tuple[int, float]]
                      ) -> list[dict[str, Any]]:
         """Rank catalog candidates for one query fingerprint.
 
@@ -1018,15 +1262,21 @@ class FingerprintDB:
         agreeing on one 50 ms reference-offset bin, divided by the
         number of query hashes. Returns every candidate that shared
         at least one hash, best first. Total.
+
+        Occurrence lookups go through :meth:`_hash_rows`, so the
+        native index and the seam's inverted documents feed the
+        identical voting code in the identical order — including
+        duplicate query hashes, which re-pull the same occurrences
+        (the cache below is per call, keyed by hash value).
         """
         query_types = len({h for h, _t in hashes})
         cand: dict[int, list[tuple[int, int, int, int]]] = {}
+        occurrence_cache: dict[int, list[tuple[int, int]]] = {}
         for h, t in hashes:
-            rows = conn.execute(
-                "SELECT track_id, offset_ms FROM hashes "
-                "WHERE hash = ?", (h,)).fetchall()
+            if h not in occurrence_cache:
+                occurrence_cache[h] = self._hash_rows(h)
             q_ms = int(t * 1000)
-            for tid, off in rows:
+            for tid, off in occurrence_cache[h]:
                 cand.setdefault(tid, []).append(
                     (int(off) - q_ms, q_ms, int(off), int(h)))
         ranked: list[dict[str, Any]] = []
@@ -1056,9 +1306,7 @@ class FingerprintDB:
             votes = distinct_votes(coherent)
             distinct_types = len({item[3] for item in coherent})
             score = votes / max(1, len(hashes))
-            row = conn.execute(
-                "SELECT title, artist, source FROM tracks "
-                "WHERE id = ?", (tid,)).fetchone()
+            row = self._track_meta(tid)
             if not row:
                 continue
             deltas = sorted(item[0] for item in coherent)
@@ -1130,8 +1378,7 @@ class FingerprintDB:
                 or float(top.get("type_recall") or 0.0)
                 >= MIN_TYPE_RECALL)
 
-    def _rate_retry_locked(self, conn: sqlite3.Connection,
-                           path: str | os.PathLike[str],
+    def _rate_retry_locked(self, path: str | os.PathLike[str],
                            threshold: float
                            ) -> tuple[list[dict[str, Any]], float] | None:
         """Retry voting under playback-rate corrections.
@@ -1182,7 +1429,7 @@ class FingerprintDB:
             hashes = _hashes_from_samples(corrected, _FP_SR)
             if not hashes:
                 return
-            ranked = self._rank_locked(conn, hashes)
+            ranked = self._rank_locked(hashes)
             if not ranked:
                 return
             score = float(ranked[0]["score"])
@@ -1257,8 +1504,7 @@ class FingerprintDB:
             if not hashes:
                 return []
             with self._lock:
-                conn = self._connect()
-                return self._rank_locked(conn, hashes)[:limit]
+                return self._rank_locked(hashes)[:limit]
         except Exception:  # noqa: BLE001
             _log.debug("rank_candidates failed", exc_info=True)
             return []
@@ -1282,14 +1528,10 @@ class FingerprintDB:
                 return {}
             out: dict[int, list[tuple[int, int]]] = {}
             with self._lock:
-                conn = self._connect()
                 for h in sorted(wanted):
-                    rows = conn.execute(
-                        "SELECT track_id, offset_ms FROM hashes "
-                        "WHERE hash = ?", (h,)).fetchall()
+                    rows = self._hash_rows(h)
                     if rows:
-                        out[h] = [(int(tid), int(off))
-                                  for tid, off in rows]
+                        out[h] = rows
             return out
         except Exception:  # noqa: BLE001
             _log.debug("hash_occurrences failed", exc_info=True)
@@ -1306,6 +1548,14 @@ class FingerprintDB:
         """
         try:
             with self._lock:
+                if self._port is not None:
+                    doc = self._port.store.get(
+                        "audio-fingerprints__" + _TRACK_HASHES_COLLECTION,
+                        str(int(track_id)))
+                    if not doc:
+                        return []
+                    return [(int(h), int(off) / 1000.0)
+                            for h, off in doc.get("pairs") or []]
                 conn = self._connect()
                 rows = conn.execute(
                     "SELECT hash, offset_ms FROM hashes "
@@ -1353,28 +1603,26 @@ class FingerprintDB:
                             query_hash=query_hash,
                             query_count=query_count)}
             with self._lock:
-                conn = self._connect()
                 # Pull candidate evidence per hash. Keeping the query
                 # and reference times lets the receipt name the actual
                 # windows that voted for the winning offset.
-                ranked = self._rank_locked(conn, hashes)
+                ranked = self._rank_locked(hashes)
                 rate_used: float | None = None
                 if not self._clears_acceptance(ranked, threshold):
                     # Coupled speed/pitch edits defeat unscaled
                     # voting by construction; retry rate-corrected
                     # before answering no-match (SR2 hardening).
-                    retry = self._rate_retry_locked(
-                        conn, path, threshold)
+                    retry = self._rate_retry_locked(path, threshold)
                     if retry is not None:
                         ranked, rate_used = retry
-                catalog = self._catalog_snapshot_locked(conn)
+                catalog = self._catalog_snapshot_locked()
                 if self._clears_acceptance(ranked, threshold):
                     winner = ranked[0]
                     if rate_used is not None:
                         winner = self._apply_rate_to_winner(
                             winner, rate_used)
                     receipt = self._receipt_locked(
-                        conn, status="matched", query_hash=query_hash,
+                        status="matched", query_hash=query_hash,
                         query_count=query_count, winner=winner,
                         alternatives=ranked[1:4], catalog=catalog)
                     result = {
@@ -1432,7 +1680,7 @@ class FingerprintDB:
                         "landmark-offset pattern)")
                     best_candidate = None
                 receipt = self._receipt_locked(
-                    conn, status="no_match", query_hash=query_hash,
+                    status="no_match", query_hash=query_hash,
                     query_count=query_count, reason=reason,
                     best_candidate=best_candidate, catalog=catalog)
                 return {
@@ -1464,6 +1712,14 @@ class FingerprintDB:
         """Everything Devon can recognize locally. Never raises."""
         try:
             with self._lock:
+                if self._port is not None:
+                    rows = self._port.tables["tracks"].all()
+                    rows.sort(key=lambda r: float(r["created"] or 0.0),
+                              reverse=True)
+                    return [{"track_id": int(r["id"]), "title": r["title"],
+                             "artist": r["artist"], "source": r["source"],
+                             "duration_s": round(float(r["duration"] or 0.0), 1)}
+                            for r in rows]
                 conn = self._connect()
                 rows = conn.execute(
                     "SELECT id, title, artist, source, duration, created "
@@ -1476,9 +1732,31 @@ class FingerprintDB:
             return []
 
     def remove_track(self, track_id: int) -> bool:
-        """Drop a track and its hashes. Never raises."""
+        """Drop a track and its hashes. Never raises.
+
+        Seam: the track_hashes document hands back the exact scrub
+        list, so no occurrence of a deleted track survives in the
+        inverted index; the meta counter retreats by the row count.
+        Composition order (occurrences first, track row last) leaves
+        a crash with extra occurrences for a track — inert, because
+        the voting code already skips occurrences whose track row
+        is gone — never a track missing hashes.
+        """
         try:
             with self._lock:
+                if self._port is not None:
+                    doc = self._port.store.get(
+                        "audio-fingerprints__" + _TRACK_HASHES_COLLECTION,
+                        str(int(track_id)))
+                    pairs = [(int(h), int(off))
+                             for h, off in (doc.get("pairs") or [])] \
+                        if doc else []
+                    self._seam_drop_hashes(int(track_id), pairs)
+                    self._port.store.delete(
+                        "audio-fingerprints__" + _TRACK_HASHES_COLLECTION,
+                        str(int(track_id)))
+                    return self._port.tables["tracks"].delete(
+                        int(track_id))
                 conn = self._connect()
                 conn.execute("DELETE FROM hashes WHERE track_id = ?",
                              (track_id,))
