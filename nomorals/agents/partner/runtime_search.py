@@ -83,6 +83,32 @@ def _chapter_actionable(*, kind: str, slug: str, title: str,
     return actionable(f"{head}\n\n{pages[page - 1]}\n\n{foot}", rows,
                       session=session, session_edit=edit)
 
+
+def _read_epub_bytes(manifest, text: str) -> bytes:
+    """The /read EPUB rendition of a routed text, built by the
+    shipped /books export generator (``books.forge.epub_from_chapters``)
+    from the routed document's own manifest: the completeness line
+    plus the resolved brand line on the title page, the manifest's
+    revision + completeness stamps in the OPF metadata — the same
+    branding a followed story's export carries, because it is the
+    same generator fed the same way.  The routed text is a single
+    segment, so it rides as the book's one chapter, whole."""
+    from ...books.forge import _epub_stamp_meta, epub_from_chapters
+    from ...core.branding import resolve_brand_mark
+    from ...core.edition import completeness_line
+
+    line = completeness_line(manifest)
+    mark = resolve_brand_mark(manifest.presentation.brand_policy)
+    front_note = line if mark is None else f"{line} {mark.text}."
+    title = manifest.title or "Long output"
+    fingerprint = manifest.document_id.split(":", 1)[-1]
+    return epub_from_chapters(
+        slug=f"read-{fingerprint}", title=title,
+        chapters=[(1, title, (text or "").strip(), "")],
+        front_note=front_note,
+        extra_meta=_epub_stamp_meta(manifest))
+
+
 class RuntimeSearchMixin:
     """RuntimeSearchMixin for :class:`PartnerRuntime`."""
 
@@ -625,15 +651,28 @@ class RuntimeSearchMixin:
 
         return ReaderService.for_context(self.context)
 
+    def _ensure_read_renditions(self, router) -> None:
+        """Install the EPUB rendition renderer on the output router
+        (idempotent): the EPUB export generator lives in books, a
+        layer above the router's social layer, so the router takes
+        it injected — and this surface owns /read, so it does the
+        installing, the same way :meth:`_ensure_story_engine`
+        stands the story engine up for the books verbs."""
+        try:
+            if getattr(router, "epub_renderer", None) is None:
+                router.epub_renderer = _read_epub_bytes
+        except Exception as exc:  # noqa: BLE001 - the reply still goes out
+            record_failure("runtime_search._ensure_read_renditions", exc)
+
     def _control_read(self, tail: str, chat_key: str) -> str:
         """``/read`` — the routed long outputs' desk (Doc 16 P4).
 
         Long outputs the router sent to the reader (or offered as
         files) live here: the list reopens them, ``go`` actuates a
         reading token (the reader's own grammar), ``get`` delivers
-        the branded HTML edition or the raw original as a file.
-        Owner-only by absence from PUBLIC_COMMANDS, exactly like
-        /cases.
+        the branded HTML, PDF or EPUB edition or the raw original
+        as a file.  Owner-only by absence from PUBLIC_COMMANDS,
+        exactly like /cases.
         """
         from ...social.chat.output_router import OutputRouter
 
@@ -645,6 +684,7 @@ class RuntimeSearchMixin:
             record_failure("runtime_search._control_read.router", exc)
             return ("reading is unavailable right now — the output "
                     "store failed to open")
+        self._ensure_read_renditions(router)
         reader_key = f"chat:{chat_key}"
         svc = router.reader
         try:
@@ -674,12 +714,16 @@ class RuntimeSearchMixin:
                                   f"{session.token} j<line number>")
                 return svc.render_text(result.view)
             if verb == "get":
-                # /read get <token> <html|txt> — the file actions:
-                # the branded HTML edition, or the raw original,
-                # delivered as a document through the gateway.
+                # /read get <token> <html|pdf|epub|txt> — the file
+                # actions: the branded editions (HTML from the
+                # edition renderer, PDF and EPUB from the export
+                # generators), or the raw original, delivered as a
+                # document through the gateway.
                 if len(parts) < 3 or \
-                        parts[2].lower() not in ("html", "txt"):
-                    return "usage: /read get <token> <html|txt>"
+                        parts[2].lower() not in (
+                            "html", "pdf", "epub", "txt"):
+                    return ("usage: /read get <token> "
+                            "<html|pdf|epub|txt>")
                 session = svc.session_by_token(parts[1])
                 if session is None:
                     return ("that file control has expired — /read "
@@ -687,18 +731,33 @@ class RuntimeSearchMixin:
                 if not session.document_id.startswith("text:"):
                     return ("that file control belongs to a "
                             "different document")
-                found = router.file_for(
-                    session.document_id, parts[2].lower())
+                fmt = parts[2].lower()
+                try:
+                    found = router.file_for(session.document_id, fmt)
+                except Exception as exc:  # noqa: BLE001 - chat surface
+                    record_failure(
+                        "runtime_search._control_read.rendition", exc)
+                    from ...core.errors import redact_secrets
+                    return (f"the {fmt} edition could not be built "
+                            f"— {redact_secrets(str(exc))}")
                 if found is None:
                     return ("that output is no longer in the store "
                             "— nothing to send")
                 path, name = found
                 chat = self._ref_from_key(chat_key)
-                caption = (
-                    "🌐 the branded HTML edition — complete, with "
-                    "its completeness stated on the cover"
-                    if parts[2].lower() == "html" else
-                    "⬇ the original output, byte for byte")
+                caption = {
+                    "html": (
+                        "🌐 the branded HTML edition — complete, "
+                        "with its completeness stated on the cover"),
+                    "pdf": (
+                        "📕 the branded PDF edition — the designed "
+                        "watermark on every page, its completeness "
+                        "stated in the front matter"),
+                    "epub": (
+                        "📗 the branded EPUB edition — its "
+                        "completeness stated on the title page"),
+                    "txt": "⬇ the original output, byte for byte",
+                }[fmt]
                 result = self.gateway.send_file(
                     chat.platform, chat, str(path), caption=caption,
                     name=name)

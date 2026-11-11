@@ -29,9 +29,11 @@ The decision, given content + transport + explicit caller intent:
   session; the chat gets one introduction carrying the first page
   and working controls.
 * **long** (> :data:`READER_MAX_CHUNKS` chunks) → ``reader+edition``:
-  the reader session plus two file actions — the branded HTML
-  edition (:mod:`nomorals.core.edition` over the text manifest)
-  and the raw original — delivered on request through ``/read get``.
+  the reader session plus the file actions — the branded HTML
+  edition (:mod:`nomorals.core.edition` over the text manifest),
+  the branded PDF and EPUB editions (the /books export generators
+  over the same manifest) and the raw original — delivered on
+  request through ``/read get``.
 * a transport that cannot hold reader pages (per-segment-billed /
   tiny message cap, e.g. SMS) degrades to ``chunks`` — lossless,
   never a dead action, never a fake button.
@@ -42,7 +44,7 @@ arrive as a file / a reader / chunks?" is answerable after the
 fact.  Routed texts persist content-addressed under
 ``<workspace>/longdoc/content/`` — that store is what lets a reader
 session (which pins only the manifest) resolve its content after a
-restart, and what the HTML edition and the raw download render
+restart, and what the editions and the raw download render
 from.  The router performs no network I/O: it returns a
 :class:`RoutePlan` and the caller (the runtime seam) executes it
 through the gateway.
@@ -55,12 +57,15 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ...core.edition import render_edition_from_map
+from ...core.branding import resolve_brand_mark
+from ...core.edition import completeness_line, render_edition_from_map
 from ...core.longdoc import LongDocumentManifest
+from ...core.pdf import render_pdf
 from .chunking import chunk_message
 from .manifest import manifest_from_text
 from .platform_limits import for_platform
@@ -168,6 +173,21 @@ def _safe_stem(title: str) -> str:
     return stem or "output"
 
 
+def _stamped_body(text: str, line: str) -> str:
+    """The routed text with its completeness line as front matter:
+    the line rides directly under the head block (the first
+    paragraph — for a routed output, its title line), ahead of the
+    body it describes.  The same assembly the derivative stamps
+    use everywhere (the story export's head → line → chapters;
+    documents.to_pdf's head → line → rest): nothing of the
+    original is dropped or reordered, the line is inserted."""
+    body = (text or "").strip()
+    if "\n\n" in body:
+        head, rest = body.split("\n\n", 1)
+        return f"{head}\n\n{line}\n\n{rest}"
+    return f"{line}\n\n{body}"
+
+
 class OutputRouter:
     """Routing decisions + the routed-content store + reader
     sessions for long outputs.  Construct with an explicit root or
@@ -175,10 +195,19 @@ class OutputRouter:
     memory (tests, ephemeral callers)."""
 
     def __init__(self, root: Path | None = None, *,
-                 reader: ReaderService | None = None) -> None:
+                 reader: ReaderService | None = None,
+                 epub_renderer: Callable[[Any, str], bytes] | None = None,
+                 ) -> None:
         self.root = Path(root) if root else None
         self.reader = reader or ReaderService(
             self.root / "reader_sessions.json" if self.root else None)
+        # The EPUB export generator (books.forge.epub_from_chapters)
+        # sits a layer above social, so it arrives injected: the
+        # runtime surface that owns /read installs it on the router
+        # it builds (runtime_search._ensure_read_renditions).  Until
+        # then the EPUB rendition is honestly unavailable (None),
+        # never faked by a lower-layer substitute.
+        self.epub_renderer = epub_renderer
         # Same-process content/journal for root=None routers; with a
         # real root the disk is the truth and these stay small.
         self._memory: dict[str, str] = {}
@@ -264,12 +293,54 @@ class OutputRouter:
         contents = {seg.content_ref: text for seg in manifest.segments}
         return render_edition_from_map(manifest, contents)
 
+    def edition_pdf(self, document_id: str) -> bytes | None:
+        """The branded PDF edition of a routed document, rendered
+        from its stored original through the same generator the
+        /books export uses (``core.pdf.render_pdf``): the
+        completeness line rides as front matter under the head,
+        the line and the manifest's revision stamp ride the /Info
+        metadata, and the designed watermark — resolved from the
+        manifest's brand policy through ``core.branding``, exactly
+        as the story export resolves it — marks every page.  None
+        when the document is not in the store."""
+        text = self.text_for(document_id)
+        if text is None:
+            return None
+        manifest = manifest_from_text(text)
+        line = completeness_line(manifest)
+        title = manifest.title or "Long output"
+        return render_pdf(
+            _stamped_body(text, line), title=title, headings=True,
+            chapter_break=True, toc=True,
+            metadata={"title": title, "author": "",
+                      "subject": line.replace("—", "-"),
+                      "keywords": "nomorals-longdoc "
+                                  + manifest.revision_ref},
+            watermark=resolve_brand_mark(
+                manifest.presentation.brand_policy))
+
+    def edition_epub(self, document_id: str) -> bytes | None:
+        """The branded EPUB edition of a routed document, rendered
+        by the injected EPUB renderer (the /books export generator;
+        see :meth:`__init__` for why it arrives injected).  None
+        when the document is not in the store, or when no renderer
+        is installed — the rendition is unavailable then, never
+        substituted with a different generator's output."""
+        text = self.text_for(document_id)
+        if text is None or self.epub_renderer is None:
+            return None
+        manifest = manifest_from_text(text)
+        return self.epub_renderer(manifest, text)
+
     def file_for(self, document_id: str, fmt: str) -> tuple[Path, str] | None:
         """A sendable file for a routed document: ``(path, name)``.
 
         ``txt`` serves the stored original itself (byte for byte);
         ``html`` renders the edition once and caches it beside the
-        content, content-addressed like everything else here."""
+        content, content-addressed like everything else here;
+        ``pdf`` and ``epub`` do the same for the branded PDF and
+        EPUB editions (rendered through the export generators —
+        see :meth:`edition_pdf` and :meth:`edition_epub`)."""
         text = self.text_for(document_id)
         if text is None or self.root is None:
             return None
@@ -290,6 +361,21 @@ class OutputRouter:
             except OSError:
                 return None
             return path, f"{stem}.html"
+        if fmt in ("pdf", "epub"):
+            path = self.root / "editions" / (
+                f"{self._fingerprint(document_id)}.{fmt}")
+            try:
+                if not path.exists():
+                    data = (self.edition_pdf(document_id)
+                            if fmt == "pdf" else
+                            self.edition_epub(document_id))
+                    if data is None:
+                        return None
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(data)
+            except OSError:
+                return None
+            return path, f"{stem}.{fmt}"
         return None
 
     # ── the decision journal ─────────────────────────────────────
@@ -395,8 +481,8 @@ class OutputRouter:
             decision.kind = ROUTE_READER_EDITION
             decision.reason = (
                 f"long output ({chunks} chunks) — the chat reader "
-                "plus the branded HTML edition and the raw original "
-                "as file actions")
+                "plus the branded HTML, PDF and EPUB editions and "
+                "the raw original as file actions")
 
         plan = RoutePlan(decision=decision)
         if decision.kind == ROUTE_DOCUMENT:
@@ -423,13 +509,18 @@ class OutputRouter:
             if decision.kind == ROUTE_READER_EDITION:
                 plan.intro_text += (
                     f"\n🌐 HTML edition: /read get {session.token} html"
+                    f"\n📕 PDF edition: /read get {session.token} pdf"
+                    f"\n📗 EPUB edition: /read get {session.token} epub"
                     f"\n⬇ original text: /read get {session.token} txt")
             if caps.buttons:
                 rows = view.buttons(READ_PREFIX)
                 if decision.kind == ROUTE_READER_EDITION:
                     rows.append([
-                        ("🌐 Open HTML",
-                         f"read get {session.token} html"),
+                        ("🌐 HTML", f"read get {session.token} html"),
+                        ("📕 PDF", f"read get {session.token} pdf"),
+                    ])
+                    rows.append([
+                        ("📗 EPUB", f"read get {session.token} epub"),
                         ("⬇ Download",
                          f"read get {session.token} txt"),
                     ])

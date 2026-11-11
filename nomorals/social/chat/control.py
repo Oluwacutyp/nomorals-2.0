@@ -880,7 +880,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "craft": (0, None),       # /craft [board] | coverage | intake <goal> | status <field> — the craft cooperative board: capability levels derived from records at read (never assigned, never a stored token), pack states, open items, absences named in words; intake is a read-only plan preview — the composer's plan + the shipped consequential rule's verdicts in the seam's own words, opening nothing and running nothing; status reads one field's claim: live pack, temporary grant (expiry + benchmark citation), or unmade with the reason (owner-only)
     "worldmodel": (0, None),  # /worldmodel [topic] — the world model board: provenance-tagged, versioned facts about codebase, runtime and work state, fed at the plan seam as work settles; stale facts labelled, absent areas never rendered as claims (owner-only)
     "glossary": (0, None),    # /glossary [list [glossary] [scope]] | set <glossary> <scope> <term> = <translation> | del <glossary> [scope] <term> — the translation glossary board: every named glossary in the shipped store with its per-scope counts (owner/domain/global, empty scopes named), the entries themselves, and add/replace/remove through the store's own write path; an edit changes the glossary's fingerprint, so translations cached under the old fingerprint stop matching (owner-only)
-    "read": (0, None),        # /read [list] | open <n> | go <token> <verb> | get <token> <html|txt> — routed long outputs in the reader, editions + raw downloads (owner-only)
+    "read": (0, None),        # /read [list] | open <n> | go <token> <verb> | get <token> <html|pdf|epub|txt> — routed long outputs in the reader, editions + raw downloads (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
@@ -3414,8 +3414,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/glossary [list [glossary] [scope]] | set <glossary> <scope> <term> = <translation> | del <glossary> [scope] <term>",
               "example": "/glossary set legal owner bank = Banco Central",
               "related": "/translate /craft"},
-    "read": {"what": ("the reading desk for long outputs: when a report, research result or other long output runs past one message, the output router sends it here instead of a wall of chunks — the full text is preserved in a reading session with working controls (next/previous page, contents, jump), and the longest outputs also offer a branded HTML edition and the raw original as downloads. Nothing is truncated: what the reader holds is the whole output, and every route records why the output arrived the way it did."),
-              "usage": "/read [list] | open <n> | go <token> <n|p|c|jN|u> | get <token> <html|txt>",
+    "read": {"what": ("the reading desk for long outputs: when a report, research result or other long output runs past one message, the output router sends it here instead of a wall of chunks — the full text is preserved in a reading session with working controls (next/previous page, contents, jump), and the longest outputs also offer branded HTML, PDF and EPUB editions and the raw original as downloads. Nothing is truncated: what the reader holds is the whole output, and every route records why the output arrived the way it did."),
+              "usage": "/read [list] | open <n> | go <token> <n|p|c|jN|u> | get <token> <html|pdf|epub|txt>",
               "example": "/read open 1",
               "related": "/books /notify"},
     "api": {"what": "external API connectors: weather, fx, github, …",
@@ -5085,7 +5085,7 @@ LIST_ONELINERS: dict[str, str] = {
     "craft": "the craft cooperative board: capability levels derived from records, pack states, open items — coverage detail, read-only intake previews, per-field claim status",
     "worldmodel": "the world model board: versioned facts with provenance (observed / inferred / proposed / unverified), fed as work settles — stale facts labelled, empty areas never claimed",
     "glossary": "translation glossaries: every named glossary with per-scope counts, the entries, and add/replace/remove through the store",
-    "read": "long outputs in the reader: page through them, contents, the HTML edition and the raw download — nothing truncated",
+    "read": "long outputs in the reader: page through them, contents, the HTML, PDF and EPUB editions and the raw download — nothing truncated",
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",
