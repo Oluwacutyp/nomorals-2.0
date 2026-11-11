@@ -44,16 +44,22 @@ the TikTok comment sheet and the YouTube video page —
 each a typed model in ``schema``, designs as data in
 ``designs`` (``SOCIAL_DESIGNS``), and its own layout
 engine in ``render_social`` under the same media
-hand-off contract.  Phase 5 (this build): bulk test
-data — a seeded generator of obviously synthetic
-personal / identity test data (``demo_data``) that
-populates whole screens from one seed + count
-(``bulk_list_screen`` / ``bulk_call_history`` /
-``bulk_chat_screen`` / ``bulk_status_views``) and
-exports records as text / JSON / CSV / XML; the
-``/mock demo bulk-*`` and ``/mock data`` forms ride it.
-Animation and NL authoring are later phases of the
-same organ.
+hand-off contract.  Phase 4 (this build): the
+animation organ (``animation``) — a data timeline per
+screen class (chat reveal + typing + true-length voice
+playback, list row arrival, status/story segment fill,
+call timer, page scroll) rendered through the same
+engines and piped to ffmpeg by Motion Studio's frame
+pipe; the video ends on exactly the previewed screen.
+Phase 5 (this build): bulk test data — a seeded
+generator of obviously synthetic personal / identity
+test data (``demo_data``) that populates whole screens
+from one seed + count (``bulk_list_screen`` /
+``bulk_call_history`` / ``bulk_chat_screen`` /
+``bulk_status_views``) and exports records as text /
+JSON / CSV / XML; the ``/mock demo bulk-*`` and
+``/mock data`` forms ride it.  NL authoring is a later
+phase of the same organ.
 
 The organ never claims a render is a real captured
 screenshot: it is a mock screen, generated from data the
@@ -62,6 +68,22 @@ caller supplied.
 
 from __future__ import annotations
 
+from .animation import (
+    Clip,
+    Recording,
+    RecordingError,
+    TimelineSpec,
+    build_call_recording,
+    build_chat_recording,
+    build_comment_recording,
+    build_hold_recording,
+    build_list_recording,
+    build_profile_recording,
+    build_status_recording,
+    build_story_recording,
+    build_video_recording,
+    record,
+)
 from .demo_data import (
     COUNTRIES,
     CREATIVE_FAMILIES,
@@ -147,6 +169,7 @@ __all__ = [
     "COUNTRIES",
     "COUNT_STYLES",
     "CREATIVE_FAMILIES",
+    "Clip",
     "DEVICE_STYLES",
     "DemoDataError",
     "LIST_DESIGNS",
@@ -163,6 +186,8 @@ __all__ = [
     "PROFILE_ITEM_KINDS",
     "REFERENCE_DATE",
     "RING_STATES",
+    "Recording",
+    "RecordingError",
     "SOCIAL_DESIGNS",
     "STATUS_BG_COLORS",
     "STATUS_DESIGNS",
@@ -171,7 +196,18 @@ __all__ = [
     "STORY_KINDS",
     "STORY_STICKER_KINDS",
     "TICK_STATES",
+    "TimelineSpec",
     "VIDEO_LAYOUTS",
+    "build_call_recording",
+    "build_chat_recording",
+    "build_comment_recording",
+    "build_hold_recording",
+    "build_list_recording",
+    "build_profile_recording",
+    "build_status_recording",
+    "build_story_recording",
+    "build_video_recording",
+    "record",
     "CallHistoryEntry",
     "CallHistoryScreen",
     "CallScreen",

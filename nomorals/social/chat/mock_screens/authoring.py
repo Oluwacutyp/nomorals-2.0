@@ -122,7 +122,9 @@ USAGE = (
     "[photo <path>] a file on disk, [photo last] your "
     "newest generated image; [voice] / [voice <path>] a "
     "voice note with its real waveform and duration; "
-    "words after [photo] are its caption")
+    "words after [photo] are its caption — record one as "
+    "video: /mock record demo whatsapp · /mock record "
+    "whatsapp me: hi ;; Adaeze: hello")
 
 _PLATFORMS = {
     "whatsapp": ("whatsapp", False),
@@ -1455,6 +1457,17 @@ def parse_mock_tail(tail: str) -> tuple:
     if head == "data":
         return _parse_data_tail(
             words[1] if len(words) > 1 else ""), "data"
+    if head == "record":
+        # /mock record <demo … | built form …> — the
+        # remainder parses exactly as a still would, and
+        # the mode comes back with the record- prefix the
+        # runtime dispatches on (Phase 4).
+        rest = words[1].strip() if len(words) > 1 else ""
+        if not rest or rest.split(None, 1)[0].lower() \
+                == "record":
+            raise MockScreensError(USAGE)
+        screen, mode = parse_mock_tail(rest)
+        return screen, "record-" + mode
     if head == "demo":
         rest = words[1].split() if len(words) > 1 else []
         name = rest[0] if rest else "whatsapp"

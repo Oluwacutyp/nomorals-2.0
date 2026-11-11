@@ -1124,15 +1124,32 @@ def _draw_voice(draw, cv: _Canvas, msg: Message, x: float,
                 y: float, w: float, h: float, fg) -> None:
     pal = cv.pal
     own = msg.sender == "me"
+    # the animation phase's playhead: the fraction of
+    # this voice note already played (0 = unplayed, 1 =
+    # finished).  Played bars wear the accent; while the
+    # note is mid-play the disc shows pause, not play.
+    played = float(
+        getattr(cv, "voice_progress", {}).get(msg.id, 0.0)
+        or 0.0)
+    played = max(0.0, min(1.0, played))
+    playing = 0.0 < played < 1.0
     cx = x + 10
     cy = y + h / 2
     draw.ellipse([cv.s(cx), cv.s(cy - 15), cv.s(cx + 30),
                   cv.s(cy + 15)],
                  fill=pal["meta"] if own else pal["accent"])
-    draw.polygon([(cv.s(cx + 12), cv.s(cy - 7)),
-                  (cv.s(cx + 12), cv.s(cy + 7)),
-                  (cv.s(cx + 22), cv.s(cy))],
-                 fill=(255, 255, 255))
+    if playing:
+        draw.rectangle(
+            [cv.s(cx + 11), cv.s(cy - 7), cv.s(cx + 15),
+             cv.s(cy + 7)], fill=(255, 255, 255))
+        draw.rectangle(
+            [cv.s(cx + 18), cv.s(cy - 7), cv.s(cx + 22),
+             cv.s(cy + 7)], fill=(255, 255, 255))
+    else:
+        draw.polygon([(cv.s(cx + 12), cv.s(cy - 7)),
+                      (cv.s(cx + 12), cv.s(cy + 7)),
+                      (cv.s(cx + 22), cv.s(cy))],
+                     fill=(255, 255, 255))
     bx = cx + 40
     probe = cv.voice_probe(msg)
     if probe is not None:
@@ -1149,10 +1166,12 @@ def _draw_voice(draw, cv: _Canvas, msg: Message, x: float,
                    for i in range(VOICE_BARS)]
         label = msg.duration or "0:00"
     for i, bh in enumerate(heights):
+        fill = pal["accent"] if i < played * len(heights) \
+            else fg
         draw.rounded_rectangle(
             [cv.s(bx + i * 4.2), cv.s(cy - bh / 2 - 4),
              cv.s(bx + i * 4.2 + 2.2), cv.s(cy + bh / 2 - 4)],
-            radius=cv.s(1.1), fill=fg)
+            radius=cv.s(1.1), fill=fill)
     draw.text((cv.s(bx), cv.s(cy + 6)), label,
               font=cv.font(10.5), fill=pal["meta"])
     if own and msg.ticks and cv.dflag("ticks_in_bubble"):
@@ -1213,7 +1232,8 @@ def _attach_media_record(cv: _Canvas, entry: dict,
 
 
 def render_screen(screen: Screen, *, avatars: dict | None = None,
-                  media: dict | None = None):
+                  media: dict | None = None,
+                  voice_progress: dict | None = None):
     """Render one chat screen.  Returns ``(png_bytes,
     drawn)`` — the drawn record carries the output size,
     the chrome regions and one entry per element (id,
@@ -1226,7 +1246,12 @@ def render_screen(screen: Screen, *, avatars: dict | None = None,
     ``media`` maps a message id to a real-media hand-off
     (bytes / path / PIL image / MediaRef) for that
     message's photo or voice note; it wins over the
-    message's own ``media`` reference."""
+    message's own ``media`` reference.  ``voice_progress``
+    maps a voice message id to the fraction already
+    played (0..1) — the animation phase's playhead: the
+    played bars wear the accent and the disc shows pause
+    while the note is mid-play.  A still render passes
+    none and every voice note draws unplayed."""
     if screen.platform not in CHAT_DESIGNS:
         raise MockScreensError(
             "no chat design called " + repr(screen.platform)
@@ -1234,6 +1259,7 @@ def render_screen(screen: Screen, *, avatars: dict | None = None,
     cv = _Canvas(screen)
     cv.avatars = dict(avatars or {})
     cv.media_handoff = dict(media or {})
+    cv.voice_progress = dict(voice_progress or {})
 
     # ── measure ──────────────────────────────────────────
     items: list = []  # (msg, kind, w, h, parts, gap_before)

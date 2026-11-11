@@ -13,9 +13,29 @@ as it does for maker cards.
 from __future__ import annotations
 
 import hashlib
+import io
+import json
+import uuid
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from PIL import Image
+
+from .animation import (
+    RecordingError,
+    TimelineSpec,
+    build_call_recording,
+    build_chat_recording,
+    build_comment_recording,
+    build_hold_recording,
+    build_list_recording,
+    build_profile_recording,
+    build_status_recording,
+    build_story_recording,
+    build_video_recording,
+    record,
+)
 from .render import MockScreensError, render_screen
 from .render_screens import (
     render_call_history,
@@ -186,6 +206,218 @@ class MockScreenService:
             render_video_screen, screen,
             label="youtube video",
             title=screen.title, **kw)
+
+    # ── Phase 4 recordings ───────────────────────────────
+
+    def _record_with(self, recording, *, screen=None,
+                     label: str, title: str,
+                     audience: str = "", caption: str = "",
+                     send=None) -> dict[str, Any]:
+        """Encode one built recording and deliver the mp4
+        through the same send seam stills use.  The file
+        is cache-keyed on the screen + timeline spec, so
+        re-recording the same screen reuses the encode —
+        the key carries the whole screen, not just its
+        shape: two chats with the same message count
+        must never share a file."""
+        out: dict[str, Any] = {
+            "sent": False, "drawn": recording.drawn,
+            "duration_s": recording.duration_s,
+            "timeline": recording.timeline,
+            "kind": recording.kind}
+        if self.media_dir is None:
+            return {**out, "reason":
+                    "no media directory on this runtime"}
+        try:
+            key = hashlib.sha256(json.dumps(
+                {"kind": recording.kind,
+                 "spec": asdict(recording.spec),
+                 "timeline": recording.timeline,
+                 "screen": asdict(screen)
+                 if screen is not None else None},
+                sort_keys=True, default=str).encode(
+                    "utf-8")).hexdigest()[:16]
+        except Exception:  # noqa: BLE001 - unique key
+            key = "recording-" + uuid.uuid4().hex[:16]
+        self.media_dir.mkdir(parents=True, exist_ok=True)
+        path = self.media_dir / (key + ".mp4")
+        if path.exists() and path.stat().st_size > 0:
+            # the same screen + timeline was already
+            # encoded: reuse it, exactly like the stills
+            # reuse their content-hash file
+            result = {
+                "path": str(path),
+                "duration_s": recording.duration_s,
+                "expected_s": recording.duration_s,
+                "frames": int(round(
+                    recording.duration_s
+                    * recording.spec.fps)),
+                "fps": recording.spec.fps,
+                "size": recording.size,
+                "kind": recording.kind}
+        else:
+            try:
+                result = record(recording, path)
+            except RecordingError as exc:
+                return {**out, "reason": str(exc)}
+        out.update(result)
+        if send is None:
+            return out
+        from ..base import MediaRef
+
+        ref = MediaRef(
+            path=str(path), mime="video/mp4", kind="video",
+            name=path.name, audience=audience)
+        try:
+            sent = send(ref, caption
+                        or "🎬 " + label + " mock screen "
+                        "recording — " + title)
+        except Exception as exc:  # noqa: BLE001 - send failed
+            return {**out,
+                    "reason": "the send failed: " + str(exc)}
+        if sent is not None and getattr(sent, "ok", True):
+            out["sent"] = True
+            return out
+        out["reason"] = str(
+            getattr(sent, "error", "")
+            or "this surface couldn't send it")
+        return out
+
+    def _record(self, builder, screen, *, label: str,
+                title: str, spec=None, avatars=None,
+                media=None, audience: str = "",
+                caption: str = "", send=None) -> dict[str, Any]:
+        """Build a recording through ``builder`` and serve
+        it; a build failure is the honest reason."""
+        try:
+            recording = builder(
+                screen, spec or TimelineSpec(),
+                avatars=avatars, media=media)
+        except RecordingError as exc:
+            return {"sent": False, "reason": str(exc)}
+        return self._record_with(
+            recording, screen=screen, label=label,
+            title=title, audience=audience, caption=caption,
+            send=send)
+
+    def record_chat(self, screen: Screen, **kw
+                    ) -> dict[str, Any]:
+        """Record a chat screen as a video: messages
+        reveal, typing dots, voice notes at true length."""
+        return self._record(
+            build_chat_recording, screen,
+            label=screen.platform, title=screen.title, **kw)
+
+    def record_list(self, screen: ListScreen, **kw
+                    ) -> dict[str, Any]:
+        """Record a list screen: rows arrive one by one."""
+        return self._record(
+            build_list_recording, screen,
+            label=screen.platform, title=screen.title, **kw)
+
+    def record_status(self, screen: StatusScreen, **kw
+                      ) -> dict[str, Any]:
+        """Record a WhatsApp Status: the segment fills to
+        the user-set point."""
+        return self._record(
+            build_status_recording, screen,
+            label="whatsapp status",
+            title=screen.owner.name, **kw)
+
+    def record_story(self, screen: StoryScreen, **kw
+                     ) -> dict[str, Any]:
+        """Record an Instagram Story: segments advance,
+        each bar filling for its set duration."""
+        return self._record(
+            build_story_recording, screen,
+            label="instagram story",
+            title=screen.owner.name, **kw)
+
+    def record_call(self, screen: CallScreen, **kw
+                    ) -> dict[str, Any]:
+        """Record a call screen: an ongoing timer
+        advances, an incoming call holds ringing."""
+        return self._record(
+            build_call_recording, screen,
+            label=screen.platform + " call",
+            title=screen.display_name(), **kw)
+
+    def record_profile(self, screen: ProfileScreen, **kw
+                       ) -> dict[str, Any]:
+        """Record a profile page scrolling through it."""
+        return self._record(
+            build_profile_recording, screen,
+            label=screen.platform + " profile",
+            title=screen.identity.name, **kw)
+
+    def record_comment(self, screen: CommentScreen, **kw
+                       ) -> dict[str, Any]:
+        """Record a comment sheet scrolling through it."""
+        return self._record(
+            build_comment_recording, screen,
+            label="tiktok comments",
+            title=str(screen.total) + " comments", **kw)
+
+    def record_video(self, screen: VideoScreen, **kw
+                     ) -> dict[str, Any]:
+        """Record a YouTube video page scrolling."""
+        return self._record(
+            build_video_recording, screen,
+            label="youtube video",
+            title=screen.title, **kw)
+
+    def _record_hold(self, frame, *, label: str, title: str,
+                     kind: str, drawn: dict, spec=None,
+                     audience: str = "", caption: str = "",
+                     send=None) -> dict[str, Any]:
+        recording = build_hold_recording(
+            frame, spec or TimelineSpec(), kind=kind,
+            drawn=drawn)
+        return self._record_with(
+            recording, label=label, title=title,
+            audience=audience, caption=caption, send=send)
+
+    def record_post(self, screen: PostScreen, **kw
+                    ) -> dict[str, Any]:
+        """Record a social post: a hold on the card (a
+        post carries no animation choreography of its
+        own)."""
+        try:
+            data, drawn = render_post_screen(screen)
+        except MockScreensError as exc:
+            return {"sent": False, "reason": str(exc)}
+        frame = Image.open(io.BytesIO(data)).convert("RGB")
+        return self._record_hold(
+            frame, label=screen.platform + " post",
+            title=screen.author.name, kind="post",
+            drawn=drawn, **kw)
+
+    def record_status_views(self, screen: StatusViewsScreen,
+                            **kw) -> dict[str, Any]:
+        """Record the Status Views sheet: a hold on the
+        sheet."""
+        try:
+            data, drawn = render_status_views(screen)
+        except MockScreensError as exc:
+            return {"sent": False, "reason": str(exc)}
+        frame = Image.open(io.BytesIO(data)).convert("RGB")
+        return self._record_hold(
+            frame, label="whatsapp status views",
+            title="My Status", kind="views", drawn=drawn, **kw)
+
+    def record_call_history(self, screen: CallHistoryScreen,
+                            **kw) -> dict[str, Any]:
+        """Record the iPhone Call History: a hold on the
+        Recents screen."""
+        try:
+            data, drawn = render_call_history(screen)
+        except MockScreensError as exc:
+            return {"sent": False, "reason": str(exc)}
+        frame = Image.open(io.BytesIO(data)).convert("RGB")
+        return self._record_hold(
+            frame, label="iphone call history",
+            title=screen.title_text, kind="history",
+            drawn=drawn, **kw)
 
     # ── the shared delivery tail ─────────────────────────
 

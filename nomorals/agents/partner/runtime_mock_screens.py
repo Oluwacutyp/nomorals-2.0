@@ -148,46 +148,69 @@ class RuntimeMockScreensMixin:
             # Phase 5: /mock data answers in chat text —
             # the export IS the reply (no picture to send).
             return str(screen)
-        if mode not in ("demo", "built"):
+        record = mode.startswith("record-")
+        base = mode[len("record-"):] if record else mode
+        if base not in ("demo", "built"):
             # Phase 2b/3 screen classes (lists / status /
             # calls, then posts / profiles / stories /
             # comments / video pages): their own service
             # doors, the same delivery contract — a
-            # picture WAS the reply
-            door = {
-                "demo-list": "render_list",
-                "demo-status": "render_status",
-                "demo-views": "render_status_views",
-                "demo-call": "render_call",
-                "demo-history": "render_call_history",
-                "demo-post": "render_post",
-                "demo-profile": "render_profile",
-                "demo-story": "render_story",
-                "demo-comment": "render_comment",
-                "demo-video": "render_video",
-            }[mode]
-            if mode == "demo-status":
+            # picture WAS the reply, a video WAS the reply
+            if record:
+                door = {
+                    "demo-list": "record_list",
+                    "demo-status": "record_status",
+                    "demo-views": "record_status_views",
+                    "demo-call": "record_call",
+                    "demo-history": "record_call_history",
+                    "demo-post": "record_post",
+                    "demo-profile": "record_profile",
+                    "demo-story": "record_story",
+                    "demo-comment": "record_comment",
+                    "demo-video": "record_video",
+                }.get(base)
+                if door is None:
+                    return ("that screen can't be recorded "
+                            "as a video yet.")
+            else:
+                door = {
+                    "demo-list": "render_list",
+                    "demo-status": "render_status",
+                    "demo-views": "render_status_views",
+                    "demo-call": "render_call",
+                    "demo-history": "render_call_history",
+                    "demo-post": "render_post",
+                    "demo-profile": "render_profile",
+                    "demo-story": "render_story",
+                    "demo-comment": "render_comment",
+                    "demo-video": "render_video",
+                }[base]
+            if base == "demo-status":
                 title = screen.owner.name
-            elif mode == "demo-views":
+            elif base == "demo-views":
                 title = "My Status"
-            elif mode == "demo-call":
+            elif base == "demo-call":
                 title = screen.display_name()
-            elif mode == "demo-history":
+            elif base == "demo-history":
                 title = screen.title_text
-            elif mode == "demo-post":
+            elif base == "demo-post":
                 title = screen.author.name
-            elif mode == "demo-profile":
+            elif base == "demo-profile":
                 title = screen.identity.name
-            elif mode == "demo-story":
+            elif base == "demo-story":
                 title = screen.owner.name
-            elif mode == "demo-comment":
+            elif base == "demo-comment":
                 title = str(screen.total) + " comments"
-            elif mode == "demo-video":
+            elif base == "demo-video":
                 title = screen.title
             else:
                 title = screen.title
-            caption = ("🖼 " + screen.platform
-                       + " mock screen — " + title)
+            if record:
+                caption = ("🎬 " + screen.platform
+                           + " mock screen recording — " + title)
+            else:
+                caption = ("🖼 " + screen.platform
+                           + " mock screen — " + title)
             try:
                 out = getattr(service, door)(
                     screen, audience=audience, caption=caption,
@@ -196,6 +219,30 @@ class RuntimeMockScreensMixin:
             except Exception as exc:  # noqa: BLE001 - honest
                 record_failure("mock_screens.render", exc)
                 return ("the mock screen render failed: "
+                        + str(exc)[:160])
+            if out.get("sent"):
+                return ""
+            return str(out.get("reason") or "no mock screen "
+                                            "right now")
+        if record:
+            # a chat recording: resolve the media tokens
+            # the same way the still path does, then the
+            # recording door (the picture's door is below)
+            media_error = self._mock_resolve_media(
+                screen, message)
+            if media_error:
+                return media_error
+            caption = ("🎬 " + screen.platform
+                       + " mock screen recording — "
+                       + screen.title)
+            try:
+                out = service.record_chat(
+                    screen, audience=audience, caption=caption,
+                    send=lambda ref, cap: self._expression_send(
+                        message, ref, caption=cap))
+            except Exception as exc:  # noqa: BLE001 - honest
+                record_failure("mock_screens.render", exc)
+                return ("the mock screen recording failed: "
                         + str(exc)[:160])
             if out.get("sent"):
                 return ""
