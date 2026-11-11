@@ -569,6 +569,86 @@ _register(_S(
         "native _sync_db() path serves the SQLite default."),
 ))
 
+_register(_S(
+    name="health-coach", verdict="ported", kind="sqlite-file",
+    modules=("health/coach.py",),
+    tables=("readiness_log",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 2): "
+        "HealthCoach's readiness history routes through the seam "
+        "(health-coach__readiness_log) whenever a store is "
+        "resolved, behind its unchanged never-raises API; the "
+        "history file path is fixed (~/.nomorals/health/coach.db), "
+        "so the lazily built port threads the same path the "
+        "native per-call history connection opens. The native "
+        "sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="health-form", verdict="ported", kind="sqlite-file",
+    modules=("health/form.py",),
+    tables=("form_analyses",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 2): "
+        "FormStore's single table routes through the seam "
+        "(health-form__form_analyses) whenever a store is "
+        "resolved, behind its unchanged never-raises API; "
+        "analysis payloads ride as their JSON text exactly as "
+        "the file stores them, and the module-level form_trend "
+        "reader reads the same rows on both rungs. The native "
+        "sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="life-archive", verdict="ported", kind="sqlite-file",
+    modules=("life/archive.py",),
+    tables=("life_events",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 2): "
+        "LifeArchive's single table routes through the seam "
+        "(life-archive__life_events) behind its unchanged "
+        "owner-gated API. Pickup is by INJECTED port, not the "
+        "ambient: life/archive.py is layer L0 (stdlib only), "
+        "so it cannot import storage — the composition layer "
+        "builds the port with sidecar_port() (the DDL lives "
+        "in the module) and passes it as port=. A ':memory:' "
+        "archive's port imports nothing — there is no file. "
+        "The native path's ts/kind indexes stay native-path "
+        "concerns. The native sqlite3 path serves the SQLite "
+        "default."),
+))
+
+_register(_S(
+    name="llm-cost-display", verdict="ported", kind="sqlite-file",
+    modules=("llm/cost_display.py",),
+    tables=("cost_display",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 2): "
+        "CostDisplay's single table routes through the seam "
+        "(llm-cost-display__cost_display) whenever a store is "
+        "resolved, behind its unchanged never-raises API; rows "
+        "are pre-aggregated per-user display toggles — derived "
+        "data, owner-adjacent. The native sqlite3 path serves "
+        "the SQLite default."),
+))
+
+_register(_S(
+    name="marketing-aeo", verdict="ported", kind="sqlite-file",
+    modules=("marketing/aeo.py",),
+    tables=("aeo_reports",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 2): "
+        "AEOTracker's single table routes through the seam "
+        "(marketing-aeo__aeo_reports) whenever a store is "
+        "resolved, behind its unchanged never-raises API; "
+        "report rows are documents and the gaps payload rides "
+        "as its JSON text. The native path's tolerate-missing-"
+        "column ALTER for pre-gaps_json files stays a native-"
+        "path concern — the seam mapping is derived from the "
+        "module's final-shape DDL. The native sqlite3 path "
+        "serves the SQLite default."),
+))
+
 # ── federated by reference (files/blobs by nature; metadata accounted) ────
 
 _register(_S(
@@ -875,10 +955,6 @@ _residue("health-challenges", "health/challenges.py",
          "health challenge groups, streaks and proofs — the "
          "largest health sidecar, eight tables with cross-table "
          "streak flows; its port wants the domain pass to itself.")
-_residue("health-coach", "health/coach.py", ("readiness_log",),
-         "coaching readiness log.")
-_residue("health-form", "health/form.py", ("form_analyses",),
-         "exercise form analyses in form.db.")
 _residue("health-nutrition", "health/nutrition.py", ("meals", "water"),
          "meal and water logs in nutrition.db.")
 _residue("health-training", "health/training.py",
@@ -917,12 +993,6 @@ _residue("legal-portfolio", "legal/portfolio.py",
 _residue("legal-regulatory", "legal/regulatory.py",
          ("reg_items", "reg_seen", "reg_watches"),
          "regulatory tracking items and seen-state in regulatory.db.")
-_residue("life-archive", "life/archive.py", ("life_events",),
-         "the life archive's event records.")
-_residue("llm-cost-display", "llm/cost_display.py", ("cost_display",),
-         "LLM cost display aggregates in cost_display.db.")
-_residue("marketing-aeo", "marketing/aeo.py", ("aeo_reports",),
-         "answer-engine-optimization reports in aeo.db.")
 _residue("marketing-briefs", "marketing/briefs.py",
          ("briefs", "drafts", "score_feedback"),
          "marketing briefs, their drafts and score feedback.")

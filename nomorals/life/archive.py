@@ -14,6 +14,9 @@ here with their provenance intact: *where* each entry came from and
 Storage: SQLite, ``:memory:`` by default. Pass a file path for a
 durable archive. ``search`` is substring matching over ``text`` +
 ``kind`` (case-insensitive); ``timeline`` returns newest-first.
+The archive also runs over the document-store seam (Mongo program
+P5 — ``life-archive__life_events``) when the composition layer
+injects a port; this module is layer L0 and never imports storage.
 """
 
 from __future__ import annotations
@@ -31,19 +34,49 @@ def _require_owner(owner: bool) -> None:
         raise PermissionError("life archive is owner-only")
 
 
-class LifeArchive:
-    """SQLite life-event archive. Private; no publish method exists."""
+#: The archive's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift. (The ts /
+#: kind indexes stay native-path concerns; the seam reads by find.)
+_DDL = """CREATE TABLE IF NOT EXISTS life_events (
+       id TEXT PRIMARY KEY, source TEXT NOT NULL,
+       kind TEXT NOT NULL, text TEXT NOT NULL,
+       ts REAL NOT NULL, provenance TEXT NOT NULL,
+       private INTEGER NOT NULL, created_ts REAL NOT NULL)"""
 
-    def __init__(self, db_path: str = ":memory:") -> None:
+
+class LifeArchive:
+    """Life-event archive. Private; no publish method exists.
+
+    Native path: a SQLite file (or ``:memory:``). When the
+    composition layer injects a ``port`` (Mongo program P5 — a
+    SidecarPort built by ``storage.sidecars.sidecar_port``, from
+    this module's own ``_DDL``), the same owner-gated API runs over
+    the seam in the ``life-archive__life_events`` collection
+    instead, and a file-backed archive's existing rows are imported
+    once at construction. This module is layer L0 (stdlib only):
+    the port arrives injected and is used duck-typed; the module
+    never imports storage.
+    """
+
+    def __init__(self, db_path: str = ":memory:", *,
+                 port: Any = None) -> None:
         self.db_path = db_path
+        self._db: sqlite3.Connection | None = None
+        self._port: Any = None
+        if port is not None:
+            table = port.tables["life_events"]
+
+            def write_events(rows: list[dict[str, Any]]) -> int:
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+
+            port.ensure_imported({"life_events": write_events})
+            self._port = port
+            return
         self._db = sqlite3.connect(db_path)
         self._db.row_factory = sqlite3.Row
-        self._db.execute(
-            """CREATE TABLE IF NOT EXISTS life_events (
-                   id TEXT PRIMARY KEY, source TEXT NOT NULL,
-                   kind TEXT NOT NULL, text TEXT NOT NULL,
-                   ts REAL NOT NULL, provenance TEXT NOT NULL,
-                   private INTEGER NOT NULL, created_ts REAL NOT NULL)""")
+        self._db.execute(_DDL)
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_life_ts ON life_events(ts)")
         self._db.execute(
@@ -69,6 +102,14 @@ class LifeArchive:
             raise ValueError("text is required")
         event_id = uuid.uuid4().hex[:12]
         now = time.time()
+        if self._port is not None:
+            self._port.tables["life_events"].put({
+                "id": event_id, "source": source, "kind": kind,
+                "text": text,
+                "ts": float(ts if ts is not None else now),
+                "provenance": provenance,
+                "private": 1 if private else 0, "created_ts": now})
+            return event_id
         self._db.execute(
             "INSERT INTO life_events VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (event_id, source, kind, text,
@@ -81,6 +122,9 @@ class LifeArchive:
     def get(self, event_id: str, *, owner: bool = False) -> dict[str, Any] | None:
         """Fetch one event by id, or ``None`` when absent."""
         _require_owner(owner)
+        if self._port is not None:
+            row = self._port.tables["life_events"].get(event_id)
+            return self._row_to_dict(row) if row is not None else None
         row = self._db.execute(
             "SELECT * FROM life_events WHERE id = ?", (event_id,)).fetchone()
         return self._row_to_dict(row) if row is not None else None
@@ -91,6 +135,14 @@ class LifeArchive:
         _require_owner(owner)
         if limit < 0:
             raise ValueError("limit must be >= 0")
+        if self._port is not None:
+            rows = self._port.tables["life_events"].all()
+            if kind is not None:
+                rows = [r for r in rows if r.get("kind") == kind]
+            # ts DESC, created_ts DESC — the native ORDER BY.
+            rows.sort(key=lambda r: (r["ts"], r["created_ts"]),
+                      reverse=True)
+            return [self._row_to_dict(r) for r in rows[:limit]]
         if kind is None:
             rows = self._db.execute(
                 "SELECT * FROM life_events ORDER BY ts DESC, created_ts DESC "
@@ -104,6 +156,14 @@ class LifeArchive:
     def search(self, query: str, *, owner: bool = False) -> list[dict[str, Any]]:
         """Substring search (case-insensitive) over ``text`` + ``kind``."""
         _require_owner(owner)
+        if self._port is not None:
+            needle = (query or "").lower()
+            rows = [r for r in self._port.tables["life_events"].all()
+                    if needle in str(r.get("text") or "").lower()
+                    or needle in str(r.get("kind") or "").lower()]
+            rows.sort(key=lambda r: (r["ts"], r["created_ts"]),
+                      reverse=True)
+            return [self._row_to_dict(r) for r in rows]
         needle = f"%{(query or '').lower()}%"
         rows = self._db.execute(
             "SELECT * FROM life_events "
@@ -113,7 +173,7 @@ class LifeArchive:
         return [self._row_to_dict(r) for r in rows]
 
     @staticmethod
-    def _row_to_dict(row: sqlite3.Row) -> dict[str, Any]:
+    def _row_to_dict(row: Any) -> dict[str, Any]:
         return {
             "id": row["id"], "source": row["source"], "kind": row["kind"],
             "text": row["text"], "ts": row["ts"],
@@ -122,4 +182,5 @@ class LifeArchive:
         }
 
     def close(self) -> None:
-        self._db.close()
+        if self._db is not None:
+            self._db.close()

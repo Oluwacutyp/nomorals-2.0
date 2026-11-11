@@ -419,23 +419,39 @@ NO_DATA_MSG = (
     "Then ask me again and I'll work from your actual data.")
 
 
+#: The readiness log's own DDL — the native path executes it and the
+#: seam mapping is derived from it, so the two can never drift.
+_READINESS_DDL = """CREATE TABLE IF NOT EXISTS readiness_log (
+       ts REAL PRIMARY KEY, level TEXT, score REAL,
+       numbers_json TEXT)"""
+
+
 # ── the coach ──────────────────────────────────────────────────────────────
 
 class HealthCoach:
     """Ask-your-data coaching over synced biometrics.
 
     Owner-scoped: ``community=True`` raises, mirroring HealthTimeline.
+
+    The readiness history log routes through the document-store seam
+    (Mongo program P5 — ``health-coach__readiness_log``) whenever a
+    store is resolved (an explicit ``store`` or the boot ambient),
+    behind this unchanged API; the native SQLite file serves the
+    SQLite default.
     """
 
     def __init__(self, source: HealthDataSource | None = None,
                  timeline: Any | None = None,
-                 community: bool = False) -> None:
+                 community: bool = False,
+                 store: Any = None) -> None:
         if community:
             raise PermissionError(
                 "health coaching is owner-scoped — not available in "
                 "community context")
         self.source = source or HealthDataSource()
         self._timeline = timeline  # HealthTimeline or None (lazy)
+        self._store = store  # document store for the readiness log
+        self._port: Any = None  # built lazily, like the history conn
 
     # -- timeline logging ------------------------------------------------
 
@@ -759,17 +775,54 @@ class HealthCoach:
 
     # -- readiness history -------------------------------------------------
 
+    def _history_path(self) -> str:
+        import os
+        return os.path.expanduser("~/.nomorals/health/coach.db")
+
+    def _readiness_port(self):  # SidecarPort or None; never raises
+        """The seam path for the readiness log, when a store resolves.
+
+        Built lazily — the native history connection is per-call, so
+        the port is too. The first history read/write with a store
+        resolved constructs it against the same file path the native
+        connection opens and imports that file's rows once, through
+        the same mapping. ``None`` → the native per-call connection.
+        """
+        if self._port is not None:
+            return self._port
+        try:
+            import os
+
+            from ..storage.sidecars import sidecar_port
+            path = self._history_path()
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            port = sidecar_port("health-coach", _READINESS_DDL,
+                                ("readiness_log",), path,
+                                store=self._store)
+            if port is None:
+                return None
+            table = port.tables["readiness_log"]
+
+            def write_readiness(rows: list[dict[str, Any]]) -> int:
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+
+            port.ensure_imported({"readiness_log": write_readiness})
+            self._port = port
+            return port
+        except Exception:  # noqa: BLE001 — history never breaks coaching
+            _log.debug("readiness seam unavailable", exc_info=True)
+            return None
+
     def _history_db(self):  # sqlite3 connection or None; never raises
         import os
         import sqlite3
         try:
-            p = os.path.expanduser("~/.nomorals/health/coach.db")
+            p = self._history_path()
             os.makedirs(os.path.dirname(p), exist_ok=True)
             db = sqlite3.connect(p)
-            db.execute(
-                """CREATE TABLE IF NOT EXISTS readiness_log (
-                       ts REAL PRIMARY KEY, level TEXT, score REAL,
-                       numbers_json TEXT)""")
+            db.execute(_READINESS_DDL)
             db.commit()
             return db
         except Exception:  # noqa: BLE001
@@ -779,6 +832,13 @@ class HealthCoach:
     def _record_readiness(self, r: "Readiness") -> None:
         try:
             import json as _json
+            port = self._readiness_port()
+            if port is not None:
+                port.tables["readiness_log"].put({
+                    "ts": time.time(), "level": r.level,
+                    "score": r.score,
+                    "numbers_json": _json.dumps(r.numbers)})
+                return
             db = self._history_db()
             if db is None:
                 return
@@ -794,6 +854,18 @@ class HealthCoach:
     def readiness_history(self, days: int = 30) -> list[ReadinessPoint]:
         """Past readiness scores, oldest first. Never raises."""
         try:
+            port = self._readiness_port()
+            if port is not None:
+                cutoff = time.time() - days * 86400
+                rows = [row for row in
+                        port.tables["readiness_log"].all()
+                        if row.get("ts") is not None
+                        and float(row["ts"]) >= cutoff]
+                rows.sort(key=lambda row: float(row["ts"]))
+                return [ReadinessPoint(ts=float(row["ts"]),
+                                       level=str(row["level"]),
+                                       score=float(row["score"]))
+                        for row in rows]
             db = self._history_db()
             if db is None:
                 return []

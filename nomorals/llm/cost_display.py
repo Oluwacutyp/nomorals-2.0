@@ -163,34 +163,66 @@ def _default_db() -> str:
     return str(d / "cost_display.db")
 
 
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_DDL = (
+    "CREATE TABLE IF NOT EXISTS cost_display ("
+    " user_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0,"
+    " updated_at REAL NOT NULL)")
+
+
 class CostDisplay:
     """Toggleable per-user cost display, backed by the router's CostLog.
 
     ``footer_for_turn(since_ts)`` sums the metered spend since the turn
     started: "this answer cost $0.003".  ``today_spend()`` is the rolling
-    24h total.  SQLite, thread-safe enough for chat, never raises.
+    24h total.  Thread-safe enough for chat, never raises.
+
+    Native path: a SQLite file (``cost_display.db``). When a document
+    store is resolved (Mongo program P5 — an explicit ``store`` or
+    the boot ambient), the toggles run over the seam in the
+    ``llm-cost-display__cost_display`` collection instead
+    (registered in storage.sidecars), and the file's existing rows
+    are imported once, through the same mapping, at construction.
     """
 
-    def __init__(self, db_path: str = "") -> None:
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             path = db_path or _default_db()
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("llm-cost-display", _DDL,
+                                ("cost_display",), path, store=store)
+            if port is not None:
+                table = port.tables["cost_display"]
+
+                def write_rows(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"cost_display": write_rows})
+                self._port = port
+                return
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                "CREATE TABLE IF NOT EXISTS cost_display ("
-                " user_id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0,"
-                " updated_at REAL NOT NULL)"
-            )
+            self._db.execute(_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001
             _log.debug("cost display db init failed", exc_info=True)
             self._db = None
+            self._port = None
 
     # -- toggle --
 
     def is_enabled(self, user_id: str = "owner") -> bool:
         try:
+            if self._port is not None:
+                row = self._port.tables["cost_display"].get(
+                    user_id or "owner")
+                return bool(row and row["enabled"])
             if self._db is None:
                 return False
             row = self._db.execute(
@@ -203,6 +235,12 @@ class CostDisplay:
 
     def set_enabled(self, on: bool, user_id: str = "owner") -> bool:
         try:
+            if self._port is not None:
+                self._port.tables["cost_display"].put({
+                    "user_id": user_id or "owner",
+                    "enabled": 1 if on else 0,
+                    "updated_at": time.time()})
+                return True
             if self._db is None:
                 return False
             self._db.execute(

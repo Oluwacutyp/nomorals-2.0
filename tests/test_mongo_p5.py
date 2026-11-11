@@ -16,10 +16,11 @@ P5 settles the stores that live BESIDE the central database:
   The residue Batch 1 slice-1 ports (agent-identities,
   audio-audiobooks, audio-characters, audio-overviews,
   audio-keyterms) follow the same pattern below, as do the
-  slice-3 ports (audio-melodic, property-scam, property-value,
-  social-voice, social-voice-notes, calendar-integration — the
-  last with the cursor-continuity case its registry entry
-  demands).
+  slice-2 ports (health-coach, health-form, life-archive,
+  llm-cost-display, marketing-aeo) and the slice-3 ports
+  (audio-melodic, property-scam, property-value, social-voice,
+  social-voice-notes, calendar-integration — the last with the
+  cursor-continuity case its registry entry demands).
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -199,7 +200,10 @@ class TestSidecarRegistry:
             # residue Batch 1, slice 3:
             "audio-melodic", "property-scam", "property-value",
             "social-voice", "social-voice-notes",
-            "calendar-integration"}
+            "calendar-integration",
+            # residue Batch 1, slice 2:
+            "health-coach", "health-form", "life-archive",
+            "llm-cost-display", "marketing-aeo"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -1415,3 +1419,369 @@ class TestAnalyticsBackendAwareness:
             assert rows[0]["value"] == '{"v": 7}' or rows[0]["value"] == {"v": 7}
         finally:
             db.close()
+
+
+
+class _CoachSource:
+    """HealthDataSource-shaped fake: steady HRV, good sleep, no strain."""
+
+    def has_data(self):
+        return True
+
+    def metrics(self, start, end):
+        return [{"heart_rate_variability_ms": 52.0, "step_count": 8000}
+                for _ in range(30)]
+
+    def sleep_sessions(self, start, end):
+        return [{"sleep_in_bed_duration_sec": 8.2 * 3600,
+                 "sleep_awake_duration_sec": 0.3 * 3600,
+                 "start_datetime": "2026-10-09T22:30:00-04:00",
+                 "end_datetime": "2026-10-10T06:30:00-04:00"}
+                for _ in range(7)]
+
+    def workouts(self, start, end):
+        return []
+
+
+class _StubTimeline:
+    def __init__(self):
+        self.logged = []
+
+    def log(self, kind, text, source=""):
+        self.logged.append((kind, text, source))
+
+
+class TestHealthCoachPort:
+    def _coach(self, tmp_path, store):
+        from nomorals.health.coach import HealthCoach
+
+        coach = HealthCoach(source=_CoachSource(),
+                            timeline=_StubTimeline(), store=store)
+        path = str(tmp_path / "coach.db")
+        coach._history_path = lambda: path  # keep history out of $HOME
+        return coach
+
+    def _scenario(self, coach) -> dict:
+        import time as _time
+
+        r1 = coach.readiness(log=True)
+        _time.sleep(0.02)  # distinct ts: the log's PK
+        r2 = coach.readiness(log=True)
+        hist = coach.readiness_history(days=7)
+        return {
+            "levels": (r1.level, r2.level),
+            "scores": (r1.score, r2.score),
+            "hist_levels": [p.level for p in hist],
+            "hist_scores": [p.score for p in hist],
+            "hist_ascending": [p.ts for p in hist] == sorted(
+                p.ts for p in hist),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        coach = self._coach(tmp_path, rung.store)
+        observed = self._scenario(coach)
+        assert observed["levels"] == ("high", "high")
+        assert observed["hist_levels"] == ["high", "high"]
+        assert observed["hist_scores"] == list(observed["scores"])
+        assert observed["hist_ascending"] is True
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        native = self._coach(tmp_path, None)
+        native.readiness(log=True)
+
+        coach = self._coach(tmp_path, rung.store)
+        hist = coach.readiness_history(days=7)
+        assert len(hist) == 1 and hist[0].level == "high"
+        assert rung.store.count("health-coach__readiness_log") == 1
+        doc = rung.store.find("health-coach__readiness_log")[0]
+        assert doc["level"] == "high"
+        assert doc["numbers_json"]
+        # second construction: adopted, not re-imported or duplicated
+        again = self._coach(tmp_path, rung.store)
+        assert len(again.readiness_history(days=7)) == 1
+        assert rung.store.count("health-coach__readiness_log") == 1
+
+
+class TestHealthFormPort:
+    def _scenario(self, store) -> dict:
+        from nomorals.health.form import (
+            FormAnalysis,
+            FormIssue,
+            form_trend,
+        )
+
+        issue = FormIssue(checkpoint="knees", label="knees",
+                          observed="valgus collapse",
+                          fix="push knees out")
+        a1 = FormAnalysis(id="fa_1", exercise="squat", available=True,
+                          score=0.80, band="good", passes=["depth"],
+                          frames_used=12, created_at=100.0)
+        a2 = FormAnalysis(id="fa_2", exercise="squat", available=True,
+                          score=0.90, band="solid", issues=[issue],
+                          passes=["depth", "knees"], frames_used=14,
+                          created_at=200.0)
+        a3 = FormAnalysis(id="fa_3", exercise="deadlift", available=True,
+                          score=0.70, band="good", created_at=150.0)
+        saved = (store.save(a1), store.save(a2), store.save(a3))
+        a1.score = 0.85  # INSERT OR REPLACE on re-save
+        resaved = store.save(a1)
+        got = store.get("fa_2")
+        trend = form_trend(store, "squat")
+        return {
+            "saved": saved, "resaved": resaved,
+            "got": (got.exercise, got.score, got.band,
+                    [i.checkpoint for i in got.issues], got.frames_used),
+            "latest": store.latest().id,
+            "latest_squat": store.latest("squat").id,
+            "latest_deadlift": store.latest("deadlift").id,
+            "latest_missing": store.latest("plank"),
+            "trend": trend,
+            "missing": store.get("nope"),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.health.form import FormStore
+
+        store = FormStore(db_path=str(tmp_path / "form.db"),
+                          store=rung.store)
+        observed = self._scenario(store)
+        assert observed["saved"] == (True, True, True)
+        assert observed["resaved"] is True
+        assert observed["got"] == ("squat", 0.90, "solid", ["knees"], 14)
+        assert observed["latest"] == "fa_2"
+        assert observed["latest_squat"] == "fa_2"
+        assert observed["latest_deadlift"] == "fa_3"
+        assert observed["latest_missing"] is None
+        assert "squat form trend (2 checks)" in observed["trend"]
+        assert "85%" in observed["trend"]
+        assert "90%" in observed["trend"]
+        assert observed["missing"] is None
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.health.form import FormAnalysis, FormStore
+
+        path = tmp_path / "form.db"
+        native = FormStore(db_path=str(path))
+        native.save(FormAnalysis(id="fa_kept", exercise="squat",
+                                 available=True, score=0.75, band="good",
+                                 created_at=50.0))
+
+        store = FormStore(db_path=str(path), store=rung.store)
+        got = store.get("fa_kept")
+        assert got is not None and got.score == 0.75
+        assert rung.store.count("health-form__form_analyses") == 1
+        doc = rung.store.get("health-form__form_analyses", "fa_kept")
+        assert doc is not None and doc["exercise"] == "squat"
+        again = FormStore(db_path=str(path), store=rung.store)
+        assert again.latest().id == "fa_kept"
+        assert rung.store.count("health-form__form_analyses") == 1
+
+
+class TestLifeArchivePort:
+    @staticmethod
+    def _port_for(path, rung):
+        # life/archive.py is L0: the composition layer (this test)
+        # builds the port and injects it — the module never imports
+        # storage.
+        from nomorals.life.archive import _DDL
+        from nomorals.storage.sidecars import sidecar_port
+
+        return sidecar_port("life-archive", _DDL, ("life_events",),
+                            None if path is None else str(path),
+                            store=rung.store)
+
+    def _scenario(self, archive) -> dict:
+        id1 = archive.record_event(
+            "journal", "note", "Morning pages", ts=100.0,
+            provenance="journal:2026-11-11", owner=True)
+        id2 = archive.record_event(
+            "health", "metric", "Slept well", ts=300.0, owner=True)
+        id3 = archive.record_event(
+            "journal", "idea", "Build the thing", ts=200.0,
+            private=False, owner=True)
+        got = archive.get(id2, owner=True)
+        denied = False
+        try:
+            archive.get(id1)  # owner defaults False → denied
+        except PermissionError:
+            denied = True
+        return {
+            "got": (got["text"], got["kind"], got["private"],
+                    got["provenance"]),
+            "public_event": archive.get(id3, owner=True)["private"],
+            "timeline": [e["id"] for e in archive.timeline(owner=True)],
+            "expect_order": [id2, id3, id1],
+            "kind_filter": [e["id"] for e in archive.timeline(
+                kind="note", owner=True)],
+            "search_text": [e["id"] for e in archive.search(
+                "slept", owner=True)],
+            "search_kind": [e["id"] for e in archive.search(
+                "IDEA", owner=True)],
+            "missing": archive.get("nope", owner=True),
+            "denied": denied,
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.life.archive import LifeArchive
+
+        path = tmp_path / "life.db"
+        archive = LifeArchive(db_path=str(path),
+                              port=self._port_for(path, rung))
+        observed = self._scenario(archive)
+        assert observed["got"] == ("Slept well", "metric", True, "")
+        assert observed["public_event"] is False
+        assert observed["timeline"] == observed["expect_order"]
+        assert observed["kind_filter"] == [observed["expect_order"][2]]
+        assert observed["search_text"] == [observed["expect_order"][0]]
+        assert observed["search_kind"] == [observed["expect_order"][1]]
+        assert observed["missing"] is None
+        assert observed["denied"] is True
+        archive.close()
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.life.archive import LifeArchive
+
+        path = tmp_path / "life.db"
+        native = LifeArchive(db_path=str(path))
+        kept = native.record_event("journal", "note", "Kept event",
+                                   ts=42.0, owner=True)
+        native.close()
+
+        archive = LifeArchive(db_path=str(path),
+                              port=self._port_for(path, rung))
+        got = archive.get(kept, owner=True)
+        assert got is not None and got["text"] == "Kept event"
+        assert rung.store.count("life-archive__life_events") == 1
+        doc = rung.store.get("life-archive__life_events", kept)
+        assert doc is not None and doc["kind"] == "note"
+        again = LifeArchive(db_path=str(path),
+                            port=self._port_for(path, rung))
+        assert [e["id"] for e in again.timeline(owner=True)] == [kept]
+        assert rung.store.count("life-archive__life_events") == 1
+        # a ':memory:' archive on the seam imports nothing, still works
+        mem = LifeArchive(port=self._port_for(None, rung))
+        mid = mem.record_event("journal", "note", "Seam-only event",
+                               owner=True)
+        assert mem.get(mid, owner=True)["text"] == "Seam-only event"
+
+
+class TestCostDisplayPort:
+    def _scenario(self, disp) -> dict:
+        import time as _time
+
+        return {
+            "before": disp.is_enabled("owner"),
+            "on": disp.set_enabled(True, "owner"),
+            "after_on": disp.is_enabled("owner"),
+            "other_user": disp.is_enabled("someone-else"),
+            "footer_on": disp.footer_for_turn(_time.time(), "owner"),
+            "off": disp.set_enabled(False, "owner"),
+            "after_off": disp.is_enabled("owner"),
+            "default_user": disp.is_enabled(),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.llm.cost_display import CostDisplay
+
+        disp = CostDisplay(db_path=str(tmp_path / "cost.db"),
+                           store=rung.store)
+        observed = self._scenario(disp)
+        assert observed["before"] is False
+        assert observed["on"] is True
+        assert observed["after_on"] is True
+        assert observed["other_user"] is False
+        assert observed["footer_on"].startswith("\n\n_this answer cost")
+        assert observed["off"] is True
+        assert observed["after_off"] is False
+        assert observed["default_user"] is False
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.llm.cost_display import CostDisplay
+
+        path = tmp_path / "cost.db"
+        native = CostDisplay(db_path=str(path))
+        native.set_enabled(True, "owner")
+
+        disp = CostDisplay(db_path=str(path), store=rung.store)
+        assert disp.is_enabled("owner") is True
+        assert rung.store.count("llm-cost-display__cost_display") == 1
+        doc = rung.store.get("llm-cost-display__cost_display", "owner")
+        assert doc is not None and doc["enabled"] == 1
+        again = CostDisplay(db_path=str(path), store=rung.store)
+        assert again.is_enabled("owner") is True
+        assert rung.store.count("llm-cost-display__cost_display") == 1
+
+
+class TestAEOTrackerPort:
+    def _scenario(self, tracker) -> dict:
+        from nomorals.marketing.aeo import VisibilityReport
+
+        tracker._record(VisibilityReport(
+            report_id="aeo_t1", brand="Devon", prompts=[], engines=[],
+            gaps=["q1"], created_at=100.0))
+        tracker._record(VisibilityReport(
+            report_id="aeo_t2", brand="Devon", prompts=[], engines=[],
+            created_at=200.0))
+        tracker._record(VisibilityReport(
+            report_id="aeo_t3", brand="Other", prompts=[], engines=[],
+            gaps=["q9"], created_at=150.0))
+        got = tracker.get("aeo_t2")
+        hist = tracker.history("Devon")
+        return {
+            "got": (got.brand, got.gaps, got.created_at),
+            "got_gaps": tracker.get("aeo_t1").gaps,
+            "latest": tracker.latest().report_id,
+            "latest_brand": tracker.latest("Other").report_id,
+            "latest_missing": tracker.latest("Nope"),
+            "hist_ids": [r["report_id"] for r in hist],
+            "hist_keys": sorted(hist[0].keys()),
+            "hist_all": [r["report_id"] for r in tracker.history()],
+            "missing": tracker.get("nope"),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.marketing.aeo import AEOTracker
+
+        tracker = AEOTracker(db_path=str(tmp_path / "aeo.db"),
+                             store=rung.store)
+        observed = self._scenario(tracker)
+        assert observed["got"] == ("Devon", [], 200.0)
+        assert observed["got_gaps"] == ["q1"]
+        assert observed["latest"] == "aeo_t2"
+        assert observed["latest_brand"] == "aeo_t3"
+        assert observed["latest_missing"] is None
+        assert observed["hist_ids"] == ["aeo_t2", "aeo_t1"]
+        assert observed["hist_keys"] == [
+            "brand", "confirmed", "created_at", "pairs", "report_id",
+            "share"]
+        assert observed["hist_all"] == ["aeo_t2", "aeo_t3", "aeo_t1"]
+        assert observed["missing"] is None
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.marketing.aeo import AEOTracker, VisibilityReport
+
+        path = tmp_path / "aeo.db"
+        native = AEOTracker(db_path=str(path))
+        native._record(VisibilityReport(
+            report_id="aeo_kept", brand="Devon", prompts=[], engines=[],
+            created_at=50.0))
+
+        tracker = AEOTracker(db_path=str(path), store=rung.store)
+        got = tracker.get("aeo_kept")
+        assert got is not None and got.brand == "Devon"
+        assert rung.store.count("marketing-aeo__aeo_reports") == 1
+        doc = rung.store.get("marketing-aeo__aeo_reports", "aeo_kept")
+        assert doc is not None and doc["brand"] == "Devon"
+        again = AEOTracker(db_path=str(path), store=rung.store)
+        assert again.latest().report_id == "aeo_kept"
+        assert rung.store.count("marketing-aeo__aeo_reports") == 1

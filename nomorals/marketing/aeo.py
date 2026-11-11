@@ -566,7 +566,7 @@ def site_readiness_check(url_or_domain: str, timeout: int = 10) -> dict:
 
 #: ``engine_caller(engine_name, prompt) -> str``. Injectable; tests mock it.
 #: Any callable ``(str, str) -> str`` works.
-from typing import Callable
+from typing import Any, Callable
 EngineCaller = Callable[[str, str], str]
 
 
@@ -682,20 +682,53 @@ def _default_db() -> str:
         return ":memory:"
 
 
-class AEOTracker:
-    """Runs visibility checks, cross-checks mentions, keeps report history."""
+#: The store's own DDL (final shape) — the native path executes it
+#: and the seam mapping is derived from it, so the two can never
+#: drift. Older files missing gaps_json gain it from the native
+#: path's tolerate-missing-column ALTER in AEOTracker.__init__;
+#: that migration stays a native-path concern.
+_DDL = (
+    "CREATE TABLE IF NOT EXISTS aeo_reports ("
+    "report_id TEXT PRIMARY KEY, brand TEXT, share REAL, "
+    "pairs INTEGER, confirmed INTEGER, gaps_json TEXT, "
+    "created_at REAL)")
 
-    def __init__(self, db_path: str = "") -> None:
+
+class AEOTracker:
+    """Runs visibility checks, cross-checks mentions, keeps report history.
+
+    Native path: a SQLite file (``aeo.db``). When a document store
+    is resolved (Mongo program P5 — an explicit ``store`` or the
+    boot ambient), the report history runs over the seam in the
+    ``marketing-aeo__aeo_reports`` collection instead (registered
+    in storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             path = db_path or _default_db()
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "marketing-aeo", _DDL, ("aeo_reports",),
+                None if path == ":memory:" else path, store=store)
+            if port is not None:
+                table = port.tables["aeo_reports"]
+
+                def write_reports(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"aeo_reports": write_reports})
+                self._port = port
+                return
             self._db = sqlite3.connect(path)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                "CREATE TABLE IF NOT EXISTS aeo_reports ("
-                "report_id TEXT PRIMARY KEY, brand TEXT, share REAL, "
-                "pairs INTEGER, confirmed INTEGER, gaps_json TEXT, "
-                "created_at REAL)")
+            self._db.execute(_DDL)
             # tolerate older tables missing gaps_json
             try:
                 self._db.execute("ALTER TABLE aeo_reports ADD COLUMN gaps_json TEXT")
@@ -706,6 +739,7 @@ class AEOTracker:
         except Exception as exc:  # noqa: BLE001
             record_failure("aeo.AEOTracker.__init__", exc)
             self._db = None
+            self._port = None
 
     # -- core --
 
@@ -777,9 +811,17 @@ class AEOTracker:
 
     def _record(self, report: VisibilityReport) -> None:
         try:
+            import json as _json
+            if self._port is not None:
+                self._port.tables["aeo_reports"].put({
+                    "report_id": report.report_id, "brand": report.brand,
+                    "share": report.share, "pairs": report.total_pairs,
+                    "confirmed": len(report.confirmed_pairs),
+                    "gaps_json": _json.dumps(list(report.gaps or [])),
+                    "created_at": report.created_at})
+                return
             if self._db is None:
                 return
-            import json as _json
             self._db.execute(
                 "INSERT OR REPLACE INTO aeo_reports "
                 "(report_id, brand, share, pairs, confirmed, gaps_json, created_at) "
@@ -794,13 +836,20 @@ class AEOTracker:
     def get(self, report_id: str) -> VisibilityReport | None:
         """Full stored report (gaps rebuilt; mentions are session-local). Never raises."""
         try:
-            if self._db is None or not report_id:
+            if self._port is not None:
+                if not report_id:
+                    return None
+                row = self._port.tables["aeo_reports"].get(report_id)
+                if row is None:
+                    return None
+            elif self._db is None or not report_id:
                 return None
-            row = self._db.execute(
-                "SELECT * FROM aeo_reports WHERE report_id = ?",
-                (report_id,)).fetchone()
-            if not row:
-                return None
+            else:
+                row = self._db.execute(
+                    "SELECT * FROM aeo_reports WHERE report_id = ?",
+                    (report_id,)).fetchone()
+                if not row:
+                    return None
             import json as _json
             gaps: list[str] = []
             try:
@@ -818,6 +867,19 @@ class AEOTracker:
     def latest(self, brand: str = "") -> VisibilityReport | None:
         """Most recent report (optionally for a brand). Never raises."""
         try:
+            if self._port is not None:
+                rows = self._port.tables["aeo_reports"].all()
+                brand = (brand or "").strip()
+                if brand:
+                    rows = [r for r in rows if r.get("brand") == brand]
+                if not rows:
+                    return None
+                # created_at DESC, NULLs last — the native ORDER BY.
+                rows.sort(
+                    key=lambda r: (r.get("created_at") is not None,
+                                   r.get("created_at") or 0.0),
+                    reverse=True)
+                return self.get(rows[0]["report_id"])
             if self._db is None:
                 return None
             brand = (brand or "").strip()
@@ -839,6 +901,20 @@ class AEOTracker:
     def history(self, brand: str = "", limit: int = 12) -> list[dict]:
         """Share-of-answer trend. Never raises."""
         try:
+            if self._port is not None:
+                rows = self._port.tables["aeo_reports"].all()
+                if (brand or "").strip():
+                    rows = [r for r in rows
+                            if r.get("brand") == brand.strip()]
+                # created_at DESC, NULLs last — the native ORDER BY.
+                rows.sort(
+                    key=lambda r: (r.get("created_at") is not None,
+                                   r.get("created_at") or 0.0),
+                    reverse=True)
+                rows = rows[: max(1, int(limit or 12))]
+                keys = ("report_id", "brand", "share", "pairs",
+                        "confirmed", "created_at")
+                return [{k: r.get(k) for k in keys} for r in rows]
             if self._db is None:
                 return []
             q = "SELECT report_id, brand, share, pairs, confirmed, created_at FROM aeo_reports"

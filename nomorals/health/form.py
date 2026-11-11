@@ -332,16 +332,33 @@ def form_trend(store: "FormStore", exercise: str,
         from .timeline import sparkline
         rows: list[tuple[float, float, str]] = []
         try:
-            if store._db is None:
+            import json as _json
+            port = getattr(store, "_port", None)
+            if port is not None:
+                docs = port.tables["form_analyses"].find(
+                    {"exercise": exercise})
+                # created_at DESC, NULLs last — the native ORDER BY.
+                docs.sort(
+                    key=lambda d: (d.get("created_at") is not None,
+                                   d.get("created_at") or 0.0),
+                    reverse=True)
+                if limit >= 0:
+                    docs = docs[:limit]
+                for d in docs:
+                    payload = _json.loads(d["analysis_json"])
+                    rows.append((float(d["created_at"]),
+                                 float(payload.get("score", 0.0)),
+                                 str(payload.get("band", ""))))
+            elif store._db is None:
                 return ""
-            q = ("SELECT created_at, analysis_json FROM form_analyses "
-                 "WHERE exercise = ? ORDER BY created_at DESC LIMIT ?")
-            for r in store._db.execute(q, (exercise, limit)).fetchall():
-                import json as _json
-                d = _json.loads(r["analysis_json"])
-                rows.append((float(r["created_at"]),
-                             float(d.get("score", 0.0)),
-                             str(d.get("band", ""))))
+            else:
+                q = ("SELECT created_at, analysis_json FROM form_analyses "
+                     "WHERE exercise = ? ORDER BY created_at DESC LIMIT ?")
+                for r in store._db.execute(q, (exercise, limit)).fetchall():
+                    d = _json.loads(r["analysis_json"])
+                    rows.append((float(r["created_at"]),
+                                 float(d.get("score", 0.0)),
+                                 str(d.get("band", ""))))
         except Exception:  # noqa: BLE001
             return ""
         if len(rows) < 2:
@@ -953,28 +970,63 @@ def _store_path(path: str = "") -> str:
     return os.path.join(base, "health", "form.db")
 
 
-class FormStore:
-    """SQLite store for form analyses. Never raises."""
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_DDL = """CREATE TABLE IF NOT EXISTS form_analyses (
+       id TEXT PRIMARY KEY, exercise TEXT,
+       analysis_json TEXT, created_at REAL)"""
 
-    def __init__(self, db_path: str = "") -> None:
+
+class FormStore:
+    """Store for form analyses. Never raises.
+
+    Native path: a SQLite file (``form.db``). When a document store
+    is resolved (Mongo program P5 — an explicit ``store`` or the
+    boot ambient), the same API runs over the seam in the
+    ``health-form__form_analyses`` collection instead (registered in
+    storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             p = _store_path(db_path)
             os.makedirs(os.path.dirname(p), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("health-form", _DDL, ("form_analyses",),
+                                p, store=store)
+            if port is not None:
+                table = port.tables["form_analyses"]
+
+                def write_analyses(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"form_analyses": write_analyses})
+                self._port = port
+                return
             self._db = sqlite3.connect(p)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS form_analyses (
-                       id TEXT PRIMARY KEY, exercise TEXT,
-                       analysis_json TEXT, created_at REAL)""")
+            self._db.execute(_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001
             _log.warning("form store unavailable, running empty",
                          exc_info=True)
             self._db = None
+            self._port = None
 
     def save(self, analysis: FormAnalysis) -> bool:
         try:
+            if self._port is not None:
+                self._port.tables["form_analyses"].put({
+                    "id": analysis.id, "exercise": analysis.exercise,
+                    "analysis_json": json.dumps(asdict(analysis)),
+                    "created_at": analysis.created_at})
+                return True
             if self._db is None:
                 return False
             self._db.execute(
@@ -989,6 +1041,12 @@ class FormStore:
 
     def get(self, analysis_id: str) -> FormAnalysis | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["form_analyses"].get(analysis_id)
+                if row is None:
+                    return None
+                return _analysis_from_dict(json.loads(
+                    row["analysis_json"]))
             if self._db is None:
                 return None
             row = self._db.execute(
@@ -1004,6 +1062,20 @@ class FormStore:
 
     def latest(self, exercise: str = "") -> FormAnalysis | None:
         try:
+            if self._port is not None:
+                rows = self._port.tables["form_analyses"].all()
+                if exercise:
+                    rows = [r for r in rows
+                            if r.get("exercise") == exercise]
+                if not rows:
+                    return None
+                # created_at DESC, NULLs last — the native ORDER BY.
+                rows.sort(
+                    key=lambda r: (r.get("created_at") is not None,
+                                   r.get("created_at") or 0.0),
+                    reverse=True)
+                return _analysis_from_dict(json.loads(
+                    rows[0]["analysis_json"]))
             if self._db is None:
                 return None
             q = ("SELECT analysis_json FROM form_analyses ORDER BY "
