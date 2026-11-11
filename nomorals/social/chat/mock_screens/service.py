@@ -41,14 +41,19 @@ class MockScreenService:
 
     def render(self, screen: Screen, *,
                avatars: dict | None = None,
+               media: dict | None = None,
                audience: str = "",
                caption: str = "",
                send=None) -> dict[str, Any]:
         """Render one screen.  With ``send`` given, also
         deliver it as a photo and report ``sent``; without,
-        the result carries the PNG bytes for the caller."""
+        the result carries the PNG bytes for the caller.
+        ``media`` is the real-media hand-off (message id →
+        bytes / path / PIL image / MediaRef) forwarded to
+        the renderer."""
         try:
-            data, drawn = render_screen(screen, avatars=avatars)
+            data, drawn = render_screen(
+                screen, avatars=avatars, media=media)
         except MockScreensError as exc:
             return {"sent": False, "reason": str(exc)}
         out: dict[str, Any] = {"sent": False, "drawn": drawn,

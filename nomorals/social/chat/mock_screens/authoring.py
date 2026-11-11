@@ -26,6 +26,20 @@ two structured ways:
   reply to the previous one.  Times are assigned on a
   steady clock from 9:41 AM unless a segment opens with a
   time (``9:58 Adaeze: words``).
+
+  Media segments carry REAL media into the screen: a
+  segment whose words open with a media marker —
+  ``me: [photo]`` (the image attached to the command
+  message itself), ``me: [photo <path>]`` (a file on disk,
+  e.g. the ``saved:`` path an image generation reported),
+  ``me: [photo last]`` (the newest generated image), or
+  ``Adaeze: [voice]`` / ``[voice <path>]`` (an attached or
+  on-disk voice note, drawn with its measured waveform
+  and true duration).  Words after a ``[photo]`` marker
+  are its caption; a voice segment carries no words.
+  The parser stores the reference (or the ``attach:`` /
+  ``last:`` token) on the message; the runtime resolves
+  tokens to real paths before render.
 """
 
 from __future__ import annotations
@@ -43,7 +57,12 @@ USAGE = (
     "[iphone|android] [with <Name>] me: hi ;; Adaeze: hello "
     ";; me: on my way [read] — families: whatsapp · "
     "telegram · messenger · snapchat · imessage · sms · "
-    "instagram (add -group for the group form)")
+    "instagram (add -group for the group form) — media: "
+    "me: [photo] uses an image attached to your message, "
+    "[photo <path>] a file on disk, [photo last] your "
+    "newest generated image; [voice] / [voice <path>] a "
+    "voice note with its real waveform and duration; "
+    "words after [photo] are its caption")
 
 _PLATFORMS = {
     "whatsapp": ("whatsapp", False),
@@ -84,6 +103,12 @@ _TICK_SUFFIX = re.compile(r"\[(read|sent|delivered|sending)\]\s*$")
 _REACT_SUFFIX = re.compile(r"\[react\s+([^\]]*)\]\s*$")
 _TIME_PREFIX = re.compile(
     r"^(\d{1,2}:\d{2}\s*(?:AM|PM|am|pm)?)\s+(.*)$", re.DOTALL)
+#: a media marker opening a segment's words: [photo],
+#: [photo <path>], [photo last], [voice], [voice <path>]
+#: ([image] / [audio] are the same markers by other names)
+_MEDIA_MARKER = re.compile(
+    r"\[(photo|image|voice|audio)(?:\s+([^\]]+))?\]\s*",
+    re.IGNORECASE)
 
 
 def demo_screen(name: str = "whatsapp", style: str = "android",
@@ -623,12 +648,38 @@ def parse_mock_tail(tail: str) -> tuple:
             pid = person(name)
             if not title and not group:
                 title = name
+        shared = {
+            "time": when,
+            "ticks": ticks if pid == "me" else "",
+            "reactions": reactions,
+            "reply_to": (messages[-1].id
+                         if reply and messages else ""),
+        }
+        marker = _MEDIA_MARKER.match(words_text)
+        if marker is not None:
+            word = marker.group(1).lower()
+            arg = (marker.group(2) or "").strip()
+            rest = words_text[marker.end():].strip()
+            if word in ("photo", "image"):
+                ref = "attach:image" if not arg else (
+                    "last:image" if arg.lower() == "last"
+                    else arg)
+                messages.append(Message(
+                    "e" + str(idx), pid, kind="image",
+                    caption=rest, media=ref, **shared))
+            else:
+                if rest:
+                    raise MockScreensError(
+                        "a voice segment carries no words — "
+                        "put them in their own segment: "
+                        + USAGE)
+                ref = arg if arg else "attach:voice"
+                messages.append(Message(
+                    "e" + str(idx), pid, kind="voice",
+                    media=ref, **shared))
+            continue
         messages.append(Message(
-            "e" + str(idx), pid, text=words_text, time=when,
-            ticks=ticks if pid == "me" else "",
-            reactions=reactions,
-            reply_to=(messages[-1].id
-                      if reply and messages else "")))
+            "e" + str(idx), pid, text=words_text, **shared))
     if not messages:
         raise MockScreensError(USAGE)
     if not any(m.kind == "divider" for m in messages):

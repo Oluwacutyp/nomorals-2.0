@@ -72,7 +72,17 @@ class Message:
     the last own message); ``reply_to`` names the ``id`` of
     the quoted message; ``reactions`` are emoji strings worn
     on the bubble.  ``caption`` rides an image, ``duration``
-    a voice note."""
+    a voice note.  ``media`` is the real-media hand-off for
+    an image/voice message: a local file path whose pixels
+    (image) or samples (voice — the duration and waveform
+    are MEASURED from it at render) compose into the
+    screen.  Empty means the explicit no-media case, drawn
+    as the placeholder scene / synthetic waveform.  The
+    command form's ``attach:``/``last:`` tokens live only
+    between the parser and the runtime, which resolves
+    them to paths before render; the animation phase
+    consumes this same field, so a screen built with real
+    media today moves tomorrow with no schema break."""
 
     id: str
     sender: str
@@ -85,6 +95,7 @@ class Message:
     seen: bool = False
     caption: str = ""
     duration: str = ""
+    media: str = ""
 
     def __post_init__(self) -> None:
         if self.kind not in MESSAGE_KINDS:
@@ -104,7 +115,7 @@ class Message:
                 "reply_to": self.reply_to,
                 "reactions": list(self.reactions),
                 "seen": self.seen, "caption": self.caption,
-                "duration": self.duration}
+                "duration": self.duration, "media": self.media}
 
     @classmethod
     def from_dict(cls, data: dict) -> Message:
@@ -118,7 +129,8 @@ class Message:
                    reactions=list(data.get("reactions") or []),
                    seen=bool(data.get("seen")),
                    caption=str(data.get("caption") or ""),
-                   duration=str(data.get("duration") or ""))
+                   duration=str(data.get("duration") or ""),
+                   media=str(data.get("media") or ""))
 
 
 @dataclass

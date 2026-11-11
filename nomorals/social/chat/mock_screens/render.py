@@ -17,6 +17,18 @@ Typography and avatar machinery are reused from
 typography service through ``makers._font``, wrapping is
 measured, avatars are masked discs or deterministic
 initials placeholders.
+
+Real media (the media hand-off, :mod:`.media`): an
+image message whose ``media`` reference (or the render's
+``media`` hand-off, keyed by message id) resolves has its
+REAL pixels composited into the photo frame — cover-fit,
+the frame height adapting to the image's own aspect —
+and a voice message with real audio draws the waveform
+MEASURED from its samples under its true duration.  A
+reference that cannot be loaded or decoded fails the
+render with the reason; the placeholder scene and the
+synthetic waveform remain only for messages carrying no
+media at all.
 """
 
 from __future__ import annotations
@@ -25,10 +37,17 @@ import hashlib
 import io
 from dataclasses import replace
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 from .. import makers as _makers
 from .designs import CHAT_DESIGNS, DEVICES, GROUP_NAME_COLORS
+from .media import (
+    VOICE_BARS,
+    MediaError,
+    format_duration,
+    load_image,
+    probe_audio,
+)
 from .schema import Message, Participant, Screen
 
 #: Logical → device pixel scale.  A 390-wide iPhone layout
@@ -109,6 +128,68 @@ class _Canvas:
         self.w = int(self.dev["width"])
         self.intent = self.design.get("intent", "text")
         self._measure = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+        #: real-media hand-off for this render: message id
+        #: → bytes / path / PIL image / MediaRef.  Wins over
+        #: the message's own ``media`` reference.
+        self.media_handoff: dict = {}
+        self._images: dict = {}
+        self._probes: dict = {}
+        #: message id → (logical media box, source) for the
+        #: drawn record: source is "real" or "placeholder".
+        self.media_regions: dict = {}
+
+    # ── real media ───────────────────────────────────────
+
+    def media_source(self, msg: Message):
+        """The media source for one message: the render's
+        hand-off by id, else the message's own ``media``
+        reference, else None (the explicit no-media case)."""
+        if msg.id in self.media_handoff:
+            return self.media_handoff[msg.id]
+        return msg.media or None
+
+    def message_image(self, msg: Message):
+        """The real image for an image message, or None
+        when the message carries no media (the placeholder
+        case).  A supplied reference that cannot be loaded
+        fails the render with the reason — never a silent
+        placeholder swap."""
+        if msg.id in self._images:
+            return self._images[msg.id]
+        source = self.media_source(msg)
+        if source is None:
+            return None
+        try:
+            img = load_image(source)
+        except MediaError as exc:
+            raise MockScreensError(
+                "the photo on message " + repr(msg.id)
+                + " could not be used: " + str(exc)) from exc
+        self._images[msg.id] = img
+        return img
+
+    def voice_probe(self, msg: Message):
+        """The measured probe (true duration + derived
+        bars) for a voice message with real audio, or None
+        when it carries no media.  Undecodable audio fails
+        the render with the reason."""
+        if msg.id in self._probes:
+            return self._probes[msg.id]
+        source = self.media_source(msg)
+        if source is None:
+            return None
+        try:
+            probe = probe_audio(source, bars=VOICE_BARS)
+        except MediaError as exc:
+            raise MockScreensError(
+                "the voice note on message " + repr(msg.id)
+                + " could not be used: " + str(exc)) from exc
+        self._probes[msg.id] = probe
+        return probe
+
+    def note_media_region(self, msg: Message, box: tuple,
+                          source: str) -> None:
+        self.media_regions[msg.id] = (box, source)
 
     def dflag(self, name: str, default=None):
         """A behaviour flag from the design entry (the
@@ -622,6 +703,15 @@ def _measure_bubble(cv: _Canvas, msg: Message) -> tuple:
     if msg.kind == "image":
         media_w = min(248.0, text_max)
         media_h = 168.0
+        img = cv.message_image(msg)
+        if img is not None:
+            # a real photo wears its own aspect: the frame
+            # height follows it, clamped to the range the
+            # apps themselves use for chat photos
+            media_h = max(96.0, min(
+                260.0, media_w * img.height
+                / max(1, img.width)))
+            parts["real_media"] = True
         h = 4 + media_h
         w = media_w + 8
         if msg.caption:
@@ -673,8 +763,15 @@ def _measure_flat(cv: _Canvas, msg: Message) -> tuple:
     w = cv.w - 12.0
     h = 17.0  # the caps name line
     if msg.kind == "image":
-        parts["media"] = (168.0, 112.0)
-        h += 112 + 4
+        media_w, media_h = 168.0, 112.0
+        img = cv.message_image(msg)
+        if img is not None:
+            media_h = max(80.0, min(
+                220.0, media_w * img.height
+                / max(1, img.width)))
+            parts["real_media"] = True
+        parts["media"] = (media_w, media_h)
+        h += media_h + 4
         if msg.caption:
             lines = cv.wrap(msg.caption, _TEXT_SIZE, cv.w - 38)
             parts["caption_lines"] = lines
@@ -716,6 +813,32 @@ def _draw_media_placeholder(canvas, draw, cv: _Canvas,
     ImageDraw.Draw(mask).rounded_rectangle(
         [0, 0, cv.s(w), cv.s(h)], radius=cv.s(6), fill=255)
     canvas.paste(tile, (cv.s(x), cv.s(y)), mask)
+
+
+def _draw_media_image(canvas, draw, cv: _Canvas,
+                      msg: Message, x: float, y: float,
+                      w: float, h: float) -> None:
+    """The photo in an image message's frame: the REAL
+    image cover-fit into the frame when the message
+    carries media (centre-cropped to the frame's aspect,
+    the chat idiom), the placeholder scene only when it
+    carries none.  Either way the media region lands in
+    the canvas record with its source."""
+    img = cv.message_image(msg)
+    if img is None:
+        _draw_media_placeholder(canvas, draw, cv, x, y, w, h,
+                                msg.id)
+        cv.note_media_region(msg, (x, y, w, h), "placeholder")
+        return
+    tile = ImageOps.fit(img.convert("RGB"),
+                        (max(1, cv.s(w)), max(1, cv.s(h))),
+                        Image.LANCZOS)
+    mask = Image.new("L", tile.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        [0, 0, tile.width, tile.height], radius=cv.s(6),
+        fill=255)
+    canvas.paste(tile, (cv.s(x), cv.s(y)), mask)
+    cv.note_media_region(msg, (x, y, w, h), "real")
 
 
 def _draw_reactions(canvas, draw, cv: _Canvas, msg: Message,
@@ -821,9 +944,8 @@ def _draw_bubble(canvas, draw, cv: _Canvas, msg: Message,
                               media_h + 8, radius)
             cy = y + media_h + 8 + 2
         else:
-            _draw_media_placeholder(canvas, draw, cv, x + 4,
-                                    y + 4, media_w, media_h,
-                                    msg.id)
+            _draw_media_image(canvas, draw, cv, msg, x + 4,
+                              y + 4, media_w, media_h)
             cy = y + 4 + media_h + 2
         for line in parts.get("caption_lines") or []:
             draw.text((cv.s(cx), cv.s(cy)), line,
@@ -879,12 +1001,25 @@ def _draw_media_flush(canvas, draw, cv: _Canvas, msg: Message,
                       radius: float) -> None:
     """A photo that fills its bubble edge-to-edge (the
     Messenger idiom: no coloured frame around a picture).
-    The placeholder scene is drawn on a scratch canvas
-    and pasted through a rounded-corner mask."""
+    The real image is cover-fit edge-to-edge when the
+    message carries media; the placeholder scene (drawn
+    on a scratch canvas) only when it carries none.  Both
+    are pasted through the bubble's rounded-corner mask,
+    and the media region lands in the canvas record."""
     tmp = Image.new("RGB", (cv.s(w), cv.s(h)),
                     cv.pal["wallpaper"])
     tdraw = ImageDraw.Draw(tmp)
-    _draw_media_placeholder(tmp, tdraw, cv, 0, 0, w, h, msg.id)
+    img = cv.message_image(msg)
+    if img is not None:
+        tile = ImageOps.fit(img.convert("RGB"),
+                            (max(1, cv.s(w)), max(1, cv.s(h))),
+                            Image.LANCZOS)
+        tmp.paste(tile, (0, 0))
+        cv.note_media_region(msg, (x, y, w, h), "real")
+    else:
+        _draw_media_placeholder(tmp, tdraw, cv, 0, 0, w, h,
+                                msg.id)
+        cv.note_media_region(msg, (x, y, w, h), "placeholder")
     mask = Image.new("L", (cv.s(w), cv.s(h)), 0)
     mdraw = ImageDraw.Draw(mask)
     mdraw.rounded_rectangle(
@@ -915,8 +1050,8 @@ def _draw_flat_row(canvas, draw, cv: _Canvas, msg: Message,
     cy = y + 17
     if msg.kind == "image":
         media_w, media_h = parts["media"]
-        _draw_media_placeholder(canvas, draw, cv, 24, cy,
-                                media_w, media_h, msg.id)
+        _draw_media_image(canvas, draw, cv, msg, 24, cy,
+                          media_w, media_h)
         cy += media_h + 4
         for line in parts.get("caption_lines") or []:
             draw.text((cv.s(24), cv.s(cy)), line,
@@ -967,15 +1102,25 @@ def _draw_voice(draw, cv: _Canvas, msg: Message, x: float,
                   (cv.s(cx + 22), cv.s(cy))],
                  fill=(255, 255, 255))
     bx = cx + 40
-    digest = hashlib.sha256(msg.id.encode("utf-8")).digest()
-    bars = 26
-    for i in range(bars):
-        bh = 4 + (digest[i % len(digest)] % 13)
+    probe = cv.voice_probe(msg)
+    if probe is not None:
+        # the measured waveform: bar heights ARE the
+        # audio's own peak amplitudes, and the label is
+        # its true duration read from the samples
+        heights = [3.0 + peak * 13.0 for peak in probe.bars]
+        label = format_duration(probe.seconds)
+        cv.note_media_region(
+            msg, (bx, y, len(heights) * 4.2, h), "real")
+    else:
+        digest = hashlib.sha256(msg.id.encode("utf-8")).digest()
+        heights = [4 + (digest[i % len(digest)] % 13)
+                   for i in range(VOICE_BARS)]
+        label = msg.duration or "0:00"
+    for i, bh in enumerate(heights):
         draw.rounded_rectangle(
             [cv.s(bx + i * 4.2), cv.s(cy - bh / 2 - 4),
              cv.s(bx + i * 4.2 + 2.2), cv.s(cy + bh / 2 - 4)],
             radius=cv.s(1.1), fill=fg)
-    label = msg.duration or "0:00"
     draw.text((cv.s(bx), cv.s(cy + 6)), label,
               font=cv.font(10.5), fill=pal["meta"])
     if own and msg.ticks and cv.dflag("ticks_in_bubble"):
@@ -1014,21 +1159,49 @@ def _draw_chip(draw, cv: _Canvas, msg: Message, y: float,
     return h
 
 
-def render_screen(screen: Screen, *, avatars: dict | None = None):
+def _attach_media_record(cv: _Canvas, entry: dict,
+                         msg: Message) -> dict:
+    """Fold one element's media region into its drawn
+    record: the composited media box (device pixels) and
+    its source for image/voice elements, plus the measured
+    duration + bars when a voice note was probed — the
+    record proves the media landed, and the animation
+    phase reads the same facts."""
+    region = cv.media_regions.get(msg.id)
+    if region is not None:
+        (mx, my, mw, mh), source = region
+        entry["media_box"] = [cv.s(mx), cv.s(my), cv.s(mw),
+                              cv.s(mh)]
+        entry["media_source"] = source
+    probe = cv._probes.get(msg.id)
+    if probe is not None:
+        entry["duration_s"] = round(probe.seconds, 3)
+        entry["bars"] = [round(b, 3) for b in probe.bars]
+    return entry
+
+
+def render_screen(screen: Screen, *, avatars: dict | None = None,
+                  media: dict | None = None):
     """Render one chat screen.  Returns ``(png_bytes,
     drawn)`` — the drawn record carries the output size,
     the chrome regions and one entry per element (id,
-    kind, sender, box, ticks/seen state).
+    kind, sender, box, ticks/seen state, and for media
+    elements the composited media box + source).
 
     ``avatars`` maps a participant id to an avatar hand-off
     (bytes / path / PIL image) the live surface supplied;
-    it wins over the participant's own ``avatar`` ref."""
+    it wins over the participant's own ``avatar`` ref.
+    ``media`` maps a message id to a real-media hand-off
+    (bytes / path / PIL image / MediaRef) for that
+    message's photo or voice note; it wins over the
+    message's own ``media`` reference."""
     if screen.platform not in CHAT_DESIGNS:
         raise MockScreensError(
             "no chat design called " + repr(screen.platform)
             + " — designs: " + ", ".join(sorted(CHAT_DESIGNS)))
     cv = _Canvas(screen)
     cv.avatars = dict(avatars or {})
+    cv.media_handoff = dict(media or {})
 
     # ── measure ──────────────────────────────────────────
     items: list = []  # (msg, kind, w, h, parts, gap_before)
@@ -1197,13 +1370,14 @@ def render_screen(screen: Screen, *, avatars: dict | None = None):
             if msg.reactions:
                 _draw_reactions(img, draw, cv, msg, 18,
                                 cy + bubble_h, w)
-            drawn["elements"].append({
-                "id": msg.id, "kind": msg.kind,
-                "sender": msg.sender,
-                "box": [cv.s(bx), cv.s(cy), cv.s(w),
-                        cv.s(bubble_h)],
-                "ticks": msg.ticks, "seen": msg.seen,
-                "reactions": list(msg.reactions)})
+            drawn["elements"].append(_attach_media_record(
+                cv, {
+                    "id": msg.id, "kind": msg.kind,
+                    "sender": msg.sender,
+                    "box": [cv.s(bx), cv.s(cy), cv.s(w),
+                            cv.s(bubble_h)],
+                    "ticks": msg.ticks, "seen": msg.seen,
+                    "reactions": list(msg.reactions)}, msg))
             cy += h
             continue
         if own:
@@ -1228,11 +1402,14 @@ def render_screen(screen: Screen, *, avatars: dict | None = None):
         if msg.reactions:
             _draw_reactions(img, draw, cv, msg, bx,
                             cy + bubble_h, w)
-        drawn["elements"].append({
-            "id": msg.id, "kind": msg.kind, "sender": msg.sender,
-            "box": [cv.s(bx), cv.s(cy), cv.s(w), cv.s(bubble_h)],
-            "ticks": msg.ticks, "seen": msg.seen,
-            "reactions": list(msg.reactions)})
+        drawn["elements"].append(_attach_media_record(
+            cv, {
+                "id": msg.id, "kind": msg.kind,
+                "sender": msg.sender,
+                "box": [cv.s(bx), cv.s(cy), cv.s(w),
+                        cv.s(bubble_h)],
+                "ticks": msg.ticks, "seen": msg.seen,
+                "reactions": list(msg.reactions)}, msg))
         cy += h
 
     input_y = total_h - nav_h - input_h

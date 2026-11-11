@@ -21,8 +21,15 @@ live, bubble tails, run avatars, read-state lines, input
 bars).  Chat tools the census names but does not inspect
 to flagship depth stay named remainders (see the census
 §3.10 note in the tests) rather than guessed designs.
-Lists/status/calls, social profiles, animation, bulk data
-and NL authoring are later phases of the same organ.
+The media hand-off: image and voice messages carry REAL
+media — a generated image or any image bytes compose
+into the photo frame, a real voice note is drawn with
+its measured waveform and true duration (``media``
+probes in :mod:`.media`) — and the placeholder scene /
+synthetic waveform remain only for messages carrying no
+media.  Lists/status/calls, social profiles, animation,
+bulk data and NL authoring are later phases of the same
+organ.
 
 The organ never claims a render is a real captured
 screenshot: it is a mock screen, generated from data the
