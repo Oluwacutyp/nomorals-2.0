@@ -65,6 +65,7 @@ tools layer's pytest runner.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import re
@@ -204,6 +205,20 @@ def _git(cwd: Path, args: list[str], *,
         ["git", *args], cwd=str(cwd), capture_output=True,
         text=True, encoding="utf-8", errors="replace",
         timeout=timeout)
+
+
+def _purge_pycache(root: Path) -> None:
+    """Drop every ``__pycache__`` under ``root`` (and any stray
+    ``.pyc`` beside sources). A revision switch inside one
+    scratch must never let bytecode compiled from the other
+    revision survive: same-size files and second-granularity
+    ``.pyc`` validation make that a silent wrong-code run
+    (see :meth:`BenchVerifier._run_on_base`)."""
+    for cache in root.rglob("__pycache__"):
+        shutil.rmtree(cache, ignore_errors=True)
+    for stale in root.rglob("*.pyc"):
+        with contextlib.suppress(OSError):
+            stale.unlink()
 
 
 def _failed_ids(run: dict[str, Any]) -> list[str]:
@@ -916,16 +931,29 @@ class BenchVerifier:
         """Run ``fn`` with the scratch checked out at the BASE
         revision, then restore the candidate checkout. The
         base-side half of every two-revision check — the
-        verifier runs both sides itself."""
+        verifier runs both sides itself.
+
+        Every revision switch purges the scratch's bytecode
+        caches first. A candidate-side run compiles the
+        candidate's modules into ``__pycache__``; CPython
+        validates a ``.pyc`` by source mtime in whole seconds
+        plus size, so a same-size one-character fix whose base
+        checkout lands in the same second as the compile would
+        otherwise execute the CANDIDATE's bytecode on the base
+        side — the proving test then passes on "base" and a
+        sound fix is contradicted (Lane 5, Proof 8). The purge
+        makes each side run the source actually checked out."""
         try:
             proc = _git(scratch, ["checkout", "--quiet",
                                   request.base_revision])
             if proc.returncode != 0:
                 return None
+            _purge_pycache(scratch)
             return fn()
         finally:
             target = request.candidate_ref or request.base_revision
             _git(scratch, ["checkout", "--quiet", target])
+            _purge_pycache(scratch)
 
     # -- frozen file ---------------------------------------------------------
 

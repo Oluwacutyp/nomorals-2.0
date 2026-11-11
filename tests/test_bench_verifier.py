@@ -33,6 +33,8 @@ from __future__ import annotations
 import dataclasses
 import json
 import os
+import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -50,6 +52,7 @@ from nomorals.agents.bench.staging import BenchViews
 from nomorals.agents.delegation import IndependenceError
 from nomorals.agents.role_specs import BUILTIN_ROLES, check_spec_call
 from nomorals.storage.db import Database
+from nomorals.tools.pytest_runner import run_tests
 
 T0 = 1_700_000_000.0
 
@@ -528,6 +531,59 @@ class TimeoutAndEscalationTests(_VerifierCase):
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["detail"]["arbiter"], "owner")
         self.assertTrue(events[0]["detail"]["challenge_id"])
+
+
+class StaleBytecodeTests(_VerifierCase):
+    """Lane 5, Proof 8 — the verdict-stability root cause.
+
+    A same-size one-character fix (``a - b`` -> ``a * b``)
+    compiles the candidate's module into the verifier scratch's
+    ``__pycache__``; CPython validates a ``.pyc`` by source
+    mtime in whole seconds plus size, so a base checkout landing
+    in the same second as the compile resurrected the
+    candidate's bytecode on the base side — the proving test
+    passed on "base" and a sound fix was contradicted. The
+    verifier purges bytecode caches on every revision switch;
+    this test plants the collision deterministically (the base
+    source is laid over the scratch with the recorded mtime
+    second) and asserts the base-side run still executes the
+    base source. Without the purge it passes and this fails."""
+
+    def test_base_side_run_ignores_stale_candidate_bytecode(self):
+        self.register("a", ("calc.py", "tests/test_mul.py"),
+                      role="bugfix",
+                      acceptance=("test:tests/test_mul.py",))
+        got = self.claim("a", "cursor-a")
+        self.edit("a", "cursor-a", "calc.py",
+                  "def add(a, b):\n    return a + b\n\n\n"
+                  "def mul(a, b):\n    return a * b\n")
+        self.submit("a", "cursor-a", got["generation"], now=T0 + 1)
+        request = VerifyRequest.from_task(self.task("a"))
+        scratch = self.verifier._materialise(request)
+        self.addCleanup(shutil.rmtree, scratch, True)
+        acc = run_tests(paths=["tests/test_mul.py"],
+                        repo=str(scratch), timeout=180.0)
+        self.assertTrue(acc and acc.get("ok"), acc)
+        pycs = list((scratch / "__pycache__").glob("calc.*.pyc"))
+        self.assertEqual(len(pycs), 1, pycs)
+        recorded = struct.unpack(
+            "<I", pycs[0].read_bytes()[8:12])[0]
+
+        def _on_base():
+            # Force the collision the wall clock only sometimes
+            # delivers: the base source, same size, same second.
+            calc = scratch / "calc.py"
+            os.utime(calc, (recorded, recorded))
+            return run_tests(paths=["tests/test_mul.py"],
+                             repo=str(scratch), timeout=180.0)
+
+        base_run = self.verifier._run_on_base(request, scratch,
+                                              _on_base)
+        self.assertIsNotNone(base_run)
+        self.assertFalse(base_run.get("ok"), base_run)
+        self.assertIn("tests/test_mul.py::test_mul",
+                      [str(f.get("test_id"))
+                       for f in base_run.get("failed") or []])
 
 
 if __name__ == "__main__":
