@@ -5,8 +5,14 @@ scene without text, and real typography is composited on top with
 PIL. :class:`TextComposite` is the compositing spec (string, font,
 size, colour, position, stroke, box, rotation). :func:`composite_text`
 draws it onto a copy of the image and returns the composited image —
-the source image is never mutated. If no font file is supplied, PIL's
-built-in bitmap font is used (deterministic, always available).
+the source image is never mutated. Fonts resolve through the
+typography service over the stocked FontLibrary registry: a
+layer's ``font_path`` may be a real file OR a stocked family
+name (a spec naming a family is portable across hosts); with
+neither, the service picks a face covering the layer's own
+text.  A font that cannot resolve is logged by name and the
+layer falls back to PIL's built-in bitmap font, so one bad
+layer never kills the composite.
 """
 
 from __future__ import annotations
@@ -53,6 +59,32 @@ class TextComposite:
                 "font_path": self.font_path, "x": self.x, "y": self.y}
 
 
+def _layer_font(layer: TextComposite, image_font: Any) -> Any:
+    """A layer's explicit font: an existing file loads
+    directly; a path-shaped value that does not exist is a
+    broken spec (warned by name, then the caller's fallback);
+    anything else is a FAMILY NAME resolved through the
+    stocked registry — the named FontNotStocked outcome when
+    the library does not hold it, so a spec naming a family
+    is portable across hosts instead of a host-path lottery.
+    """
+    from pathlib import Path
+
+    raw = str(layer.font_path)
+    if Path(raw).is_file():
+        return image_font.truetype(raw, layer.size)
+    if "/" in raw or "\\" in raw or raw.lower().endswith(
+            (".ttf", ".otf", ".ttc", ".woff", ".woff2")):
+        _log.warning(
+            "composite_text: layer font path %r does not "
+            "exist on this host; bitmap default carries the "
+            "layer — name a stocked family instead", raw)
+        return image_font.load_default(size=layer.size)
+    from ..typography import get_service, pil_font_for
+    return pil_font_for(get_service(), "card", layer.size,
+                        family=raw, text=layer.text)
+
+
 def composite_text(image: Any, layers: list[TextComposite] | TextComposite) -> Any:
     """Composite real typography onto a copy of ``image``.
 
@@ -72,20 +104,25 @@ def composite_text(image: Any, layers: list[TextComposite] | TextComposite) -> A
     for layer in layers:
         try:
             if layer.font_path:
-                font = ImageFont.truetype(layer.font_path, layer.size)
+                font = _layer_font(layer, ImageFont)
             else:
-                # No explicit face: the typography service picks
-                # one that covers the layer's own text; PIL's
-                # bitmap default remains the last resort.
-                font = None
+                # No explicit face: the registry door — the
+                # typography service's card context, picked
+                # against the layer's own text; PIL's bitmap
+                # default remains the last resort, reached
+                # only on a logged total miss.
+                from ..typography import get_service, pil_font_for
                 try:
-                    from ..typography import get_service
-                    font = get_service().pil_font(
-                        "text", layer.size, text=layer.text)
-                except Exception:  # noqa: BLE001 - default below
-                    font = None
-                if font is None:
-                    font = ImageFont.load_default(size=layer.size)
+                    font = pil_font_for(
+                        get_service(), "card", layer.size,
+                        text=layer.text)
+                except Exception as exc:  # noqa: BLE001 - named
+                    _log.warning(
+                        "composite_text: stocked library miss "
+                        "for a layer (%s); bitmap default "
+                        "carries it", exc)
+                    font = ImageFont.load_default(
+                        size=layer.size)
         except Exception as _exc:
             _log.debug("typography.composite_text failed", exc_info=True)
             font = ImageFont.load_default()

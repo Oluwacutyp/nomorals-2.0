@@ -463,31 +463,24 @@ def _hex(value: str) -> tuple[int, int, int]:
 
 
 def _load_font(size: int) -> Any:
+    """The conversion-card face through the ONE door: the
+    typography service's ``poster`` context policy over the
+    stocked registry.  The old private host-path ladder
+    (three hardcoded files plus a filesystem walk) is gone;
+    should the registry ever report a total miss, the miss
+    is logged by name and Pillow's default carries the card
+    (this helper has never raised)."""
     from PIL import ImageFont
 
     try:
-        from ...media.typography import get_service
-        picked = get_service().pil_font("display", size, weight=700)
-    except Exception:  # noqa: BLE001 - legacy ladder below
-        picked = None
-    if picked is not None:
-        return picked
-    candidates = (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSans-Bold.ttf",
-    )
-    for path in candidates:
-        if Path(path).exists():
-            return ImageFont.truetype(path, size)
-    fc_list = Path("/usr/share/fonts")
-    for ttf in sorted(fc_list.rglob("*.ttf")):
-        if "Bold" in ttf.name and "Emoji" not in ttf.name:
-            try:
-                return ImageFont.truetype(str(ttf), size)
-            except Exception:  # noqa: BLE001
-                continue
-    return ImageFont.load_default()
+        from ...media.typography import get_service, pil_font_for
+        return pil_font_for(get_service(), "poster", size,
+                            weight=700)
+    except Exception as exc:  # noqa: BLE001 - logged miss
+        _log.warning(
+            "media_convert: stocked library miss (%s); "
+            "rendering in Pillow's default face", exc)
+        return ImageFont.load_default()
 
 
 #: The conversion verb table: name → (function, blurb).  The

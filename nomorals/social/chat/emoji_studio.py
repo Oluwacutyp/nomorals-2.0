@@ -184,30 +184,23 @@ def _seed_for(spec: dict[str, Any]) -> int:
 
 
 def _font(size: int):  # type: ignore[no-untyped-def]
-    """A bold font at ``size`` from the typography service;
-    DejaVu where the host carries it (Linux), the Windows
-    staples on EC2, else Pillow's own sized default — letter
-    art never depends on one host."""
+    """A bold font at ``size`` through the ONE door: the
+    typography service's ``poster`` context policy over the
+    stocked registry — letter art no longer depends on one
+    host's DejaVu/Windows staples.  Should the registry ever
+    report a total miss, the miss is logged by name and
+    Pillow's own sized default carries the art (this helper
+    has never raised)."""
     _Image, _Draw, ImageFont = _pil()
     try:
-        from ...media.typography import get_service
-        picked = get_service().pil_font("display", size, weight=700)
-    except Exception:  # noqa: BLE001 - legacy ladder below
-        picked = None
-    if picked is not None:
-        return picked
-    candidates = (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "C:/Windows/Fonts/arialbd.ttf",
-        "C:/Windows/Fonts/segoeuib.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-    )
-    for path in candidates:
-        try:
-            if Path(path).is_file():
-                return ImageFont.truetype(path, size)
-        except Exception:  # noqa: BLE001 - next candidate
-            continue
+        from ...media.typography import get_service, pil_font_for
+        return pil_font_for(get_service(), "poster", size,
+                            weight=700)
+    except Exception as exc:  # noqa: BLE001 - logged miss
+        from ...core.logging_setup import get_logger
+        get_logger(__name__).warning(
+            "emoji_studio: stocked library miss (%s); "
+            "lettering in Pillow's default face", exc)
     try:
         return ImageFont.load_default(size=size)
     except Exception:  # noqa: BLE001 - ancient Pillow

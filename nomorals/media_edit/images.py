@@ -337,26 +337,22 @@ def op_thumbnail(img: Any, size: int = 256) -> Any:
 # ---------------------------------------------------------------------------
 
 def _load_font(size: int) -> Any:
+    """The annotate face through the ONE door: the typography
+    service's ``poster`` context policy over the stocked
+    registry.  The old private DejaVu path ladder is gone;
+    should the registry ever report a total miss, the miss is
+    logged by name and Pillow's default carries the
+    annotation (this helper has never raised)."""
     from PIL import ImageFont
     try:
-        from ..media.typography import get_service
-        picked = get_service().pil_font("display", size, weight=700)
-    except Exception:  # noqa: BLE001 - legacy ladder below
-        picked = None
-    if picked is not None:
-        return picked
-    candidates = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-        "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-    ]
-    for path in candidates:
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except OSError:
-                continue
-    return ImageFont.load_default()
+        from ..media.typography import get_service, pil_font_for
+        return pil_font_for(get_service(), "poster", size,
+                            weight=700)
+    except Exception as exc:  # noqa: BLE001 - logged miss
+        _log.warning("images annotate: stocked library miss "
+                     "(%s); annotating in Pillow's default "
+                     "face", exc)
+        return ImageFont.load_default()
 
 
 def _text_position(img: Any, text: str, font: Any, position: str,

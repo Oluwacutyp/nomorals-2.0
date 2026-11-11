@@ -48,11 +48,6 @@ _log = get_logger(__name__)
 __all__ = ["CoverVideoReport", "render_cover_video", "audio_envelope"]
 
 _SAMPLE_RATE = 8000
-_FONT_CANDIDATES = (
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans-Bold.ttf",
-)
 
 
 @dataclass
@@ -132,22 +127,22 @@ def _embedded_artwork(audio_path: str, out_png: Path,
 
 
 def _font(px: int):
+    """The cover title's face through the ONE door: the
+    typography service's ``cover`` context policy over the
+    stocked registry.  The old private DejaVu path ladder is
+    gone; should the registry ever report a total miss, the
+    miss is recorded by name and Pillow's default carries
+    the title (this surface never fails a render over a
+    font)."""
     from PIL import ImageFont
 
     try:
-        from .typography import get_service
-        picked = get_service().pil_font("display", px, weight=700)
-    except Exception:  # noqa: BLE001 - legacy ladder below
-        picked = None
-    if picked is not None:
-        return picked
-    for candidate in _FONT_CANDIDATES:
-        if os.path.isfile(candidate):
-            try:
-                return ImageFont.truetype(candidate, px)
-            except Exception as exc:  # noqa: BLE001
-                record_failure("cover_video._font", exc)
-    return ImageFont.load_default()
+        from .typography import get_service, pil_font_for
+        return pil_font_for(get_service(), "cover", px,
+                            weight=700)
+    except Exception as exc:  # noqa: BLE001 - recorded miss
+        record_failure("cover_video._font", exc)
+        return ImageFont.load_default()
 
 
 def _palette(title: str, artist: str) -> tuple[tuple, tuple, tuple]:

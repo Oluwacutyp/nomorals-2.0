@@ -1721,6 +1721,27 @@ class RuntimeExpressionMixin:
                             f"{', '.join(INTENTS)}")
                 store.set(scope, intent=value)
             elif field in ("font", "font_family", "family"):
+                # A font pin names a family in the stocked
+                # library (or one the host catalogue holds) —
+                # validated NOW, at set time, against the real
+                # catalogue: a pin for a family nothing holds
+                # is refused by name instead of surfacing as a
+                # failed render later.
+                stocked = False
+                try:
+                    from ...media.typography import get_service
+                    service = get_service()
+                    stocked = service.font_library().stocked(
+                        value) or bool(
+                            service.catalogue().faces(
+                                family=value))
+                except Exception:  # noqa: BLE001 - catalogue
+                    stocked = False      # unreachable: refuse
+                if not stocked:
+                    return (f"{value!r} is not a font family "
+                            f"the stocked library or this host "
+                            f"holds — browse what is stocked "
+                            f"with /fonts, then pin a real name.")
                 store.set(scope, font_family=value)
             elif field == "theme":
                 from ...social.chat.typography import THEMES

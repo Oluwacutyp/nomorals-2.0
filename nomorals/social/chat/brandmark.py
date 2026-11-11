@@ -96,36 +96,29 @@ class BrandMarkError(ValueError):
 
 
 def _font(size: int):
-    """The card faces' ladder (makers._font's shape): the
-    typography service first, the platform font files next,
-    Pillow's bundled default last — a mark renders on every
-    profile."""
-    import os
-
+    """The mark's face through the ONE door: the typography
+    service's ``brandmark`` context policy over the stocked
+    registry — a guaranteed face (the vendored core subset
+    stocks it) instead of the old host lottery of private
+    path ladders.  A mark renders on every profile: should
+    the registry ever report a total miss, that miss is
+    logged by name and Pillow's bundled default carries the
+    mark, exactly the never-fail contract this surface has
+    always kept."""
     from PIL import ImageFont
 
-    try:
-        from ...media.typography import get_service
+    from ...core.logging_setup import get_logger
 
-        picked = get_service().pil_font("text", size, weight=700)
-    except Exception:  # noqa: BLE001 - the ladder below is the fallback
-        picked = None
-    if picked is not None:
-        return picked
-    names = ("DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf",
-             "LiberationSans-Bold.ttf", "arialbd.ttf")
-    roots = ("/usr/share/fonts", "/usr/local/share/fonts",
-             os.path.expanduser("~/.fonts"), r"C:\Windows\Fonts")
-    for root in roots:
-        for dirpath, _dirs, files in os.walk(root):
-            for name in names:
-                if name in files:
-                    try:
-                        return ImageFont.truetype(
-                            os.path.join(dirpath, name), size)
-                    except OSError:
-                        continue
-    return ImageFont.load_default()
+    try:
+        from ...media.typography import get_service, pil_font_for
+
+        return pil_font_for(get_service(), "brandmark", size,
+                            weight=700)
+    except Exception as exc:  # noqa: BLE001 - a mark renders
+        get_logger(__name__).warning(
+            "brandmark: stocked library miss (%s); the mark "
+            "renders in Pillow's default face", exc)
+        return ImageFont.load_default()
 
 
 def _corner_luminance(img, box: tuple[int, int, int, int]) -> float:

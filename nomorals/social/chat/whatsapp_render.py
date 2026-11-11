@@ -27,6 +27,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from ...core.logging_setup import get_logger
+
 __all__ = [
     "needs_image_render",
     "is_table",
@@ -83,20 +85,23 @@ def needs_image_render(text: str) -> bool:
 
 
 def _font() -> Any:
+    """The table/diff face through the ONE door: the
+    typography service's ``mono`` context policy over the
+    stocked registry (a real monospace face is vendored in
+    the core subset, so this renders in mono on every host).
+    The old bare-filename ladder is gone; should the
+    registry ever report a total miss, the miss is logged
+    by name and Pillow's default carries the render (this
+    helper has never raised)."""
     from PIL import ImageFont
     try:
-        from ...media.typography import get_service
-        picked = get_service().pil_font("mono", _FONT_SIZE)
-    except Exception:  # noqa: BLE001 - legacy ladder below
-        picked = None
-    if picked is not None:
-        return picked
-    for candidate in ("DejaVuSansMono.ttf", "DejaVuSans.ttf"):
-        try:
-            return ImageFont.truetype(candidate, _FONT_SIZE)
-        except OSError:
-            continue
-    return ImageFont.load_default()
+        from ...media.typography import get_service, pil_font_for
+        return pil_font_for(get_service(), "mono", _FONT_SIZE)
+    except Exception as exc:  # noqa: BLE001 - logged miss
+        get_logger(__name__).warning(
+            "whatsapp_render: stocked library miss (%s); "
+            "rendering in Pillow's default face", exc)
+        return ImageFont.load_default()
 
 
 def _parse_table(text: str) -> list[list[str]]:

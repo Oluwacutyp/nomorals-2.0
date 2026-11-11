@@ -70,90 +70,86 @@ PROJECT_VERSION = 1
 # font discovery
 # ---------------------------------------------------------------------------
 
-_FONT_DIRS = [
-    "/usr/share/fonts",
-    "/usr/local/share/fonts",
-    os.path.expanduser("~/.fonts"),
-    os.path.expanduser("~/.local/share/fonts"),
-    "/System/Library/Fonts",
-    "/Library/Fonts",
-    "C:\\Windows\\Fonts",
-]
-
 _font_cache: dict[str, str] | None = None
 
 
 def discover_fonts(*, refresh: bool = False) -> dict[str, str]:
-    """Scan system font dirs → {display name: path}. Cached after first scan."""
+    """The discoverable fonts → {family name (lowercased): path}.
+
+    The typography service's parsed catalogue is the index —
+    real family names from the font files themselves, over
+    the stocked registry tiers first and the host's faces
+    after (the service's root order).  The legacy raw
+    filename walk over system dirs is gone: it guessed names
+    from filenames and could not see the stocked library at
+    all.  Cached after first scan."""
     global _font_cache
     if _font_cache is not None and not refresh:
         return _font_cache
     found: dict[str, str] = {}
-    for d in _FONT_DIRS:
-        if not os.path.isdir(d):
-            continue
-        for root, _dirs, files in os.walk(d):
-            for f in files:
-                if f.lower().endswith((".ttf", ".otf", ".ttc")):
-                    name = os.path.splitext(f)[0].replace("-", " ").replace("_", " ")
-                    found.setdefault(name.lower(), os.path.join(root, f))
+    try:
+        from ..media.typography import get_service
+        for face in get_service().catalogue().faces():
+            found.setdefault(face.family.lower(), str(face.path))
+    except Exception as exc:  # noqa: BLE001 - empty is honest
+        _log.warning("studio discover_fonts: catalogue "
+                     "unavailable: %s", exc)
     _font_cache = found
     return found
 
 
 def find_font(query: str | None, size: int) -> Any:
-    """Resolve a font by name (fuzzy), path, or fall back to DejaVu/default.
+    """Resolve a font for a text layer through the ONE door.
 
-    Name resolution runs through the typography service's parsed
-    catalogue first (real family names, not filename guesses);
-    the legacy filename walk remains the fallback."""
+    An explicit file path loads directly; a NAME resolves
+    through the typography service (its parsed catalogue
+    search, then the stocked library's exact door).  This
+    helper's pinned contract is that it always returns a
+    working font: a query nothing holds — an unloadable
+    path, a name no tier stocks — is a NAMED outcome (the
+    miss is logged with the query verbatim) whose fall-
+    through now lands on the ``poster`` context policy's
+    real stocked face, never the old silent slide down a
+    filename ladder to DejaVu or the bitmap default.  With
+    no query the poster policy answers directly; its total
+    miss (practically unreachable while the vendored core
+    is stocked) is logged by name before Pillow's default.
+    """
     from PIL import ImageFont
     if query:
         q = query.strip()
         if os.path.isfile(q):
             try:
                 return ImageFont.truetype(q, size)
-            except OSError:  # noqa: E103 - falls through to font discovery
-                pass
+            except OSError:  # noqa: E103 - falls through,
+                pass             # named in the log below
+        from ..media.typography import (
+            FontNotStocked,
+            get_service,
+            load_font,
+            pil_font_for,
+        )
+        service = get_service()
+        hits = service.catalogue().search(q)
+        if hits:
+            return load_font(hits[0].path, size,
+                             hits[0].face_index)
         try:
-            from ..media.typography import get_service, load_font
-            hits = get_service().catalogue().search(q)
-            if hits:
-                return load_font(hits[0].path, size, hits[0].face_index)
-        except Exception:  # noqa: BLE001 - legacy discovery below
-            pass
-        fonts = discover_fonts()
-        ql = q.lower()
-        # exact → startswith → contains
-        for key in (ql,):
-            if key in fonts:
-                try:
-                    return ImageFont.truetype(fonts[key], size)
-                except OSError:
-                    break
-        for name, path in fonts.items():
-            if name.startswith(ql):
-                try:
-                    return ImageFont.truetype(path, size)
-                except OSError:
-                    continue
-        for name, path in fonts.items():
-            if ql in name:
-                try:
-                    return ImageFont.truetype(path, size)
-                except OSError:
-                    continue
-    # bundled fallbacks (same as images._load_font)
-    for path in (
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    ):
-        if os.path.exists(path):
-            try:
-                return ImageFont.truetype(path, size)
-            except OSError:
-                continue
-    return ImageFont.load_default()
+            return pil_font_for(service, "poster", size,
+                                family=q)
+        except FontNotStocked as miss:
+            _log.warning("studio find_font: %s — the poster "
+                         "context face carries the layer",
+                         miss)
+    try:
+        from ..media.typography import get_service, pil_font_for
+        return pil_font_for(get_service(), "poster", size,
+                            weight=700)
+    except Exception as exc:  # noqa: BLE001 - logged miss
+        _log.warning("studio find_font: stocked library miss "
+                     "(%s); Pillow's default carries the "
+                     "layer", exc)
+        return ImageFont.load_default()
 
 
 # ---------------------------------------------------------------------------

@@ -60,27 +60,33 @@ class MockScreensError(Exception):
     message IS the user-fit reason."""
 
 
-_EMOJI_FONT_PATHS = (
-    "/usr/share/fonts/truetype/noto/NotoColorEmoji.ttf",
-    "C:\\Windows\\Fonts\\seguiemj.ttf",
-)
 _emoji_font_cache: dict = {}
 
 
 def _emoji_tile(char: str, px: int):
     """Render one emoji as a colour tile when a colour
-    emoji font exists on the host; None otherwise (the
-    caller falls back to a text glyph)."""
+    emoji face is available through the ONE door — the
+    stocked registry first (the pack carries Noto Color
+    Emoji), then the typography catalogue's host faces
+    under their real family names; the old hardcoded
+    host-path pair is gone.  None when no colour-emoji
+    face exists (the caller falls back to a text glyph)."""
     key = (char, px)
     if key in _emoji_font_cache:
         return _emoji_font_cache[key]
     tile = None
-    for path in _EMOJI_FONT_PATHS:
+    path = None
+    try:
+        from ....media.typography import (
+            emoji_font_path,
+            get_service,
+        )
+        path = emoji_font_path(get_service())
+    except Exception:  # noqa: BLE001 - no colour rung
+        path = None
+    if path is not None:
         try:
-            font = ImageFont.truetype(path, 109)
-        except Exception:  # noqa: BLE001 - next candidate
-            continue
-        try:
+            font = ImageFont.truetype(str(path), 109)
             img = Image.new("RGBA", (136, 136), (0, 0, 0, 0))
             draw = ImageDraw.Draw(img)
             draw.text((8, 8), char, font=font, embedded_color=True)
@@ -88,10 +94,8 @@ def _emoji_tile(char: str, px: int):
             if bbox is not None:
                 tile = img.crop(bbox).resize(
                     (px, px), Image.LANCZOS)
-            break
         except Exception:  # noqa: BLE001 - no colour rung
             tile = None
-            break
     _emoji_font_cache[key] = tile
     return tile
 
@@ -127,6 +131,14 @@ class _Canvas:
         self.dev = DEVICES[screen.chrome.style]
         self.w = int(self.dev["width"])
         self.intent = self.design.get("intent", "text")
+        #: the typography context policy row this screen
+        #: wears: the platform's own screen_* row when the
+        #: policy table carries one, else the generic screen
+        #: row.  A design may also name a ``family`` outright.
+        from ....media.typography import CONTEXT_POLICIES
+        wanted = "screen_" + str(screen.platform)
+        self.font_context = wanted if wanted in \
+            CONTEXT_POLICIES else "screen"
         self._measure = ImageDraw.Draw(Image.new("RGB", (8, 8)))
         #: real-media hand-off for this render: message id
         #: → bytes / path / PIL image / MediaRef.  Wins over
@@ -212,8 +224,21 @@ class _Canvas:
         return int(round(value * SCALE))
 
     def font(self, size: float, *, bold: bool = False):
-        return _makers._font(self.s(size), bold=bold,
-                             intent=self.intent)
+        """This screen's face through the ONE door (makers'
+        font seam over the typography context policy): the
+        platform's real UI family where it is stockable, a
+        design-named ``family`` when the design carries one.
+        A family the stocked library does not hold fails the
+        render with the registry's named reason, carried as
+        this surface's own error type."""
+        from ....media.typography import FontNotStocked
+        try:
+            return _makers._font(
+                self.s(size), bold=bold,
+                context=self.font_context,
+                family=self.design.get("family"))
+        except FontNotStocked as exc:
+            raise MockScreensError(str(exc)) from exc
 
     def wrap(self, text: str, size: float, max_w: float,
              *, bold: bool = False) -> list:

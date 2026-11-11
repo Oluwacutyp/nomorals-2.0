@@ -190,51 +190,72 @@ def ease(name: str, t: float) -> float:
 
 _FONT_CACHE: dict[tuple[str, int], ImageFont.FreeTypeFont | ImageFont.ImageFont] = {}
 
-#: bundled-candidate font names, best first
-_FONT_CANDIDATES = (
-    "DejaVuSans-Bold.ttf",
-    "DejaVuSans.ttf",
-    "LiberationSans-Bold.ttf",
-    "LiberationSans-Regular.ttf",
-)
-
-
 def find_font(size: int, name: str = "") -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
-    """Resolve a truetype font; falls back through candidates, then PIL default.
+    """Resolve a truetype font through the ONE door.
 
-    Resolution runs through the typography service first (named
-    faces via the parsed catalogue, unnamed via display intent);
-    the legacy candidate ladder remains the fallback."""
+    A ``name`` that is an existing file loads directly; a
+    filename-shaped name (``"DejaVuSans-Bold.ttf"`` — the
+    explainer scenes' habit) and a family name both resolve
+    through the typography service: its parsed catalogue
+    search first (real family/full/PostScript names), then
+    the stocked library's exact door.  A name nothing holds
+    raises :class:`MotionStudioError` carrying the registry's
+    named FontNotStocked message — the old bare-filename
+    ladder (Pillow's host font search, then the bitmap
+    default) silently rendered scenes in the bitmap default
+    on any host without DejaVu.  Unnamed requests take the
+    ``poster`` context policy; its total miss is logged by
+    name before Pillow's default, as before."""
     key = (name or "", size)
     if key in _FONT_CACHE:
         return _FONT_CACHE[key]
     _require_pil()
-    try:
-        from ..typography import get_service, load_font
-        service = get_service()
-        if name:
-            hits = service.catalogue().search(name)
-            if hits:
-                font = load_font(hits[0].path, size, hits[0].face_index)
-                _FONT_CACHE[key] = font
-                return font
-        else:
-            picked = service.pil_font("display", size, weight=700)
-            if picked is not None:
-                _FONT_CACHE[key] = picked
-                return picked
-    except Exception:  # noqa: BLE001 - legacy ladder below
-        pass
-    candidates = ([name] if name else []) + list(_FONT_CANDIDATES)
-    _require_pil()
-    for cand in candidates:
-        try:
-            font = ImageFont.truetype(cand, size)
+    if name and os.path.isfile(name):
+        font = ImageFont.truetype(name, size)
+        _FONT_CACHE[key] = font
+        return font
+    from ..typography import (
+        FontNotStocked,
+        get_service,
+        load_font,
+        pil_font_for,
+    )
+    service = get_service()
+    if name:
+        stem = name
+        lowered = name.lower()
+        for ext in (".ttf", ".otf", ".ttc"):
+            if lowered.endswith(ext):
+                stem = name[: -len(ext)]
+                break
+        hits = service.catalogue().search(stem)
+        if hits:
+            font = load_font(hits[0].path, size,
+                             hits[0].face_index)
             _FONT_CACHE[key] = font
             return font
-        except Exception:  # noqa: BLE001 - try next candidate
-            continue
-    font = ImageFont.load_default()
+        if stem != name:
+            # A filename for a face this host does not carry:
+            # the context door answers with a real stocked
+            # face rather than the bitmap default.
+            font = pil_font_for(service, "poster", size,
+                                weight=700)
+            _FONT_CACHE[key] = font
+            return font
+        try:
+            font = pil_font_for(service, "poster", size,
+                                family=name)
+        except FontNotStocked as miss:
+            raise MotionStudioError(str(miss)) from miss
+        _FONT_CACHE[key] = font
+        return font
+    try:
+        font = pil_font_for(service, "poster", size, weight=700)
+    except Exception as exc:  # noqa: BLE001 - logged miss
+        _log.warning("motion find_font: stocked library miss "
+                     "(%s); Pillow's default carries the "
+                     "scene", exc)
+        font = ImageFont.load_default()
     _FONT_CACHE[key] = font
     return font
 

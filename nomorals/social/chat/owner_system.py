@@ -457,17 +457,15 @@ def apply_media_watermark(data: bytes, text: str
     font_size = max(11, min(28, width // 42))
     font = None
     try:
-        from ...media.typography import get_service
-        font = get_service().pil_font("caption", font_size, text=label)
-    except Exception:  # noqa: BLE001 - legacy ladder below
+        from ...media.typography import get_service, pil_font_for
+        font = pil_font_for(get_service(), "caption", font_size,
+                            text=label)
+    except Exception as exc:  # noqa: BLE001 - logged miss;
+        from ...core.logging_setup import get_logger
+        get_logger(__name__).warning(
+            "owner signature stamp: stocked library miss "
+            "(%s); stamping in Pillow's default face", exc)
         font = None
-    if font is None:
-        for candidate in ("DejaVuSans.ttf", "DejaVuSans-Bold.ttf"):
-            try:
-                font = ImageFont.truetype(candidate, font_size)
-                break
-            except (OSError, IOError):
-                continue
     if font is None:
         font = ImageFont.load_default()
     overlay = Image.new("RGBA", base.size, (0, 0, 0, 0))

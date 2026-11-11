@@ -206,49 +206,27 @@ _CARD_W = 920
 _PAD = 40
 
 
-def _font(size: int, *, bold: bool = False, intent: str = "text"):
-    """Card faces come from the typography service (semantic
-    selection over the parsed catalogue); the legacy ladder —
-    DejaVu / Noto / Liberation on Linux, Arial on Windows (the
-    EC2 host), Pillow's bundled default last — remains the
-    fallback when the service has no face, so a card renders on
-    every profile.  ``intent`` is the typography service's own
-    vocabulary (text / display / editorial / …): designs pick
-    the intent that matches their platform's typographic feel
-    — the ONE theme system's faces, never a private font
-    hunt."""
-    import os
+def _font(size: int, *, bold: bool = False, intent: str = "text",
+          context: str = "", family: str | None = None):
+    """Card faces come through the ONE door: the typography
+    service's context policy (media.typography.policy) over
+    the stocked FontLibrary registry.  Designs name a
+    ``context`` (data: FEATURE_DESIGNS carry ``font_context``;
+    platform cards wear the ``card`` context) or an explicit
+    ``family``; a bare ``intent`` keeps the intent's own
+    semantics through the same door.  The old private ladder
+    (DejaVu / Noto / Liberation host paths → Pillow's bitmap
+    default) is gone: the registry's vendored core subset
+    guarantees a real face on every host, and a family that
+    cannot resolve raises the registry's named
+    FontNotStocked outcome instead of silently sliding to
+    the bitmap default."""
+    from ...media.typography import get_service, pil_font_for
 
-    from PIL import ImageFont
-
-    try:
-        from ...media.typography import get_service
-        picked = get_service().pil_font(
-            intent, size, weight=700 if bold else 400)
-    except Exception:  # noqa: BLE001 - legacy ladder below
-        picked = None
-    if picked is not None:
-        return picked
-    names = (("DejaVuSans-Bold.ttf", "NotoSans-Bold.ttf",
-              "LiberationSans-Bold.ttf", "arialbd.ttf")
-             if bold else
-             ("DejaVuSans.ttf", "NotoSans-Regular.ttf",
-              "LiberationSans-Regular.ttf", "arial.ttf"))
-    roots = ("/usr/share/fonts/truetype/dejavu",
-             "/usr/share/fonts/truetype/noto",
-             "/usr/share/fonts/truetype/liberation",
-             "/usr/share/fonts/TTF",
-             os.path.join(os.environ.get("WINDIR", "C:\\Windows"),
-                          "Fonts"))
-    for root in roots:
-        for name in names:
-            path = os.path.join(root, name)
-            if os.path.exists(path):
-                try:
-                    return ImageFont.truetype(path, size)
-                except OSError:
-                    continue
-    return ImageFont.load_default()
+    return pil_font_for(get_service(), context, size,
+                        intent=None if context else intent,
+                        family=family,
+                        weight=700 if bold else 400)
 
 
 def _initials(name: str) -> str:
@@ -710,12 +688,14 @@ FEATURE_DESIGNS: dict[str, dict[str, Any]] = {
         "label": "Quote", "size": 1080,
         "gradient": ((0x0B, 0x1E, 0x3A), (0x0E, 0x4D, 0x5C)),
         "accent": (0xE8, 0xC3, 0x4A), "font": "editorial",
+        "font_context": "quote",
     },
     "motivation": {
         "label": "Motivation", "size": 1080,
         "gradient": ((0x1B, 0x1B, 0x3A), (0xB4, 0x5A, 0x1B)),
         "gradient_evening": ((0x05, 0x08, 0x1A), (0x1D, 0x2A, 0x52)),
         "accent": (0xF2, 0xC1, 0x4A), "font": "display",
+        "font_context": "motivation",
     },
 }
 
@@ -788,12 +768,12 @@ def _render_platform(key: str, entries: list[dict[str, Any]]
     content_w = width - content_x - _PAD - (96 if rail_right else 0)
     header_h = {"bar": 64, "minimal": 52, "band": 120}.get(
         spec["header"], 0)
-    name_font = _font(32, bold=True, intent=spec["font"])
-    meta_font = _font(24, intent=spec["font"])
-    text_font = _font(36, intent=spec["font"])
-    c_name_font = _font(27, bold=True, intent=spec["font"])
-    c_text_font = _font(29, intent=spec["font"])
-    act_font = _font(25, bold=True, intent=spec["font"])
+    name_font = _font(32, bold=True, context="card")
+    meta_font = _font(24, context="card")
+    text_font = _font(36, context="card")
+    c_name_font = _font(27, bold=True, context="card")
+    c_text_font = _font(29, context="card")
+    act_font = _font(25, bold=True, context="card")
 
     probe = ImageDraw.Draw(Image.new("RGB", (width, 100)))
     post_lines = _wrap(probe, post["text"], text_font,
@@ -1071,9 +1051,10 @@ def _render_feature(key: str, entries: list[dict[str, Any]], *,
         drawn["regions"]["title"] = (int((size - tw) / 2), 84,
                                      int(tw), 40)
     if key == "bigquote":
-        qfont = _font(150, bold=True, intent=spec["font"])
+        qfont = _font(150, bold=True,
+                      context=spec.get("font_context", ""))
         draw.text((90, 120), "“", font=qfont, fill=spec["accent"])
-    body_font = _font(58, intent=spec["font"])
+    body_font = _font(58, context=spec.get("font_context", ""))
     probe = ImageDraw.Draw(Image.new("RGB", (size, 100)))
     lines = _wrap(probe, str(entry.get("text") or ""), body_font,
                   size - 220)
