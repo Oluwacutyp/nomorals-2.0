@@ -10,6 +10,7 @@ Verifies:
 from __future__ import annotations
 
 import unittest
+from contextlib import nullcontext
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -28,6 +29,43 @@ def _chat(platform: str = "telegram", chat_id: str = "123") -> ChatRef:
 def _message(text: str = "hello", **kw) -> ChatMessage:
     return ChatMessage(chat=_chat(**kw), incoming=True, text=text,
                        sender="owner")
+
+
+def _faithful_db() -> MagicMock:
+    """A db double shaped like a production Database on the default rung.
+
+    Production's Database carries NO ``document_store`` attribute unless
+    boot attached a non-SQLite store (storage.docstore.attach_document_store
+    sets it only then), and the ConversationLog seam dispatches on exactly
+    that attribute (storage.rowstore.attached_rows). A bare MagicMock
+    fabricates a truthy ``document_store``, so every write silently routes
+    into a phantom row table and db.execute is never called — pin the
+    faithful default explicitly.
+    """
+    db = MagicMock()
+    db.document_store = None
+    return db
+
+
+class _RecordingLog:
+    """A ConversationLog double that records what the brain hands it."""
+
+    last = None
+
+    def __init__(self, db):
+        self.db = db
+        self.ensured = []
+        self.appended = []
+        _RecordingLog.last = self
+
+    def transaction(self):
+        return nullcontext()
+
+    def ensure_conversation(self, conv_id, **kw):
+        self.ensured.append(conv_id)
+
+    def append_message(self, **kw):
+        self.appended.append(kw)
 
 
 class BridgeInjectionTests(unittest.TestCase):
@@ -93,7 +131,7 @@ class BrainSessionScopeTests(unittest.TestCase):
         from nomorals.agents.partner.brain import PartnerBrain
         brain = PartnerBrain.__new__(PartnerBrain)
         brain.context = SimpleNamespace(
-            db=MagicMock(), memory=None, metrics=MagicMock(),
+            db=_faithful_db(), memory=None, metrics=MagicMock(),
             settings=SimpleNamespace(
                 partner=SimpleNamespace(history_window=10),
                 memory=SimpleNamespace(extract_enabled=False),
@@ -145,7 +183,7 @@ class BrainSessionScopeTests(unittest.TestCase):
 
     def test_persist_uses_session_conversation_id(self):
         brain = self._brain()
-        db = MagicMock()
+        db = _faithful_db()
         brain.context.db = db
         msg = _message()
         msg.meta["os_session_id"] = "telegram:123"
@@ -154,6 +192,45 @@ class BrainSessionScopeTests(unittest.TestCase):
         calls = [str(c) for c in db.execute.call_args_list]
         self.assertTrue(any("telegram:123" in c for c in calls),
                         f"session id not in persist calls: {calls}")
+
+    def test_persist_hands_session_id_to_the_conversation_log(self):
+        # Seam pin: whatever storage rung is active, _persist_inbound must
+        # hand the ConversationLog the SESSION's conversation id — not the
+        # chat key, not an empty scope. The session id here deliberately
+        # differs from the chat key, so only the session id can satisfy it.
+        import nomorals.storage.conversations as conv_mod
+        brain = self._brain()
+        msg = _message()
+        msg.meta["os_session_id"] = "os-session:42"
+        orig = conv_mod.ConversationLog
+        conv_mod.ConversationLog = _RecordingLog
+        try:
+            brain._persist_inbound(msg)
+        finally:
+            conv_mod.ConversationLog = orig
+        log = _RecordingLog.last
+        self.assertIsNotNone(log)
+        self.assertEqual(log.ensured, ["os-session:42"])
+        self.assertEqual([a["conversation_id"] for a in log.appended],
+                         ["os-session:42"])
+
+    def test_persist_hands_chat_key_to_the_log_without_a_session(self):
+        # Seam pin, fallback half: with no session attached, the log
+        # receives the chat key — the scope is never empty.
+        import nomorals.storage.conversations as conv_mod
+        brain = self._brain()
+        msg = _message()  # no os_session_id in meta
+        orig = conv_mod.ConversationLog
+        conv_mod.ConversationLog = _RecordingLog
+        try:
+            brain._persist_inbound(msg)
+        finally:
+            conv_mod.ConversationLog = orig
+        log = _RecordingLog.last
+        self.assertIsNotNone(log)
+        self.assertEqual(log.ensured, [msg.chat.key])
+        self.assertEqual([a["conversation_id"] for a in log.appended],
+                         [msg.chat.key])
 
 
 if __name__ == "__main__":
