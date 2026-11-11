@@ -587,7 +587,9 @@ def render_card(card: Card, *, platform: Any = "telegram-bot",
 
 
 def render_card_framed(card: Card, *,
-                       settings: dict[str, Any] | None = None
+                       settings: dict[str, Any] | None = None,
+                       row_marker: str = "",
+                       head_marker: str = ""
                        ) -> Rendered:
     """The card in the XMD frame grammar (owner order
     2026-11-05 — the boxed WhatsApp menu format): one box for the
@@ -601,7 +603,13 @@ def render_card_framed(card: Card, *,
     instead of a bold line inside the box.  Pure divider sections
     (the board preset's rules) are the frame's job here and are
     skipped.  WhatsApp only — every other platform keeps
-    :func:`render_card`."""
+    :func:`render_card`.
+
+    ``row_marker`` / ``head_marker`` are the XMD row rhythm the
+    menu grammar carries (``✫✧│`` down a section's rows, ``✫``
+    down the masthead's fields): opt-in per render, empty by
+    default so every existing framed surface renders exactly as
+    before."""
     # present's own internals, reused so framed content IS the
     # flat render's content (same package, same layer).
     from .present import _literal as _present_literal
@@ -621,7 +629,7 @@ def render_card_framed(card: Card, *,
             head = [xmd_frame_top(head_title)]
             for ln in _present_prose(doc.summary, dialect) \
                     .split("\n"):
-                head.append(xmd_frame_line(ln))
+                head.append(xmd_frame_line(ln, head_marker))
             head.append(xmd_frame_bottom())
             boxes.append("\n".join(head))
         else:
@@ -641,7 +649,7 @@ def render_card_framed(card: Card, *,
             continue
         title = _present_literal(section.title, dialect)
         box = [xmd_frame_top(small_caps(title) if title else "")]
-        box += [xmd_frame_line(ln) for ln in flat]
+        box += [xmd_frame_line(ln, row_marker) for ln in flat]
         box.append(xmd_frame_bottom())
         boxes.append("\n".join(box))
     text = "\n\n".join(boxes)

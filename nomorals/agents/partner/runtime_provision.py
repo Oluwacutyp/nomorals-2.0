@@ -1820,7 +1820,7 @@ class RuntimeProvisionMixin:
             return {}
 
     def _control_pair(self, tail: str, *, chat_key: str = "",
-                      message: Any = None) -> str:
+                      message: Any = None):  # type: ignore[no-untyped-def]
         """/pair — the pairing-with-code account pool (§15).
 
         /pair                              pool summary + accounts
@@ -1877,10 +1877,21 @@ class RuntimeProvisionMixin:
         parts = (tail or "").split()
         if not parts or parts[0].lower() in ("list", "status"):
             counts = sup.counts()
-            lines = [f"📟 paired accounts — Registered: "
-                     f"{counts['registered']} · Connected: "
-                     f"{counts['connected']} · Dropped: "
-                     f"{counts.get('dropped', 0)}"]
+            # The home is a composed Card now (presentation
+            # Phase 2): counts as the summary line, one titled
+            # block per account family, the personal-surface
+            # commands as a sectioned block instead of the old
+            # ~35-line prose tail — and the accounts' toggles
+            # ride as buttons that flip them (below).
+            from ...social.chat.typography import Card, card_text
+
+            card = Card("settings", title="paired accounts",
+                        icon="📟")
+            card.line(f"Registered: {counts['registered']} · "
+                      f"Connected: {counts['connected']} · "
+                      f"Dropped: {counts.get('dropped', 0)}")
+            account_lines: list[str] = []
+            toggle_rows: list = []
             try:
                 pair_bundle = self._pairing_personal()
                 pairer = pair_bundle["pairer"]
@@ -1909,10 +1920,11 @@ class RuntimeProvisionMixin:
                                   "left)")
                 if row.get("last_error"):
                     extra += f" · ⚠️ {row['last_error']}"
-                lines.append(
-                    f"  {row['id']}{label} — {row['status']}"
+                account_lines.append(
+                    f"{row['id']}{label} — {row['status']}"
                     f" (bridge {row['process']}){extra}")
                 if rec is not None:
+                    toggle_rows.append((row["id"], rec))
                     # Set-on-but-not-live must be VISIBLE, with
                     # its reason — the owner's 2026-11-07 trap was
                     # toggles on, surface dead, display silent.
@@ -1921,7 +1933,7 @@ class RuntimeProvisionMixin:
                     if verdicts:
                         from ...social.pairing import PERSONAL_TOGGLES as _TOGGLES
 
-                        lines.append("    live: " + " · ".join(
+                        account_lines.append("  live: " + " · ".join(
                             f"{name} {verdicts[name]}"
                             for name in _TOGGLES
                             if name in verdicts))
@@ -1935,50 +1947,97 @@ class RuntimeProvisionMixin:
                     chat_cfg, "whatsapp_enabled", True) and any(
                     r.platform == "whatsapp" and r.status == "linked"
                     for r in sup.registry.all()):
-                lines.append(
+                card.line(
                     "⚠️ WhatsApp is paired and linked, but the "
                     "WhatsApp platform is disabled in config "
                     "(chat.whatsapp_enabled=false) — paired accounts "
                     "have no live chat surface until it's enabled.")
-            lines.append("pair one: /pair whatsapp number [label] "
-                         "· /pair telegram number [label]")
-            lines.append(
-                "personal surfaces on these accounts: "
-                "/statusreact [on|off|emoji] sets the status "
-                "reaction · /react and /forward act on messages "
-                "as you · /viewonce (or /vv) shows a captured "
-                "view-once · /poststatus posts as you · "
-                "/statusaud reads or sets who your status "
-                "goes to and /statusviewers shows who "
-                "viewed it · "
-                "/sendonce sends a photo/video view-once and "
-                "/sendnote sends a round video note, as you · "
-                "/chanstory posts to a channel you admin · "
-                "/joinlink joins a WhatsApp group from its "
-                "invite link · /newgroup and /newchannel "
-                "create Telegram chats as you · /leave leaves "
-                "a group or channel · /myprofile and /privacy "
-                "shape your WhatsApp identity · /makepoll "
-                "posts a WhatsApp poll (read it back with "
-                "/pollres) · /sendloc drops a location pin "
-                "and /sendcontact shares a contact card in "
-                "the chat you run them in · /find searches "
-                "a chat's messages and /findall searches "
-                "every chat on the surface · /labels reads "
-                "and manages your WhatsApp labels and "
-                "/catalog your WhatsApp product catalog, "
-                "both by the numbers their lists print · "
-                "/broadcast and /wpay answer honestly what "
-                "a linked device cannot do with broadcast "
-                "lists and payments · "
-                "/pair saved and /pair recovered list what the "
-                "surfaces kept · /pair journal [kind] [count] "
-                "reads the journal itself — every status view, "
-                "reaction and refusal, newest first — all of "
-                "them answer in your "
-                "private chats (personal bot, userbot DM, "
-                "WhatsApp self-chat), never on the public bot.")
-            return "\n".join(lines)
+            if account_lines:
+                card.block_lines(account_lines, title="accounts")
+            card.line("pair one: /pair whatsapp number [label] "
+                      "· /pair telegram number [label]")
+            # The personal-surface command set, sectioned — the
+            # same content the old prose tail enumerated, one
+            # command per line under its own block.
+            card.block_lines([
+                "/statusreact [on|off|emoji] — sets the status "
+                "reaction",
+                "/react and /forward — act on messages as you",
+                "/viewonce (or /vv) — shows a captured view-once",
+                "/poststatus — posts as you",
+                "/statusaud — reads or sets who your status goes "
+                "to",
+                "/statusviewers — shows who viewed it",
+                "/sendonce — sends a photo/video view-once, as you",
+                "/sendnote — sends a round video note, as you",
+                "/chanstory — posts to a channel you admin",
+                "/joinlink — joins a WhatsApp group from its "
+                "invite link",
+                "/newgroup and /newchannel — create Telegram "
+                "chats as you",
+                "/leave — leaves a group or channel",
+                "/myprofile and /privacy — shape your WhatsApp "
+                "identity",
+                "/makepoll — posts a WhatsApp poll (read it back "
+                "with /pollres)",
+                "/sendloc — drops a location pin",
+                "/sendcontact — shares a contact card in the chat "
+                "you run them in",
+                "/find — searches a chat's messages",
+                "/findall — searches every chat on the surface",
+                "/labels — reads and manages your WhatsApp labels",
+                "/catalog — your WhatsApp product catalog, by the "
+                "numbers their lists print",
+                "/broadcast and /wpay — answer honestly what a "
+                "linked device cannot do with broadcast lists and "
+                "payments",
+                "/pair saved and /pair recovered — list what the "
+                "surfaces kept",
+                "/pair journal [kind] [count] — reads the journal "
+                "itself: every status view, reaction and refusal, "
+                "newest first",
+            ], title="personal surfaces")
+            card.note("all of them answer in your private chats "
+                      "(personal bot, userbot DM, WhatsApp "
+                      "self-chat), never on the public bot.")
+            # Toggle buttons: one per personal-surface toggle per
+            # account, labelled with its live state; a tap runs
+            # the very /pair toggle command that flips it. On
+            # Telegram surfaces the callback budget is enforced
+            # per button (a long account id can price a button
+            # out — it is skipped, never shipped broken); on
+            # WhatsApp the tap re-enters as the command text
+            # itself, so no Telegram budget applies.
+            _platform = (chat_key or "").partition(":")[0] \
+                .strip().lower()
+            _tg_surface = _platform.startswith("telegram")
+            buttons: list = []
+            for row_id, rec in toggle_rows:
+                from ...social.pairing import PERSONAL_TOGGLES as _TG
+
+                singles: list = []
+                for name in _TG:
+                    on = bool(rec.toggle(name))
+                    data = (f"pair toggle {row_id} {name} "
+                            f"{'off' if on else 'on'}")
+                    if _tg_surface:
+                        from ...social.chat.tgbot_buttons import check_callback_data
+
+                        try:
+                            check_callback_data(data)
+                        except ValueError:
+                            continue
+                    singles.append(
+                        (f"{name} {'✓' if on else '✗'}", data))
+                buttons.extend(
+                    [singles[i:i + 3]
+                     for i in range(0, len(singles), 3)])
+            text = card_text(card)
+            if buttons:
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(text, buttons)
+            return text
         sub = parts[0].lower()
         if sub == "whatsapp":
             if len(parts) < 2:

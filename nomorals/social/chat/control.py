@@ -60,7 +60,7 @@ __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
            "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS",
            "GAME_START_COMMANDS",
            "PUBLIC_COMMANDS", "PUBLIC_GAME_COMMANDS", "caller_may_run",
-           "public_menu_text",
+           "public_menu_text", "menu_home_text",
            "MAX_STACK_DEPTH", "NON_STACKABLE_COMMANDS", "STACK_DENIAL_REPLY",
            "split_command_stack", "expand_prev_placeholders", "stack_header",
            "WHATSAPP_UNSUPPORTED_KINDS", "TELEGRAM_CLEANUP_KINDS"]
@@ -298,63 +298,16 @@ CONFIRM_TTL_S = 300.0
 
 
 def public_menu_text() -> str:
-    """Menu text for bare /start and bare /menu — the PUBLIC list only.
-
-    Short: title + grouped command names + the tap-a-button line. No
-    per-command descriptions (those live in /help); the keyboard
-    carries the actions. Owner-only commands are never listed here —
-    the owner reaches the full catalog via /list.
-    """
-    games = " ".join(f"/{name}" for name in PUBLIC_GAME_COMMANDS)
-    return (
-        "🥷 Devon — tap a button below, or type a command:\n"
-        "\n"
-        "talk — /help /ping /search /news /translate /tl /book\n"
-        "make — /music /play /video /podcast\n"
-        "see & hear — /tts /stt /look /image /lens\n"
-        "tools — /decode /dns /whois /cipher /wisdom /think\n"
-        "express — /steal /sticker /convert /gif /emoji "
-        "/customemoji /emojiart /react\n"
-        "reactions — /awoo /baka /bite /blush /bonk /bored "
-        "/bully /cringe /cry /cuddle /dance /facepalm /feed "
-        "/glomp /handhold /handshake /happy /highfive /hug "
-        "/kiss /laugh /lick /nom /pat /pout /shrug /slap "
-        "/sleep /smile /smug /stare /thumbsup /tickle /wave "
-        "/wink /yeet\n"
-        "groups — /rules /member /glog /gsettings /strikes "
-        "/recheck /joinq /console /undonotice /flag /rep "
-        "/repclear /repdismiss /report /mute /unmute /ban "
-        "/unban /kick /warn /pin /unpin /purge /cleanup "
-        "/rmdeleted /rminactive /tag /bansender /unbansender "
-        "/reactwipe /boosters\n"
-        "group purse — /balance /mine /work /pay /gshop "
-        "/quests /treasury /deposit /withdraw /rob /bail "
-        "/coinflip /top /tax /grant /property /buyproperty "
-        "/sellproperty /rent /listproperty /auctions /mortgage "
-        "/insure /drop /claim\n"
-        "conflict — /gear /heist /shoot /kill /assassinate "
-        "/sabotage /gang /war /police /bounty /claimdrop\n"
-        "group life — /poll /vote /milestones /contributions "
-        "/boards /webshot /webrec\n"
-        "anime — /anime /manga /anichar /charpic /staff "
-        "/studio /episodes /animechars /trailer /streaming "
-        "/animereview /genres /genre /topanime /topmanga "
-        "/popular /trending /airing /upcoming /season "
-        "/topchars /anischedule /nextep /recommend "
-        "/randomanime /randommanga /randomchar /animequote "
-        "/favorite /whatanime /waifu /neko /kitsune /husbando\n"
-        "fun — /joke /dadjoke /progjoke /chuck /fact /fact2 "
-        "/catfact /numfact /advice /quote /dog /cat /fox "
-        "/meme /riddle /8ball /choose /activity /pokemon "
-        "/history /nasa /calc\n"
-        "makers — /qcard /canvasquote /iqc /wndwqute /meme2 "
-        "/fakemsg /fakettc /nokiamsg /fakeff /fakeffduo "
-        "/ffgirl /removebg /qr /shorturl /unshorten /bible "
-        "/couplepp /pp\n"
-        f"play — /game {games}\n"
-        "\n"
-        "tap a button below to run it · /help for what each one does"
-    )
+    """Menu text for bare /start and bare /menu where the live
+    session cannot serve — the PUBLIC set only, in the designed
+    menu composition (:func:`menu_home_text`): the same masthead,
+    intent clusters and dividers the session home renders, with
+    the public command lines spelled out. Owner-only commands
+    are never listed here — the owner reaches the full catalog
+    via /list. (Before presentation Phase 2 this was a hand-kept
+    name list that drifted from the registry; it now composes
+    from the registry like every other menu surface.)"""
+    return menu_home_text("telegram", public_only=True)
 
 
 def caller_may_run(kind: str, is_owner: bool) -> bool:
@@ -1680,7 +1633,7 @@ def menu_sections(
         and f"/{kind}" not in shown and f"/{kind}" in help_text())
     if missing:
         sections.append((
-            "📌", "more",
+            "🧩", "more",
             [("/" + kind,
               LIST_ONELINERS.get(
                   kind,
@@ -1791,6 +1744,142 @@ def _pack_menu_rows(singles: list, per_row: int = 2) -> list:
             for i in range(0, len(singles), per_row)]
 
 
+#: The home menu's intent clusters (presentation Phase 2,
+#: 2026-11-11): the flat category index grouped the way a reader
+#: thinks — talk, play, know, run — each cluster its own titled
+#: block in the composed home, a divider rule between clusters
+#: in the flat render, its own box in the WhatsApp frame.
+#: Membership is by section-title prefix; the LAST cluster is
+#: the catch-all, so a future section is composed into the menu,
+#: never dropped from it.
+_MENU_CLUSTERS: list[tuple[str, tuple[str, ...]]] = [
+    ("💬 talk to me", ("groups — in plain words", "voice", "memory")),
+    ("🎮 play", ("media", "games", "anime", "fun", "makers")),
+    ("🔍 know", ("search", "wisdom", "discovery")),
+    ("⚙️ run", ()),
+]
+
+
+def _menu_clusters(
+        sections: list,
+) -> list[tuple[str, list]]:
+    """Group menu sections into the home's intent clusters,
+    preserving registry order inside each cluster. Every section
+    lands in exactly one cluster — the catch-all takes whatever
+    no prefix claimed — and empty clusters are omitted."""
+    claimed: list[list] = [[] for _ in _MENU_CLUSTERS]
+    for section in sections:
+        title = section[1]
+        for i, (_ct, prefixes) in enumerate(_MENU_CLUSTERS):
+            if prefixes and any(
+                    title.startswith(p) for p in prefixes):
+                claimed[i].append(section)
+                break
+        else:
+            claimed[-1].append(section)
+    return [(ct, secs) for (ct, _p), secs
+            in zip(_MENU_CLUSTERS, claimed, strict=True) if secs]
+
+
+def _menu_masthead_lines(sections: list, *,
+                         public_only: bool) -> list[str]:
+    """The composed home's masthead: the live fields the XMD
+    fallback header has always carried (daypart greeting, owner,
+    status, command total, mode), computed from the same section
+    data the menu renders — honest fields only, the rule
+    :func:`whatsapp_menu` states for its own header. The public
+    form omits the owner field and names its own mode."""
+    total = sum(1 for _e, _t, items in sections
+                for command, _d in items
+                if command.startswith("/"))
+    lines = [f"👋 {_whatsapp_daypart()} — here's what I can do"]
+    if not public_only:
+        lines.append("👑 owner: peacethefirst")
+    lines.append("⚡ status: Online")
+    lines.append(f"📚 total commands: {total}")
+    lines.append("🔐 mode: public" if public_only
+                 else "🔐 mode: owner-gated")
+    return lines
+
+
+def _menu_home_card(sections: list, *, public_only: bool):
+    """The ONE composed session home (presentation Phase 2): a
+    masthead of live fields, the plain-words line, then the
+    categories clustered by intent — a titled block per cluster,
+    a divider rule between clusters — over the session note.
+    Both platform renders and the text form compose THIS card;
+    only the rendering differs."""
+    from .typography import DIVIDER, Card
+
+    card = Card("menu", title="Devon — command menu", icon="✨")
+    for masthead_line in _menu_masthead_lines(
+            sections, public_only=public_only):
+        card.line(masthead_line)
+    card.line("you don't need to memorize these — just say "
+              "what you want in plain words.")
+    for ci, (cluster_title, members) in enumerate(
+            _menu_clusters(sections)):
+        if ci:
+            card.block_lines([DIVIDER])
+        card.block_lines(
+            [f"{emoji} {title} — {len(items)} commands"
+             for emoji, title, items in members],
+            title=cluster_title)
+    card.note("tap a category — every page lives in this one "
+              "message · /help <command> for the full page on "
+              "one command")
+    return card
+
+
+def _render_menu_card(card, platform: str):
+    """The session menu's ONE render decision: WhatsApp takes
+    the XMD frame (:func:`render_card_framed` with the menu's
+    row rhythm — ``✫✧│`` down the sections, ``✫`` down the
+    masthead), every other platform the flat Card render. Same
+    card, same stamp resolution; only the framing differs."""
+    from .typography import render_card, render_card_framed
+
+    if str(platform or "").strip().lower() in ("whatsapp", "wa"):
+        return render_card_framed(card, row_marker="✫✧│",
+                                  head_marker="✫")
+    return render_card(card, platform=platform)
+
+
+def menu_home_text(platform: str = "telegram", *,
+                   public_only: bool = False) -> str:
+    """The designed menu as TEXT, for surfaces that take text
+    only (the /start and bare-/menu fallback where the live
+    session cannot serve): the same masthead + intent clusters +
+    divider grammar the session home composes, with each
+    section's commands named in a compact row under its section
+    head — a text surface has no category pages to tap into, so
+    the index form would strand the reader, and the spelled-out
+    catalog would wall it (descriptions live in /help, as they
+    always have). Sections and filtering are the session's own
+    (:func:`_menu_session_sections`), so the text menu can never
+    drift from the live one. The text form renders in the plain
+    dialect — markup-free by design (the public-menu contract):
+    the markup forms live in the session render, never here."""
+    from .typography import DIVIDER, Card, render_card
+
+    sections = _menu_session_sections(platform, public_only)
+    card = Card("menu", title="Devon — command menu", icon="✨")
+    for masthead_line in _menu_masthead_lines(
+            sections, public_only=public_only):
+        card.line(masthead_line)
+    for ci, (_cluster_title, members) in enumerate(
+            _menu_clusters(sections)):
+        if ci:
+            card.block_lines([DIVIDER])
+        for emoji, title, items in members:
+            card.block_lines(
+                [" ".join(cmd for cmd, _desc in items)],
+                title=f"{emoji} {title}")
+    card.note("tap a button below to run it · /help for what "
+              "each one does")
+    return render_card(card, platform="plain").text
+
+
 def menu_session_render(topic: str = "", page: int = 1, *,
                         platform: str = "",
                         public_only: bool = False,
@@ -1802,7 +1891,11 @@ def menu_session_render(topic: str = "", page: int = 1, *,
     no section (the caller then answers with the catalog text path).
 
     ``home=True`` renders the section index (every section + its
-    command count). Otherwise the render is one page of one section;
+    command count), composed as the designed home (presentation
+    Phase 2): a masthead of live fields over intent-clustered
+    category blocks — :func:`_menu_home_card` — framed in the
+    XMD grammar on WhatsApp, flat on every other platform
+    (:func:`_render_menu_card`). Otherwise the render is one page of one section;
     pages walk the WHOLE catalog linearly (Next on a section's last
     page opens the next section), so the old "All commands" dump is
     a page walk inside this one message — never a second message,
@@ -1812,7 +1905,7 @@ def menu_session_render(topic: str = "", page: int = 1, *,
     menu message in place; the home opener posts it.
     """
     from .tgbot_buttons import actionable
-    from .typography import Card, render_card
+    from .typography import Card
 
     sections = _menu_session_sections(platform, public_only)
     if not sections:
@@ -1820,16 +1913,7 @@ def menu_session_render(topic: str = "", page: int = 1, *,
     nav = [[(f"{emoji} {title}", f"list {_menu_section_key(title)}")]
            for emoji, title, _items in sections]
     if home:
-        card = Card("menu", title="Devon — command menu", icon="✨")
-        card.line("you don't need to memorize these — just say "
-                  "what you want in plain words.")
-        card.block_lines(
-            [f"{emoji} {title} — {len(items)} commands"
-             for emoji, title, items in sections],
-            title="categories")
-        card.note("tap a category — every page lives in this one "
-                  "message · /help <command> for the full page on "
-                  "one command")
+        card = _menu_home_card(sections, public_only=public_only)
         singles = [row[0] for row in nav]
         if not public_only:
             # Parity with the personal category menu's Power row (an
@@ -1841,7 +1925,7 @@ def menu_session_render(topic: str = "", page: int = 1, *,
         buttons = _pack_menu_rows(singles)
         buttons.append([("📋 All commands",
                          f"list {_menu_section_key(sections[0][1])}")])
-        return actionable(render_card(card, platform=platform).text,
+        return actionable(_render_menu_card(card, platform).text,
                           buttons, session="menu",
                           session_edit=continuation,
                           media=media)
@@ -1877,7 +1961,7 @@ def menu_session_render(topic: str = "", page: int = 1, *,
         buttons.append(turn)
     buttons.append([("⌂ Menu home", "list home")])
     buttons.extend(_pack_menu_rows([row[0] for row in nav]))
-    return actionable(render_card(card, platform=platform).text,
+    return actionable(_render_menu_card(card, platform).text,
                       buttons, session="menu", session_edit=True)
 
 
@@ -2031,7 +2115,8 @@ def whatsapp_menu(page: str = "") -> str:
             lines.append(xmd_frame_line(
                 f"{icon} {small_caps(label)}: {value}", "✫"))
         lines.append(xmd_frame_bottom())
-        lines += ["", "_text-first — no buttons, no tapping needed_"]
+        lines += ["", "_the text form of the menu — /menu opens "
+                      "the tappable one where buttons live_"]
         for emoji, title, items in sections:
             lines.append("")
             lines += _box(emoji, title, items)
@@ -4747,6 +4832,9 @@ _GROUP_EMOJI = {
     "platform control — updates & restarts": "🔄",
     "groups & communities": "👥",
     "discovery": "🧭",
+    "fun one-shots — jokes · facts · pictures · space": "✨",
+    "makers & tools — cards · qr · links · bible": "🎨",
+    "chat & privacy — your chats · your accounts": "🔒",
 }
 
 #: quick aliases → the group they filter to

@@ -1467,16 +1467,42 @@ def apply_verb(pack: PackDef, verb: str, args: str, *,
 # ── listing, inline articles, companion pages ───────────────────
 
 
+def _listing_rows(store: PackStore) -> list[str]:
+    """One listing row per pack, with its honest state — the
+    single row composition both listing forms render."""
+    rows = []
+    for pack in PACKS:
+        state = "on" if store.is_enabled(pack.id) else "off"
+        rows.append(f"{pack.icon} {pack.title} ({pack.id}) — "
+                    f"{state} — {pack.tagline}")
+    return rows
+
+
+#: The listing's grammar line (how the listed packs open, switch
+#: and act) — shared by both listing forms.
+_LISTING_FOOTER = ("open: /pack open <id> · switch: /pack on|off "
+                   "<id> · act: /pack act <id> <verb> …")
+
+
 def listing_lines(store: PackStore) -> list[str]:
     """The /pack listing: every pack, with its honest state."""
     lines = ["🧩 experience packs — installed:"]
-    for pack in PACKS:
-        state = "on" if store.is_enabled(pack.id) else "off"
-        lines.append(f"{pack.icon} {pack.title} ({pack.id}) — "
-                     f"{state} — {pack.tagline}")
-    lines.append("open: /pack open <id> · switch: /pack on|off "
-                 "<id> · act: /pack act <id> <verb> …")
+    lines.extend(_listing_rows(store))
+    lines.append(_LISTING_FOOTER)
     return lines
+
+
+def listing_card(store: PackStore):
+    """The /pack listing as a typography Card (presentation
+    Phase 2): the same rows under a titled block, the grammar
+    line as the card's note — the listing joins the pack homes
+    in the designed system instead of arriving as plain lines."""
+    from .typography import Card
+
+    card = Card("menu", title="experience packs", icon="🧩")
+    card.block_lines(_listing_rows(store), title="installed")
+    card.note(_LISTING_FOOTER)
+    return card
 
 
 def pack_inline_articles(query: str) -> list[dict[str, Any]]:

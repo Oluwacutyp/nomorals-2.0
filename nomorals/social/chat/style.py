@@ -32,7 +32,6 @@ __all__ = [
     "THEMES", "set_theme", "current_theme", "theme_context",
     "header", "quote", "kv",
     "stat_line", "card", "table", "sparkline", "tag",
-    "render_menu", "menu_section", "menu_item", "menu_divider",
 ]
 
 
@@ -257,59 +256,16 @@ def table(headers: list[str], rows: list[list[str]]) -> str:
         return ""
 
 
-# ── platform-aware menus ─────────────────────────────────────────────────────
-# Sections with emoji icons and a scannable command list, rendered for the
-# target platform. Telegram gets HTML; WhatsApp gets *bold* / ```mono```;
-# the same structure reads well on both.
-
-
-def _plat(platform: str) -> str:
-    try:
-        from .platforms import TELEGRAM, detect_platform
-        p = (platform or "").strip().lower()
-        if p in ("telegram", "whatsapp", "sms", "web", "discord", "local"):
-            return p
-        return TELEGRAM
-    except Exception as exc:  # noqa: BLE001
-        record_failure('style._plat', exc)
-        return "telegram"
-
-
-def menu_section(emoji: str, title: str, platform: str = "telegram") -> str:
-    """A menu section header: ``🎮 GAMES``. Never raises."""
-    try:
-        p = _plat(platform)
-        t = str(title or "").upper()
-        if p == "whatsapp":
-            return f"{emoji} *{t}*"
-        return f"{emoji} <b>{escape(t)}</b>"
-    except Exception as exc:  # noqa: BLE001
-        record_failure('style.menu_section', exc)
-        return f"{emoji} {title}"
-
-
-def menu_item(command: str, description: str, platform: str = "telegram") -> str:
-    """One menu row: command + description. Never raises."""
-    try:
-        p = _plat(platform)
-        c = str(command or "")
-        d = str(description or "")
-        if p == "whatsapp":
-            return f"• `{c}` — {d}"
-        if p in ("sms",):
-            return f"- {c} — {d}"
-        return f"• <code>{escape(c)}</code> — {escape(d)}"
-    except Exception as exc:  # noqa: BLE001
-        record_failure('style.menu_item', exc)
-        return f"{command} — {description}"
-
-
-def menu_divider(platform: str = "telegram") -> str:
-    """A visual separator between menu sections. Never raises."""
-    try:
-        return "━━━━━━━━━━━━━━━"
-    except Exception:  # noqa: BLE001
-        return "---"
+# ── the XMD frame grammar ───────────────────────────────────────────────────
+# The boxed WhatsApp menu format's helpers (small caps + frame
+# parts). The platform-aware menu RENDERER that used to live
+# here (render_menu / menu_section / menu_item / menu_divider)
+# was dead — no production caller — and its grammar (emoji
+# section heads, divider rules between sections, item rows) is
+# absorbed into the one live menu composition in control.py
+# (presentation Phase 2, 2026-11-11). What remains here is live:
+# the frame helpers the WhatsApp menu and the typography framed
+# render build on.
 
 
 #: Unicode small capitals for display titles (the XMD menu
@@ -365,32 +321,3 @@ def xmd_frame_line(text: str, marker: str = "") -> str:
     if marker:
         return f"┃ {marker} {body}"
     return f"┃ {body}"
-
-
-def render_menu(sections: list, platform: str = "telegram",
-                header: str = "", footer: str = "") -> str:
-    """Render a full menu.
-
-    ``sections``: ``[(emoji, title, [(command, description), ...]), ...]``.
-    Never raises.
-    """
-    try:
-        p = _plat(platform)
-        lines: list[str] = []
-        if header:
-            lines.append(menu_section("✨", header, p))
-            lines.append("")
-        for i, sec in enumerate(sections or []):
-            emoji, title, items = sec[0], sec[1], sec[2]
-            if i:
-                lines.append(menu_divider(p))
-            lines.append(menu_section(emoji, title, p))
-            for command, desc in items or []:
-                lines.append(menu_item(command, desc, p))
-            lines.append("")
-        if footer:
-            lines.append(f"_{footer}_" if p == "whatsapp" else f"<i>{escape(footer)}</i>")
-        return "\n".join(lines).rstrip()
-    except Exception as exc:  # noqa: BLE001
-        record_failure('style.render_menu', exc)
-        return ""

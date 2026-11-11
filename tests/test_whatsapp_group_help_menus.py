@@ -187,7 +187,10 @@ def test_whatsapp_start_and_menu_dm(rig):
         assert not isinstance(out, str)
         assert out.session == "menu"
         assert out.buttons
-        assert "command menu" in out.text
+        # RE-PINNED (presentation Phase 2, 2026-11-11): the session
+        # home now renders in the XMD frame on WhatsApp — its title
+        # rides the frame small-capped, not as ASCII body text.
+        assert "ᴄᴏᴍᴍᴀɴᴅ ᴍᴇɴᴜ" in out.text
         assert WA_MENU_MARKER not in out.text
 
 
@@ -231,7 +234,8 @@ def test_whatsapp_dm_help_takes_the_session_render(rig):
                      chat_id="15551234567"))
     assert not isinstance(out, str)
     assert out.session == "menu"
-    assert "command menu" in out.text
+    # RE-PINNED (presentation Phase 2): framed small-caps title.
+    assert "ᴄᴏᴍᴍᴀɴᴅ ᴍᴇɴᴜ" in out.text
 
 
 # ── unit: the claim block inside _control_group_help ─────────

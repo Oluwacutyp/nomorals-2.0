@@ -5537,6 +5537,52 @@ class PartnerRuntime(
                             str(message.chat.key or ""), session,
                             _mid, media=True)
                 return sent_media
+        # Doc-16 route for long composed control replies
+        # (presentation Phase 2): a PLAIN reply — no live session,
+        # no media head, no buttons or reply keyboard to carry,
+        # no markup of its own beyond the closing stamp — longer
+        # than the surface's per-message cap used to leave through
+        # the gateway send below and arrive as (i/n)-labelled
+        # chunks. It now rides _send_long_checked first: the
+        # output router's reader/edition routes for medium and
+        # long output, the unlabelled chunker underneath — the
+        # (i/n) flood is unreachable for composed replies. A
+        # routed failure note is itself delivered as the reply;
+        # everything else keeps the gateway path below.
+        if not session and media is None and not btn_rows \
+                and not buttons and reply_keyboard is None \
+                and _limits is not None \
+                and len(text) > _limits.max_text:
+            from ...social.chat.typography import DEFAULT_STAMP_TEXT, STAMP_HTML
+
+            _body = text.rstrip()
+            for _form in (STAMP_HTML, f"_{DEFAULT_STAMP_TEXT}_",
+                          DEFAULT_STAMP_TEXT):
+                if _body.endswith(_form):
+                    _body = _body[: -len(_form)]
+                    break
+            if not any(tag in _body
+                       for tag in ("<b>", "<code>", "<i>")):
+                _note = self._send_long_checked(
+                    message.chat.platform, message.chat, text,
+                    title="control reply")
+                if not _note:
+                    from ...social.chat.base import SendResult
+
+                    result = SendResult(
+                        ok=True, platform=message.chat.platform)
+                    self._register_confirm_live(
+                        message, result, text, buttons)
+                    return result
+                result = self.gateway.send(
+                    message.chat.platform, message.chat, _note,
+                    fresh=True)
+                self._register_confirm_live(
+                    message, result, text, buttons)
+                return result
+            # Markup-bearing: the gateway path below owns it
+            # (its splitter is markup-balanced; the router's
+            # chunker is not).
         result = self.gateway.send(message.chat.platform, message.chat,
                                    text, buttons=buttons,
                                    parse_mode=parse_mode,
@@ -5787,6 +5833,21 @@ class PartnerRuntime(
                         return _home
                 from ...social.chat.control import help_menu
                 return help_menu("whatsapp")
+            # Telegram /start is the same front door as /menu
+            # (presentation Phase 2, 2026-11-11): the live session
+            # home serves it wherever the session can serve — the
+            # helper applies the gated/public split, so a stranger
+            # on the gated bot gets the public subset composed the
+            # same way — and the designed text menu
+            # (public_menu_text, the same composition in text
+            # form) remains the answer where it cannot (no inbound
+            # message, buttonless surface).
+            _menu_cmd = parse_control("/menu")
+            if _menu_cmd is not None:
+                _home = self._menu_session_reply(
+                    message, chat_key, _menu_cmd)
+                if _home is not None:
+                    return _home
             return public_menu_text()
 
         # Natural phrasing for the representation review: "/how did I do"

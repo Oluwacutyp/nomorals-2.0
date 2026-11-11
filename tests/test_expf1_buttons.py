@@ -154,7 +154,11 @@ class WhatsAppMenuDispatchTests(unittest.TestCase):
         rt, _adapter, chat = _dm_runtime("whatsapp")
         reply = rt.handle_control("/menu", chat.key, message=None)
         self.assertIsInstance(reply, str)
-        self.assertIn("no buttons", reply)
+        # RE-PINNED (presentation Phase 2, 2026-11-11): the old
+        # fallback line claimed "no buttons" — false since F1 made
+        # the buttons real, and the task removed it. The fallback
+        # now names itself the text form of the menu.
+        self.assertIn("the text form of the menu", reply)
 
 
 # ── 2 · WhatsApp button-form preference persists ────────────────

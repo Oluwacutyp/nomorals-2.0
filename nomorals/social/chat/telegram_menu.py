@@ -1,9 +1,9 @@
-"""Telegram menu derived from the command registry — never a pasted copy.
+"""Telegram menu coverage derived from the command registry.
 
 The old failure mode was ``test_help_sync`` drift: a hand-maintained menu
 listed commands the system no longer had (or missed new ones), so
 "reachable capabilities must be in catalog" was aspirational. This module
-builds both menus — public and owner — straight from
+derives both menus' COVERAGE — public and owner — straight from
 :mod:`nomorals.social.chat.control` at call time:
 
 * public menu: exactly :data:`PUBLIC_COMMANDS` (the curated BotFather
@@ -15,6 +15,15 @@ covers every registered command and the public menu covers every public
 command while containing nothing a non-owner may not run
 (:func:`caller_may_run`). Any registry change that breaks that fails
 loudly instead of drifting silently.
+
+The RENDERED menu lives in control now (presentation Phase 2,
+2026-11-11): the live session render and its text form
+(``menu_session_render`` / ``menu_home_text``) compose the one
+designed menu from the same registry. This module's own text
+renderer (``menu_text``) was a second, dead render of the same
+data — no production caller — and is removed; what remains is
+the coverage structure and the drift invariant the help-sync
+tests pin.
 """
 
 from __future__ import annotations
@@ -23,7 +32,6 @@ from typing import Any
 
 __all__ = [
     "build_telegram_menu",
-    "menu_text",
     "menu_covers",
     "validate_menu",
     "public_menu_kinds",
@@ -94,34 +102,6 @@ def build_telegram_menu(is_owner: bool) -> dict[str, list[str]]:
             if kind in kinds and kind not in shown_all and kind not in menu.get("more", []):
                 menu.setdefault("more", []).append(kind)
     return menu
-
-
-def menu_text(is_owner: bool) -> str:
-    """Render the registry-derived menu as chat text.
-
-    State coverage (design absorption #6): the menu renders
-    synchronously from the in-process registry, so it has NO
-    loading state and can never be empty — the registry is code,
-    and :func:`validate_menu` pins that every registered command
-    appears. A registry failure is a boot failure, not a menu
-    state, so there is no error render either. The menu's
-    partial answer is omission: a group with no commands visible
-    to this caller does not render at all (never a blank group),
-    and ungrouped kinds collect under "more".
-    """
-    from .control import COMMAND_DETAILS
-
-    menu = build_telegram_menu(is_owner)
-    lines = ["🥷 Devon — tap a command:" if is_owner else "🥷 Devon — what you can run:"]
-    for group, kinds in menu.items():
-        lines.append(f"\n— {group} —")
-        for kind in kinds:
-            what = (COMMAND_DETAILS.get(kind, {}) or {}).get("what", "")
-            one = what.split(".")[0].strip() if what else ""
-            lines.append(f"  /{kind}" + (f" — {one}" if one else ""))
-    if not is_owner:
-        lines.append("\nowner-only commands are not listed; asking for one is denied, not hidden-then-allowed.")
-    return "\n".join(lines)
 
 
 def menu_covers(kind: str, is_owner: bool) -> bool:

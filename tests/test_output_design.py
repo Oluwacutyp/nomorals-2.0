@@ -205,35 +205,28 @@ class WhatsAppGameFormatTests(unittest.TestCase):
 
 
 class MenuStyleTests(unittest.TestCase):
-    def test_section_telegram(self):
-        self.assertEqual(style.menu_section("🎮", "games", "telegram"), "🎮 <b>GAMES</b>")
+    """The platform-aware menu renderer that used to live in
+    style.py (render_menu / menu_section / menu_item /
+    menu_divider) was dead — no production caller — and its
+    grammar (emoji section heads, divider rules between
+    sections, item rows) is absorbed into the one live menu
+    composition in control.py (presentation Phase 2, 2026-11-11).
+    These tests pin the absorption: the dead entry points stay
+    gone, and the grammar lives in the composed menu."""
 
-    def test_section_whatsapp(self):
-        self.assertEqual(style.menu_section("🎮", "games", "whatsapp"), "🎮 *GAMES*")
+    def test_dead_renderers_stay_gone(self):
+        for name in ("render_menu", "menu_section", "menu_item",
+                     "menu_divider"):
+            self.assertFalse(hasattr(style, name), name)
 
-    def test_item_telegram(self):
-        self.assertEqual(style.menu_item("/game list", "all games", "telegram"),
-                         "• <code>/game list</code> — all games")
+    def test_grammar_lives_in_the_composed_menu(self):
+        from nomorals.social.chat.control import menu_home_text
 
-    def test_item_whatsapp(self):
-        self.assertEqual(style.menu_item("/game list", "all games", "whatsapp"),
-                         "• `/game list` — all games")
-
-    def test_render_menu(self):
-        out = style.render_menu([("🎮", "games", [("/game list", "all games")])], "whatsapp")
-        self.assertIn("🎮 *GAMES*", out)
-        self.assertIn("`/game list`", out)
-
-    def test_render_menu_telegram(self):
-        out = style.render_menu([("🎮", "games", [("/game list", "all games")])], "telegram")
-        self.assertIn("<b>GAMES</b>", out)
-        self.assertIn("<code>/game list</code>", out)
-
-    def test_garbage_never_raises(self):
-        style.menu_section(None, None, None)
-        style.menu_item(None, None, None)
-        style.render_menu(None, None)
-        style.render_menu("junk", "junk")
+        out = menu_home_text("telegram", public_only=True)
+        self.assertIn("━━━", out)  # divider rules between clusters
+        self.assertIn("🎮 games", out)  # emoji section head
+        self.assertNotIn("<b>", out)  # the text form is markup-free
+        self.assertIn("/wordchain", out)  # item rows render
 
 
 class HelpMenuTests(unittest.TestCase):
@@ -260,8 +253,11 @@ class HelpMenuTests(unittest.TestCase):
 
     def test_help_menu_coverage_matches_help_text(self):
         from nomorals.social.chat.control import (
-            WHATSAPP_UNSUPPORTED_KINDS, help_menu, help_text,
-            CONTROL_COMMANDS)
+            CONTROL_COMMANDS,
+            WHATSAPP_UNSUPPORTED_KINDS,
+            help_menu,
+            help_text,
+        )
         menu = help_menu("whatsapp")
         missing = [k for k in CONTROL_COMMANDS if f"/{k}" not in menu and f"/{k}" in help_text()]
         # Coverage is total EXCEPT the kinds WhatsApp cannot
@@ -288,6 +284,7 @@ class HelpMenuTests(unittest.TestCase):
 class WhatsAppAdapterHookTests(unittest.TestCase):
     def test_send_converts_html(self):
         import inspect
+
         from nomorals.social.chat import whatsapp as wamod
         src = inspect.getsource(wamod.WhatsAppAdapter.send)
         self.assertIn("format_for_platform", src)

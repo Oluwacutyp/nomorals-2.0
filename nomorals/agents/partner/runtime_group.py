@@ -4295,39 +4295,42 @@ class RuntimeGroupMixin:
         key = self._group_key_or_none(message)
         name = str(tail or "").strip().lower()
         if not name:
-            lines = ["🏆 <b>boards</b> — /boards &lt;name&gt; "
-                     "reads one:"]
+            # The index is a Card like its boards (presentation
+            # Phase 2): the same scope lines, composed through
+            # the typography layer instead of hand-joined raw
+            # text with literal markup in the head.
+            from ...social.chat.typography import Card
+
+            card = Card("leaderboard", title="boards", icon="🏆")
+            card.line("/boards <name> reads one:")
+            scope_lines: list[str] = []
             if key:
-                lines.append(
+                scope_lines.append(
                     "this group: sparks · gems · messages · "
                     "contributions · gangs")
-            lines.append(
+            scope_lines.append(
                 "wider: global:sparks · global:messages · "
                 "global:contributions · "
-                "platform:&lt;platform&gt;:&lt;metric&gt; · "
-                "community:&lt;id&gt;:&lt;metric&gt;")
-            lines.append(
+                "platform:<platform>:<metric> · "
+                "community:<id>:<metric>")
+            scope_lines.append(
                 "games: games:xp · games:coins · games:wins · "
-                "games:mastery · game:&lt;game&gt;:elo · "
-                "game:&lt;game&gt;:wins · "
-                "game:&lt;game&gt;:points")
+                "games:mastery · game:<game>:elo · "
+                "game:<game>:wins · "
+                "game:<game>:points")
             if key:
                 cfg = surface.store.settings(key).get(
                     "boards") or {}
-                lines.append(
+                scope_lines.append(
                     f"this group publishes daily "
                     f"[{', '.join(cfg.get('daily') or []) or '—'}]"
                     f" · weekly "
                     f"[{', '.join(cfg.get('weekly') or []) or '—'}]"
                     f" at {int(cfg.get('hour', 20))}:00 — "
                     "/gsettings boards changes it.")
-            text = "\n".join(lines)
+            card.block_lines(scope_lines, title="scopes")
             rows = self._board_index_buttons(key)
-            if rows:
-                from ...social.chat.tgbot_buttons import actionable
-
-                return actionable(text, rows)
-            return text
+            return self._card(message, card, rows if rows else None)
         board_id = name if ":" in name else f"group:{name}"
         text = surface.render_board(
             board_id, group_key=key or "",

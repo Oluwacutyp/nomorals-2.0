@@ -548,7 +548,12 @@ class TestWhatsAppHelpMenuWiring:
                                      message=self._msg("/help", key))
         # The WhatsApp-native menu's stable markers (XMD frame
         # since 2026-11-05: category titles ride small-capped).
-        assert "text-first — no buttons" in out
+        # DELIBERATELY RE-PINNED (presentation Phase 2, 2026-11-11):
+        # the fallback's old "_text-first — no buttons_" line is
+        # gone — F1 made buttons real, so the text form now says
+        # what it is and where the tappable menu lives.
+        assert "text-first — no buttons" not in out
+        assert "the text form of the menu" in out
         assert "ɢʀᴏᴜᴘs & ᴄᴏᴍᴍᴜɴɪᴛɪᴇs" in out
 
     def test_telegram_help_unchanged(self):

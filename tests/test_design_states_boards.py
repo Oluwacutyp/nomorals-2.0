@@ -257,20 +257,25 @@ def test_leaderboard_success_render_unchanged(tmp_path):
 # ── /menu: the synchronous board ─────────────────────────────
 
 def test_menu_success_and_omission_contract():
-    from nomorals.social.chat.telegram_menu import menu_text, validate_menu
+    # RE-POINTED (presentation Phase 2, 2026-11-11): telegram_menu's
+    # own text renderer was a dead second menu and is removed; the
+    # contract now pins the LIVE composition (control.menu_home_text)
+    # against the same coverage invariant.
+    from nomorals.social.chat.control import _menu_session_sections, menu_home_text
+    from nomorals.social.chat.telegram_menu import validate_menu
     ok, problems = validate_menu()
     assert ok and problems == []
-    for is_owner in (True, False):
-        text = menu_text(is_owner)
+    for public_only in (False, True):
+        text = menu_home_text("telegram", public_only=public_only)
         assert text.strip()
-        # every rendered group header is followed by at least
-        # one command line before the next header — a group with
-        # nothing visible to the caller is omitted, never blank.
-        lines = text.splitlines()
-        for i, line in enumerate(lines):
-            if line.startswith("\n— ") or line.startswith("— "):
-                nxt = lines[i + 1] if i + 1 < len(lines) else ""
-                assert nxt.strip().startswith("/")
+        # every section visible to this caller renders under its
+        # head with its commands — a section with nothing visible
+        # to the caller is omitted, never blank.
+        for emoji, title, items in _menu_session_sections(
+                "telegram", public_only):
+            assert f"{emoji} {title}" in text
+            for cmd, _desc in items:
+                assert cmd in text
 
 
 # ── /pair journal: the partial section ───────────────────────

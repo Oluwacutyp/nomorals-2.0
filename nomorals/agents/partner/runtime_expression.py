@@ -1834,7 +1834,9 @@ class RuntimeExpressionMixin:
         text = " ".join(str(tail or "").split()).strip()
         parts = text.split()
         if not parts or parts[0].lower() == "list":
-            return "\n".join(_packs.listing_lines(store))
+            from ...social.chat.typography import card_text
+
+            return card_text(_packs.listing_card(store))
         verb = parts[0].lower()
         if verb in ("on", "off"):
             if len(parts) < 2:
