@@ -1696,6 +1696,47 @@ _register(_S(
         "path serves the SQLite default byte-for-byte."),
 ))
 
+_register(_S(
+    name="planning-congestion", verdict="ported", kind="sqlite-file",
+    modules=("planning/congestion.py",),
+    tables=("congestion_resources", "congestion_events",
+            "congestion_holds", "congestion_breakers"),
+    reason=(
+        "ported in the Mongo residue Batch 3 pass (C3): "
+        "ContentionMonitor routes through the seam "
+        "(planning-congestion__congestion_resources / "
+        "__congestion_holds / __congestion_breakers by TEXT PK; "
+        "__congestion_events by allocated id via put_raw, the "
+        "counter seeded by the one-time lazy import from the "
+        "file's maximum event id) whenever a store is resolved, "
+        "behind its unchanged never-raises API. Hold expiry is "
+        "domain data, never the store-managed TTL (Batch 3 "
+        "design dossier §C3): the expires_at column rides in "
+        "the document body as sql_expires_at through the carry "
+        "layer's _RESERVED rename, every seam write passes "
+        "managed expires_at=None, and queue_depth / "
+        "oldest_hold_age / reap_stale evaluate the native "
+        "predicates in Python over finds — expires_at <= 0 OR "
+        "expires_at > now counts as live, expires_at > 0 AND "
+        "expires_at <= now is reapable — so 0 still means NO "
+        "expiry, and an expired hold stays stored and visible "
+        "until reap_stale counts it and emits its expire event, "
+        "exactly as in congestion.db. Multi-document write sets "
+        "(acquire / release / reap) write the state document "
+        "first and the event document second — a crash between "
+        "them can lose an event (rates undercount) but never "
+        "the hold itself, the storage/queue.py composition "
+        "order; the native path commits both atomically, and "
+        "that accepted divergence is recorded here. The in-file "
+        "ALTER adding expires_at to pre-lease files stays a "
+        "native-path concern; the seam DDL carries the final "
+        "shape, and imported pre-lease rows take expires_at "
+        "from the column default. The file's existing rows are "
+        "imported once, through the same mapping, at first "
+        "construction. The native sqlite3 path serves the "
+        "SQLite default."),
+))
+
 
 # ── residue: contained domain file stores, classified, port queued ────────
 #
@@ -1734,13 +1775,6 @@ _residue("marketing-send", "marketing/send.py",
          "contains a QUEUE (send_queue) whose claim semantics need "
          "the P4 fencing treatment, so this port is a coordination "
          "port, not a plain CRUD port.")
-_residue("planning-congestion", "planning/congestion.py",
-         ("congestion_resources", "congestion_events",
-          "congestion_holds", "congestion_breakers"),
-         "congestion resources, holds and circuit breakers in "
-         "congestion.db — holds are lease-shaped state; the port "
-         "reviews hold expiry semantics against the seam's "
-         "store-managed expiry.")
 _residue("travel-groups", "travel/groups.py",
          ("group_trips", "legs", "expenses", "payments", "budgets",
           "proposals", "votes", "polls"),

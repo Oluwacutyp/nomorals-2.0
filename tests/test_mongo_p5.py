@@ -58,6 +58,9 @@ P5 settles the stores that live BESIDE the central database:
   The residue Batch 3 C8 port (planning-graph —
   traversal parity: the walks are the module's own Python over
   full-edge loads on both rungs) follows the same pattern below.
+  The residue Batch 3 C3 port (planning-congestion — hold expiry
+  as document data via the sql_expires_at rename, never the
+  store-managed TTL) follows the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -276,7 +279,9 @@ class TestSidecarRegistry:
             # residue Batch 3, C5 lane:
             "household",
             # residue Batch 3, C8 lane:
-            "planning-graph"}
+            "planning-graph",
+            # residue Batch 3, C3 lane:
+            "planning-congestion"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -6306,3 +6311,199 @@ class TestPlanningGraphPort:
         # leaf -> ... -> chain head: 150 chain nodes + the leaf
         assert len(graph.critical_path()) == 151
         assert graph.find_cycles() == []
+
+
+class TestPlanningCongestionPort:
+    """planning/congestion.py — the planning-congestion port
+    (residue Batch 3, C3): resources, holds and breakers are
+    documents in planning-congestion__congestion_resources /
+    __congestion_holds / __congestion_breakers; the AUTOINCREMENT
+    events ride allocated ids via put_raw in __congestion_events,
+    the counter seeded by the lazy import. THE lease pin (design
+    dossier §C3): a hold's expires_at is document DATA — it rides
+    in the body as sql_expires_at through the carry layer's
+    _RESERVED rename and the managed expires_at stays None on
+    every seam write — so 0 still means NO expiry, an expired
+    hold stays stored until reap_stale counts it and emits its
+    expire event, and expiry is evaluated by the organ's own
+    predicates (live: expires_at <= 0 OR expires_at > now;
+    reapable: expires_at > 0 AND expires_at <= now), identically
+    on every rung. Multi-document write sets write the state
+    document first and the event document second."""
+
+    @staticmethod
+    def _monitor(path, rung):
+        # planning is L3: the monitor wires the factory itself
+        # behind the keyword-only store= — no injected port here.
+        from nomorals.planning.congestion import ContentionMonitor
+
+        if rung.store is None:
+            return ContentionMonitor(str(path))
+        return ContentionMonitor(str(path), store=rung.store)
+
+    @staticmethod
+    def _wait_until(predicate, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.02)
+        return predicate()
+
+    def _scenario(self, path, rung) -> dict:
+        mon = self._monitor(path, rung)
+        out: dict = {}
+        a = mon.register("lease-a", kind="api_key", capacity=2)
+        b = mon.register("lease-b", kind="endpoint", capacity=1)
+        out["resources"] = [r.name for r in mon.list_resources()]
+        out["kinds"] = [mon.get("lease-a").kind, mon.get("lease-b").kind]
+        out["by_id"] = mon.get(a.resource_id).name
+        a2 = mon.register("lease-a", kind="api_key", capacity=3)
+        out["reregister_same_id"] = a2.resource_id == a.resource_id
+        out["capacity_after"] = mon.get("lease-a").capacity
+        out["alternate"] = mon.register_alternate("lease-a", "lease-b")
+        out["alternates"] = mon.get("lease-a").alternates == [b.resource_id]
+        # the never-expiring hold + the 600 s lease (the depth window)
+        h_anchor = mon.acquire("lease-a", "anchor", ttl_s=0)
+        h_lease = mon.acquire("lease-a", "lessee", ttl_s=600)
+        out["holds_shape"] = (h_anchor is not None, h_lease is not None)
+        t0 = h_lease.acquired_at
+        out["depth_t0"] = mon.queue_depth("lease-a", now=t0)
+        out["depth_599"] = mon.queue_depth("lease-a", now=t0 + 599)
+        out["depth_601"] = mon.queue_depth("lease-a", now=t0 + 601)
+        age = mon.oldest_hold_age("lease-a", now=t0 + 601)
+        out["age_601_live"] = bool(age is not None and age > 600)
+        # a full resource advises backoff; an expired-but-unreaped
+        # hold frees it again (the advise-side lease pin)
+        mon.acquire("lease-b", "squatter", ttl_s=0)
+        out["advise_full"] = mon.advise("lease-b")["action"]
+        out["release_squatter"] = mon.release("lease-b", "squatter")
+        h_temp = mon.acquire("lease-b", "temp", ttl_s=0.05)
+        tb = h_temp.acquired_at
+        out["depth_b_live"] = mon.queue_depth("lease-b", now=tb)
+        out["depth_b_expired_unreaped"] = mon.queue_depth(
+            "lease-b", now=tb + 10)
+        assert self._wait_until(lambda: mon.queue_depth("lease-b") == 0)
+        out["advise_freed"] = mon.advise("lease-b")["action"]
+        # the reap: exactly the one expired hold, counted once, and
+        # the never-expiring / long-lease holds on lease-a untouched
+        out["reaped"] = mon.reap_stale()
+        out["reaped_again"] = mon.reap_stale()
+        out["depth_b_post_reap"] = mon.queue_depth("lease-b", now=tb + 10)
+        # release flow + rates over the event corpus
+        out["release_lessee"] = mon.release("lease-a", "lessee")
+        out["release_missing"] = mon.release("lease-a", "lessee")
+        out["rates_a"] = mon._rates(a.resource_id, now=time.time())
+        out["wait_clear"] = mon.wait_estimate("lease-a", now=t0)
+        # breaker: five jam observations open it; advise fails fast
+        states = [mon._breaker_observe(a.resource_id, True)
+                  for _ in range(5)]
+        out["breaker_progression"] = states
+        out["breaker_state"] = mon.breaker_state("lease-a")
+        advice_open = mon.advise("lease-a")
+        out["advise_open"] = (advice_open["action"], advice_open["breaker"])
+        out["status"] = [(r["name"], r["depth"]) for r in mon.status()]
+        out["predict_shape"] = (
+            mon.predict_jam("lease-a")[1] is None,
+            mon.predict_jam("ghost-resource"))
+        return out
+
+    def test_conformance(self, rung, tmp_path):
+        out = self._scenario(tmp_path / "congestion.db", rung)
+        assert out == {
+            "resources": ["lease-a", "lease-b"],
+            "kinds": ["api_key", "endpoint"],
+            "by_id": "lease-a",
+            "reregister_same_id": True,
+            "capacity_after": 3,
+            "alternate": True,
+            "alternates": True,
+            "holds_shape": (True, True),
+            "depth_t0": 2,
+            "depth_599": 2,
+            "depth_601": 1,
+            "age_601_live": True,
+            "advise_full": "backoff",
+            "release_squatter": True,
+            "depth_b_live": 1,
+            "depth_b_expired_unreaped": 0,
+            "advise_freed": "proceed",
+            "reaped": 1,
+            "reaped_again": 0,
+            "depth_b_post_reap": 0,
+            "release_lessee": True,
+            "release_missing": False,
+            "rates_a": (0.4, 0.2),
+            "wait_clear": 0.0,
+            "breaker_progression": ["closed", "closed", "closed",
+                                    "closed", "open"],
+            "breaker_state": "open",
+            "advise_open": ("backoff", "open"),
+            "status": [("lease-a", 1), ("lease-b", 0)],
+            "predict_shape": (True, (0.0, None)),
+        }
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.planning.congestion import ContentionMonitor
+
+        path = tmp_path / "congestion.db"
+        native = ContentionMonitor(str(path))
+        native.register("imp-a", kind="api_key", capacity=5)
+        h_holder = native.acquire("imp-a", "holder", ttl_s=600)
+        native.acquire("imp-a", "anchor", ttl_s=0)
+        assert native.release("imp-a", "anchor")
+        # events in the file: acquire(1), acquire(2), release(3)
+
+        res_c = "planning-congestion__congestion_resources"
+        holds_c = "planning-congestion__congestion_holds"
+        events_c = "planning-congestion__congestion_events"
+        mon = self._monitor(path, rung)
+        assert rung.store.count(res_c) == 1
+        assert rung.store.count(holds_c) == 1
+        assert rung.store.count(events_c) == 3
+        marker = rung.store.get("planning-congestion__meta", "import")
+        assert marker is not None and marker["done"] is True
+        # THE seam-shape pin: the lease is document data under the
+        # carry rename; the managed TTL field is present and None
+        doc = rung.store.get(holds_c, h_holder.hold_id,
+                             include_expired=True)
+        assert doc is not None
+        assert set(doc) == {"_id", "resource_id", "agent",
+                            "acquired_at", "sql_expires_at",
+                            "expires_at"}
+        assert doc["expires_at"] is None
+        assert doc["sql_expires_at"] == doc["acquired_at"] + 600.0
+        # event ids continue the file's sequence (import max = 3)
+        assert rung.store.get(events_c, "3")["kind"] == "release"
+        h_late = mon.acquire("imp-a", "late", ttl_s=0)
+        assert rung.store.count(events_c) == 4
+        assert rung.store.get(events_c, "4")["kind"] == "acquire"
+        late_doc = rung.store.get(holds_c, h_late.hold_id,
+                                  include_expired=True)
+        assert late_doc["sql_expires_at"] == 0  # ttl<=0: NO expiry
+        # an expired hold stays PRESENT until the organ reaps it
+        h_temp = mon.acquire("imp-a", "temp", ttl_s=0.05)
+        assert rung.store.count(holds_c) == 3
+        assert mon.queue_depth("imp-a", now=time.time() + 10) == 2
+        assert self._wait_until(lambda: mon.reap_stale() == 1)
+        assert rung.store.count(holds_c) == 2
+        assert rung.store.get(holds_c, h_temp.hold_id,
+                              include_expired=True) is None
+        # exactly one expire event, emitted by the reap
+        expires = rung.store.find(events_c, {"kind": "expire"},
+                                  include_expired=True)
+        assert len(expires) == 1
+        # no seam document for this store EVER carries a managed TTL
+        for coll in (res_c, holds_c, events_c,
+                     "planning-congestion__congestion_breakers"):
+            for stored in rung.store.find(coll, {},
+                                          include_expired=True):
+                assert stored.get("expires_at") is None, (
+                    f"{coll}/{stored.get('_id')} carries a managed "
+                    "expires_at — hold expiry must stay document data")
+        # a second construction adopts — never re-imports
+        again = self._monitor(path, rung)
+        assert again.queue_depth("imp-a") == 2
+        assert rung.store.count(events_c) == 6

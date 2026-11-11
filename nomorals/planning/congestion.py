@@ -60,6 +60,41 @@ _CB_FAIL_THRESHOLD = 0.5  # open when >=50% of the window are jam signals
 _CB_COOLDOWN_S = 60.0    # OPEN -> HALF-OPEN after this long
 _CB_PROBES = 2           # successful probes to close from HALF-OPEN
 
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift. The
+#: in-file ALTER that adds expires_at to pre-lease files stays a
+#: native-path concern; the seam DDL carries the final shape, and
+#: imported pre-lease rows take expires_at from the column default.
+_RESOURCES_DDL = """CREATE TABLE IF NOT EXISTS congestion_resources (
+                       resource_id TEXT PRIMARY KEY, name TEXT, kind TEXT,
+                       capacity INTEGER, alternates TEXT, created_at REAL)"""
+_HOLDS_DDL = """CREATE TABLE IF NOT EXISTS congestion_holds (
+                       hold_id TEXT PRIMARY KEY, resource_id TEXT,
+                       agent TEXT, acquired_at REAL,
+                       expires_at REAL DEFAULT 0)"""
+_EVENTS_DDL = """CREATE TABLE IF NOT EXISTS congestion_events (
+                       id INTEGER PRIMARY KEY AUTOINCREMENT,
+                       resource_id TEXT, kind TEXT, ts REAL)"""
+_BREAKERS_DDL = """CREATE TABLE IF NOT EXISTS congestion_breakers (
+                       resource_id TEXT PRIMARY KEY, state TEXT,
+                       window TEXT, consec_fail INTEGER DEFAULT 0,
+                       probes_ok INTEGER DEFAULT 0,
+                       opened_at REAL DEFAULT 0,
+                       updated_at REAL DEFAULT 0)"""
+_DDL = ";\n".join((_RESOURCES_DDL, _HOLDS_DDL, _EVENTS_DDL, _BREAKERS_DDL))
+_TABLES = ("congestion_resources", "congestion_events",
+           "congestion_holds", "congestion_breakers")
+
+
+def _lease_live(expires_at: float | None, now: float) -> bool:
+    """The native live-hold predicate, verbatim: a hold counts iff
+    ``expires_at <= 0 OR expires_at > now`` — 0 (or NULL) means the
+    lease never expires. Applied to the seam's data field
+    (``sql_expires_at`` in the document body), never to the store's
+    managed TTL."""
+    exp = 0.0 if expires_at is None else float(expires_at)
+    return exp <= 0 or exp > now
+
 
 def _default_db() -> str:
     base = os.environ.get("NOMORALS_HOME", os.path.expanduser("~/.nomorals"))
@@ -121,51 +156,115 @@ class ContentionMonitor:
         mon.release("groq-key-1", "agent-7")
     """
 
-    def __init__(self, db_path: str = "", *, in_memory: bool = False) -> None:
+    # When a document store is resolved (Mongo program P5 — an explicit
+    # ``store`` or the boot ambient), the same API runs over the seam
+    # instead (registered in storage.sidecars as planning-congestion):
+    # resources, holds and breakers are documents in
+    # ``planning-congestion__congestion_resources`` / ``__congestion_holds``
+    # / ``__congestion_breakers`` and events ride allocated ids in
+    # ``__congestion_events``. A hold's ``expires_at`` is domain data
+    # on the seam, never the store's managed TTL: it rides in the
+    # document body as ``sql_expires_at`` and every seam write passes
+    # managed ``expires_at=None``, so 0 still means "no expiry" and
+    # an expired hold stays stored until reap_stale counts it and
+    # emits its expire event. Multi-document write sets write the
+    # state document first and the event document second (the
+    # composition order the registry entry records). The file's
+    # existing rows are imported once, through the same mapping, at
+    # first construction.
+
+    def __init__(self, db_path: str = "", *, in_memory: bool = False,
+                 store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         self._events: dict[str, list[tuple[float, str]]] = {}  # resource_id → [(ts, kind)]
         try:
-            if in_memory:
-                self._db = sqlite3.connect(":memory:")
-            else:
-                path = db_path or _default_db()
+            path = ":memory:" if in_memory else (db_path or _default_db())
+            if path != ":memory:":
                 os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "planning-congestion", _DDL, _TABLES,
+                None if path == ":memory:" else path, store=store)
+            if port is not None:
+                self._import_into(port)
+                self._port = port
+            else:
                 self._db = sqlite3.connect(path)
-            self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS congestion_resources (
-                       resource_id TEXT PRIMARY KEY, name TEXT, kind TEXT,
-                       capacity INTEGER, alternates TEXT, created_at REAL)""")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS congestion_holds (
-                       hold_id TEXT PRIMARY KEY, resource_id TEXT,
-                       agent TEXT, acquired_at REAL,
-                       expires_at REAL DEFAULT 0)""")
-            # Migration for DBs created before hold leases existed.
-            try:
-                cols = [r[1] for r in self._db.execute(
-                    "PRAGMA table_info(congestion_holds)").fetchall()]
-                if "expires_at" not in cols:
-                    self._db.execute(
-                        "ALTER TABLE congestion_holds "
-                        "ADD COLUMN expires_at REAL DEFAULT 0")
-            except Exception:  # noqa: BLE001
-                pass
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS congestion_events (
-                       id INTEGER PRIMARY KEY AUTOINCREMENT,
-                       resource_id TEXT, kind TEXT, ts REAL)""")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS congestion_breakers (
-                       resource_id TEXT PRIMARY KEY, state TEXT,
-                       window TEXT, consec_fail INTEGER DEFAULT 0,
-                       probes_ok INTEGER DEFAULT 0,
-                       opened_at REAL DEFAULT 0,
-                       updated_at REAL DEFAULT 0)""")
-            self._db.commit()
+                self._db.row_factory = sqlite3.Row
+                self._db.executescript(_DDL)
+                # Migration for DBs created before hold leases existed.
+                try:
+                    cols = [r[1] for r in self._db.execute(
+                        "PRAGMA table_info(congestion_holds)").fetchall()]
+                    if "expires_at" not in cols:
+                        self._db.execute(
+                            "ALTER TABLE congestion_holds "
+                            "ADD COLUMN expires_at REAL DEFAULT 0")
+                except Exception:  # noqa: BLE001
+                    pass
+                self._db.commit()
         except Exception:  # noqa: BLE001 — a bad DB path is an empty monitor
             _log.warning("congestion: db unavailable, running empty", exc_info=True)
             self._db = None
+            self._port = None
+
+    def _import_into(self, port: Any) -> None:
+        """One-time lazy import of congestion.db into the seam.
+        Resources, holds and breakers port as-is through their
+        RowTables; the AUTOINCREMENT events keep their file ids via
+        put_raw, and the events counter is seeded from the imported
+        maximum so seam-allocated event ids continue the file's
+        sequence instead of colliding with it. Runs through
+        ensure_imported: one-time, idempotent — a live store is
+        adopted, never overwritten."""
+        max_event = [0]
+
+        def _make(table: Any) -> Any:
+            def write(rows: list[dict[str, Any]]) -> int:
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+            return write
+
+        def write_events(rows: list[dict[str, Any]]) -> int:
+            for row in rows:
+                eid = int(row["id"])
+                max_event[0] = max(max_event[0], eid)
+                port.put_raw("congestion_events", str(eid), {
+                    "id": eid, "resource_id": row["resource_id"],
+                    "kind": row["kind"], "ts": row["ts"]})
+            return len(rows)
+
+        def seed_counter(_counts: dict[str, int]) -> None:
+            doc = port.store.get(port.meta_collection, "counters") or {}
+            if int(doc.get("events") or 0) < max_event[0]:
+                port.store.put(port.meta_collection, "counters",
+                               {**doc, "events": max_event[0]})
+
+        writers = {name: _make(port.tables[name]) for name in
+                   ("congestion_resources", "congestion_holds",
+                    "congestion_breakers")}
+        writers["congestion_events"] = write_events
+        port.ensure_imported(writers, after_import=seed_counter)
+
+    def _log_event(self, resource_id: str, kind: str, ts: float) -> None:
+        """Append one event row. Seam: an allocated-id raw document,
+        written after the state document it describes. Native: the
+        INSERT joins the caller's transaction — call sites keep
+        their single commit, exactly as before."""
+        if self._port is not None:
+            eid = self._port.next_id("events")
+            self._port.put_raw("congestion_events", str(eid), {
+                "id": eid, "resource_id": resource_id, "kind": kind,
+                "ts": ts})
+            return
+        if self._db is None:
+            return
+        self._db.execute(
+            "INSERT INTO congestion_events (resource_id, kind, ts) "
+            "VALUES (?, ?, ?)", (resource_id, kind, ts))
 
     # ── resources ─────────────────────────────────────────────────────
 
@@ -175,12 +274,28 @@ class ContentionMonitor:
         """Register (or update) a contended resource. Never raises."""
         try:
             name = (name or "").strip()[:120]
-            if not name or self._db is None:
+            if not name or (self._db is None and self._port is None):
                 return None
             capacity = max(1, int(capacity or 4))
             kind = (kind or "endpoint").strip().lower()
             if kind not in ("api_key", "endpoint", "lock", "rate_limit"):
                 kind = "endpoint"
+            if self._port is not None:
+                table = self._port.tables["congestion_resources"]
+                rows = table.find({"name": name})
+                if rows:
+                    table.put({
+                        "resource_id": rows[0]["resource_id"],
+                        "name": name, "kind": kind, "capacity": capacity,
+                        "alternates": ",".join(alternates or []),
+                        "created_at": rows[0]["created_at"]})
+                else:
+                    table.put({
+                        "resource_id": "res_" + uuid.uuid4().hex[:8],
+                        "name": name, "kind": kind, "capacity": capacity,
+                        "alternates": ",".join(alternates or []),
+                        "created_at": time.time()})
+                return self.get(name)
             rid = "res_" + uuid.uuid4().hex[:8]
             row = self._db.execute(
                 "SELECT resource_id FROM congestion_resources WHERE name = ?",
@@ -204,9 +319,25 @@ class ContentionMonitor:
             _log.debug("congestion register failed", exc_info=True)
             return None
 
+    @staticmethod
+    def _to_resource(row: Any) -> Resource:
+        """One stored row (sqlite Row or seam dict) → Resource."""
+        return Resource(
+            resource_id=row["resource_id"], name=row["name"],
+            kind=row["kind"], capacity=int(row["capacity"] or 1),
+            alternates=[a for a in (row["alternates"] or "").split(",") if a],
+            created_at=float(row["created_at"] or 0.0))
+
     def _resolve(self, name: str) -> Resource | None:
         """Name or id → Resource. Never raises."""
         try:
+            if self._port is not None:
+                table = self._port.tables["congestion_resources"]
+                rows = table.find({"name": name})
+                if rows:
+                    return self._to_resource(rows[0])
+                row = table.get(name)
+                return self._to_resource(row) if row else None
             if self._db is None:
                 return None
             row = self._db.execute(
@@ -215,11 +346,7 @@ class ContentionMonitor:
                 (name, name)).fetchone()
             if row is None:
                 return None
-            return Resource(
-                resource_id=row["resource_id"], name=row["name"],
-                kind=row["kind"], capacity=int(row["capacity"] or 1),
-                alternates=[a for a in (row["alternates"] or "").split(",") if a],
-                created_at=float(row["created_at"] or 0.0))
+            return self._to_resource(row)
         except Exception as exc:  # noqa: BLE001
             record_failure("congestion.resolve", exc)
             return None
@@ -229,15 +356,15 @@ class ContentionMonitor:
 
     def list_resources(self) -> list[Resource]:
         try:
+            if self._port is not None:
+                rows = self._port.tables["congestion_resources"].all()
+                rows.sort(key=lambda r: r["name"] or "")
+                return [self._to_resource(r) for r in rows]
             if self._db is None:
                 return []
             rows = self._db.execute(
                 "SELECT * FROM congestion_resources ORDER BY name").fetchall()
-            return [Resource(
-                resource_id=r["resource_id"], name=r["name"], kind=r["kind"],
-                capacity=int(r["capacity"] or 1),
-                alternates=[a for a in (r["alternates"] or "").split(",") if a],
-                created_at=float(r["created_at"] or 0.0)) for r in rows]
+            return [self._to_resource(r) for r in rows]
         except Exception as exc:  # noqa: BLE001
             record_failure("congestion.list_resources", exc)
             return []
@@ -247,10 +374,15 @@ class ContentionMonitor:
         try:
             res = self._resolve(name)
             alt = self._resolve(alternate)
-            if res is None or alt is None or self._db is None:
+            if res is None or alt is None or (
+                    self._db is None and self._port is None):
                 return False
             alts = [a for a in res.alternates if a != alt.resource_id]
             alts.append(alt.resource_id)
+            if self._port is not None:
+                self._port.tables["congestion_resources"].update(
+                    res.resource_id, {"alternates": ",".join(alts)})
+                return True
             self._db.execute(
                 "UPDATE congestion_resources SET alternates = ? WHERE resource_id = ?",
                 (",".join(alts), res.resource_id))
@@ -273,7 +405,7 @@ class ContentionMonitor:
         """
         try:
             res = self._resolve(name)
-            if res is None or self._db is None:
+            if res is None or (self._db is None and self._port is None):
                 return None
             agent = (agent or "unknown").strip()[:80]
             now = time.time()
@@ -285,6 +417,19 @@ class ContentionMonitor:
             hold = Hold(hold_id="hold_" + uuid.uuid4().hex[:8],
                         resource_id=res.resource_id, agent=agent,
                         acquired_at=now)
+            if self._port is not None:
+                # State document first, event document second — the
+                # composition order the registry entry records. The
+                # lease rides as document data (sql_expires_at via
+                # the carry rename); RowTable.put passes the managed
+                # expires_at as None, so the store TTL never fires.
+                self._port.tables["congestion_holds"].put({
+                    "hold_id": hold.hold_id,
+                    "resource_id": hold.resource_id,
+                    "agent": hold.agent, "acquired_at": now,
+                    "expires_at": expires})
+                self._log_event(res.resource_id, "acquire", now)
+                return hold
             self._db.execute(
                 """INSERT INTO congestion_holds
                    (hold_id, resource_id, agent, acquired_at, expires_at)
@@ -306,9 +451,21 @@ class ContentionMonitor:
         expired holds anyway. Never raises.
         """
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return 0
             now = time.time()
+            if self._port is not None:
+                # The native reapable predicate (expires_at > 0 AND
+                # expires_at <= now) evaluated in Python over the
+                # data field — an unreaped expired hold stays stored.
+                holds = self._port.tables["congestion_holds"]
+                stale = [r for r in holds.all()
+                         if (r["expires_at"] or 0) > 0
+                         and (r["expires_at"] or 0) <= now]
+                for r in stale:
+                    holds.delete(r["hold_id"])
+                    self._log_event(r["resource_id"], "expire", now)
+                return len(stale)
             rows = self._db.execute(
                 "SELECT hold_id, resource_id FROM congestion_holds "
                 "WHERE expires_at > 0 AND expires_at <= ?",
@@ -329,8 +486,21 @@ class ContentionMonitor:
         """One agent gives the resource back. Never raises."""
         try:
             res = self._resolve(name)
-            if res is None or self._db is None:
+            if res is None or (self._db is None and self._port is None):
                 return False
+            if self._port is not None:
+                holds = self._port.tables["congestion_holds"]
+                agent_norm = (agent or "").strip()[:80]
+                rows = [r for r in holds.find(
+                    {"resource_id": res.resource_id})
+                    if r["agent"] == agent_norm]
+                if not rows:
+                    return False
+                rows.sort(key=lambda r: (r["acquired_at"] or 0,
+                                         r["hold_id"]))
+                holds.delete(rows[0]["hold_id"])
+                self._log_event(res.resource_id, "release", time.time())
+                return True
             row = self._db.execute(
                 """SELECT hold_id FROM congestion_holds
                    WHERE resource_id = ? AND agent = ? LIMIT 1""",
@@ -353,9 +523,14 @@ class ContentionMonitor:
         Never raises."""
         try:
             res = self._resolve(name)
-            if res is None or self._db is None:
+            if res is None or (self._db is None and self._port is None):
                 return 0
             now = now if now is not None else time.time()
+            if self._port is not None:
+                rows = self._port.tables["congestion_holds"].find(
+                    {"resource_id": res.resource_id})
+                return sum(1 for r in rows
+                           if _lease_live(r["expires_at"], now))
             row = self._db.execute(
                 """SELECT COUNT(*) AS n FROM congestion_holds
                    WHERE resource_id = ?
@@ -371,9 +546,18 @@ class ContentionMonitor:
         None when no live holds. Never raises."""
         try:
             res = self._resolve(name)
-            if res is None or self._db is None:
+            if res is None or (self._db is None and self._port is None):
                 return None
             now = now if now is not None else time.time()
+            if self._port is not None:
+                rows = self._port.tables["congestion_holds"].find(
+                    {"resource_id": res.resource_id})
+                live = [float(r["acquired_at"]) for r in rows
+                        if r["acquired_at"] is not None
+                        and _lease_live(r["expires_at"], now)]
+                if live and min(live):
+                    return max(0.0, now - min(live))
+                return None
             row = self._db.execute(
                 """SELECT MIN(acquired_at) AS m FROM congestion_holds
                    WHERE resource_id = ?
@@ -433,11 +617,15 @@ class ContentionMonitor:
 
     def _breaker_row(self, resource_id: str) -> dict[str, Any]:
         try:
-            if self._db is None:
+            if self._port is not None:
+                row = self._port.tables["congestion_breakers"].get(
+                    resource_id)
+            elif self._db is None:
                 return {}
-            row = self._db.execute(
-                "SELECT * FROM congestion_breakers WHERE resource_id = ?",
-                (resource_id,)).fetchone()
+            else:
+                row = self._db.execute(
+                    "SELECT * FROM congestion_breakers WHERE resource_id = ?",
+                    (resource_id,)).fetchone()
             if row is None:
                 return {"state": "closed", "window": [],
                         "consec_fail": 0, "probes_ok": 0, "opened_at": 0.0}
@@ -456,6 +644,15 @@ class ContentionMonitor:
 
     def _breaker_save(self, resource_id: str, row: dict[str, Any]) -> None:
         try:
+            if self._port is not None:
+                self._port.tables["congestion_breakers"].put({
+                    "resource_id": resource_id, "state": row["state"],
+                    "window": json.dumps(row["window"][-_CB_WINDOW:]),
+                    "consec_fail": int(row["consec_fail"]),
+                    "probes_ok": int(row["probes_ok"]),
+                    "opened_at": float(row["opened_at"]),
+                    "updated_at": time.time()})
+                return
             if self._db is None:
                 return
             self._db.execute(
@@ -481,7 +678,7 @@ class ContentionMonitor:
         transition (no direct OPEN→CLOSED, per the pattern). Never raises."""
         try:
             res = self._resolve(name)
-            if res is None or self._db is None:
+            if res is None or (self._db is None and self._port is None):
                 return "closed"
             now = now if now is not None else time.time()
             row = self._breaker_row(res.resource_id)
@@ -535,6 +732,16 @@ class ContentionMonitor:
         """(acquisitions/min, releases/min) over the window. Never raises."""
         try:
             now = now if now is not None else time.time()
+            if self._port is not None:
+                rows = self._port.find_raw(
+                    "congestion_events", {"resource_id": resource_id})
+                cutoff = now - window_s
+                acq_n = sum(1 for r in rows if r["kind"] == "acquire"
+                            and float(r["ts"] or 0) >= cutoff)
+                rel_n = sum(1 for r in rows if r["kind"] == "release"
+                            and float(r["ts"] or 0) >= cutoff)
+                mins = max(window_s / 60.0, 1e-6)
+                return (acq_n / mins, rel_n / mins)
             if self._db is None:
                 return 0.0, 0.0
             cutoff = now - window_s
