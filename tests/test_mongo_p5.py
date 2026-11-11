@@ -221,7 +221,9 @@ class TestSidecarRegistry:
             "social-whatsapp-cost", "planning-estimates",
             # residue Batch 2, slice 4:
             "digital-twin", "health-training", "legal-portfolio",
-            "legal-regulatory"}
+            "legal-regulatory",
+            # residue Batch 1, A16 catch-up:
+            "travel-itinerary"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -3129,3 +3131,83 @@ class TestRegulatoryWatchPort:
         seen = rung.store.get("legal-regulatory__reg_seen", "chk-1")
         assert seen is not None and seen["_id"] == "chk-1"
         assert seen["dismissed"] == 1
+
+
+
+# ---------------------------------------------------------------------------
+# residue Batch 1, A16 catch-up: travel-itinerary
+# ---------------------------------------------------------------------------
+
+
+class TestTravelItineraryPort:
+    @staticmethod
+    def _trip(tid, name, pnr, created):
+        from nomorals.travel.itinerary import Flight, Trip
+
+        return Trip(
+            id=tid, name=name,
+            flights=[Flight(airline="British Airways",
+                            flight_number="BA075", origin="LOS",
+                            destination="LHR",
+                            departs="2026-12-01T22:45",
+                            arrives="2026-12-02T05:30", pnr=pnr)],
+            docs=["email.txt"], created_at=created)
+
+    def _scenario(self, builder) -> dict:
+        builder._save(self._trip("trip_a", "LOS → LHR", "ABC123", 100.0))
+        builder._save(self._trip("trip_b", "LOS → LHR", "DEF456", 200.0))
+        builder._save(self._trip("trip_c", "LOS → LHR", "GHI789", 300.0))
+        # INSERT OR REPLACE: trip_a's payload moves, its stamp stays
+        moved = self._trip("trip_a", "LOS → LHR", "ABC123", 100.0)
+        moved.flights[0].seat = "14A"
+        builder._save(moved)
+        got = builder.get_trip("trip_a")
+        return {
+            "got": (got.name, got.flights[0].pnr, got.flights[0].seat,
+                    got.docs, got.created_at),
+            "listed": [t.id for t in builder.list_trips()],
+            "missing": builder.get_trip("nope"),
+            "deleted": builder.delete_trip("trip_b"),
+            "deleted_again": builder.delete_trip("trip_b"),
+            "after_delete": [t.id for t in builder.list_trips()],
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.travel.itinerary import ItineraryBuilder
+
+        builder = ItineraryBuilder(db_path=str(tmp_path / "trips.db"),
+                                   vault_dir=str(tmp_path / "vault"),
+                                   store=rung.store)
+        observed = self._scenario(builder)
+        assert observed["got"] == ("LOS → LHR", "ABC123", "14A",
+                                   ["email.txt"], 100.0)
+        assert observed["listed"] == ["trip_c", "trip_b", "trip_a"]
+        assert observed["missing"] is None
+        assert observed["deleted"] is True
+        assert observed["deleted_again"] is False
+        assert observed["after_delete"] == ["trip_c", "trip_a"]
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.travel.itinerary import ItineraryBuilder
+
+        path = tmp_path / "trips.db"
+        native = ItineraryBuilder(db_path=str(path),
+                                  vault_dir=str(tmp_path / "vault"))
+        native._save(self._trip("trip_kept", "LOS → LHR", "ABC123",
+                                100.0))
+
+        builder = ItineraryBuilder(db_path=str(path),
+                                   vault_dir=str(tmp_path / "vault"),
+                                   store=rung.store)
+        got = builder.get_trip("trip_kept")
+        assert got is not None and got.flights[0].pnr == "ABC123"
+        assert rung.store.count("travel-itinerary__trips") == 1
+        doc = rung.store.get("travel-itinerary__trips", "trip_kept")
+        assert doc is not None and "BA075" in doc["data_json"]
+        again = ItineraryBuilder(db_path=str(path),
+                                 vault_dir=str(tmp_path / "vault"),
+                                 store=rung.store)
+        assert [t.id for t in again.list_trips()] == ["trip_kept"]
+        assert rung.store.count("travel-itinerary__trips") == 1

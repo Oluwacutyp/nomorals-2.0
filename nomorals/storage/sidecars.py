@@ -1140,6 +1140,21 @@ _register(_S(
 ))
 
 _register(_S(
+    name="travel-itinerary", verdict="ported", kind="sqlite-file",
+    modules=("travel/itinerary.py",),
+    tables=("trips",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (A16 catch-up): "
+        "ItineraryBuilder's single table routes through the seam "
+        "(travel-itinerary__trips) whenever a store is resolved, "
+        "behind its unchanged API; the whole itinerary — flights, "
+        "hotels, cars, vault doc names — rides as the data_json "
+        "payload exactly as the file stores it, and only the trip "
+        "records move: the document vault stays on disk on both "
+        "rungs. The native sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
     name="health-timeline", verdict="residue", kind="database-file",
     modules=("health/timeline.py",),
     anchors=(("health/timeline.py", "timeline.db"),),
@@ -1272,8 +1287,6 @@ _residue("travel-groups", "travel/groups.py",
          "group trip state — eight tables with money-split flows "
          "(expenses/payments); the port reviews its split "
          "composition, like household.")
-_residue("travel-itinerary", "travel/itinerary.py", ("trips",),
-         "trip itineraries.")
 _residue("travel-watchers", "travel/watchers.py",
          ("watches", "price_history", "alert_log"),
          "travel price watches and their history.")

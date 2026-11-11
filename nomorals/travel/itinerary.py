@@ -344,25 +344,54 @@ def _ensure_dir(path: str) -> str:
     return path
 
 
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_DDL = """CREATE TABLE IF NOT EXISTS trips
+       (id TEXT PRIMARY KEY, name TEXT, data_json TEXT,
+        created_at REAL)"""
+
+
 class ItineraryBuilder:
     """Booking confirmations → structured trips + document vault.
 
     Never raises on ingestion problems — returns a (possibly empty) Trip
     and records what failed in the vault log.
+
+    Persistence: a SQLite file at ``db_path``. When a document store
+    is resolved (Mongo program P5 — an explicit ``store`` or the boot
+    ambient), the trips table runs over the seam in the
+    ``travel-itinerary__trips`` collection instead (registered in
+    storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at construction. The document
+    vault stays on disk on both rungs — only the trip records move.
     """
 
-    def __init__(self, db_path: str = "", vault_dir: str = "") -> None:
+    def __init__(self, db_path: str = "", vault_dir: str = "",
+                 *, store: Any = None) -> None:
         self.db_path = db_path or TRIP_DB
         self.vault_dir = vault_dir or TRIP_VAULT_DIR
         _ensure_dir(os.path.dirname(self.db_path))
         _ensure_dir(self.vault_dir)
+        self._db: sqlite3.Connection | None = None
+        self._port: Any = None
+        from ..storage.sidecars import sidecar_port
+
+        port = sidecar_port("travel-itinerary", _DDL, ("trips",),
+                            self.db_path, store=store)
+        if port is not None:
+            table = port.tables["trips"]
+
+            def write_trips(rows: list[dict[str, Any]]) -> int:
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+
+            port.ensure_imported({"trips": write_trips})
+            self._port = port
+            return
         self._db = sqlite3.connect(self.db_path)
         self._db.row_factory = sqlite3.Row
-        self._db.execute(
-            """CREATE TABLE IF NOT EXISTS trips
-               (id TEXT PRIMARY KEY, name TEXT, data_json TEXT,
-                created_at REAL)"""
-        )
+        self._db.execute(_DDL)
         self._db.commit()
 
     # ── ingestion ──
@@ -492,6 +521,11 @@ class ItineraryBuilder:
 
     def get_trip(self, trip_id: str) -> Trip | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["trips"].get(trip_id)
+                if not row:
+                    return None
+                return self._from_row(trip_id, row["data_json"])
             row = self._db.execute(
                 "SELECT data_json FROM trips WHERE id = ?", (trip_id,)
             ).fetchone()
@@ -505,6 +539,15 @@ class ItineraryBuilder:
 
     def list_trips(self) -> list[Trip] | None:
         try:
+            if self._port is not None:
+                rows = self._port.tables["trips"].all()
+                # created_at DESC, NULLs last — the native ORDER BY.
+                rows.sort(
+                    key=lambda r: (r.get("created_at") is not None,
+                                   r.get("created_at") or 0.0),
+                    reverse=True)
+                return [self._from_row(r["id"], r["data_json"])
+                        for r in rows]
             rows = self._db.execute(
                 "SELECT id, data_json FROM trips ORDER BY created_at DESC"
             ).fetchall()
@@ -527,6 +570,12 @@ class ItineraryBuilder:
 
     def _save(self, trip: Trip) -> None:
         try:
+            if self._port is not None:
+                self._port.tables["trips"].put({
+                    "id": trip.id, "name": trip.name,
+                    "data_json": json.dumps(asdict(trip)),
+                    "created_at": trip.created_at})
+                return
             self._db.execute(
                 "INSERT OR REPLACE INTO trips (id, name, data_json, "
                 "created_at) VALUES (?, ?, ?, ?)",
@@ -565,6 +614,8 @@ class ItineraryBuilder:
     def delete_trip(self, trip_id: str) -> bool:
         """Remove a trip record (used by merges). Returns True on delete."""
         try:
+            if self._port is not None:
+                return self._port.tables["trips"].delete(trip_id)
             cur = self._db.execute("DELETE FROM trips WHERE id = ?",
                                    (trip_id,))
             self._db.commit()
