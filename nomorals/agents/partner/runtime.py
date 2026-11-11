@@ -76,12 +76,13 @@ _DRAFT_CALLBACK_RE = re.compile(
     r"^/draft:(post|schedule|discard|edit|variants):([0-9A-Za-z_-]+)$")
 
 #: /proposals subcommands (show / approve / deny <id>): the
-#: catalog spec for "proposals" is (0, 0), so parse_control
-#: refuses ANY argument and the dispatch branch's own subcommand
-#: handling was unreachable from chat — intercepted pre-parse
-#: like the draft taps above, owner-gated the same way, and
-#: routed to PartnerRuntime._proposals_command (the one
-#: implementation the branch also uses).
+#: catalog spec for "proposals" is (0, None) — parse_control
+#: admits the args — but the parse dispatch hands the branch
+#: only the tail's FIRST word (the verb), losing the id and
+#: deny's free-text reason.  The full tail rides this pre-parse
+#: interception instead, like the draft taps above, owner-gated
+#: the same way, and routed to PartnerRuntime._proposals_command
+#: (the one implementation the branch also uses).
 _PROPOSALS_SUB_RE = re.compile(r"^/proposals\s+(.+)$", re.IGNORECASE)
 _PROPOSALS_VERBS = frozenset({"show", "inspect", "view",
                               "approve", "deny"})
@@ -5805,10 +5806,11 @@ class PartnerRuntime(
             return self._draft_callback(
                 text.strip(), chat_key, message=message)
 
-        # /proposals <verb> …: see _PROPOSALS_SUB_RE — the (0, 0)
-        # catalog spec would error these before dispatch, so the
+        # /proposals <verb> …: see _PROPOSALS_SUB_RE — the
         # subcommands (including the list buttons' taps, which
-        # re-enter as exactly this text) are routed here.
+        # re-enter as exactly this text) are routed here so the
+        # FULL tail reaches _proposals_command; the parse
+        # dispatch below would hand it only the first word.
         # Owner-only, same refusal as the draft taps: deciding a
         # proposal is the owner's act.
         _prop = _PROPOSALS_SUB_RE.match(text.strip())
@@ -6714,9 +6716,10 @@ class PartnerRuntime(
         if kind == "proposals":
             # Subcommands (show / approve / deny) live in
             # _proposals_command — reached from chat through the
-            # pre-parse interception (the catalog spec is (0, 0));
-            # this call keeps any other route that lands here with
-            # an argument on the same one implementation.
+            # pre-parse interception, which carries the full tail
+            # this branch's first-word `arg` would truncate; this
+            # call keeps any other route that lands here with an
+            # argument on the same one implementation.
             _handled = self._proposals_command(arg)
             if _handled is not None:
                 return _handled

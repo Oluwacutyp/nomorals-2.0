@@ -16,13 +16,29 @@ The designed values (one home, stated once):
 * **width** — the typeset mark spans ``WIDTH_FRACTION`` (0.34)
   of the image width, clamped to [90, 460] px; the font size is
   solved from the measured text width so the fraction is real
-  at every image size.  A height cap rides on top
-  (``MAX_HEIGHT_FRACTION``, 0.12 of the image height): on a
-  short banner the width rule alone would make the mark as
-  tall as the content's own type, so the fit shrinks until the
-  mark's height is subordinate to the frame.
-* **anchor** — bottom-right, margin ``MARGIN_FRACTION`` (0.03)
-  of the smaller image dimension, at least 8 px.
+  at every image size.  A JOINT height cap rides on top: the
+  mark's height may not exceed ``MAX_HEIGHT_FRACTION`` (0.085)
+  of the image height — and on LANDSCAPE frames (wider than
+  tall, the banner regime) it must ALSO clear
+  ``MAX_HEIGHT_WIDTH_FRACTION`` (0.03) of the image width, so
+  the mark stays modest against the frame's full span.  (On
+  square and portrait frames the height fraction alone
+  governs: width isn't the scarce dimension there, and a
+  width term would tax a small square — a 240 px QR card —
+  out of a mark its height happily carries.)  On a short
+  banner the width rule alone would make the mark as tall as
+  the content's own type (the 0.12-of-height-only cap still
+  overwhelmed a 182 px card), so the fit shrinks until the
+  cap holds.  A frame whose binding cap falls below
+  ``MIN_MARK_HEIGHT_PX`` (8 px) cannot carry a LEGIBLE mark
+  and is refused — a smudge is not a signature.
+* **anchor** — bottom-right.  The margin is the largest of
+  ``MARGIN_FRACTION`` (0.03) of the smaller image dimension,
+  ``MARGIN_MARK_FRACTION`` (0.75) of the mark's OWN height,
+  and 8 px: clearance scales with the mark itself, so the
+  mark (and its soft shadow) never crowds the frame's edge —
+  on the 182 px card the old flat 8 px margin left the mark
+  sitting on the bottom edge, reading clipped.
 * **contrast** — the luminance of the corner region the mark
   will occupy is sampled from the source: a bright region
   (>= ``LUMINANCE_SPLIT``, 140) takes a DARK ink, a dark region
@@ -51,7 +67,8 @@ from ...core.branding import BRAND_TEXT
 
 __all__ = [
     "BrandMarkError", "burn_brand_mark",
-    "WIDTH_FRACTION", "MAX_HEIGHT_FRACTION", "MARGIN_FRACTION",
+    "WIDTH_FRACTION", "MAX_HEIGHT_FRACTION", "MAX_HEIGHT_WIDTH_FRACTION",
+    "MIN_MARK_HEIGHT_PX", "MARGIN_FRACTION", "MARGIN_MARK_FRACTION",
     "INK_ALPHA", "SHADOW_ALPHA", "LUMINANCE_SPLIT",
 ]
 
@@ -59,8 +76,11 @@ __all__ = [
 WIDTH_FRACTION = 0.34
 WIDTH_MIN_PX = 90
 WIDTH_MAX_PX = 460
-MAX_HEIGHT_FRACTION = 0.12
+MAX_HEIGHT_FRACTION = 0.085
+MAX_HEIGHT_WIDTH_FRACTION = 0.03
+MIN_MARK_HEIGHT_PX = 8
 MARGIN_FRACTION = 0.03
+MARGIN_MARK_FRACTION = 0.75
 INK_ALPHA = 0.78
 SHADOW_ALPHA = 0.43
 LUMINANCE_SPLIT = 140
@@ -171,18 +191,33 @@ def burn_brand_mark(data: bytes, text: str = "") -> bytes:
     target = max(WIDTH_MIN_PX,
                  min(WIDTH_MAX_PX, round(width * WIDTH_FRACTION)))
     target = min(target, width)  # a narrow image: the mark fits it
-    margin = max(8, round(min(width, height) * MARGIN_FRACTION))
     font, (text_w, text_h), box = _fit_font(
         mark_text, target, start=max(10, round(width * 0.045)))
     if text_w <= 0 or text_h <= 0:
         raise BrandMarkError("brand text typesets to nothing")
-    height_cap = max(9.0, height * MAX_HEIGHT_FRACTION)
+    # The JOINT height cap: subordinate to the frame's height —
+    # and, on landscape frames, to its width too (see the
+    # docstring for why square/portrait frames skip the width
+    # term).
+    height_cap = height * MAX_HEIGHT_FRACTION
+    if width > height:
+        height_cap = min(height_cap,
+                         width * MAX_HEIGHT_WIDTH_FRACTION)
     if text_h > height_cap:
+        if height_cap < MIN_MARK_HEIGHT_PX:
+            # The frame is too small for a legible mark at the
+            # designed proportions — refuse honestly rather than
+            # burn in an unreadable smudge.
+            raise BrandMarkError("image too small to carry a mark")
         # A short frame (a card banner): shrink the fit until the
         # mark's height is subordinate to the frame's own type.
         font, (text_w, text_h), box = _fit_font(
             mark_text, max(24, round(target * height_cap / text_h)),
             start=max(10, round(width * 0.045)))
+    # Clearance scales with the mark itself: never closer to an
+    # edge than MARGIN_MARK_FRACTION of the mark's own height.
+    margin = max(8, round(min(width, height) * MARGIN_FRACTION),
+                 round(text_h * MARGIN_MARK_FRACTION))
     # The mark's footprint: the typeset box placed bottom-right.
     x1, y1 = width - margin, height - margin
     x0, y0 = x1 - text_w, y1 - text_h

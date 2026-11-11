@@ -397,7 +397,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # rich voice (/say [direction] [accent=…] <text>). The dispatch
     # branch in handle_control routes on the tail shape.
     "say": (1, None),
-    "proposals": (0, 0),
+    "proposals": (0, None),  # /proposals [show|inspect|view <id> | approve <id> | deny <id> [reason…]] — the verbs ride the runtime's pre-parse interception (it carries the full tail, incl. deny's free-text reason, which the parse dispatch's first-word arg would truncate); the spec admits the args so /help and validation don't refuse forms the surface executes
     "approve": (0, 1),     # context kind: proposal approvals in DM (arg required there); in a group it executes treasury proposals, bare lists them
     "deny": (1, 2),       # /deny <id> [reason] — reason required for upgrade tickets
     "stage": (0, 1),
@@ -2123,8 +2123,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/say <platform:chat> <text> | /say <voice> <text> | /say [direction] [accent=…] [ambient=…] <text>",
             "example": "/say telegram:123 hi — or — /say trump hello there — or — /say [whispers fearfully] don't go in there",
             "related": "/file /publish /voices /voice /tts /sing"},
-    "proposals": {"what": "list everything waiting for your approval: proactive actions + research upgrade proposals.",
-                  "usage": "/proposals", "example": "/proposals",
+    "proposals": {"what": "list everything waiting for your approval — and inspect any one of them in full before you decide: proactive actions + research upgrade proposals.",
+                  "usage": "/proposals [show|approve|deny] <id>", "example": "/proposals show prop-1",
                   "related": "/approve /deny /upgrade"},
     "approve": {"what": "approve one pending proposal so she executes it (upgrade tickets are approved + test-gated applied).",
                 "usage": "/approve <id>", "example": "/approve p3",

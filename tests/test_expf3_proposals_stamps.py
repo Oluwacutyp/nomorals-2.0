@@ -238,6 +238,81 @@ class ProposalButtonTests(unittest.TestCase):
             self.assertIn("/proposals show <id>", out)
 
 
+class ProposalsCatalogPathTests(unittest.TestCase):
+    """F3b remainder: the catalog record is truthful AND the parse
+    path is safe. The spec admits the subcommand args ((0, None))
+    and the usage names them; every typed form still lands in
+    _proposals_command EXACTLY ONCE through handle_control — the
+    pre-parse interception carries the full tail, parse_control
+    no longer errors the forms, and nothing double-routes."""
+
+    def test_spec_and_catalog_tell_the_truth(self):
+        from nomorals.social.chat.control import COMMAND_DETAILS, CONTROL_COMMANDS
+
+        self.assertEqual(CONTROL_COMMANDS["proposals"], (0, None))
+        self.assertEqual(COMMAND_DETAILS["proposals"]["usage"],
+                         "/proposals [show|approve|deny] <id>")
+
+    def test_parse_control_admits_every_typed_form(self):
+        from nomorals.social.chat.control import parse_control
+
+        for text in ("/proposals", "/proposals show prop-1",
+                     "/proposals approve prop-1",
+                     "/proposals deny prop-1 not now, too risky"):
+            cmd = parse_control(text)
+            self.assertIsNotNone(cmd, text)
+            self.assertEqual(cmd.kind, "proposals", text)
+
+    def _full_runtime(self, tmp, sent):
+        return ProposalButtonTests()._full_runtime(tmp, sent)
+
+    def test_each_form_lands_exactly_once(self):
+        sent: list = []
+        with tempfile.TemporaryDirectory(prefix="nm-expf3b-") as tmp:
+            rt, ctx = self._full_runtime(tmp, sent)
+            _proactive_row(ctx.db, pid="prop-1",
+                           content="held: the first note")
+            _proactive_row(ctx.db, pid="prop-2",
+                           content="held: the second note")
+            calls: list = []
+            original = rt._proposals_command
+
+            def spy(arg):
+                calls.append(arg)
+                return original(arg)
+
+            rt._proposals_command = spy
+            # Bare list: one call (the dispatch's), list rendered.
+            out = rt.handle_control("/proposals", "telegram:123")
+            self.assertEqual(calls, [""])
+            self.assertIn("pending proposals (2)", str(out.text))
+            # Show: one call, full tail, the detail opens.
+            calls.clear()
+            detail = rt.handle_control("/proposals show prop-1",
+                                       "telegram:123")
+            self.assertEqual(calls, ["show prop-1"])
+            self.assertIn("held: the first note", str(detail))
+            # Approve: one call, the send really happens.
+            calls.clear()
+            verdict = rt.handle_control("/proposals approve prop-1",
+                                        "telegram:123")
+            self.assertEqual(calls, ["approve prop-1"])
+            self.assertIn("approved prop-1", str(verdict))
+            self.assertEqual([row[2] for row in sent],
+                             ["held: the first note"])
+            # Deny with a multi-word reason: ONE call carrying the
+            # whole tail (the interception, not a truncated arg).
+            calls.clear()
+            verdict = rt.handle_control(
+                "/proposals deny prop-2 not now, too risky",
+                "telegram:123")
+            self.assertEqual(calls, ["deny prop-2 not now, too risky"])
+            self.assertIn("prop-2", str(verdict))
+            row = ctx.db.query_one(
+                "SELECT status FROM proactive_log WHERE id = 'prop-2'")
+            self.assertEqual(row["status"], "denied")
+
+
 # ── Part 2a: the rendered image watermark ───────────────────────
 
 def _png_bytes(color, size=(800, 600)):
@@ -300,6 +375,25 @@ class WatermarkRenderTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertLessEqual(max(changed) - min(changed),
                              int(182 * MAX_HEIGHT_FRACTION) + 14)
+
+    def test_small_square_still_marks(self):
+        # A 240 px square (her QR cards' size): the landscape
+        # width term must not tax a square out of its mark — the
+        # height fraction alone governs there, and the mark lands
+        # (dark ink on the light ground, corner changed).
+        from PIL import Image
+
+        from nomorals.social.chat.brandmark import burn_brand_mark
+
+        raw = _png_bytes((250, 250, 250), size=(240, 240))
+        marked = burn_brand_mark(raw)
+        img = Image.open(io.BytesIO(marked)).convert("L")
+        base = Image.open(io.BytesIO(raw)).convert("L")
+        corner = [img.getpixel((x, y))
+                  for y in range(200, 240) for x in range(60, 240)]
+        self.assertLess(min(corner), 200)
+        self.assertNotEqual(marked, raw)
+        self.assertEqual(base.getpixel((10, 10)), 250)
 
     def test_rejects_non_images_and_tiny(self):
         from nomorals.social.chat.brandmark import BrandMarkError, burn_brand_mark
