@@ -128,48 +128,105 @@ class DealBreaker:
 
 _DEFAULT_DB = os.path.expanduser("~/.nomorals/matching/questionnaire.db")
 
-
-class Questionnaire:
-    """Per-owner preference capture + weighted candidate scoring."""
-
-    def __init__(self, owner: str = "owner", db_path: str = "") -> None:
-        self.owner = owner or "owner"
-        self._db = None
-        try:
-            path = db_path or _DEFAULT_DB
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            self._db = sqlite3.connect(path)
-            self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS answers (
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift. The
+#: answers statement carries the FINAL shape (the ``acceptable`` /
+#: ``section`` columns the in-file migration adds to older files);
+#: ``_migrate_answers`` below stays as the legacy-file path.
+_ANSWERS_DDL = """CREATE TABLE IF NOT EXISTS answers (
                        owner TEXT, question_id TEXT, text TEXT,
                        attribute TEXT, importance INTEGER, answer TEXT,
-                       updated_at REAL,
+                       updated_at REAL, acceptable TEXT DEFAULT '[]',
+                       section TEXT DEFAULT '',
                        PRIMARY KEY (owner, question_id))"""
-            )
-            self._migrate_answers()
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS dealbreakers (
+_DEALBREAKERS_DDL = """CREATE TABLE IF NOT EXISTS dealbreakers (
                        owner TEXT, name TEXT, attribute TEXT,
                        predicate TEXT, value TEXT,
                        PRIMARY KEY (owner, name))"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS ranks (
+_RANKS_DDL = """CREATE TABLE IF NOT EXISTS ranks (
                        owner TEXT, who TEXT, side TEXT, ranking TEXT,
                        updated_at REAL,
                        PRIMARY KEY (owner, who, side))"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS capacities (
+_CAPACITIES_DDL = """CREATE TABLE IF NOT EXISTS capacities (
                        owner TEXT, reviewer TEXT, capacity INTEGER,
                        PRIMARY KEY (owner, reviewer))"""
-            )
+_DDL = ";\n".join((_ANSWERS_DDL, _DEALBREAKERS_DDL, _RANKS_DDL,
+                   _CAPACITIES_DDL))
+
+
+class Questionnaire:
+    """Per-owner preference capture + weighted candidate scoring.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as matching-questionnaire):
+    all four tables are documents in ``matching-questionnaire__answers``
+    / ``__dealbreakers`` / ``__ranks`` / ``__capacities``, composite-
+    keyed by owner, so the key parts live only in the joined document
+    id — point reads fetch by that id and owner-scoped reads scan the
+    restored rows. The file's existing rows are imported once, through
+    the same mapping, at first construction.
+    """
+
+    def __init__(self, owner: str = "owner", db_path: str = "",
+                 *, store=None) -> None:
+        self.owner = owner or "owner"
+        self._db = None
+        self._port = None
+        try:
+            path = db_path or _DEFAULT_DB
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "matching-questionnaire", _DDL,
+                ("answers", "dealbreakers", "ranks", "capacities"),
+                path, store=store)
+            if port is not None:
+                def _writer(table):
+                    def write(rows):
+                        for row in rows:
+                            table.put(row)
+                        return len(rows)
+                    return write
+
+                port.ensure_imported({
+                    name: _writer(port.tables[name])
+                    for name in ("answers", "dealbreakers", "ranks",
+                                 "capacities")})
+                self._port = port
+                return
+            self._db = sqlite3.connect(path)
+            self._db.row_factory = sqlite3.Row
+            self._db.execute(_ANSWERS_DDL)
+            self._migrate_answers()
+            self._db.execute(_DEALBREAKERS_DDL)
+            self._db.execute(_RANKS_DDL)
+            self._db.execute(_CAPACITIES_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001
             _log.warning("matching.questionnaire: db unavailable",
                          exc_info=True)
             self._db = None
+            self._port = None
+
+    # ── seam helpers ────────────────────────────────────────────
+
+    @staticmethod
+    def _key(*parts) -> str:
+        """The joined document id of a composite-keyed row."""
+        return "\x1f".join(str(p) for p in parts)
+
+    def _my_rows(self, table: str) -> list:
+        """This owner's rows of a composite-keyed table (seam side).
+
+        The owner is a key part, so it lives only in the joined
+        document id, never in a findable field: owner-scoped reads
+        scan the restored rows and filter in Python — never find()
+        on key fields (the matching-batches precedent).
+        """
+        return [r for r in self._port.tables[table].all()
+                if r["owner"] == self.owner]
 
     def _migrate_answers(self) -> None:
         """Add `acceptable` + `section` columns to older databases."""
@@ -201,9 +258,18 @@ class Questionnaire:
     def add_question(self, question_id: str, text: str,
                      attribute: str = "", section: str = "") -> Question:
         try:
-            if self._db is None or not question_id:
+            if (self._db is None and self._port is None) or not question_id:
                 return Question()
             section = section if section in SECTIONS else ""
+            if self._port is not None:
+                self._port.tables["answers"].insert_ignore({
+                    "owner": self.owner, "question_id": question_id,
+                    "text": text, "attribute": attribute or question_id,
+                    "importance": 0, "answer": "", "acceptable": "[]",
+                    "section": section, "updated_at": time.time()})
+                return self.get(question_id) or Question(
+                    question_id=question_id, text=text,
+                    attribute=attribute)
             self._db.execute(
                 """INSERT OR IGNORE INTO answers
                    (owner, question_id, text, attribute, importance, answer,
@@ -238,6 +304,10 @@ class Questionnaire:
 
     def get(self, question_id: str) -> Question | None:
         try:
+            if self._port is not None:
+                r = self._port.tables["answers"].get(
+                    self._key(self.owner, question_id))
+                return self._row_to_question(r) if r else None
             if self._db is None:
                 return None
             r = self._db.execute(
@@ -256,9 +326,17 @@ class Questionnaire:
         pair with ``set_acceptable`` for the full OkCupid pattern.
         """
         try:
-            if self._db is None or not question_id:
+            if (self._db is None and self._port is None) or not question_id:
                 return False
             importance = max(1, min(5, int(importance)))
+            if self._port is not None:
+                table = self._port.tables["answers"]
+                key = self._key(self.owner, question_id)
+                if table.get(key) is None:
+                    return False
+                return table.update(key, {
+                    "importance": importance, "answer": value or "",
+                    "updated_at": time.time()})
             cur = self._db.execute(
                 """UPDATE answers SET importance = ?, answer = ?,
                                   updated_at = ?
@@ -279,10 +357,18 @@ class Questionnaire:
         my value" (homophily default). Never raises.
         """
         try:
-            if self._db is None or not question_id:
+            if (self._db is None and self._port is None) or not question_id:
                 return False
             clean = [str(v).strip() for v in (values or [])
                      if str(v).strip()]
+            if self._port is not None:
+                table = self._port.tables["answers"]
+                key = self._key(self.owner, question_id)
+                if table.get(key) is None:
+                    return False
+                return table.update(key, {
+                    "acceptable": json.dumps(clean),
+                    "updated_at": time.time()})
             cur = self._db.execute(
                 """UPDATE answers SET acceptable = ?, updated_at = ?
                    WHERE owner = ? AND question_id = ?""",
@@ -296,6 +382,14 @@ class Questionnaire:
     def unanswered(self, section: str = "") -> list[Question]:
         """The nudge list: answer more → better matches."""
         try:
+            if self._port is not None:
+                rows = [r for r in self._my_rows("answers")
+                        if int(r["importance"] or 0) == 0]
+                if section in SECTIONS:
+                    rows = [r for r in rows
+                            if (r["section"] or "") == section]
+                rows.sort(key=lambda r: r["question_id"])
+                return [self._row_to_question(r) for r in rows]
             if self._db is None:
                 return []
             if section in SECTIONS:
@@ -316,6 +410,12 @@ class Questionnaire:
     def answered(self) -> list[Question]:
         """All answered questions, most-recently-updated first."""
         try:
+            if self._port is not None:
+                rows = [r for r in self._my_rows("answers")
+                        if int(r["importance"] or 0) > 0]
+                rows.sort(key=lambda r: (-(r["updated_at"] or 0),
+                                         r["question_id"]))
+                return [self._row_to_question(r) for r in rows]
             if self._db is None:
                 return []
             rows = self._db.execute(
@@ -329,9 +429,13 @@ class Questionnaire:
     def weights(self) -> dict[str, float]:
         """{attribute: importance} for answered questions (tag weights)."""
         try:
-            if self._db is None:
+            if self._port is not None:
+                rows = [r for r in self._my_rows("answers")
+                        if int(r["importance"] or 0) > 0]
+            elif self._db is None:
                 return {}
-            rows = self._db.execute(
+            else:
+                rows = self._db.execute(
                 """SELECT attribute, importance FROM answers
                    WHERE owner = ? AND importance > 0""",
                 (self.owner,)).fetchall()
@@ -348,9 +452,13 @@ class Questionnaire:
     def okcupid_weights(self) -> dict[str, int]:
         """{attribute: ladder weight} — 1/10/50/250, not 1–5."""
         try:
-            if self._db is None:
+            if self._port is not None:
+                rows = [r for r in self._my_rows("answers")
+                        if int(r["importance"] or 0) > 0]
+            elif self._db is None:
                 return {}
-            rows = self._db.execute(
+            else:
+                rows = self._db.execute(
                 """SELECT attribute, importance FROM answers
                    WHERE owner = ? AND importance > 0""",
                 (self.owner,)).fetchall()
@@ -371,11 +479,17 @@ class Questionnaire:
                         value: object) -> bool:
         """Front-load the awkward conversation: budget, availability, intent."""
         try:
-            if self._db is None or not name:
+            if (self._db is None and self._port is None) or not name:
                 return False
             if predicate not in ("eq", "ne", "le", "ge", "in", "contains",
                                  "between"):
                 return False
+            if self._port is not None:
+                self._port.tables["dealbreakers"].put({
+                    "owner": self.owner, "name": name,
+                    "attribute": attribute, "predicate": predicate,
+                    "value": json.dumps(value, default=str)})
+                return True
             self._db.execute(
                 """INSERT OR REPLACE INTO dealbreakers
                    (owner, name, attribute, predicate, value)
@@ -390,8 +504,11 @@ class Questionnaire:
 
     def remove_dealbreaker(self, name: str) -> bool:
         try:
-            if self._db is None or not name:
+            if (self._db is None and self._port is None) or not name:
                 return False
+            if self._port is not None:
+                return self._port.tables["dealbreakers"].delete(
+                    self._key(self.owner, name))
             cur = self._db.execute(
                 "DELETE FROM dealbreakers WHERE owner = ? AND name = ?",
                 (self.owner, name))
@@ -403,9 +520,12 @@ class Questionnaire:
 
     def dealbreakers(self) -> list[DealBreaker]:
         try:
-            if self._db is None:
+            if self._port is not None:
+                rows = self._my_rows("dealbreakers")
+            elif self._db is None:
                 return []
-            rows = self._db.execute(
+            else:
+                rows = self._db.execute(
                 "SELECT * FROM dealbreakers WHERE owner = ?",
                 (self.owner,)).fetchall()
             out = []
@@ -427,6 +547,11 @@ class Questionnaire:
     def boundary_questions(self) -> list[Question]:
         """'Boundaries'-section questions — Feeld's red-flags list."""
         try:
+            if self._port is not None:
+                rows = [r for r in self._my_rows("answers")
+                        if (r["section"] or "") == "boundaries"]
+                rows.sort(key=lambda r: r["question_id"])
+                return [self._row_to_question(r) for r in rows]
             if self._db is None:
                 return []
             rows = self._db.execute(
@@ -447,10 +572,16 @@ class Questionnaire:
         ``side`` is ``"proposer"`` or ``"reviewer"``.
         """
         try:
-            if self._db is None or not who or side not in ("proposer",
-                                                          "reviewer"):
+            if (self._db is None and self._port is None) or not who \
+                    or side not in ("proposer", "reviewer"):
                 return False
             clean = [r.strip() for r in (ranking or []) if r and r.strip()]
+            if self._port is not None:
+                self._port.tables["ranks"].put({
+                    "owner": self.owner, "who": who, "side": side,
+                    "ranking": json.dumps(clean),
+                    "updated_at": time.time()})
+                return True
             self._db.execute(
                 """INSERT OR REPLACE INTO ranks
                    (owner, who, side, ranking, updated_at)
@@ -465,9 +596,14 @@ class Questionnaire:
     def rankings(self, side: str) -> dict[str, list[str]]:
         """{who: ranked list} for one side."""
         try:
-            if self._db is None or side not in ("proposer", "reviewer"):
+            if (self._db is None and self._port is None) \
+                    or side not in ("proposer", "reviewer"):
                 return {}
-            rows = self._db.execute(
+            if self._port is not None:
+                rows = [r for r in self._my_rows("ranks")
+                        if r["side"] == side]
+            else:
+                rows = self._db.execute(
                 "SELECT who, ranking FROM ranks WHERE owner = ? AND side = ?",
                 (self.owner, side)).fetchall()
             out: dict[str, list[str]] = {}
@@ -488,9 +624,14 @@ class Questionnaire:
     def set_capacity(self, reviewer: str, capacity: int) -> bool:
         """A reviewer takes up to ``capacity`` proposers (mentor's seats)."""
         try:
-            if self._db is None or not reviewer:
+            if (self._db is None and self._port is None) or not reviewer:
                 return False
             capacity = max(1, int(capacity))
+            if self._port is not None:
+                self._port.tables["capacities"].put({
+                    "owner": self.owner, "reviewer": reviewer,
+                    "capacity": capacity})
+                return True
             self._db.execute(
                 """INSERT OR REPLACE INTO capacities
                    (owner, reviewer, capacity) VALUES (?, ?, ?)""",
@@ -503,9 +644,12 @@ class Questionnaire:
 
     def capacities(self) -> dict[str, int]:
         try:
-            if self._db is None:
+            if self._port is not None:
+                rows = self._my_rows("capacities")
+            elif self._db is None:
                 return {}
-            rows = self._db.execute(
+            else:
+                rows = self._db.execute(
                 "SELECT reviewer, capacity FROM capacities WHERE owner = ?",
                 (self.owner,)).fetchall()
             return {r["reviewer"]: int(r["capacity"] or 1) for r in rows}

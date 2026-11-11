@@ -231,20 +231,86 @@ class RentalPassport:
             return "attestation: unknown"
 
 
-class PassportStore:
-    """SQLite passport storage. Never raises. Stores vault references only."""
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift. The
+#: passports statement carries the FINAL shape (with the
+#: ``attested_at`` column the in-file migration adds to older
+#: files); the ALTER in ``__init__`` stays as the legacy-file path.
+_PASSPORTS_DDL = """CREATE TABLE IF NOT EXISTS passports (
+                       id TEXT PRIMARY KEY, owner_name TEXT, kyc_summary TEXT,
+                       income_band TEXT, created_at REAL, updated_at REAL,
+                       attested_at REAL)"""
+_HISTORY_DDL = """CREATE TABLE IF NOT EXISTS history (
+                       id TEXT PRIMARY KEY, passport_id TEXT, address TEXT,
+                       landlord TEXT, years TEXT, note TEXT)"""
+_REFS_DDL = """CREATE TABLE IF NOT EXISTS refs (
+                       id TEXT PRIMARY KEY, passport_id TEXT, name TEXT,
+                       relationship TEXT, contact_ref TEXT)"""
+_DOC_REFS_DDL = """CREATE TABLE IF NOT EXISTS doc_refs (
+                       id TEXT PRIMARY KEY, passport_id TEXT,
+                       vault_id TEXT, label TEXT)"""
+_DDL = ";\n".join((_PASSPORTS_DDL, _HISTORY_DDL, _REFS_DDL, _DOC_REFS_DDL))
 
-    def __init__(self, db_path: str = "") -> None:
+
+class PassportStore:
+    """SQLite passport storage. Never raises. Stores vault references only.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as property-passport):
+    all four tables are documents in ``property-passport__passports``
+    / ``__history`` / ``__refs`` / ``__doc_refs``, and the passport
+    aggregate assembles from per-passport finds exactly as it
+    assembled from per-passport SELECTs. Every value is a typed
+    column — there are no JSON-blob rows in this store. The file's
+    existing rows are imported once, through the same mapping, at
+    first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store=None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port = None
         try:
             path = db_path or _default_db()
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "property-passport", _DDL,
+                ("passports", "history", "refs", "doc_refs"),
+                path, store=store)
+            if port is not None:
+                def _writer(table, columns):
+                    def write(rows):
+                        for row in rows:
+                            row = dict(row)
+                            # A legacy file's rows can predate a
+                            # migrated column (attested_at): fill
+                            # the gaps with None — the NULL a native
+                            # ALTER would have left there.
+                            for col in columns:
+                                row.setdefault(col, None)
+                            table.put(row)
+                        return len(rows)
+                    return write
+
+                port.ensure_imported({
+                    "passports": _writer(port.tables["passports"], (
+                        "id", "owner_name", "kyc_summary", "income_band",
+                        "created_at", "updated_at", "attested_at")),
+                    "history": _writer(port.tables["history"], (
+                        "id", "passport_id", "address", "landlord",
+                        "years", "note")),
+                    "refs": _writer(port.tables["refs"], (
+                        "id", "passport_id", "name", "relationship",
+                        "contact_ref")),
+                    "doc_refs": _writer(port.tables["doc_refs"], (
+                        "id", "passport_id", "vault_id", "label"))})
+                self._port = port
+                return
             self._db = sqlite3.connect(path)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS passports (
-                       id TEXT PRIMARY KEY, owner_name TEXT, kyc_summary TEXT,
-                       income_band TEXT, created_at REAL, updated_at REAL)""")
+            self._db.execute(_PASSPORTS_DDL)
             # Migration for pre-existing DBs: attested_at (Zillow pattern).
             try:
                 self._db.execute(
@@ -252,23 +318,15 @@ class PassportStore:
                 self._db.commit()
             except sqlite3.OperationalError:
                 pass  # column already there
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS history (
-                       id TEXT PRIMARY KEY, passport_id TEXT, address TEXT,
-                       landlord TEXT, years TEXT, note TEXT)""")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS refs (
-                       id TEXT PRIMARY KEY, passport_id TEXT, name TEXT,
-                       relationship TEXT, contact_ref TEXT)""")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS doc_refs (
-                       id TEXT PRIMARY KEY, passport_id TEXT,
-                       vault_id TEXT, label TEXT)""")
+            self._db.execute(_HISTORY_DDL)
+            self._db.execute(_REFS_DDL)
+            self._db.execute(_DOC_REFS_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001 — a bad DB path is an empty store
             _log.warning("passport: db unavailable, running empty",
                          exc_info=True)
             self._db = None
+            self._port = None
 
     # ── assembly ──
 
@@ -304,6 +362,21 @@ class PassportStore:
                         landlord=str(h.get("landlord", ""))[:120],
                         years=str(h.get("years", ""))[:40],
                         note=str(h.get("note", ""))[:200]))
+            if self._port is not None:
+                self._port.tables["passports"].put({
+                    "id": p.passport_id, "owner_name": p.owner_name,
+                    "kyc_summary": p.kyc_summary,
+                    "income_band": p.income_band,
+                    "created_at": p.created_at,
+                    "updated_at": p.updated_at,
+                    "attested_at": p.attested_at})
+                for h in p.history:
+                    self._port.tables["history"].put({
+                        "id": "h_" + uuid.uuid4().hex[:8],
+                        "passport_id": p.passport_id, "address": h.address,
+                        "landlord": h.landlord, "years": h.years,
+                        "note": h.note})
+                return p
             if self._db is None:
                 return p
             self._db.execute(
@@ -323,6 +396,36 @@ class PassportStore:
 
     def get(self, passport_id: str) -> RentalPassport | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["passports"].get(passport_id)
+                if row is None:
+                    return None
+                p = RentalPassport(
+                    passport_id=row["id"],
+                    owner_name=row["owner_name"] or "",
+                    kyc_summary=row["kyc_summary"] or "",
+                    income_band=row["income_band"] or "",
+                    created_at=row["created_at"] or 0.0,
+                    updated_at=row["updated_at"] or 0.0,
+                    attested_at=row.get("attested_at") or 0.0)
+                for h in self._port.tables["history"].find(
+                        {"passport_id": p.passport_id}):
+                    p.history.append(RentalHistory(
+                        address=h["address"] or "",
+                        landlord=h["landlord"] or "",
+                        years=h["years"] or "", note=h["note"] or ""))
+                for r in self._port.tables["refs"].find(
+                        {"passport_id": p.passport_id}):
+                    p.references.append(Reference(
+                        name=r["name"] or "",
+                        relationship=r["relationship"] or "",
+                        contact_ref=r["contact_ref"] or ""))
+                for d in self._port.tables["doc_refs"].find(
+                        {"passport_id": p.passport_id}):
+                    p.doc_refs.append(DocRef(
+                        vault_id=d["vault_id"] or "",
+                        label=d["label"] or ""))
+                return p
             if self._db is None:
                 return None
             row = self._db.execute(
@@ -362,10 +465,16 @@ class PassportStore:
 
     def list(self) -> list[RentalPassport]:
         try:
-            if self._db is None:
+            if self._port is not None:
+                rows = self._port.tables["passports"].all()
+                rows.sort(key=lambda r: (-(r["updated_at"] or 0),
+                                         r["id"]))
+                ids = [r["id"] for r in rows]
+            elif self._db is None:
                 return []
-            ids = [r["id"] for r in self._db.execute(
-                "SELECT id FROM passports ORDER BY updated_at DESC")]
+            else:
+                ids = [r["id"] for r in self._db.execute(
+                    "SELECT id FROM passports ORDER BY updated_at DESC")]
             out = []
             for pid in ids:
                 p = self.get(pid)
@@ -383,6 +492,10 @@ class PassportStore:
     # ── mutation ──
 
     def _touch(self, passport_id: str) -> None:
+        if self._port is not None:
+            self._port.tables["passports"].update(
+                passport_id, {"updated_at": time.time()})
+            return
         if self._db is not None:
             self._db.execute("UPDATE passports SET updated_at = ? WHERE id = ?",
                              (time.time(), passport_id))
@@ -391,7 +504,14 @@ class PassportStore:
     def set_income_band(self, passport_id: str, band: str) -> bool:
         try:
             band = (band or "").strip().lower()
-            if band not in INCOME_BANDS or self._db is None:
+            if band not in INCOME_BANDS:
+                return False
+            if self._port is not None:
+                self._port.tables["passports"].update(
+                    passport_id, {"income_band": band})
+                self._touch(passport_id)
+                return True
+            if self._db is None:
                 return False
             self._db.execute("UPDATE passports SET income_band = ? WHERE id = ?",
                              (band, passport_id))
@@ -403,6 +523,12 @@ class PassportStore:
 
     def set_kyc(self, passport_id: str, summary: str) -> bool:
         try:
+            if self._port is not None:
+                self._port.tables["passports"].update(
+                    passport_id,
+                    {"kyc_summary": (summary or "").strip()[:500]})
+                self._touch(passport_id)
+                return True
             if self._db is None:
                 return False
             self._db.execute(
@@ -417,6 +543,18 @@ class PassportStore:
     def add_history(self, passport_id: str, address: str, landlord: str = "",
                     years: str = "", note: str = "") -> bool:
         try:
+            if self._port is not None:
+                if not self.get(passport_id):
+                    return False
+                self._port.tables["history"].put({
+                    "id": "h_" + uuid.uuid4().hex[:8],
+                    "passport_id": passport_id,
+                    "address": (address or "").strip()[:200],
+                    "landlord": (landlord or "").strip()[:120],
+                    "years": (years or "").strip()[:40],
+                    "note": (note or "").strip()[:200]})
+                self._touch(passport_id)
+                return True
             if self._db is None or not self.get(passport_id):
                 return False
             self._db.execute(
@@ -434,6 +572,17 @@ class PassportStore:
                       contact_ref: str = "") -> bool:
         """contact_ref is a vault/contact reference ID — never a raw number."""
         try:
+            if self._port is not None:
+                if not self.get(passport_id):
+                    return False
+                self._port.tables["refs"].put({
+                    "id": "r_" + uuid.uuid4().hex[:8],
+                    "passport_id": passport_id,
+                    "name": (name or "").strip()[:120],
+                    "relationship": (relationship or "").strip()[:80],
+                    "contact_ref": (contact_ref or "").strip()[:120]})
+                self._touch(passport_id)
+                return True
             if self._db is None or not self.get(passport_id):
                 return False
             self._db.execute(
@@ -452,6 +601,16 @@ class PassportStore:
                     label: str = "") -> bool:
         """Store a vault *reference* only. The vault is never opened here."""
         try:
+            if self._port is not None:
+                if not self.get(passport_id):
+                    return False
+                self._port.tables["doc_refs"].put({
+                    "id": "d_" + uuid.uuid4().hex[:8],
+                    "passport_id": passport_id,
+                    "vault_id": (vault_id or "").strip()[:160],
+                    "label": (label or "").strip()[:120]})
+                self._touch(passport_id)
+                return True
             if self._db is None or not self.get(passport_id):
                 return False
             self._db.execute(
@@ -471,6 +630,11 @@ class PassportStore:
         """Renew the 30-day attestation (Zillow pattern: reports pulled
         fresh at the start of the reuse period)."""
         try:
+            if self._port is not None:
+                self._port.tables["passports"].update(
+                    passport_id, {"attested_at": time.time()})
+                self._touch(passport_id)
+                return True
             if self._db is None:
                 return False
             self._db.execute(

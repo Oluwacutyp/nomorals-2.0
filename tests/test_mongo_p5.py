@@ -39,6 +39,9 @@ P5 settles the stores that live BESIDE the central database:
   follow the same pattern below.
   The residue Batch 2 slice-8 ports (travel-watchers, social-leads)
   follow the same pattern below.
+  The residue Batch 2 slice-7 ports (matching-questionnaire,
+  property-passport, social-profiles, triggers-saved-search) follow
+  the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -240,7 +243,10 @@ class TestSidecarRegistry:
             "marketing-briefs", "marketing-competitor",
             "marketing-guardrails", "commerce-cart-recovery",
             # residue Batch 2, slice 8:
-            "travel-watchers", "social-leads"}
+            "travel-watchers", "social-leads",
+            # residue Batch 2, slice 7:
+            "matching-questionnaire", "property-passport",
+            "social-profiles", "triggers-saved-search"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -4207,3 +4213,704 @@ class TestSocialLeadsPort:
         again = LeadStore(path, store=rung.store)
         assert rung.store.count("social-leads__leads") == 2
         assert again.funnel_stats(trig.trigger_id)["dmed"] == 2
+
+
+class TestMatchingQuestionnairePort:
+    """matching/questionnaire.py — Questionnaire port (residue
+    Batch 2, slice 7): all four tables over the seam behind the
+    unchanged never-raises API. Every table is composite-keyed by
+    owner, so the key parts live only in the joined document id —
+    point reads fetch by it, owner-scoped reads scan restored rows.
+    Helpers live on the class, per the slice-2 placement lesson."""
+
+    def _scenario(self, store, path) -> dict:
+        from nomorals.matching.questionnaire import Questionnaire
+
+        q = Questionnaire("owner", str(path), store=store)
+        starters = sorted(x.question_id for x in q.ensure_starters("gig"))
+        assert q.answer("gig:remote", 5, "yes")
+        assert q.set_acceptable("gig:remote", ["yes", "hybrid"])
+        assert q.answer("gig:speed", 2, "fast")
+        unanswered = [x.question_id for x in q.unanswered()]
+        unanswered_b = [x.question_id
+                        for x in q.unanswered("boundaries")]
+        boundary = [x.question_id for x in q.boundary_questions()]
+        assert q.answer("gig:budget_fit", 3, "strict")
+        ghost_answer = q.answer("gig:ghost", 4, "x")
+        ghost_accept = q.set_acceptable("gig:ghost", ["x"])
+        answered = [x.question_id for x in q.answered()]
+        breakdown = sorted(
+            (r["question_id"], r["weight"], r["matched"])
+            for r in q.match_breakdown(
+                {"remote": "yes", "speed": "fast",
+                 "budget_fit": "loose"}))
+        satisfaction = round(q.satisfaction(
+            {"remote": "yes", "speed": "fast",
+             "budget_fit": "loose"}), 6)
+        score = q.score({"attributes": {"remote": "yes"}})
+        assert q.set_dealbreaker("budget", "budget", "le", 5000)
+        assert q.set_dealbreaker("when", "start", "in", ["now", "soon"])
+        breakers = sorted(
+            (d.name, d.attribute, d.predicate,
+             tuple(d.value) if isinstance(d.value, list) else d.value)
+            for d in q.dealbreakers())
+        kept = q.filter_dealbreakers([
+            {"attributes": {"budget": 4000, "start": "now"}},
+            {"attributes": {"budget": 9000, "start": "now"}},
+            {"attributes": {"budget": 100, "start": "later"}}])
+        removed = q.remove_dealbreaker("when")
+        removed_again = q.remove_dealbreaker("when")
+        assert q.set_ranking("cand-a", "proposer", ["rev-1", "rev-2"])
+        assert q.set_capacity("rev-1", 3)
+        other = Questionnaire("other", str(path), store=store)
+        other.ensure_starters("gig")
+        assert other.answer("gig:remote", 4, "yes")
+        assert other.set_acceptable("gig:remote", ["yes"])
+        return {
+            "starters": starters,
+            "unanswered": unanswered,
+            "unanswered_b": unanswered_b,
+            "boundary": boundary,
+            "ghost_answer": ghost_answer,
+            "ghost_accept": ghost_accept,
+            "answered": answered,
+            "weights": q.weights(),
+            "okcupid": q.okcupid_weights(),
+            "breakdown": breakdown,
+            "satisfaction": satisfaction,
+            "score": score,
+            "breakers": breakers,
+            "kept": kept,
+            "removed": removed,
+            "removed_again": removed_again,
+            "rankings": q.rankings("proposer"),
+            "capacities": q.capacities(),
+            "match_percent": q.match_percent(other),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        observed = self._scenario(rung.store, tmp_path / "q.db")
+        assert observed["starters"] == [
+            "gig:budget_fit", "gig:experience", "gig:remote", "gig:speed"]
+        assert observed["unanswered"] == ["gig:budget_fit",
+                                          "gig:experience"]
+        assert observed["unanswered_b"] == ["gig:budget_fit"]
+        assert observed["boundary"] == ["gig:budget_fit"]
+        assert observed["ghost_answer"] is False
+        assert observed["ghost_accept"] is False
+        # most-recently-updated first (answers were set in this order)
+        assert observed["answered"] == [
+            "gig:budget_fit", "gig:speed", "gig:remote"]
+        assert observed["weights"] == {
+            "budget_fit": 3.0, "remote": 5.0, "speed": 2.0}
+        assert observed["okcupid"] == {
+            "budget_fit": 50, "remote": 250, "speed": 10}
+        assert observed["breakdown"] == [
+            ("gig:budget_fit", 50, False), ("gig:remote", 250, True),
+            ("gig:speed", 10, True)]
+        assert observed["satisfaction"] == round(260 / 310, 6)
+        assert observed["score"] == 1.0
+        assert observed["breakers"] == [
+            ("budget", "budget", "le", 5000),
+            ("when", "start", "in", ("now", "soon"))]
+        assert observed["kept"] == [
+            {"attributes": {"budget": 4000, "start": "now"}}]
+        assert observed["removed"] is True
+        assert observed["removed_again"] is False
+        assert observed["rankings"] == {"cand-a": ["rev-1", "rev-2"]}
+        assert observed["capacities"] == {"rev-1": 3}
+        assert observed["match_percent"] == 100.0
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.matching.questionnaire import Questionnaire
+
+        path = tmp_path / "q.db"
+        native = Questionnaire("owner", str(path))
+        native.ensure_starters("gig")
+        native.answer("gig:remote", 5, "yes")
+        native.set_dealbreaker("budget", "budget", "le", 5000)
+        native.set_ranking("cand-a", "proposer", ["rev-1"])
+        native.set_capacity("rev-1", 3)
+
+        seam = Questionnaire("owner", str(path), store=rung.store)
+        assert rung.store.count("matching-questionnaire__answers") == 4
+        assert rung.store.count(
+            "matching-questionnaire__dealbreakers") == 1
+        assert rung.store.count("matching-questionnaire__ranks") == 1
+        assert rung.store.count(
+            "matching-questionnaire__capacities") == 1
+        # the composite key lives in the joined document id only
+        doc = rung.store.get("matching-questionnaire__answers",
+                             "owner\x1fgig:remote")
+        assert doc is not None and doc["importance"] == 5
+        assert "owner" not in doc and "question_id" not in doc
+        # the imported state is the live state on the seam
+        assert seam.get("gig:remote").importance == 5
+        assert seam.weights() == {"remote": 5.0}
+        assert seam.rankings("proposer") == {"cand-a": ["rev-1"]}
+        # answering continues on the seam, on the imported rows
+        assert seam.answer("gig:speed", 2, "fast")
+        again = Questionnaire("owner", str(path), store=rung.store)
+        assert rung.store.count("matching-questionnaire__answers") == 4
+        assert again.get("gig:speed").importance == 2
+
+
+class TestPropertyPassportPort:
+    """property/passport.py — PassportStore port (residue Batch 2,
+    slice 7): the passport aggregate over the seam behind the
+    unchanged never-raises API. The port brief warned of JSON-blob
+    document rows; the live store carries none — history / refs /
+    doc_refs are typed single-PK child rows keyed by
+    module-allocated ids, assembled per passport exactly as the
+    native SELECTs assembled them, and the store still holds vault
+    references only. Time is a fake clock (the module's own time
+    source) so attestation/list observables are exact on every
+    rung. Helpers live on the class, per the slice-2 placement
+    lesson."""
+
+    class _Clock:
+        """Deterministic time.time: +60s per call, both rungs."""
+
+        def __init__(self):
+            self.t = 1_700_000_000.0
+
+        def time(self):
+            value = self.t
+            self.t += 60.0
+            return value
+
+    def _scenario(self, store, path) -> dict:
+        from nomorals.property.passport import PassportStore, referencing_readiness
+
+        s = PassportStore(str(path), store=store)
+        p = s.generate("Ada Tenant", memory={
+            "income_band": "250k-500k", "kyc_summary": "NIN verified",
+            "rental_history": [{
+                "address": "12 Yaba Rd", "landlord": "Mr Ojo",
+                "years": "2022-2024", "note": "good tenant"}]})
+        pid = p.passport_id
+        band_bad = s.set_income_band(pid, "bogus")
+        band_ok = s.set_income_band(pid, "500k-1m")
+        # native parity: the setters report True for a missing
+        # passport (the UPDATE's rowcount is never checked)
+        ghost_band = s.set_income_band("pp_ghost", "500k-1m")
+        kyc_ok = s.set_kyc(pid, "NIN + BVN verified")
+        hist_ok = s.add_history(pid, "3 Marina Close", "Mrs Bello",
+                                "2020-2022")
+        hist_ghost = s.add_history("pp_ghost", "Nowhere")
+        ref_ok = s.add_reference(pid, "Mr Ojo", "former landlord",
+                                 "vault:ref1")
+        doc_ok = s.add_doc_ref(pid, "vault:doc_nin_2024", "NIN slip")
+        doc2_ok = s.add_doc_ref(pid, "vault:util_2024",
+                                "recent utility bill")
+        s.generate("Bola Second")
+        order1 = [x.owner_name for x in s.list()]
+        assert s.set_kyc(pid, "NIN + BVN + utility verified")
+        order2 = [x.owner_name for x in s.list()]
+        reatt = s.reattest(pid)
+        got = s.get(pid)
+        readiness = referencing_readiness(got)
+        return {
+            "generated": (p.owner_name, p.income_band, p.kyc_summary,
+                          [(h.address, h.landlord, h.years, h.note)
+                           for h in p.history]),
+            "band_bad": band_bad, "band_ok": band_ok,
+            "ghost_band": ghost_band, "kyc_ok": kyc_ok,
+            "hist_ok": hist_ok, "hist_ghost": hist_ghost,
+            "ref_ok": ref_ok, "doc_ok": doc_ok, "doc2_ok": doc2_ok,
+            "order1": order1, "order2": order2,
+            "default": s.default().owner_name,
+            "reatt": reatt,
+            "got": (got.owner_name, got.income_band, got.kyc_summary,
+                    sorted((h.address, h.landlord, h.years, h.note)
+                           for h in got.history),
+                    sorted((r.name, r.relationship, r.contact_ref)
+                           for r in got.references),
+                    sorted((d.vault_id, d.label)
+                           for d in got.doc_refs),
+                    got.is_fresh()),
+            "export": s.export_text(pid),
+            "readiness": (readiness["score"], readiness["ok"],
+                          readiness["verdict"], readiness["missing"]),
+        }
+
+    def test_conformance(self, rung, tmp_path, monkeypatch):
+        import nomorals.property.passport as passport_mod
+
+        monkeypatch.setattr(passport_mod, "time",
+                            SimpleNamespace(time=self._Clock().time))
+        observed = self._scenario(rung.store, tmp_path / "pp.db")
+        assert observed["generated"] == (
+            "Ada Tenant", "250k-500k", "NIN verified",
+            [("12 Yaba Rd", "Mr Ojo", "2022-2024", "good tenant")])
+        assert observed["band_bad"] is False
+        assert observed["band_ok"] is True
+        assert observed["ghost_band"] is True
+        assert observed["kyc_ok"] is True
+        assert observed["hist_ok"] is True
+        assert observed["hist_ghost"] is False
+        assert observed["ref_ok"] is True
+        assert observed["doc_ok"] is True and observed["doc2_ok"] is True
+        assert observed["order1"] == ["Bola Second", "Ada Tenant"]
+        assert observed["order2"] == ["Ada Tenant", "Bola Second"]
+        assert observed["default"] == "Ada Tenant"
+        assert observed["reatt"] is True
+        assert observed["got"] == (
+            "Ada Tenant", "500k-1m", "NIN + BVN + utility verified",
+            [("12 Yaba Rd", "Mr Ojo", "2022-2024", "good tenant"),
+             ("3 Marina Close", "Mrs Bello", "2020-2022", "")],
+            [("Mr Ojo", "former landlord", "vault:ref1")],
+            [("vault:doc_nin_2024", "NIN slip"),
+             ("vault:util_2024", "recent utility bill")],
+            True)
+        assert observed["readiness"] == (
+            100, True, "referencing-ready — share the passport",
+            ["kyc: employment letter / staff ID, "
+             "3 months' bank statement, passport photograph"])
+        export = observed["export"]
+        assert "Income band: ₦500,000–₦1,000,000/mo" in export
+        assert "vault:doc_nin_2024" in export
+        assert "attested 0d ago — fresh for" in export
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.property.passport import PassportStore
+
+        path = tmp_path / "pp.db"
+        native = PassportStore(str(path))
+        p = native.generate("Ada Tenant", memory={
+            "income_band": "250k-500k",
+            "rental_history": [{"address": "12 Yaba Rd"}]})
+        native.add_reference(p.passport_id, "Mr Ojo",
+                             "former landlord", "vault:ref1")
+        native.add_doc_ref(p.passport_id, "vault:doc_nin_2024",
+                           "NIN slip")
+
+        seam = PassportStore(str(path), store=rung.store)
+        assert rung.store.count("property-passport__passports") == 1
+        assert rung.store.count("property-passport__history") == 1
+        assert rung.store.count("property-passport__refs") == 1
+        assert rung.store.count("property-passport__doc_refs") == 1
+        doc = rung.store.get("property-passport__passports",
+                             p.passport_id)
+        assert doc is not None and doc["income_band"] == "250k-500k"
+        got = seam.get(p.passport_id)
+        assert got.owner_name == "Ada Tenant"
+        assert [h.address for h in got.history] == ["12 Yaba Rd"]
+        assert [r.contact_ref for r in got.references] == ["vault:ref1"]
+        # the aggregate keeps growing on the seam, on imported rows
+        assert seam.add_history(p.passport_id, "3 Marina Close")
+        assert rung.store.count("property-passport__history") == 2
+        again = PassportStore(str(path), store=rung.store)
+        assert rung.store.count("property-passport__passports") == 1
+        assert len(again.get(p.passport_id).history) == 2
+
+    def test_legacy_file_import(self, rung, tmp_path):
+        """A passports file that predates the attested_at migration
+        (never opened by the current organ) imports cleanly: the
+        missing column lands as the NULL a native ALTER leaves."""
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        import sqlite3
+
+        from nomorals.property.passport import PassportStore
+
+        path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            "CREATE TABLE passports (id TEXT PRIMARY KEY, "
+            "owner_name TEXT, kyc_summary TEXT, income_band TEXT, "
+            "created_at REAL, updated_at REAL)")
+        conn.execute(
+            "INSERT INTO passports VALUES ('pp_old', 'Old Timer', "
+            "'kyc', '100k-250k', 10.0, 20.0)")
+        conn.execute(
+            "CREATE TABLE history (id TEXT PRIMARY KEY, "
+            "passport_id TEXT, address TEXT, landlord TEXT, "
+            "years TEXT, note TEXT)")
+        conn.execute(
+            "INSERT INTO history VALUES ('h_old', 'pp_old', "
+            "'1 Old St', '', '', '')")
+        conn.execute(
+            "CREATE TABLE refs (id TEXT PRIMARY KEY, "
+            "passport_id TEXT, name TEXT, relationship TEXT, "
+            "contact_ref TEXT)")
+        conn.execute(
+            "CREATE TABLE doc_refs (id TEXT PRIMARY KEY, "
+            "passport_id TEXT, vault_id TEXT, label TEXT)")
+        conn.commit()
+        conn.close()
+
+        seam = PassportStore(str(path), store=rung.store)
+        old = seam.get("pp_old")
+        assert old is not None and old.owner_name == "Old Timer"
+        assert old.attested_at == 0.0
+        assert [h.address for h in old.history] == ["1 Old St"]
+
+
+class TestSocialProfilesPort:
+    """social/profiles.py — ProfileStore port (residue Batch 2,
+    slice 7): profiles + elements + likes over the seam behind the
+    unchanged never-raises API. Likes are composite-keyed (profile,
+    element, liker) with the parts in the joined document id, so
+    the JOIN reads re-express as finds and restored-row scans —
+    get() counts likes per element id from the restored rows
+    (element_id is a key part, never a find field), matches()
+    walks owner → elements → likes with the native join's
+    semantics. Helpers live on the class, per the slice-2
+    placement lesson."""
+
+    def _scenario(self, store, path, tmp) -> dict:
+        from nomorals.social.profiles import ProfileStore
+
+        vault = tmp / "vault"
+        vault.mkdir(exist_ok=True)
+        original_vault = ProfileStore.voice_vault_dir
+        ProfileStore.voice_vault_dir = staticmethod(lambda: str(vault))
+        try:
+            s = ProfileStore(str(path), store=store)
+            p = s.create("ada", "gig", "Ada")
+            pid = p.profile_id
+            coerced = s.create("bola", "nope-surface", "Bola")
+            a1 = s.answer_prompt(pid, "best_work",
+                                 "Built a market app")
+            a_bad = s.answer_prompt(pid, "nope", "x")
+            el1 = s.add_element(pid, "project", "Market App",
+                                "the content")
+            el2 = s.add_element(pid, "photo", "Studio Shot", "",
+                                "http://x")
+            el_ghost = s.add_element("prof_ghost", "project", "Ghost")
+            lk1 = s.like(pid, el1.element_id, "bola", "nice work")
+            lk_dup = s.like(pid, el1.element_id, "bola", "second")
+            s.like(pid, el1.element_id, "chidi", "")
+            s.like(pid, el2.element_id, "bola", "great pic")
+            lk_bad = s.like(pid, "elem_ghost", "bola")
+            got = s.get(pid)
+            wav = tmp / "intro.wav"
+            wav.write_bytes(b"RIFF\x24\x00\x00\x00WAVE")
+            vi = s.set_voice_intro(
+                pid, str(wav), language="en",
+                stt=lambda pth, lang: {"text": "hello from ada",
+                                       "backend": "fake-stt"})
+            vi_seen = s.get_voice_intro(pid)
+            vi_in_get = (got.voice_intro is None
+                         and s.get(pid).voice_intro.transcript)
+            vi_deleted = s.delete_voice_intro(pid)
+            vi_gone = s.get_voice_intro(pid)
+            return {
+                "created": (p.owner, p.surface, p.display_name),
+                "coerced_surface": coerced.surface,
+                "a1": a1, "a_bad": a_bad,
+                "el_ghost": el_ghost is None,
+                "lk1": (lk1.liker, lk1.comment) if lk1 else None,
+                "lk_dup_kept_first": (
+                    lk_dup.comment if lk_dup else None),
+                "lk_bad": lk_bad is None,
+                "prompts": got.prompts,
+                "elements": sorted(
+                    (e.title, e.type, e.like_count)
+                    for e in got.elements),
+                "completeness": got.completeness()["score"],
+                "unanswered": [pid_ for pid_, _ in s.unanswered(pid)],
+                "likes_el1": [(lk.liker, lk.comment)
+                              for lk in s.likes_for(el1.element_id)],
+                "matches": [(lk.liker, lk.comment)
+                            for lk in s.matches("ada")],
+                "listed": sorted((x.owner, x.surface)
+                                 for x in s.list()),
+                "listed_business": s.list("business"),
+                "voice": (vi.transcript, vi.language, vi.stt_backend,
+                          vi.audio_path.endswith(pid + ".wav")),
+                "vi_seen": vi_seen.transcript if vi_seen else None,
+                "vi_in_get": vi_in_get,
+                "vi_deleted": vi_deleted,
+                "vi_gone": vi_gone is None,
+            }
+        finally:
+            ProfileStore.voice_vault_dir = original_vault
+
+    def test_conformance(self, rung, tmp_path):
+        observed = self._scenario(rung.store, tmp_path / "p.db",
+                                  tmp_path)
+        assert observed["created"] == ("ada", "gig", "Ada")
+        assert observed["coerced_surface"] == "gig"
+        assert observed["a1"] is True and observed["a_bad"] is False
+        assert observed["el_ghost"] is True
+        assert observed["lk1"] == ("bola", "nice work")
+        # liking twice keeps the first like — the returned like is
+        # the new attempt, the stored one is still "nice work"
+        assert observed["lk_dup_kept_first"] == "second"
+        assert observed["lk_bad"] is True
+        assert observed["prompts"] == {"best_work": "Built a market app"}
+        assert observed["elements"] == [
+            ("Market App", "project", 2), ("Studio Shot", "photo", 1)]
+        assert observed["completeness"] == 43
+        assert observed["unanswered"] == [
+            "looking_for", "ask_me", "superpower"]
+        assert observed["likes_el1"] == [
+            ("bola", "nice work"), ("chidi", "")]
+        assert observed["matches"] == [
+            ("bola", "nice work"), ("chidi", ""),
+            ("bola", "great pic")]
+        assert observed["listed"] == [("ada", "gig"), ("bola", "gig")]
+        assert observed["listed_business"] == []
+        assert observed["voice"] == (
+            "hello from ada", "en", "fake-stt", True)
+        assert observed["vi_seen"] == "hello from ada"
+        assert observed["vi_in_get"] == "hello from ada"
+        assert observed["vi_deleted"] is True
+        assert observed["vi_gone"] is True
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.social.profiles import ProfileStore
+
+        path = tmp_path / "p.db"
+        native = ProfileStore(str(path))
+        p = native.create("ada", "gig", "Ada")
+        el1 = native.add_element(p.profile_id, "project", "Market App")
+        native.like(p.profile_id, el1.element_id, "bola", "nice work")
+        native.like(p.profile_id, el1.element_id, "chidi", "")
+
+        seam = ProfileStore(str(path), store=rung.store)
+        assert rung.store.count("social-profiles__profiles") == 1
+        assert rung.store.count("social-profiles__elements") == 1
+        assert rung.store.count("social-profiles__likes") == 2
+        # the composite like key lives in the joined document id
+        doc = rung.store.get(
+            "social-profiles__likes",
+            f"{p.profile_id}\x1f{el1.element_id}\x1fbola")
+        assert doc is not None and doc["comment"] == "nice work"
+        got = seam.get(p.profile_id)
+        assert got.elements[0].like_count == 2
+        # likes continue on the seam, on the imported rows
+        assert seam.like(p.profile_id, el1.element_id, "dara", "third")
+        assert seam.get(p.profile_id).elements[0].like_count == 3
+        again = ProfileStore(str(path), store=rung.store)
+        assert rung.store.count("social-profiles__profiles") == 1
+        assert len(again.likes_for(el1.element_id)) == 3
+
+    def test_legacy_file_import(self, rung, tmp_path):
+        """A profiles file that predates the voice-intro columns
+        imports cleanly: the lazy import backfills them, and the
+        profile reads as having no voice intro."""
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        import sqlite3
+
+        from nomorals.social.profiles import ProfileStore
+
+        path = tmp_path / "legacy.db"
+        conn = sqlite3.connect(str(path))
+        conn.execute(
+            "CREATE TABLE profiles (profile_id TEXT PRIMARY KEY, "
+            "owner TEXT, surface TEXT, display_name TEXT, "
+            "prompts_json TEXT, created_at REAL)")
+        conn.execute(
+            "INSERT INTO profiles VALUES ('prof_old', 'ada', 'gig', "
+            "'Old Ada', '{}', 5.0)")
+        conn.execute(
+            "CREATE TABLE elements (element_id TEXT PRIMARY KEY, "
+            "profile_id TEXT, type TEXT, title TEXT, content TEXT, "
+            "url TEXT)")
+        conn.execute(
+            "CREATE TABLE likes (profile_id TEXT, element_id TEXT, "
+            "liker TEXT, comment TEXT, created_at REAL, "
+            "PRIMARY KEY (profile_id, element_id, liker))")
+        conn.commit()
+        conn.close()
+
+        seam = ProfileStore(str(path), store=rung.store)
+        old = seam.get("prof_old")
+        assert old is not None and old.display_name == "Old Ada"
+        assert old.voice_intro is None
+
+
+class TestTriggersSavedSearchPort:
+    """triggers/saved_search.py — SavedSearchStore port (residue
+    Batch 2, slice 7): searches + seen dedup + the digest queue
+    over the seam behind the unchanged API. seen_matches is a
+    dedup registry composite-keyed (search, dedup key) — existence
+    is a joined-id get. pending_digest is AUTOINCREMENT-keyed: its
+    rows ride put_raw under their file seq and new rows allocate
+    from the meta counter seeded by the import, so seq order is
+    queue order on both rungs.
+
+    THE CLAIM DISPOSITION, stated explicitly per the census: the
+    digest queue's claims are plain single-process CRUD — take is
+    a read-then-delete by the one host loop that runs the hourly
+    check, and no cross-process claim semantics exist anywhere in
+    the module — so this port does NOT need, and does not build,
+    the C2 generation-fencing treatment; single-document writes
+    are the whole requirement. Helpers live on the class, per the
+    slice-2 placement lesson."""
+
+    def _scenario(self, store, path) -> dict:
+        import nomorals.triggers.saved_search as ss
+
+        s = ss.SavedSearchStore(str(path), store=store)
+        w1 = s.create("property", "2bed Yaba",
+                      {"area": "Yaba", "beds": "2"}, now=1000.0)
+        w2 = s.create("gig", "logo design", {}, now=2000.0)
+        bad = s.create("mars", "nothing watchable")
+        g1 = s.get(w1.id)
+        s.mark_seen(w1.id, "ad:abc|100", now=1500.0)
+        seen_yes = s.seen(w1.id, "ad:abc|100")
+        seen_no = s.seen(w1.id, "ad:other|1")
+        s.mark_run(w1.id, 3, now=3000.0)
+        after_run = s.get(w1.id)
+        snz = s.snooze(w1.id, 2, now=4000.0)
+        snz_until = s.get(w1.id).snooze_until
+        snz_ghost = s.snooze("watch_ghost", 2, now=4000.0)
+        unsnz = s.unsnooze(w1.id)
+        dig = s.set_digest_at(w1.id, "7:30")
+        dig_val = s.get(w1.id).digest_at
+        dig_bad = s.set_digest_at(w1.id, "25:00")
+        s.queue_digest(ss.Match(
+            search_id=w1.id, title="Flat A", price_kobo=150000000,
+            area="Yaba", address="1 Yaba Rd", beds="2",
+            url="http://a", found_at=5000.0))
+        s.queue_digest(ss.Match(
+            search_id=w1.id, title="Flat B", price_kobo=120000000,
+            area="Yaba", found_at=6000.0))
+        s.queue_digest(ss.Match(
+            search_id=w2.id, title="Gig X", found_at=5500.0))
+        cnt1 = s.pending_digest_count(w1.id)
+        taken = s.take_digest(w1.id)
+        listed = [(x.domain, x.query) for x in s.list(
+            active_only=False, include_expired=True)]
+        w3 = s.create("flight", "LOS to ABV", {}, ttl_days=7,
+                      now=1000.0)
+        purged = s.purge_expired(now=1000.0 + 8 * 86400)
+        rm1 = s.remove(w2.id)
+        rm2 = s.remove(w2.id)
+        return {
+            "bad_domain": bad is None,
+            "g1": (g1.domain, g1.query, g1.filters, g1.cadence_s,
+                   g1.ttl_days, g1.created_at, g1.expires_at,
+                   g1.last_run, g1.match_count, g1.active,
+                   g1.snooze_until, g1.digest_at),
+            "seen_yes": seen_yes, "seen_no": seen_no,
+            "after_run": (after_run.last_run, after_run.match_count),
+            "snz": snz, "snz_until": snz_until, "snz_ghost": snz_ghost,
+            "unsnz": unsnz, "dig": dig, "dig_val": dig_val,
+            "dig_bad": dig_bad,
+            "cnt1": cnt1,
+            "taken": [(m.title, m.price_kobo, m.found_at)
+                      for m in taken],
+            "cnt_after": s.pending_digest_count(w1.id),
+            "cnt_w2": s.pending_digest_count(w2.id),
+            "listed": listed,
+            "purged": purged,
+            "w3_gone": s.get(w3.id) is None,
+            "rm1": rm1, "rm2": rm2,
+            "seen_after_rm": s.seen(w1.id, "ad:abc|100"),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        observed = self._scenario(rung.store, tmp_path / "ss.db")
+        assert observed["bad_domain"] is True
+        assert observed["g1"] == (
+            "property", "2bed Yaba", {"area": "Yaba", "beds": "2"},
+            21600, 14, 1000.0, 1000.0 + 14 * 86400, 0.0, 0, True,
+            0.0, "")
+        assert observed["seen_yes"] is True
+        assert observed["seen_no"] is False
+        assert observed["after_run"] == (3000.0, 3)
+        assert observed["snz"] is True
+        assert observed["snz_until"] == 4000.0 + 2 * 3600
+        assert observed["snz_ghost"] is False
+        assert observed["unsnz"] is True
+        assert observed["dig"] is True
+        assert observed["dig_val"] == "07:30"
+        assert observed["dig_bad"] is False
+        assert observed["cnt1"] == 2
+        assert observed["taken"] == [
+            ("Flat A", 150000000, 5000.0), ("Flat B", 120000000, 6000.0)]
+        assert observed["cnt_after"] == 0
+        assert observed["cnt_w2"] == 1
+        # newest first (read taken before the purge/remove segment)
+        assert observed["listed"] == [
+            ("gig", "logo design"), ("property", "2bed Yaba")]
+        assert observed["purged"] == 1
+        assert observed["w3_gone"] is True
+        assert observed["rm1"] is True and observed["rm2"] is False
+        assert observed["seen_after_rm"] is True
+
+    def test_check_search_dedup_flow(self, rung, tmp_path):
+        """The module-level check flow (match → filter → dedup →
+        remember) behaves identically on every rung."""
+        import time as _time
+
+        import nomorals.triggers.saved_search as ss
+
+        s = ss.SavedSearchStore(str(tmp_path / "ss.db"),
+                                store=rung.store)
+        w = s.create("property", "2bed Yaba", {"area": "Yaba"})
+
+        def matcher(domain, query, filters):
+            return [
+                {"title": "New Flat", "price_kobo": 90000000,
+                 "area": "Yaba", "address": "1 Yaba Rd", "beds": "2"},
+                {"title": "New Flat", "price_kobo": 90000000,
+                 "area": "Yaba", "address": "1 Yaba Rd", "beds": "2"},
+                {"title": "Far Flat", "price_kobo": 90000000,
+                 "area": "Ikeja", "address": "9 Far Rd", "beds": "2"},
+            ]
+
+        fresh = ss.check_search(s, s.get(w.id), matcher=matcher,
+                                now=_time.time())
+        again = ss.check_search(s, s.get(w.id), matcher=matcher,
+                                now=_time.time())
+        assert [(m.title, m.dedup_key) for m in fresh] == [
+            ("New Flat", "ad:yaba|90000000")]
+        assert again == []
+        assert s.get(w.id).match_count == 1
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        import nomorals.triggers.saved_search as ss
+
+        path = tmp_path / "ss.db"
+        native = ss.SavedSearchStore(str(path))
+        w = native.create("property", "2bed Yaba", {"area": "Yaba"},
+                          now=1000.0)
+        native.mark_seen(w.id, "ad:abc|100", now=1500.0)
+        native.mark_seen(w.id, "ad:def|200", now=1600.0)
+        native.queue_digest(ss.Match(
+            search_id=w.id, title="Flat A", found_at=5000.0))
+        native.queue_digest(ss.Match(
+            search_id=w.id, title="Flat B", found_at=6000.0))
+
+        seam = ss.SavedSearchStore(str(path), store=rung.store)
+        assert rung.store.count(
+            "triggers-saved-search__saved_searches") == 1
+        assert rung.store.count(
+            "triggers-saved-search__seen_matches") == 2
+        assert rung.store.count(
+            "triggers-saved-search__pending_digest") == 2
+        first = rung.store.get(
+            "triggers-saved-search__pending_digest", "1")
+        assert first is not None and first["title"] == "Flat A"
+        # the seen registry answers by joined id on the seam
+        assert seam.seen(w.id, "ad:abc|100") is True
+        # seq continuity: the next seam-queued match takes seq 3
+        seam.queue_digest(ss.Match(
+            search_id=w.id, title="Flat C", found_at=7000.0))
+        third = rung.store.get(
+            "triggers-saved-search__pending_digest", "3")
+        assert third is not None and third["title"] == "Flat C"
+        counters = rung.store.get(
+            "triggers-saved-search__meta", "counters")
+        assert counters["pending_digest"] == 3
+        taken = seam.take_digest(w.id)
+        assert [m.title for m in taken] == ["Flat A", "Flat B", "Flat C"]
+        again = ss.SavedSearchStore(str(path), store=rung.store)
+        assert rung.store.count(
+            "triggers-saved-search__saved_searches") == 1
+        assert again.pending_digest_count(w.id) == 0

@@ -160,24 +160,72 @@ class Match:
 
 # ── store ────────────────────────────────────────────────────────────
 
-class SavedSearchStore:
-    """SQLite store for saved searches + seen-match dedup keys."""
-
-    def __init__(self, db_path: str = "") -> None:
-        self._db: sqlite3.Connection | None = None
-        try:
-            path = db_path or _DEFAULT_DB
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            self._db = sqlite3.connect(path)
-            self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS saved_searches (
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift. The
+#: saved_searches statement already carries the final shape (the
+#: snooze/digest columns are in the CREATE); the PRAGMA-checked
+#: ALTERs in ``__init__`` stay as the legacy-file path, and the
+#: pending_digest index stays a native-path concern.
+_SEARCHES_DDL = """CREATE TABLE IF NOT EXISTS saved_searches (
                        id TEXT PRIMARY KEY, domain TEXT, query TEXT,
                        filters_json TEXT, cadence_s INTEGER,
                        ttl_days INTEGER, created_at REAL, expires_at REAL,
                        last_run REAL, match_count INTEGER, active INTEGER,
                        snooze_until REAL DEFAULT 0,
-                       digest_at TEXT DEFAULT '')""")
+                       digest_at TEXT DEFAULT '')"""
+_SEEN_DDL = """CREATE TABLE IF NOT EXISTS seen_matches (
+                       search_id TEXT, dedup_key TEXT,
+                       found_at REAL,
+                       PRIMARY KEY (search_id, dedup_key))"""
+_PENDING_DDL = """CREATE TABLE IF NOT EXISTS pending_digest (
+                       seq INTEGER PRIMARY KEY AUTOINCREMENT,
+                       search_id TEXT, queued_at REAL,
+                       title TEXT, price_kobo INTEGER, area TEXT,
+                       address TEXT, beds TEXT, url TEXT)"""
+_PENDING_INDEX_DDL = """CREATE INDEX IF NOT EXISTS idx_pending_digest_search
+                   ON pending_digest(search_id, seq)"""
+_DDL = ";\n".join((_SEARCHES_DDL, _SEEN_DDL, _PENDING_DDL))
+
+
+def _seen_key(search_id: str, dedup_key: str) -> str:
+    """The joined document id of a seen-matches row."""
+    return "\x1f".join((str(search_id), str(dedup_key)))
+
+
+class SavedSearchStore:
+    """SQLite store for saved searches + seen-match dedup keys.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as triggers-saved-search):
+    searches and seen keys are documents in
+    ``triggers-saved-search__saved_searches`` / ``__seen_matches``
+    (seen is composite-keyed — existence is a joined-id get), and the
+    AUTOINCREMENT digest queue rides ``put_raw`` in
+    ``__pending_digest`` under its seq, allocated from the port's
+    meta counter. The file's existing rows are imported once,
+    through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store=None) -> None:
+        self._db: sqlite3.Connection | None = None
+        self._port = None
+        self._imported_max_seq = 0
+        try:
+            path = db_path or _DEFAULT_DB
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "triggers-saved-search", _DDL,
+                ("saved_searches", "seen_matches"), path, store=store)
+            if port is not None:
+                self._import_into(port)
+                self._port = port
+                return
+            self._db = sqlite3.connect(path)
+            self._db.row_factory = sqlite3.Row
+            self._db.execute(_SEARCHES_DDL)
             # migrate older DBs that lack the new columns
             cols = {r[1] for r in self._db.execute(
                 "PRAGMA table_info(saved_searches)").fetchall()}
@@ -189,26 +237,62 @@ class SavedSearchStore:
                 self._db.execute(
                     "ALTER TABLE saved_searches ADD COLUMN "
                     "digest_at TEXT DEFAULT ''")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS seen_matches (
-                       search_id TEXT, dedup_key TEXT,
-                       found_at REAL,
-                       PRIMARY KEY (search_id, dedup_key))""")
+            self._db.execute(_SEEN_DDL)
             # digest queue: matches held for digest_at batching
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS pending_digest (
-                       seq INTEGER PRIMARY KEY AUTOINCREMENT,
-                       search_id TEXT, queued_at REAL,
-                       title TEXT, price_kobo INTEGER, area TEXT,
-                       address TEXT, beds TEXT, url TEXT)""")
-            self._db.execute(
-                """CREATE INDEX IF NOT EXISTS idx_pending_digest_search
-                   ON pending_digest(search_id, seq)""")
+            self._db.execute(_PENDING_DDL)
+            self._db.execute(_PENDING_INDEX_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001 — a bad DB is an empty store
             _log.warning("saved_search: db unavailable, running empty",
                          exc_info=True)
             self._db = None
+            self._port = None
+
+    def _import_into(self, port) -> None:
+        """The one-time lazy file import (see SidecarPort): searches
+        and seen keys go through their RowTables; pending_digest is
+        AUTOINCREMENT-keyed, so its rows ride put_raw under their
+        file seq and the id counter is seeded from the imported
+        maximum so seam-allocated seqs continue the file's sequence
+        (the health-nutrition water precedent)."""
+
+        def write_searches(rows):
+            table = port.tables["saved_searches"]
+            for row in rows:
+                row = dict(row)
+                row.setdefault("snooze_until", 0)
+                row.setdefault("digest_at", "")
+                table.put(row)
+            return len(rows)
+
+        def write_seen(rows):
+            table = port.tables["seen_matches"]
+            for row in rows:
+                table.put(row)
+            return len(rows)
+
+        def write_pending(rows):
+            for row in rows:
+                seq = int(row["seq"])
+                self._imported_max_seq = max(self._imported_max_seq, seq)
+                port.put_raw("pending_digest", str(seq), {
+                    "seq": seq, "search_id": row["search_id"],
+                    "queued_at": row["queued_at"], "title": row["title"],
+                    "price_kobo": row["price_kobo"], "area": row["area"],
+                    "address": row["address"], "beds": row["beds"],
+                    "url": row["url"]})
+            return len(rows)
+
+        def seed_counter(_counts):
+            doc = port.store.get(port.meta_collection, "counters") or {}
+            if int(doc.get("pending_digest") or 0) < self._imported_max_seq:
+                port.store.put(port.meta_collection, "counters", {
+                    **doc, "pending_digest": self._imported_max_seq})
+
+        port.ensure_imported(
+            {"saved_searches": write_searches, "seen_matches": write_seen,
+             "pending_digest": write_pending},
+            after_import=seed_counter)
 
     # — CRUD —
 
@@ -233,9 +317,19 @@ class SavedSearchStore:
                 query=query, filters=dict(filters or {}),
                 cadence_s=cadence_s, ttl_days=ttl,
                 created_at=now, expires_at=now + ttl * 86400)
+            import json as _json
+            if self._port is not None:
+                self._port.tables["saved_searches"].put({
+                    "id": s.id, "domain": s.domain, "query": s.query,
+                    "filters_json": _json.dumps(s.filters),
+                    "cadence_s": s.cadence_s, "ttl_days": s.ttl_days,
+                    "created_at": s.created_at, "expires_at": s.expires_at,
+                    "last_run": s.last_run, "match_count": s.match_count,
+                    "active": 1, "snooze_until": s.snooze_until,
+                    "digest_at": s.digest_at})
+                return s
             if self._db is None:
                 return s
-            import json as _json
             self._db.execute(
                 """INSERT INTO saved_searches
                    (id, domain, query, filters_json, cadence_s, ttl_days,
@@ -254,6 +348,9 @@ class SavedSearchStore:
 
     def get(self, search_id: str) -> SavedSearch | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["saved_searches"].get(search_id)
+                return _row_to_search(row) if row else None
             if self._db is None:
                 return None
             row = self._db.execute(
@@ -267,11 +364,16 @@ class SavedSearchStore:
     def list(self, *, active_only: bool = True,
              include_expired: bool = False) -> list[SavedSearch]:
         try:
-            if self._db is None:
+            if self._port is not None:
+                rows = self._port.tables["saved_searches"].all()
+                rows.sort(key=lambda r: (-(r["created_at"] or 0),
+                                         r["id"]))
+            elif self._db is None:
                 return []
-            rows = self._db.execute(
-                "SELECT * FROM saved_searches ORDER BY created_at DESC"
-            ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM saved_searches ORDER BY created_at DESC"
+                ).fetchall()
             out = [_row_to_search(r) for r in rows]
             now = time.time()
             if active_only:
@@ -287,6 +389,14 @@ class SavedSearchStore:
     def remove(self, search_id: str) -> bool:
         """Delete a search and its seen keys. True when it existed."""
         try:
+            if self._port is not None:
+                existed = self._port.tables["saved_searches"].delete(
+                    search_id)
+                seen = self._port.tables["seen_matches"]
+                for r in seen.all():
+                    if r["search_id"] == search_id:
+                        seen.delete(_seen_key(search_id, r["dedup_key"]))
+                return existed
             if self._db is None:
                 return False
             cur = self._db.execute(
@@ -302,6 +412,15 @@ class SavedSearchStore:
     def purge_expired(self, now: float | None = None) -> int:
         """Delete expired searches (stale-demand hygiene). Returns count."""
         try:
+            if self._port is not None:
+                now = now if now is not None else time.time()
+                ids = [r["id"]
+                       for r in self._port.tables["saved_searches"].all()
+                       if r["expires_at"] is not None
+                       and r["expires_at"] <= now]
+                for sid in ids:
+                    self.remove(sid)
+                return len(ids)
             if self._db is None:
                 return 0
             now = now if now is not None else time.time()
@@ -318,6 +437,14 @@ class SavedSearchStore:
     def mark_run(self, search_id: str, new_matches: int,
                  now: float | None = None) -> None:
         try:
+            if self._port is not None:
+                now = now if now is not None else time.time()
+                table = self._port.tables["saved_searches"]
+                if table.get(search_id) is not None:
+                    table.update(search_id, {"last_run": now})
+                    table.inc(search_id, "match_count",
+                              max(0, int(new_matches)))
+                return
             if self._db is None:
                 return
             now = now if now is not None else time.time()
@@ -333,8 +460,11 @@ class SavedSearchStore:
 
     def seen(self, search_id: str, dedup_key: str) -> bool:
         try:
-            if self._db is None or not dedup_key:
+            if (self._db is None and self._port is None) or not dedup_key:
                 return False
+            if self._port is not None:
+                return self._port.tables["seen_matches"].get(
+                    _seen_key(search_id, dedup_key)) is not None
             return self._db.execute(
                 "SELECT 1 FROM seen_matches WHERE search_id = ? "
                 "AND dedup_key = ?", (search_id, dedup_key)).fetchone() \
@@ -346,9 +476,14 @@ class SavedSearchStore:
     def mark_seen(self, search_id: str, dedup_key: str,
                   now: float | None = None) -> None:
         try:
-            if self._db is None or not dedup_key:
+            if (self._db is None and self._port is None) or not dedup_key:
                 return
             now = now if now is not None else time.time()
+            if self._port is not None:
+                self._port.tables["seen_matches"].insert_ignore({
+                    "search_id": search_id, "dedup_key": dedup_key,
+                    "found_at": now})
+                return
             self._db.execute(
                 "INSERT OR IGNORE INTO seen_matches VALUES (?, ?, ?)",
                 (search_id, dedup_key, now))
@@ -362,6 +497,13 @@ class SavedSearchStore:
                now: float | None = None) -> bool:
         """Snooze a watch for ``hours`` (Jiji pattern). True when it existed."""
         try:
+            if self._port is not None:
+                now = now if now is not None else time.time()
+                table = self._port.tables["saved_searches"]
+                if table.get(search_id) is None:
+                    return False
+                return table.update(search_id, {
+                    "snooze_until": now + max(0.0, float(hours)) * 3600})
             if self._db is None:
                 return False
             now = now if now is not None else time.time()
@@ -376,6 +518,11 @@ class SavedSearchStore:
 
     def unsnooze(self, search_id: str) -> bool:
         try:
+            if self._port is not None:
+                table = self._port.tables["saved_searches"]
+                if table.get(search_id) is None:
+                    return False
+                return table.update(search_id, {"snooze_until": 0})
             if self._db is None:
                 return False
             cur = self._db.execute(
@@ -391,7 +538,7 @@ class SavedSearchStore:
         """Set digest mode: ``"HH:MM"`` queues matches for one daily push;
         ``""`` restores instant pushes. True when the search existed."""
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return False
             digest_at = (digest_at or "").strip()
             if digest_at and not re.fullmatch(r"\d{1,2}:\d{2}", digest_at):
@@ -401,6 +548,11 @@ class SavedSearchStore:
                 if hh > 23 or mm > 59:
                     return False
                 digest_at = f"{hh:02d}:{mm:02d}"
+            if self._port is not None:
+                table = self._port.tables["saved_searches"]
+                if table.get(search_id) is None:
+                    return False
+                return table.update(search_id, {"digest_at": digest_at})
             cur = self._db.execute(
                 "UPDATE saved_searches SET digest_at = ? WHERE id = ?",
                 (digest_at, search_id))
@@ -413,6 +565,15 @@ class SavedSearchStore:
     def queue_digest(self, m: Match) -> None:
         """Hold one match for the digest_at batch."""
         try:
+            if self._port is not None:
+                seq = self._port.next_id("pending_digest")
+                self._port.put_raw("pending_digest", str(seq), {
+                    "seq": seq, "search_id": m.search_id,
+                    "queued_at": m.found_at or time.time(),
+                    "title": m.title, "price_kobo": m.price_kobo,
+                    "area": m.area, "address": m.address,
+                    "beds": m.beds, "url": m.url})
+                return
             if self._db is None:
                 return
             self._db.execute(
@@ -427,6 +588,9 @@ class SavedSearchStore:
 
     def pending_digest_count(self, search_id: str) -> int:
         try:
+            if self._port is not None:
+                return len(self._port.find_raw(
+                    "pending_digest", {"search_id": search_id}))
             if self._db is None:
                 return 0
             row = self._db.execute(
@@ -440,6 +604,20 @@ class SavedSearchStore:
     def take_digest(self, search_id: str) -> list[Match]:
         """Atomically take (and clear) queued digest matches."""
         try:
+            if self._port is not None:
+                docs = self._port.find_raw(
+                    "pending_digest", {"search_id": search_id})
+                docs.sort(key=lambda d: int(d["seq"]))
+                out = [Match(
+                    search_id=d["search_id"], title=d["title"] or "",
+                    price_kobo=int(d["price_kobo"] or 0),
+                    area=d["area"] or "", address=d["address"] or "",
+                    beds=d["beds"] or "", url=d["url"] or "",
+                    found_at=float(d["queued_at"] or 0)) for d in docs]
+                collection = f"{self._port.store_name}__pending_digest"
+                for d in docs:
+                    self._port.store.delete(collection, str(d["seq"]))
+                return out
             if self._db is None:
                 return []
             rows = self._db.execute(

@@ -183,33 +183,89 @@ class Profile:
 
 # ── store ───────────────────────────────────────────────────────────────
 
-class ProfileStore:
-    """SQLite profile + like storage. Every method never raises."""
-
-    def __init__(self, db_path: str = "") -> None:
-        path = db_path or _DEFAULT_DB
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            self._db = sqlite3.connect(path)
-            self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS profiles (
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift. The
+#: profiles statement carries the FINAL shape (with the voice-intro
+#: columns ``_ensure_voice_columns`` adds to older files); that
+#: method stays as the legacy-file path.
+_PROFILES_DDL = """CREATE TABLE IF NOT EXISTS profiles (
                        profile_id TEXT PRIMARY KEY, owner TEXT, surface TEXT,
-                       display_name TEXT, prompts_json TEXT, created_at REAL)""")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS elements (
+                       display_name TEXT, prompts_json TEXT, created_at REAL,
+                       voice_intro_path TEXT, voice_intro_transcript TEXT,
+                       voice_intro_language TEXT, voice_intro_stt TEXT,
+                       voice_intro_at REAL)"""
+_ELEMENTS_DDL = """CREATE TABLE IF NOT EXISTS elements (
                        element_id TEXT PRIMARY KEY, profile_id TEXT, type TEXT,
-                       title TEXT, content TEXT, url TEXT)""")
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS likes (
+                       title TEXT, content TEXT, url TEXT)"""
+_LIKES_DDL = """CREATE TABLE IF NOT EXISTS likes (
                        profile_id TEXT, element_id TEXT, liker TEXT,
                        comment TEXT, created_at REAL,
-                       PRIMARY KEY (profile_id, element_id, liker))""")
+                       PRIMARY KEY (profile_id, element_id, liker))"""
+_DDL = ";\n".join((_PROFILES_DDL, _ELEMENTS_DDL, _LIKES_DDL))
+
+#: Voice-intro columns a pre-#82 file's profile rows may lack; the
+#: lazy import backfills them with None (the NULL the native ALTER
+#: leaves) so seam rows carry the full final shape.
+_VOICE_COLS = ("voice_intro_path", "voice_intro_transcript",
+               "voice_intro_language", "voice_intro_stt",
+               "voice_intro_at")
+
+
+class ProfileStore:
+    """SQLite profile + like storage. Every method never raises.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as social-profiles):
+    all three tables are documents in ``social-profiles__profiles``
+    / ``__elements`` / ``__likes``; likes are composite-keyed with
+    the parts in the joined document id, and the JOIN reads
+    (per-element like counts, the owner match inbox) re-express as
+    finds keyed by profile/element id. The file's existing rows are
+    imported once, through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store=None) -> None:
+        path = db_path or _DEFAULT_DB
+        self._db = None
+        self._port = None
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "social-profiles", _DDL,
+                ("profiles", "elements", "likes"), path, store=store)
+            if port is not None:
+                def _writer(table, backfill_voice=False):
+                    def write(rows):
+                        for row in rows:
+                            row = dict(row)
+                            if backfill_voice:
+                                for col in _VOICE_COLS:
+                                    row.setdefault(col, None)
+                            table.put(row)
+                        return len(rows)
+                    return write
+
+                port.ensure_imported({
+                    "profiles": _writer(port.tables["profiles"],
+                                        backfill_voice=True),
+                    "elements": _writer(port.tables["elements"]),
+                    "likes": _writer(port.tables["likes"])})
+                self._port = port
+                return
+            self._db = sqlite3.connect(path)
+            self._db.row_factory = sqlite3.Row
+            self._db.execute(_PROFILES_DDL)
+            self._db.execute(_ELEMENTS_DDL)
+            self._db.execute(_LIKES_DDL)
             self._db.commit()
             self._ensure_voice_columns()
         except Exception:  # noqa: BLE001 — a bad DB path is an empty store
             _log.warning("profiles: db unavailable, running empty", exc_info=True)
             self._db = None
+            self._port = None
 
     def _ensure_voice_columns(self) -> None:
         """Voice-intro columns, added to DBs created before #82."""
@@ -231,7 +287,7 @@ class ProfileStore:
                display_name: str = "") -> Profile | None:
         """Create a profile. Returns None only when the store is down."""
         import json
-        if self._db is None:
+        if self._db is None and self._port is None:
             return None
         if surface not in SURFACES:
             surface = "gig"
@@ -243,6 +299,16 @@ class ProfileStore:
             created_at=time.time(),
         )
         try:
+            if self._port is not None:
+                self._port.tables["profiles"].put({
+                    "profile_id": p.profile_id, "owner": p.owner,
+                    "surface": p.surface, "display_name": p.display_name,
+                    "prompts_json": json.dumps({}),
+                    "created_at": p.created_at,
+                    "voice_intro_path": "", "voice_intro_transcript": "",
+                    "voice_intro_language": "", "voice_intro_stt": "",
+                    "voice_intro_at": 0})
+                return p
             self._db.execute(
                 """INSERT INTO profiles
                    (profile_id, owner, surface, display_name, prompts_json,
@@ -260,6 +326,34 @@ class ProfileStore:
     def get(self, profile_id: str) -> Profile | None:
         """Load a profile with its elements. None when missing/down."""
         import json
+        if self._port is not None:
+            try:
+                row = self._port.tables["profiles"].get(profile_id)
+                if row is None:
+                    return None
+                p = Profile(
+                    profile_id=row["profile_id"], owner=row["owner"],
+                    surface=row["surface"],
+                    display_name=row["display_name"],
+                    prompts=json.loads(row["prompts_json"] or "{}"),
+                    created_at=row["created_at"])
+                p.voice_intro = self._row_voice_intro(row)
+                # Like counts: element_id is a likes KEY PART, so it
+                # lives only in the joined document id — count from
+                # the restored rows, never find() on key fields.
+                like_rows = self._port.tables["likes"].all()
+                for erow in self._port.tables["elements"].find(
+                        {"profile_id": profile_id}):
+                    likes = sum(1 for r in like_rows
+                                if r["element_id"] == erow["element_id"])
+                    p.elements.append(ProfileElement(
+                        element_id=erow["element_id"], type=erow["type"],
+                        title=erow["title"], content=erow["content"],
+                        url=erow["url"] or "", like_count=likes))
+                return p
+            except Exception:  # noqa: BLE001
+                _log.debug("profiles: get failed", exc_info=True)
+                return None
         if self._db is None:
             return None
         try:
@@ -308,6 +402,19 @@ class ProfileStore:
     def list(self, surface: str = "") -> list[Profile]:
         """All profiles, optionally filtered by surface."""
         import json
+        if self._port is not None:
+            try:
+                table = self._port.tables["profiles"]
+                rows = (table.find({"surface": surface}) if surface
+                        else table.all())
+                return [Profile(
+                    profile_id=row["profile_id"], owner=row["owner"],
+                    surface=row["surface"],
+                    display_name=row["display_name"],
+                    prompts=json.loads(row["prompts_json"] or "{}"),
+                    created_at=row["created_at"]) for row in rows]
+            except Exception:  # noqa: BLE001
+                return []
         if self._db is None:
             return []
         try:
@@ -333,7 +440,7 @@ class ProfileStore:
                       answer: str) -> bool:
         """Answer one scaffold prompt. False when profile/prompt invalid."""
         import json
-        if self._db is None:
+        if self._db is None and self._port is None:
             return False
         p = self.get(profile_id)
         if p is None:
@@ -343,6 +450,10 @@ class ProfileStore:
             return False
         p.prompts[prompt_id] = (answer or "").strip()
         try:
+            if self._port is not None:
+                self._port.tables["profiles"].update(
+                    profile_id, {"prompts_json": json.dumps(p.prompts)})
+                return True
             self._db.execute(
                 "UPDATE profiles SET prompts_json = ? WHERE profile_id = ?",
                 (json.dumps(p.prompts), profile_id))
@@ -399,7 +510,7 @@ class ProfileStore:
         empty (honest: Devon says the intro isn't transcribed yet,
         never fabricates one). None returned when invalid/down.
         """
-        if self._db is None:
+        if self._db is None and self._port is None:
             return None
         if self.get(profile_id) is None:
             return None
@@ -437,6 +548,16 @@ class ProfileStore:
                 _log.debug("profiles: voice intro STT failed", exc_info=True)
         try:
             now = time.time()
+            if self._port is not None:
+                self._port.tables["profiles"].update(profile_id, {
+                    "voice_intro_path": dest,
+                    "voice_intro_transcript": transcript,
+                    "voice_intro_language": lang,
+                    "voice_intro_stt": backend,
+                    "voice_intro_at": now})
+                return VoiceIntro(profile_id=profile_id, audio_path=dest,
+                                  transcript=transcript, language=lang,
+                                  stt_backend=backend, created_at=now)
             self._db.execute(
                 """UPDATE profiles
                    SET voice_intro_path = ?, voice_intro_transcript = ?,
@@ -454,6 +575,12 @@ class ProfileStore:
 
     def get_voice_intro(self, profile_id: str) -> VoiceIntro | None:
         """A profile's voice intro, or None when unset."""
+        if self._port is not None:
+            try:
+                row = self._port.tables["profiles"].get(profile_id)
+                return self._row_voice_intro(row) if row else None
+            except Exception:  # noqa: BLE001
+                return None
         if self._db is None:
             return None
         try:
@@ -470,6 +597,14 @@ class ProfileStore:
         if vi is None:
             return False
         try:
+            if self._port is not None:
+                self._port.tables["profiles"].update(profile_id, {
+                    "voice_intro_path": "", "voice_intro_transcript": "",
+                    "voice_intro_language": "", "voice_intro_stt": "",
+                    "voice_intro_at": 0})
+                if vi.audio_path and os.path.isfile(vi.audio_path):
+                    os.remove(vi.audio_path)
+                return True
             self._db.execute(
                 """UPDATE profiles
                    SET voice_intro_path = '', voice_intro_transcript = '',
@@ -488,7 +623,7 @@ class ProfileStore:
     def add_element(self, profile_id: str, type: str, title: str,
                     content: str = "", url: str = "") -> ProfileElement | None:
         """Add a likeable element. None when invalid/down."""
-        if self._db is None:
+        if self._db is None and self._port is None:
             return None
         if self.get(profile_id) is None:
             return None
@@ -499,6 +634,12 @@ class ProfileStore:
             title=(title or "").strip()[:120], content=(content or "").strip(),
             url=(url or "").strip())
         try:
+            if self._port is not None:
+                self._port.tables["elements"].put({
+                    "element_id": el.element_id, "profile_id": profile_id,
+                    "type": el.type, "title": el.title,
+                    "content": el.content, "url": el.url})
+                return el
             self._db.execute(
                 "INSERT INTO elements VALUES (?, ?, ?, ?, ?, ?)",
                 (el.element_id, profile_id, el.type, el.title,
@@ -517,11 +658,25 @@ class ProfileStore:
         Idempotent per (profile, element, liker): liking twice keeps the
         first like (and its comment) — the signal is the first touch.
         """
-        if self._db is None:
+        if self._db is None and self._port is None:
             return None
         if self.get(profile_id) is None:
             return None
         try:
+            if self._port is not None:
+                erow = self._port.tables["elements"].get(element_id)
+                if erow is None or erow["profile_id"] != profile_id:
+                    return None
+                lk = ElementLike(
+                    profile_id=profile_id, element_id=element_id,
+                    liker=(liker or "").strip(),
+                    comment=(comment or "").strip(),
+                    created_at=time.time())
+                self._port.tables["likes"].insert_ignore({
+                    "profile_id": lk.profile_id,
+                    "element_id": lk.element_id, "liker": lk.liker,
+                    "comment": lk.comment, "created_at": lk.created_at})
+                return lk
             exists = self._db.execute(
                 "SELECT 1 FROM elements WHERE element_id = ? AND profile_id = ?",
                 (element_id, profile_id)).fetchone()
@@ -542,6 +697,19 @@ class ProfileStore:
 
     def likes_for(self, element_id: str) -> list[ElementLike]:
         """All likes on an element, oldest first."""
+        if self._port is not None:
+            try:
+                # element_id is a key part (joined-id only): scan
+                # the restored rows and filter in Python.
+                rows = [r for r in self._port.tables["likes"].all()
+                        if r["element_id"] == element_id]
+                rows.sort(key=lambda r: r["created_at"] or 0)
+                return [ElementLike(
+                    profile_id=r["profile_id"], element_id=r["element_id"],
+                    liker=r["liker"], comment=r["comment"],
+                    created_at=r["created_at"]) for r in rows]
+            except Exception:  # noqa: BLE001
+                return []
         if self._db is None:
             return []
         try:
@@ -560,6 +728,28 @@ class ProfileStore:
 
         Each like with a comment is a warm opener waiting for a reply.
         """
+        if self._port is not None:
+            try:
+                # The native read is likes ⋈ elements ⋈ profiles on
+                # element id + the element's owner — re-expressed as
+                # finds: the owner's elements first, then the likes
+                # that name them (the like row's own profile_id is
+                # not part of the join, exactly as in the SQL).
+                profs = self._port.tables["profiles"].find(
+                    {"owner": owner})
+                pids = {r["profile_id"] for r in profs}
+                eids = {r["element_id"]
+                        for r in self._port.tables["elements"].all()
+                        if r["profile_id"] in pids}
+                rows = [r for r in self._port.tables["likes"].all()
+                        if r["element_id"] in eids]
+                rows.sort(key=lambda r: r["created_at"] or 0)
+                return [ElementLike(
+                    profile_id=r["profile_id"], element_id=r["element_id"],
+                    liker=r["liker"], comment=r["comment"],
+                    created_at=r["created_at"]) for r in rows]
+            except Exception:  # noqa: BLE001
+                return []
         if self._db is None:
             return []
         try:

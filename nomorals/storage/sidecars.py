@@ -1341,6 +1341,96 @@ _register(_S(
 ))
 
 _register(_S(
+    name="matching-questionnaire", verdict="ported", kind="sqlite-file",
+    modules=("matching/questionnaire.py",),
+    tables=("answers", "ranks", "dealbreakers", "capacities"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 7): "
+        "Questionnaire routes all four tables through the seam "
+        "(matching-questionnaire__answers / __dealbreakers / __ranks "
+        "/ __capacities) whenever a store is resolved, behind its "
+        "unchanged never-raises API. All four tables are composite-"
+        "keyed by owner, so the key parts live only in the joined "
+        "document id: point reads fetch by the joined id, updates "
+        "and deletes address it, and owner-scoped reads scan the "
+        "restored rows and filter in Python — never find() on key "
+        "fields. The answers table's in-file ALTER migration "
+        "(acceptable, section) stays a native-path concern; the "
+        "seam DDL carries the final shape. The native sqlite3 path "
+        "serves the SQLite default."),
+))
+
+_register(_S(
+    name="property-passport", verdict="ported", kind="sqlite-file",
+    modules=("property/passport.py",),
+    tables=("passports", "history", "refs", "doc_refs"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 7): "
+        "PassportStore routes all four tables through the seam "
+        "(property-passport__passports / __history / __refs / "
+        "__doc_refs) whenever a store is resolved, behind its "
+        "unchanged never-raises API. The port brief warned of "
+        "JSON-blob document rows; the live code carries none — "
+        "every value is a typed column, and the passport aggregate "
+        "(history / references / doc references: single-PK children "
+        "with module-allocated ids) assembles from per-passport "
+        "finds exactly as it assembled from per-passport SELECTs. "
+        "The store still holds vault references only — no document "
+        "content moves to the seam. The passports attested_at ALTER "
+        "stays a native-path concern; the seam DDL carries the "
+        "final shape. Child assembly on the seam follows document "
+        "order (the native child SELECTs carry no ORDER BY). The "
+        "native sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="social-profiles", verdict="ported", kind="sqlite-file",
+    modules=("social/profiles.py",),
+    tables=("profiles", "elements", "likes"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 7): "
+        "ProfileStore routes all three tables through the seam "
+        "(social-profiles__profiles / __elements / __likes) "
+        "whenever a store is resolved, behind its unchanged "
+        "never-raises API. Likes are composite-keyed (profile, "
+        "element, liker) with the parts in the joined document id; "
+        "the JOIN reads re-express as finds — get() counts likes "
+        "per element id, matches() walks owner → elements → likes "
+        "in Python with the native join's semantics. The voice-"
+        "intro columns' in-file migration (_ensure_voice_columns) "
+        "stays a native-path concern; the seam DDL carries the "
+        "final shape, and the lazy import backfills the voice "
+        "columns on legacy rows. The native sqlite3 path serves "
+        "the SQLite default."),
+))
+
+_register(_S(
+    name="triggers-saved-search", verdict="ported", kind="sqlite-file",
+    modules=("triggers/saved_search.py",),
+    tables=("saved_searches", "seen_matches", "pending_digest"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 7): "
+        "SavedSearchStore routes through the seam "
+        "(triggers-saved-search__saved_searches / __seen_matches / "
+        "__pending_digest) whenever a store is resolved, behind "
+        "its unchanged API. seen_matches is a dedup registry "
+        "composite-keyed (search, dedup key): existence is a "
+        "joined-id get, never a find on key parts. pending_digest "
+        "is AUTOINCREMENT-keyed, so its rows ride put_raw under "
+        "their file seq and new rows allocate from the meta "
+        "counter (next_id) seeded by the lazy import from the "
+        "imported maximum — seq order is queue order on both "
+        "rungs. The digest queue's claims are plain single-process "
+        "CRUD (take = read-then-delete by the one host loop; no "
+        "cross-process claim semantics exist in the module), so "
+        "it does NOT need the C2 fencing treatment — the port pin "
+        "states that explicitly. The saved_searches snooze/digest "
+        "ALTERs and the pending_digest index stay native-path "
+        "concerns; the seam DDL carries the final shape. The "
+        "native sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
     name="health-timeline", verdict="residue", kind="database-file",
     modules=("health/timeline.py",),
     anchors=(("health/timeline.py", "timeline.db"),),
@@ -1414,9 +1504,6 @@ _residue("marketing-send", "marketing/send.py",
          "contains a QUEUE (send_queue) whose claim semantics need "
          "the P4 fencing treatment, so this port is a coordination "
          "port, not a plain CRUD port.")
-_residue("matching-questionnaire", "matching/questionnaire.py",
-         ("answers", "ranks", "dealbreakers", "capacities"),
-         "matching questionnaire answers and rankings.")
 _residue("people", "people/store.py",
          ("persons", "notes", "links", "gifts", "obligations"),
          "the people store: five tables with JOIN-shaped reads "
@@ -1435,21 +1522,12 @@ _residue("planning-graph", "planning/graph.py",
          "nodes/edges; its port follows the graph story (the kg "
          "tables' disposition in carry.PORT_RESIDUE), not the "
          "document-fit pattern.")
-_residue("property-passport", "property/passport.py",
-         ("passports", "history", "refs", "doc_refs"),
-         "property passports and their history in passport.db.")
-_residue("social-profiles", "social/profiles.py",
-         ("profiles", "elements", "likes"),
-         "prompt-scaffolded profiles and element likes.")
 _residue("travel-groups", "travel/groups.py",
          ("group_trips", "legs", "expenses", "payments", "budgets",
           "proposals", "votes", "polls"),
          "group trip state — eight tables with money-split flows "
          "(expenses/payments); the port reviews its split "
          "composition, like household.")
-_residue("triggers-saved-search", "triggers/saved_search.py",
-         ("saved_searches", "seen_matches", "pending_digest"),
-         "saved searches with seen-match dedup and pending digests.")
 
 
 def sidecar_status() -> dict[str, Any]:
