@@ -9,6 +9,9 @@ import os
 import tempfile
 import time
 
+import pytest
+
+from nomorals.property import failures as pf
 from nomorals.property.scam import (
     ScamFlag,
     ScamStore,
@@ -40,6 +43,28 @@ from nomorals.property.value import (
 
 def _tmpdb(name="t.db"):
     return os.path.join(tempfile.mkdtemp(), name)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    """Keep passport failure records off the live home's ledger.
+
+    The affordability paths exercised below record failures into
+    ``nomorals.property.failures``, whose store resolves through the
+    app's ``NM_HOME`` override — redirect it to a per-test tmp home
+    and clear the ring (the package's own idiom:
+    test_property_value_failures.py), so a run of this file reads
+    and writes only its own ledger, never the live home's.
+    """
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    pf.clear_failures()
+    yield
+    # Re-pin before the teardown clear: a test may have deleted
+    # NM_HOME mid-test, and clear_failures() resolves the store
+    # path at call time — it must still land on the tmp home,
+    # never unlink the live home's ledger.
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    pf.clear_failures()
 
 
 # ── scam: no-viewing / abroad (Fredy) ────────────────────────────────

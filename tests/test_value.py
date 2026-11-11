@@ -22,6 +22,27 @@ def _tmp_db():
     return os.path.join(tempfile.mkdtemp(), "v.db")
 
 
+@pytest.fixture(autouse=True)
+def _isolated_default_store(tmp_path, monkeypatch):
+    """Keep the chat controls off the live values.db.
+
+    ``control_value`` / ``control_valuepick`` build ``ValueStore()``
+    with no path, which resolves to the live home's values.db via
+    ``os.path.expanduser`` — the ``NM_HOME`` override does not govern
+    that seam, so every run used to append synthetic estimates to the
+    live store. Redirect the module's store class to a per-test tmp
+    DB — the seam ``test_full_chat_flow`` already patches by hand —
+    so no run of this file touches the live store. Tests that pass
+    an explicit store are unaffected (they hold their own binding).
+    """
+    import nomorals.property.value as vmod
+
+    real_store = vmod.ValueStore
+    db = str(tmp_path / "values.db")
+    monkeypatch.setattr(vmod, "ValueStore",
+                        lambda *a, **k: real_store(db))
+
+
 def _comps(prices, sims=None, area="surulere", bedrooms="2br"):
     sims = sims or [0.9] * len(prices)
     return [Comp(price_kobo=p * 100, area=area, bedrooms=bedrooms,
