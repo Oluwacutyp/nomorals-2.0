@@ -65,6 +65,31 @@ class ComputerService:
 
         return _fn
 
+    def _vision_fn(self) -> Callable[[bytes, str], str] | None:
+        """A vision callable from the attached context's router.
+
+        The desktop decider's eyes: the router's ``describe_image``
+        routes the perception's real PNG to a VL-capable model.
+        None when no router/vision rung is attached — the decider
+        then answers from the text summary, as before.
+        """
+        router = getattr(self.context, "router", None) \
+            if self.context is not None else None
+        describe = getattr(router, "describe_image", None)
+        if describe is None:
+            return None
+
+        def _fn(png: bytes, prompt: str) -> str:
+            response = describe(png, prompt)
+            if getattr(response, "ok", True) is False:
+                raise RuntimeError(
+                    f"vision model declined: "
+                    f"{getattr(response, 'error', '') or 'no answer'}")
+            text = getattr(response, "text", None)
+            return str(text if text is not None else response)
+
+        return _fn
+
     # -- availability / profile gating -------------------------------------
 
     def availability(self) -> dict[str, Any]:
@@ -263,6 +288,7 @@ class ComputerService:
     def run(self, goal: str, session_id: str = "",
             max_steps: int = 25,
             complete_fn: Callable[[str], str] | None = None,
+            vision_fn: Callable[[bytes, str], str] | None = None,
             ) -> dict[str, Any]:
         """A brain-directed run toward ``goal`` on a session."""
         fn = complete_fn or self._complete_fn()
@@ -272,10 +298,12 @@ class ComputerService:
                              "there is no brain to direct the desktop "
                              "— perceive/act still work, and runs need "
                              "the tool or chat surface's model."}
+        eyes = vision_fn if vision_fn is not None else self._vision_fn()
         try:
             rec = self._resolve(session_id)
             report = loop.run_task(
-                self.manager, rec, goal, loop.LLMDecider(fn),
+                self.manager, rec, goal,
+                loop.LLMDecider(fn, vision_fn=eyes),
                 max_steps=max_steps)
         except SessionError as exc:
             return {"ok": False, "error": str(exc)}

@@ -298,9 +298,21 @@ class LLMDecider:
     imports the agent layer. The reply must be the JSON action
     object described in the prompt; anything else aborts the run
     as a decider failure — reported, never silently retried.
+
+    ``vision_fn`` (optional) is the vision rung — ``(png, prompt)
+    -> reply text``. When it is wired and the perception carries a
+    real frame, the decider decides from the SCREENSHOT itself
+    (with the window list as grounding), not only from the text
+    summary: the desktop's decider was previously fed window
+    titles while the actual pixels sat unused in the journal.
+    A vision failure is recorded and the text path answers instead
+    — degraded, never blind-stopped. ``last_call_used_vision``
+    reports which rung answered, so the run can journal it.
     """
 
     complete_fn: Callable[[str], str]
+    vision_fn: Callable[[bytes, str], str] | None = None
+    last_call_used_vision: bool = False
 
     def decide(self, perception: Perception, goal: str,
                history: list[StepRecord]) -> Action | None:
@@ -311,10 +323,26 @@ class LLMDecider:
         prompt = _LLM_PROMPT.format(
             goal=goal, perception=perception.summary(),
             history=history_text)
-        try:
-            reply = self.complete_fn(prompt)
-        except Exception as exc:  # noqa: BLE001 — surfaced as the reason
-            raise DeciderError(f"the model call failed: {exc}") from exc
+        self.last_call_used_vision = False
+        reply: str | None = None
+        if self.vision_fn is not None and perception.png:
+            try:
+                reply = self.vision_fn(
+                    perception.png,
+                    prompt + "\n\nThe screenshot of the current "
+                    "desktop is attached. Base your answer on what "
+                    "you SEE in it, grounded by the window list "
+                    "above for titles and geometry.")
+                self.last_call_used_vision = True
+            except Exception as exc:  # noqa: BLE001 — fall back, loudly
+                failures.record_failure("loop decider vision", exc)
+                reply = None
+        if reply is None:
+            try:
+                reply = self.complete_fn(prompt)
+            except Exception as exc:  # noqa: BLE001 — surfaced as reason
+                raise DeciderError(
+                    f"the model call failed: {exc}") from exc
         return parse_action_reply(reply)
 
 
@@ -435,6 +463,9 @@ def run_task(manager: SessionManager, rec: SessionRecord, goal: str,
             except Exception as exc:  # noqa: BLE001 — the reason, verbatim
                 report.reason = f"decider failed: {exc}"
                 return report
+            if getattr(decider, "last_call_used_vision", False):
+                manager.journal("decider_vision", rec.id, step=n,
+                                goal=goal)
             if action is None:
                 report.status = "completed"
                 return report

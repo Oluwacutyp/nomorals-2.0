@@ -99,6 +99,14 @@ class PerceptionEscalator:
         self.tier = TIER_NUMBERED
         self._failed_clicks.clear()
 
+    def structural_elements(self) -> list[dict[str, Any]] | None:
+        """Tier 2 extraction: the deeper DOM element list, when an
+        extractor was injected; None when this escalator has none
+        (the caller then climbs straight to Tier 3)."""
+        if self._extract_structural is None:
+            return None
+        return list(self._extract_structural() or [])
+
     def mark_elements(self, elements: list[dict[str, Any]]) -> list[MarkedElement]:
         """Assign stable 1-based marks to a snapshot element list."""
         out: list[MarkedElement] = []

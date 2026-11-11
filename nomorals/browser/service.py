@@ -624,7 +624,17 @@ def _merge_stealth(base: dict[str, Any] | None,
 
 def _require_playwright_sync():
     """The playwright sync API factory, or a BrowserError that says exactly
-    how to get it. Never imports playwright at module load."""
+    how to get it. Never imports playwright at module load.
+
+    A missing engine is self-provisioned first (owner doctrine,
+    :mod:`nomorals.browser.provision`): one bounded install attempt
+    per process, and the hint below stands only when provisioning
+    could not land the engine on this host/profile.
+    """
+    from .provision import ensure_playwright, playwright_usable
+
+    if not playwright_usable():
+        ensure_playwright()
     if importlib.util.find_spec("playwright") is None:
         raise BrowserError(_PLAYWRIGHT_HINT)
     try:

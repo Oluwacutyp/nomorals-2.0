@@ -26,6 +26,7 @@ continues the same page the owner just cleared — not a copy.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Any, Callable
 
 from ..core.logging_setup import get_logger
@@ -37,11 +38,13 @@ from .agent import (
 )
 from .challenge import ChallengeSolver
 from .service import RenderedTabTakeoverAdapter
+from .vision_marks import PerceptionEscalator
 
 _log = get_logger(__name__)
 
 __all__ = [
     "RenderedTabDriver",
+    "build_vision_escalator",
     "build_wired_agent_loop",
 ]
 
@@ -165,7 +168,9 @@ def build_wired_agent_loop(*, tab: Any,
                            on_trace: Any = None,
                            on_progress: Any = None,
                            on_wall_outcome: Any = None,
-                           cancel_requested: Any = None) -> AgentLoop:
+                           cancel_requested: Any = None,
+                           vision_brain: Any = None,
+                           escalator: Any = None) -> AgentLoop:
     """Build an ``AgentLoop`` whose wall path is fully wired.
 
     ``tab`` is the live rendered tab (raw — the factory wraps it in
@@ -179,8 +184,13 @@ def build_wired_agent_loop(*, tab: Any,
     ``cancel_requested`` (optional) is the cooperative cancel poll
     handed to the loop — the browser job runner passes its job's
     ``cancel_requested`` so a cancel stops the run at its next step
-    boundary. Everything else is passed straight through to
-    :class:`AgentLoop`.
+    boundary. ``vision_brain`` (optional) is the brain whose vision
+    rung (``describe_image``) becomes the perception escalator's
+    ``see``: the loop then escalates to Set-of-Mark vision when the
+    text snapshot cannot find the target, instead of deciding
+    blind. ``escalator`` (optional) injects a prebuilt escalator
+    instead (tests, custom extractors). Everything else is passed
+    straight through to :class:`AgentLoop`.
     """
     adapter = RenderedTabTakeoverAdapter(tab)
     solver = ChallengeSolver(
@@ -190,10 +200,48 @@ def build_wired_agent_loop(*, tab: Any,
         tab=adapter, resume_state=dict(resume_state or {}),
         owner_chat=owner_chat, task_label=task_label or "browsing",
         on_outcome=on_wall_outcome)
+    if escalator is None and vision_brain is not None:
+        escalator = build_vision_escalator(tab, vision_brain)
     loop = AgentLoop(
         RenderedTabDriver(tab), decide_llm=decide_llm,
         autonomy=autonomy, approve=approve, verify=verify,
         dry_run=dry_run, max_steps=max_steps,
         on_trace=on_trace, on_progress=on_progress,
-        on_blocked=handler, cancel_requested=cancel_requested)
+        on_blocked=handler, cancel_requested=cancel_requested,
+        escalator=escalator)
     return loop
+
+
+def build_vision_escalator(tab: Any, brain: Any) -> PerceptionEscalator:
+    """A :class:`PerceptionEscalator` with live eyes for one tab.
+
+    ``see`` is the brain's vision rung: the marked screenshot's bytes
+    go to ``describe_image`` and its text comes back. ``screenshot``
+    is the tab's own capture (a file path, per the rendered tab's
+    ``screenshot()`` shape). Both are lazy: nothing is captured or
+    asked until the loop actually escalates.
+    """
+
+    def _screenshot() -> str:
+        fn = getattr(tab, "screenshot", None)
+        if not callable(fn):
+            raise RuntimeError("this tab cannot take a screenshot")
+        out = fn()
+        path = out.get("path") if isinstance(out, dict) else ""
+        if not path:
+            raise RuntimeError("the tab's screenshot produced no file")
+        return str(path)
+
+    def _see(path: str, prompt: str) -> str:
+        data = Path(path).read_bytes()
+        resp = brain.describe_image(data, prompt)
+        if getattr(resp, "ok", True) is False:
+            raise RuntimeError(
+                f"vision model declined: "
+                f"{getattr(resp, 'error', '') or 'no answer'}")
+        text = str(getattr(resp, "text", "") or "")
+        if not text:
+            raise RuntimeError("vision model returned an empty answer")
+        return text
+
+    return PerceptionEscalator(see=_see, screenshot=_screenshot)

@@ -134,6 +134,7 @@ from .takeover import (
 )
 from .loop_wiring import (
     RenderedTabDriver,
+    build_vision_escalator,
     build_wired_agent_loop,
 )
 from .jobs import (
@@ -141,8 +142,21 @@ from .jobs import (
     BrowserRunJob,
 )
 from .llm_decider import (
+    ApprovalSurfacingDecider,
     LLMDecider,
     build_llm_decider,
+)
+from .approvals import (
+    ApprovalBroker,
+    ApprovalRequest,
+    RunApprover,
+)
+from .provision import (
+    browsers_root,
+    chromium_present,
+    ensure_playwright,
+    playwright_package_present,
+    playwright_usable,
 )
 from .filtering import (
     UNTRUSTED_END,
@@ -199,6 +213,9 @@ from .vision_marks import (
 __all__ = [
     "ACT_SILENT",
     "ACT_WITH_APPROVAL",
+    "ApprovalBroker",
+    "ApprovalRequest",
+    "ApprovalSurfacingDecider",
     "AttemptRecord",
     "Action",
     "ActionLedger",
@@ -208,6 +225,7 @@ __all__ = [
     "AuthResult",
     "BotWallError",
     "BrowserBotDetectedError",
+    "build_vision_escalator",
     "build_wired_agent_loop",
     "BrowserDriver",
     "BrowserError",
@@ -303,6 +321,7 @@ __all__ = [
     "Recording",
     "RecordingDiffError",
     "RenderedTab",
+    "RunApprover",
     "RenderedTabDriver",
     "ScreenshotResult",
     "SessionHandle",
@@ -325,8 +344,10 @@ __all__ = [
     "TakeoverManager",
     "TakeoverTabAdapter",
     "action_icon",
+    "browsers_root",
     "builtin_registry",
     "build_llm_decider",
+    "chromium_present",
     "classify_botwall",
     "classify_exception",
     "classify_http_status",
@@ -338,11 +359,14 @@ __all__ = [
     "detect_challenge_signal",
     "detect_prompt_injection",
     "download_line",
+    "ensure_playwright",
     "error_card",
     "format_elapsed",
     "format_escalation_message",
     "layout_similarity",
     "pacing_from_env",
+    "playwright_package_present",
+    "playwright_usable",
     "pacing_line",
     "parallel_reads",
     "register_strategy",

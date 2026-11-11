@@ -1419,10 +1419,30 @@ class NavSession:
         try:
             from playwright.sync_api import sync_playwright
         except Exception as exc:  # noqa: BLE001
-            self._release_slot()
-            raise NavUnavailable(
-                "no browser engine on this host "
-                f"(playwright import failed: {exc})") from exc
+            # Self-provision (owner doctrine): a missing engine is
+            # Devon's job to fix — one bounded install attempt, then
+            # the import is retried before the honest failure stands.
+            provisioned = False
+            try:
+                from ...browser.provision import ensure_playwright
+
+                provisioned = ensure_playwright()
+            except Exception:  # noqa: BLE001 - provisioning never gates
+                provisioned = False
+            if provisioned:
+                try:
+                    from playwright.sync_api import sync_playwright
+                except Exception as exc2:  # noqa: BLE001
+                    self._release_slot()
+                    raise NavUnavailable(
+                        "no browser engine on this host "
+                        f"(playwright import failed: {exc2})") from exc2
+            else:
+                self._release_slot()
+                raise NavUnavailable(
+                    "no browser engine on this host "
+                    f"(playwright import failed: {exc}; Devon tried "
+                    "to install it herself and could not)") from exc
         if self._profile_dir is not None:
             lock = _profile_lock(self._profile_dir)
             if not lock.acquire(timeout=90):

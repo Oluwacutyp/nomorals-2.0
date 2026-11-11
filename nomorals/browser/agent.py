@@ -106,14 +106,26 @@ class Observation:
     #: Steps taken so far: [{step, action, result}]. The decider sees
     #: what already happened — no repeating a failed move blind.
     history: list[dict[str, Any]] = field(default_factory=list)
+    #: Vision escalation (Tier 3, vision_marks.py): what the vision
+    #: model reported from a marked screenshot of this page, and the
+    #: SoM overlay it answered over. Empty/None on the plain text
+    #: path — the loop only fills these when perception escalates,
+    #: so a run that never escalates is byte-identical to before.
+    vision_answer: str = ""
+    som: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"url": self.page.url, "title": self.page.title,
-                "tier": self.tier, "step": self.step,
-                "goal": self.goal, "history": list(self.history),
-                "snapshot_hash": self.page.snapshot_hash(),
-                "elements": self.page.elements,
-                "last_result": self.last_result}
+        out = {"url": self.page.url, "title": self.page.title,
+               "tier": self.tier, "step": self.step,
+               "goal": self.goal, "history": list(self.history),
+               "snapshot_hash": self.page.snapshot_hash(),
+               "elements": self.page.elements,
+               "last_result": self.last_result}
+        if self.vision_answer:
+            out["vision_answer"] = self.vision_answer
+        if self.som is not None:
+            out["som"] = self.som
+        return out
 
 
 @dataclass
@@ -154,10 +166,18 @@ class CdpDriver:
         try:
             from playwright.sync_api import sync_playwright  # type: ignore
         except ImportError as exc:  # pragma: no cover - env-dependent
-            raise RuntimeError(
-                "CdpDriver needs Playwright: pip install playwright "
-                "&& playwright install chromium"
-            ) from exc
+            # Self-provision (owner doctrine): a missing engine is
+            # Devon's job to fix — one bounded install attempt, then
+            # the import is retried before the honest error stands.
+            from .provision import ensure_playwright
+
+            if not ensure_playwright():
+                raise RuntimeError(
+                    "CdpDriver needs Playwright: the package and its "
+                    "chromium build are missing, and self-provisioning "
+                    "could not install them on this host/profile"
+                ) from exc
+            from playwright.sync_api import sync_playwright  # type: ignore
         self._playwright = sync_playwright().start()
         self._browser = self._playwright.chromium.launch(headless=headless)
         self._context = self._browser.new_context()
@@ -260,7 +280,8 @@ class AgentLoop:
                  on_trace: Callable[[AgentTrace], None] | None = None,
                  on_progress: Callable[[dict[str, Any]], None] | None = None,
                  on_blocked: Callable[[Observation, str], str] | None = None,
-                 cancel_requested: Callable[[], bool] | None = None) -> None:
+                 cancel_requested: Callable[[], bool] | None = None,
+                 escalator: Any = None) -> None:
         self.driver = driver
         self.decide_llm = decide_llm
         self.strategy = strategy.lower()
@@ -282,6 +303,14 @@ class AgentLoop:
         #: job runner to ``BrowserRunJob.cancel_requested``. None
         #: means the loop runs unobserved, exactly as before.
         self.cancel_requested = cancel_requested
+        #: Perception escalator (vision_marks.PerceptionEscalator),
+        #: injected by the wiring layer with a live ``see`` (the
+        #: brain's vision rung) and a screenshot source. None = the
+        #: text-only path, exactly as before this seam existed.
+        self.escalator = escalator
+        #: How many steps this run escalated to vision. Journaled via
+        #: on_progress as it happens; the count survives on the loop.
+        self.vision_escalations = 0
         self.trace: list[AgentTrace] = []
         self.stopped_reason = ""
 
@@ -295,6 +324,121 @@ class AgentLoop:
             if got is not None:
                 return got
         return _heuristic_strategy(obs)
+
+    def _escalate_if_needed(
+            self, obs: Observation,
+            decision: Decision | None) -> tuple[Decision | None, Observation]:
+        """Vision escalation inside the observe step.
+
+        When the escalator's own rules fire (target not found, the
+        same click failed twice, a canvas/WebGL page, a thin
+        snapshot), climb the tiers: Tier 2 re-decides over the
+        deeper structural element list when an extractor is wired;
+        Tier 3 captures the marked screenshot, asks the injected
+        vision rung what it sees, and either turns its mark answer
+        into this step's decision or hands the vision verdict to
+        the decider (``obs.vision_answer`` / ``obs.som``) for a
+        second decide. Escalation use is journaled (log +
+        on_progress). Any escalation failure is recorded in the
+        failure ledger and the plain decision stands — vision is a
+        rung, never a gate, and a run with no escalator attached
+        never enters this path at all.
+        """
+        esc = self.escalator
+        if esc is None:
+            return decision, obs
+        page = obs.page
+        html = page.html or ""
+        last = self.trace[-1] if self.trace else None
+        last_click_failed = bool(
+            last is not None
+            and last.action.get("kind") == "click"
+            and not last.result.get("ok", True))
+        click_target = str(last.action.get("target", "")) \
+            if last is not None else ""
+        try:
+            needed = esc.should_escalate(
+                target_found=decision is not None,
+                last_click_failed=last_click_failed,
+                is_canvas="<canvas" in html.lower(),
+                snapshot_thin=not page.elements and len(html) >= 1000,
+                click_target=click_target if last_click_failed else "")
+        except Exception:  # noqa: BLE001 - the rule never gates deciding
+            _log.debug("vision escalation rule failed", exc_info=True)
+            return decision, obs
+        if not needed:
+            return decision, obs
+        try:
+            from .vision_marks import TIER_SOM_VISION, TIER_STRUCTURAL
+
+            if esc.tier < TIER_STRUCTURAL:
+                esc.escalate()
+            if esc.tier == TIER_STRUCTURAL:
+                richer = esc.structural_elements()
+                if richer:
+                    elements = [
+                        {**el, "id": str(el.get("id")
+                                         or el.get("selector") or "")}
+                        for el in richer]
+                    obs = Observation(
+                        page=Page(url=page.url, status=page.status,
+                                  html=page.html, title=page.title,
+                                  elements=elements),
+                        tier=TIER_STRUCTURAL,
+                        last_result=obs.last_result, step=obs.step,
+                        goal=obs.goal, history=obs.history)
+                    decision = self._decide(obs)
+                    if decision is not None:
+                        self._note_vision_use(obs, TIER_STRUCTURAL, "")
+                        return decision, obs
+                esc.escalate()
+            if esc.tier >= TIER_SOM_VISION:
+                overlay = esc.som_view(list(obs.page.elements),
+                                       goal=obs.goal)
+                answer = esc.see_marks(overlay)
+                obs.vision_answer = answer
+                obs.som = overlay.to_dict()
+                obs.tier = TIER_SOM_VISION
+                self._note_vision_use(obs, TIER_SOM_VISION, answer)
+                marked = esc.parse_mark(answer, overlay.marks)
+                if marked is not None and marked.selector:
+                    return Decision(
+                        Action(kind="click", target=marked.selector,
+                               label=marked.label),
+                        reason=(f"vision escalation: the model picked "
+                                f"mark {marked.mark} "
+                                f"({marked.label or 'unlabeled'}) from "
+                                "the marked screenshot"),
+                        confidence=0.6), obs
+                # No mark named: the vision verdict still reaches the
+                # decider, which re-decides having "seen" the page.
+                return self._decide(obs), obs
+        except Exception as exc:  # noqa: BLE001 - journaled, never fatal
+            try:
+                from .failures import record_failure
+
+                record_failure("browser.agent.vision_escalation", exc)
+            except Exception:  # noqa: BLE001 - ledger never gates
+                pass
+            _log.warning("vision escalation failed; continuing on "
+                         "the text path", exc_info=True)
+        return decision, obs
+
+    def _note_vision_use(self, obs: Observation, tier: int,
+                         answer: str) -> None:
+        """Journal one escalation: count + log + progress event."""
+        self.vision_escalations += 1
+        _log.info("browser loop vision escalation at step %s (tier %s)",
+                  obs.step, tier)
+        if self.on_progress is not None:
+            try:
+                self.on_progress({
+                    "step": obs.step, "url": obs.page.url,
+                    "vision_escalation": {
+                        "tier": tier, "answer": (answer or "")[:200]}})
+            except Exception:  # noqa: BLE001 - progress never gates
+                _log.debug("vision escalation progress note failed",
+                           exc_info=True)
 
     def _wall_check(self, page: Page, step: int, goal: str = "") -> tuple[str | None, Page]:
         """Detect a wall on ``page``; run the handler; return stop reason.
@@ -395,6 +539,7 @@ class AgentLoop:
                               goal=goal,
                               history=[t.to_dict() for t in self.trace])
             decision = self._decide(obs)
+            decision, obs = self._escalate_if_needed(obs, decision)
             if decision is None:
                 self.stopped_reason = "nothing safe to do"
                 break

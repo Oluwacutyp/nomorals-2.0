@@ -312,6 +312,11 @@ class RuntimeReachMixin:
             rest = parts[1].strip() if len(parts) > 1 else ""
             return self._control_browser_run(
                 rest, chat_key=chat_key, message=message)
+        if parts and parts[0].lower() in ("approve", "deny"):
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            return self._control_browser_approval(
+                rest, approved=parts[0].lower() == "approve",
+                message=message)
         if len(parts) < 2:
             return ("usage: /browser open <url> — fetch + show the text\n"
                     "       /browser text <url> — page text only\n"
@@ -322,6 +327,10 @@ class RuntimeReachMixin:
                     "       /browser run <url> [goal] — drive a live tab "
                     "with the agent loop (owner-only, background job)\n"
                     "       /browser run status [job] — job progress\n"
+                    "       /browser approve <id> — let a paused run do "
+                    "its consequential step (owner-only)\n"
+                    "       /browser deny <id> — stop that run at the "
+                    "step (owner-only)\n"
                     "       /browser watch [session] — attach a live view "
                     "to a running browser session (owner-only)")
         verb, url = parts[0].lower(), parts[1].strip()
@@ -331,7 +340,9 @@ class RuntimeReachMixin:
                     "(owner-only)\n"
                     "       /browser run <url> [goal] — agent loop on a "
                     "live tab (owner-only, background job)\n"
-                    "       /browser run status [job] — job progress")
+                    "       /browser run status [job] — job progress\n"
+                    "       /browser approve|deny <id> — answer a paused "
+                    "run's consequential step (owner-only)")
         if not url.startswith(("http://", "https://")):
             return "give a full URL starting with http:// or https://"
         from ...tools.browser import BrowserSession
@@ -531,6 +542,62 @@ class RuntimeReachMixin:
             return "\n".join(lines)
         return f"takeover failed: {outcome.message}"[:500]
 
+    def _browser_approval_broker(self) -> Any:
+        """The ONE approval broker for browser runs (cached).
+
+        Consequential steps in a run ask through this broker: the ask
+        goes to the owner's chat via the takeover notifier seam, the
+        run parks, and ``/browser approve|deny <id>`` answers it. The
+        park timeout matches the takeover wait — silence is a no.
+        """
+        broker = getattr(self, "_browser_approval_broker_inst", None)
+        if broker is None:
+            from ...browser.approvals import ApprovalBroker
+            from ...browser.takeover import TakeoverConfig
+
+            timeout_s = float(
+                TakeoverConfig.from_settings(self.settings)
+                .wait_timeout_s)
+            broker = ApprovalBroker(
+                notifier=self._takeover_notifier(), timeout_s=timeout_s)
+            self._browser_approval_broker_inst = broker
+        return broker
+
+    def _control_browser_approval(self, tail: str, *, approved: bool,
+                                  message: Any = None) -> str:
+        """Owner-only: ``/browser approve <id>`` / ``/browser deny <id>``.
+
+        Answers a consequential-step approval a browser run is parked
+        on: approve resumes the run and performs the step; deny stops
+        it at that step. With no id, lists what is waiting.
+        """
+        if message is None or not self._is_operator(message):
+            return ("browser approvals are owner-only — run it from "
+                    "the owner's chat.")
+        broker = self._browser_approval_broker()
+        rest = (tail or "").strip()
+        if not rest:
+            pending = broker.pending()
+            if not pending:
+                return "no browser approvals are waiting on you."
+            lines = ["browser approvals waiting on your word:"]
+            for req in pending:
+                lines.append(
+                    f"  {req['request_id']} — {req['kind']} "
+                    f"{req['label'] or req['target']} on {req['url']} "
+                    f"({req['task_label']})")
+            lines.append("/browser approve <id> · /browser deny <id>")
+            return "\n".join(lines)
+        request_id = rest.split()[0]
+        if not broker.resolve(request_id, approved):
+            return (f"no waiting approval {request_id} — it may have "
+                    "timed out or already been answered.")
+        if approved:
+            return (f"approved {request_id} — the paused run will do "
+                    "that step now.")
+        return (f"denied {request_id} — the run stops at that step, "
+                "and the step will not happen.")
+
     def _control_browser_run(self, tail: str, *, chat_key: str = "",
                               message: Any = None) -> str:
         """Owner-only: ``/browser run <url> [goal]`` / ``run status [job]``.
@@ -540,7 +607,12 @@ class RuntimeReachMixin:
         is the fully-wired ``ChallengeSolver`` handler (takeover
         manager + owner notifier + challenge memory + solved-session
         store) and whose decider is the real brain (LLM decider,
-        heuristic fallback).
+        heuristic fallback). The brain's vision rung backs the
+        perception escalator, so a page the text snapshot cannot
+        read is looked at, not given up on. A consequential step
+        (submit/post/pay/…) PAUSES the run and asks the owner via
+        the approval broker — ``/browser approve|deny <id>`` —
+        instead of being denied and killing the run.
 
         NON-BLOCKING: the command starts the loop as a background job
         and returns immediately with the job id. The loop runs
@@ -576,25 +648,37 @@ class RuntimeReachMixin:
         if not url.startswith(("http://", "https://")):
             return "give a full URL starting with http:// or https://"
 
-        def _approve_benign(decision: Any, _obs: Any) -> bool:
-            # Benign acts (navigate/click around) proceed;
-            # consequential ones (spend/post/delete/irreversible)
-            # are denied — no human approver is attached, so they
-            # stop the loop instead of running.
-            from ...browser.agent import CONSEQUENTIAL_KINDS
+        def _run_brain() -> Any:
+            # The real brain, shared by the decider and the vision
+            # escalator; None when unavailable (the heuristic and
+            # the text path then cover the run, honestly degraded).
+            try:
+                from ...llm.brain import brain_for
 
-            return (not decision.irreversible
-                    and decision.action.kind not in CONSEQUENTIAL_KINDS)
+                return brain_for(self.context)
+            except Exception:  # noqa: BLE001 - heuristic covers us
+                _log.debug("browser run: brain unavailable; "
+                           "heuristic fallback", exc_info=True)
+                return None
 
         def _decider() -> Any:
             # The real brain, up front; the heuristic is the fallback
             # when no LLM is available or it returns nothing usable.
+            # The decider is wrapped so a consequential proposal it
+            # drops is surfaced to the loop as a Decision: the run's
+            # approver then asks the owner (see _runner) and the run
+            # pauses for the answer, instead of dying at the step.
+            brain = _run_brain()
+            if brain is None:
+                return None
             try:
-                from ...browser.llm_decider import build_llm_decider
-                from ...llm.brain import brain_for
+                from ...browser.llm_decider import (
+                    ApprovalSurfacingDecider,
+                    build_llm_decider,
+                )
 
-                return build_llm_decider(brain_for(self.context),
-                                         goal=goal)
+                return ApprovalSurfacingDecider(
+                    build_llm_decider(brain, goal=goal))
             except Exception:  # noqa: BLE001 - heuristic covers us
                 _log.debug("browser run: LLM decider unavailable; "
                            "heuristic fallback", exc_info=True)
@@ -614,6 +698,9 @@ class RuntimeReachMixin:
             memory = ChallengeMemory(
                 self.settings.resolve("data/takeover")
                 / "challenge-memory.sqlite3")
+            approver = self._browser_approval_broker().approver(
+                task_label=f"browser run {url}",
+                owner_chat=chat_key or "")
             loop = build_wired_agent_loop(
                 tab=tab, takeover_manager=self._takeover_manager(),
                 notifier=self._takeover_notifier(), memory=memory,
@@ -621,12 +708,35 @@ class RuntimeReachMixin:
                 owner_chat=chat_key or "",
                 task_label=f"browser run {url}",
                 resume_state={"url": url, "goal": goal},
-                max_steps=30, approve=_approve_benign,
+                max_steps=30, approve=approver,
                 decide_llm=_decider(),
+                vision_brain=_run_brain(),
                 on_progress=job.note_progress,
                 on_wall_outcome=job.wall_event,
                 cancel_requested=job.cancel_requested)
-            return loop.run(url, goal=goal)
+            result = loop.run(url, goal=goal)
+            if approver.outcomes:
+                # The receipt names the consequential verdicts, and
+                # a stop at an approval says WHY — owner denied /
+                # no answer / no channel — never a bare denial.
+                result["consequential_approvals"] = list(
+                    approver.outcomes)
+                last = approver.outcomes[-1]
+                if result.get("stopped_reason") == \
+                        "approval denied / no approver":
+                    verdict_lines = {
+                        "denied": "approval denied by owner",
+                        "timeout": "approval timed out "
+                                   "(no owner answer)",
+                        "no_channel": "approval impossible "
+                                      "(no owner channel)",
+                    }
+                    line = verdict_lines.get(str(last["verdict"]))
+                    if line:
+                        result["stopped_reason"] = (
+                            f"{line}: {last['kind']} on "
+                            f"{last['url']} — run stopped")
+            return result
 
         job, duplicate = self._browser_run_jobs().start(
             url, goal, _runner, force=force)
@@ -653,6 +763,15 @@ class RuntimeReachMixin:
                 lines.append(
                     f"  {job.job_id} [{job.status}] {job.url} — "
                     f"{job.steps} steps, wall: {job.wall_outcome}")
+            broker = getattr(self, "_browser_approval_broker_inst",
+                             None)
+            if broker is not None:
+                for req in broker.pending():
+                    lines.append(
+                        f"  ⏸ waiting on you: {req['request_id']} — "
+                        f"{req['kind']} on {req['url']} "
+                        f"(/browser approve {req['request_id']} · "
+                        f"/browser deny {req['request_id']})")
             lines.append("detail: /browser run status <job>")
             return "\n".join(lines)
         return self._browser_run_jobs().status_text(arg)
