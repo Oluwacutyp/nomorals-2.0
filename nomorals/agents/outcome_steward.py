@@ -47,8 +47,15 @@ record an honest discovery could read; :func:`adapter_health` named
 each absence and the missing record, on the record, instead of
 papering over it with a fabricated adapter. Doc 18 P1 built the two
 missing records (``browser_run_records``, ``media_job_records``), so
-the browser and render adapters now work against them; transfers and
-artifacts remain unavailable for the same stated reason.
+the browser and render adapters now work against them. The last two
+absences — transfers and artifacts — were closed by the delivery
+record registry (:mod:`nomorals.storage.delivery_records`): every
+artifact hand-off journals a transfer entry at the seam where it
+happens and a delivery receipt when it lands, and every
+artifact-carrying publication journals a publication receipt tied
+to its post — so the transfers and artifacts adapters now work
+against those records, and :func:`adapter_health` names no
+unavailable domain.
 
 Runs are deterministic by design: deterministic read-back is
 sufficient evidence for the domains covered here, and no model call
@@ -67,6 +74,7 @@ from typing import Any
 
 from ..core.jobs import JobRegistry, shared_registry
 from ..missions.mission import MissionStatus, MissionStore, mission_liveness
+from ..storage.delivery_records import DeliveryRecordStore
 from .delegation import DelegationStore
 from .outcome_cases import (
     RESOLVABLE_VERDICTS,
@@ -87,6 +95,8 @@ __all__ = [
     "OutboxAdapter",
     "BrowserAdapter",
     "RenderAdapter",
+    "TransfersAdapter",
+    "ArtifactsAdapter",
     "OutcomeSteward",
     "adapter_health",
     "run_stewardship_cycle",
@@ -145,6 +155,15 @@ BROWSER_STUCK_S = 3600.0
 #: A media job whose durable record has not transitioned for this
 #: long is presumed abandoned by its process (doc 18 P1).
 RENDER_STUCK_S = 3600.0
+#: A transfer still recorded as begun this long after the send was
+#: attempted never landed its outcome record — the process died
+#: mid-send or the completion write was lost, so whether the
+#: artifact arrived is genuinely unknown (delivery records pass).
+TRANSFER_STUCK_S = 3600.0
+#: An artifact whose latest hand-off failed this long ago, with no
+#: delivery since, is abandoned — the failure was surfaced at send
+#: time; a day later it is forgotten work (delivery records pass).
+ARTIFACT_ABANDONED_S = 24 * 3600.0
 
 
 @dataclass
@@ -929,6 +948,221 @@ class RenderAdapter:
                              establishes=establishes)]
 
 
+class TransfersAdapter:
+    """Read-only observation of the delivery record registry's
+    transfer journal (:mod:`nomorals.storage.delivery_records`).
+
+    Every artifact hand-off (``/artifact send`` / ``export``) writes
+    a transfer entry BEFORE the send is attempted and lands its
+    outcome when the send returns. Discovery: an entry still
+    ``begun`` long past its attempt is UNKNOWN-OUTCOME — the process
+    died mid-send or the completion write was lost, so whether the
+    artifact arrived is exactly the steward's question. Collection
+    re-reads the entry: ``delivered`` establishes ``delivered``
+    (citing the delivery receipt the completion minted), ``failed``
+    establishes ``failed`` with the recorded error, still ``begun``
+    establishes nothing. The subject names the platform and the
+    artifact's label — never the chat key, which can be a phone
+    number or JID (the outbox adapter's discipline).
+    """
+
+    domain = "transfers"
+
+    def __init__(self, db: Any) -> None:
+        self.records = DeliveryRecordStore(db)
+
+    @staticmethod
+    def _subject(entry: Any) -> str:
+        label = str(entry.artifact_label or "artifact").strip()
+        return f"{entry.platform or 'chat'} delivery: {label[:48]}"
+
+    def discover(self, now: float) -> list[Candidate]:
+        out: list[Candidate] = []
+        for entry in self.records.stuck_transfers(
+                now, older_than_s=TRANSFER_STUCK_S):
+            age = now - float(entry.begun_at or now)
+            out.append(Candidate(
+                domain=self.domain, kind="transfer",
+                subject=self._subject(entry),
+                subject_key=f"transfer:{entry.id}",
+                reason="unknown-outcome",
+                detail={"transfer_id": entry.id,
+                        "artifact_id": entry.artifact_id,
+                        "platform": entry.platform,
+                        "age_s": round(age, 1)}))
+        return out
+
+    def collect(self, case: OutcomeCase, now: float) -> list[EvidenceItem]:
+        transfer_id = str(case.detail.get("transfer_id") or "")
+        if not transfer_id and case.subject_key.startswith("transfer:"):
+            transfer_id = case.subject_key.split(":", 1)[1]
+        entry = self.records.get_transfer(transfer_id) if transfer_id \
+            else None
+        if entry is None:
+            return [EvidenceItem(
+                source="transfers.registry",
+                summary=("the transfer record no longer exists — "
+                         "whether the hand-off landed cannot be "
+                         "read back"))]
+        age = max(0.0, now - float(entry.begun_at or now))
+        if entry.state == "delivered":
+            receipt = self.records.delivery_receipt_for_transfer(
+                entry.id)
+            summary = (f"the registry records this {entry.kind} "
+                       f"delivered to {entry.platform or 'chat'} "
+                       f"{age:.0f}s after it began; the delivery "
+                       "receipt minted at completion is the citation")
+            return [EvidenceItem(
+                source="transfers.registry", summary=summary,
+                establishes="delivered",
+                ref=receipt.id if receipt is not None else entry.id)]
+        if entry.state == "failed":
+            summary = (f"the registry records this {entry.kind} to "
+                       f"{entry.platform or 'chat'} as failed")
+            if entry.error:
+                summary += f"; recorded error: {entry.error[:200]}"
+            return [EvidenceItem(
+                source="transfers.registry", summary=summary,
+                establishes="failed", ref=entry.id)]
+        return [EvidenceItem(
+            source="transfers.registry",
+            summary=(f"the transfer is still recorded as begun "
+                     f"{age:.0f}s after the send was attempted and "
+                     "no outcome was ever recorded — the send may "
+                     "or may not have happened; the record cannot "
+                     "say"))]
+
+
+class ArtifactsAdapter:
+    """Read-only observation of the delivery record registry from
+    the artifact's side: did this artifact ever reach anyone?
+
+    Discovery: an artifact whose latest hand-off failed a day ago
+    with no delivery since is ABANDONED — the failure was surfaced
+    at send time; a day later it is forgotten work, and the case
+    asks what became of the delivery. Collection reads the
+    artifact's receipts: a delivery receipt establishes
+    ``delivered`` (citing the receipt), a posted publication
+    receipt establishes ``delivered`` (citing the receipt — the
+    artifact reached its platform audience), failure records alone
+    establish ``failed``, and no records at all establishes
+    nothing — the honest answer that nothing in the registry
+    records this artifact ever being delivered.
+    """
+
+    domain = "artifacts"
+
+    def __init__(self, db: Any) -> None:
+        self.records = DeliveryRecordStore(db)
+
+    def discover(self, now: float) -> list[Candidate]:
+        out: list[Candidate] = []
+        for entry in self.records.abandoned_deliveries(
+                now, older_than_s=ARTIFACT_ABANDONED_S):
+            label = str(entry.artifact_label or "artifact").strip()
+            out.append(Candidate(
+                domain=self.domain, kind="artifact delivery",
+                subject=f"artifact delivery: {label[:48]}",
+                subject_key=f"artifact:{entry.artifact_id}",
+                reason="abandoned",
+                detail={"artifact_id": entry.artifact_id,
+                        "platform": entry.platform,
+                        "failure_age_s": round(
+                            max(0.0, now - float(entry.finished_at
+                                                 or now)), 1)}))
+        return out
+
+    def collect(self, case: OutcomeCase, now: float) -> list[EvidenceItem]:
+        artifact_id = str(case.detail.get("artifact_id") or "")
+        if not artifact_id and case.subject_key.startswith("artifact:"):
+            artifact_id = case.subject_key.split(":", 1)[1]
+        if not artifact_id:
+            return [EvidenceItem(
+                source="artifacts.delivery_records",
+                summary="the case names no artifact — nothing can "
+                        "be read back")]
+        deliveries = self.records.delivery_receipts_for_artifact(
+            artifact_id)
+        publications = self.records.publication_receipts_for_artifact(
+            artifact_id)
+        transfers = self.records.transfers_for_artifact(artifact_id)
+        items: list[EvidenceItem] = []
+        if deliveries:
+            latest = deliveries[-1]
+            age = max(0.0, now - float(latest.created_at or now))
+            items.append(EvidenceItem(
+                source="artifacts.delivery_receipts",
+                summary=(f"a delivery receipt records this artifact "
+                         f"delivered to {latest.platform or 'chat'} "
+                         f"{age:.0f}s ago — the send's own reference "
+                         "is on the receipt"),
+                establishes="delivered", ref=latest.id))
+        posted = [p for p in publications if p.outcome == "posted"]
+        if posted:
+            latest = posted[-1]
+            age = max(0.0, now - float(latest.created_at or now))
+            items.append(EvidenceItem(
+                source="artifacts.publication_receipts",
+                summary=(f"a publication receipt records this "
+                         f"artifact posted to "
+                         f"{latest.platform or 'a platform'} "
+                         f"{age:.0f}s ago as part of a published "
+                         f"draft (media carried "
+                         f"{latest.media_carried} of "
+                         f"{latest.media_offered} on that platform; "
+                         "the post's own reference is on the "
+                         "receipt)"),
+                establishes="delivered", ref=latest.id))
+        if items:
+            failures = [t for t in transfers if t.state == "failed"]
+            failures += [p for p in publications
+                         if p.outcome != "posted"]
+            if failures:
+                items.append(EvidenceItem(
+                    source="artifacts.delivery_records",
+                    summary=(f"the registry also holds "
+                             f"{len(failures)} failed attempt(s) for "
+                             "this artifact — recorded, and superseded "
+                             "by the delivery above where one landed")))
+            return items
+        failed_transfers = [t for t in transfers if t.state == "failed"]
+        failed_pubs = [p for p in publications if p.outcome != "posted"]
+        if failed_transfers or failed_pubs:
+            latest_error = ""
+            ref = ""
+            if failed_transfers:
+                ref = failed_transfers[-1].id
+                latest_error = failed_transfers[-1].error
+            if failed_pubs:
+                ref = failed_pubs[-1].id
+                latest_error = latest_error or failed_pubs[-1].error
+            summary = ("the registry holds only failure(s) for this "
+                       "artifact — "
+                       f"{len(failed_transfers)} failed hand-off(s), "
+                       f"{len(failed_pubs)} failed publication(s); "
+                       "no delivery or publication ever landed")
+            if latest_error:
+                summary += f"; latest recorded error: " \
+                           f"{latest_error[:200]}"
+            return [EvidenceItem(
+                source="artifacts.delivery_records", summary=summary,
+                establishes="failed", ref=ref)]
+        if transfers:
+            states = ", ".join(sorted({t.state for t in transfers}))
+            return [EvidenceItem(
+                source="artifacts.delivery_records",
+                summary=(f"the registry holds {len(transfers)} "
+                         f"transfer entr(ies) for this artifact "
+                         f"(states: {states}) but no delivery or "
+                         "publication receipt — no completed delivery "
+                         "is recorded"))]
+        return [EvidenceItem(
+            source="artifacts.delivery_records",
+            summary=("no delivery or publication record exists for "
+                     "this artifact — nothing in the registry "
+                     "records it ever being delivered or published"))]
+
+
 #: Adapter coverage, stated on the record: the domains the steward
 #: observes, and the briefed domains it deliberately does NOT —
 #: each with the durable record whose absence makes honest discovery
@@ -947,18 +1181,24 @@ _WORKING_ADAPTERS: tuple[tuple[str, str], ...] = (
     ("render", "media_job_records — the media job manager's durable "
                "job records (doc 18 P1); renders run as missions stay "
                "covered by the missions adapter"),
+    ("transfers", "transfer_entries — the delivery record registry's "
+                  "transfer journal: one entry per artifact hand-off, "
+                  "begun at the send seam and landed delivered/failed "
+                  "with its outcome"),
+    ("artifacts", "delivery_receipts + publication_receipts — the "
+                  "delivery record registry's receipts: whether an "
+                  "artifact was delivered to a chat or published to a "
+                  "platform, under the send/post reference it landed "
+                  "with"),
 )
 
-_UNAVAILABLE_ADAPTERS: tuple[tuple[str, str], ...] = (
-    ("transfers", "no transfer registry exists — the integrity "
-                  "ledger records completed downloads only, begun "
-                  "transfers leave no queryable record, and uploads "
-                  "keep no records at all"),
-    ("artifacts", "artifacts carry no delivery or publication "
-                  "record — nothing records whether an artifact was "
-                  "ever delivered, so 'awaiting publication' cannot "
-                  "be discovered honestly"),
-)
+#: Briefed domains the steward deliberately does NOT observe, each
+#: with the durable record whose absence makes honest discovery
+#: impossible. Both P5 absences (transfers, artifacts) were closed
+#: by the delivery record registry and moved to the working set
+#: above; the mechanism stays — a future gap is named here, never
+#: silently missing.
+_UNAVAILABLE_ADAPTERS: tuple[tuple[str, str], ...] = ()
 
 
 def adapter_health() -> list[dict[str, str]]:
@@ -989,7 +1229,8 @@ class OutcomeSteward:
             adapters = [MissionsAdapter(db), JobsAdapter(registry),
                         ContractsAdapter(db), SchedulerAdapter(db),
                         OutboxAdapter(db), BrowserAdapter(db),
-                        RenderAdapter(db)]
+                        RenderAdapter(db), TransfersAdapter(db),
+                        ArtifactsAdapter(db)]
         self.adapters = {a.domain: a for a in adapters}
         self._idempotency = idempotency
 
@@ -1494,7 +1735,9 @@ def register(registry: Any) -> None:
         description=(
             "Outcome stewardship for long-running or forgotten work: "
             "sweeps missions, background jobs, delegation contracts, "
-            "scheduled jobs and queued chat sends for operations "
+            "scheduled jobs, queued chat sends, browser runs, media "
+            "jobs, artifact transfers and artifact deliveries for "
+            "operations "
             "whose outcome is overdue, stalled, orphaned or unknown, "
             "opens a reconciliation case for each, and investigates "
             "under an accountable contract — a case resolves only on "

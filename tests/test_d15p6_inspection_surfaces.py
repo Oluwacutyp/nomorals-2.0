@@ -354,7 +354,12 @@ class ToolAndCliParityTests(unittest.TestCase):
                 outcomes_action="status", json=False), self.ctx)
         self.assertEqual(rc, 0)
         self.assertIn("outcome cases:", out.getvalue())
-        self.assertIn("unavailable", out.getvalue())
+        # Every briefed domain now has its durable record (transfers
+        # + artifacts were the last two, closed by the delivery
+        # record registry) — the status board names none unavailable.
+        self.assertNotIn("unavailable", out.getvalue())
+        self.assertIn("transfers: working", out.getvalue())
+        self.assertIn("artifacts: working", out.getvalue())
 
     def test_cli_notify_parity(self):
         from nomorals.cmdline.commands.notify import _cmd_notify

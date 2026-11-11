@@ -820,6 +820,7 @@ def execute_post(
     # unmarked. Passed only when the draft actually carries media,
     # so media-less publish calls keep their exact pre-P7 shape.
     media_dir: Any = None
+    artifact_ids: list[str] = []
     if draft is not None:
         entries = draft_media_entries(draft)
         if entries:
@@ -833,6 +834,20 @@ def execute_post(
                     return _media_failure_outcome(
                         content, platforms, draft, got)
                 resolved.append(got)
+                # The publication receipt (doc 15 delivery records)
+                # ties the post to the artifacts it carried — note
+                # each artifact entry's canonical id as it resolves.
+                # Noting an id never blocks the post: a store that
+                # cannot answer here already failed the entry above.
+                ref = str(entry.get("artifact") or "")
+                if ref and store is not None:
+                    try:
+                        found = store.resolve(ref)
+                    except Exception:  # noqa: BLE001 — noting only
+                        found = None
+                    if found is not None \
+                            and found.id not in artifact_ids:
+                        artifact_ids.append(found.id)
             import tempfile
 
             media_dir = tempfile.TemporaryDirectory(
@@ -873,9 +888,56 @@ def execute_post(
                 _log.warning(
                     "could not close engagement item for draft %s",
                     draft_id, exc_info=True)
+    if artifact_ids:
+        _record_publication_receipts(manager, draft_id, artifact_ids,
+                                     outcome)
     _log.info("explicit-post executed (%d platforms, no reconfirmation)",
               len(getattr(outcome, "results", []) or []))
     return outcome
+
+
+def _record_publication_receipts(manager: Any, draft_id: str | None,
+                                 artifact_ids: list[str],
+                                 outcome: Any) -> None:
+    """Mint the publication receipts for an artifact-carrying post
+    (doc 15 delivery records): one receipt per artifact per platform
+    result, tied to the draft, carrying the publish's own facts —
+    the platform outcome, the post's own reference (external id),
+    and the media accounting the publish itself recorded in the
+    result's metrics (offered vs carried), cited, never re-measured.
+
+    Fail-open by construction: the post already happened, so a
+    registry failure is logged and swallowed — a missing receipt
+    leaves the steward's answer honestly unknown; it can never
+    unpublish or fail the execution."""
+    try:
+        db = getattr(manager, "db", None)
+        if db is None:
+            return
+        from ..storage.delivery_records import DeliveryRecordStore
+
+        records = DeliveryRecordStore(db)
+        for result in getattr(outcome, "results", []) or []:
+            metrics = getattr(result, "metrics", None) or {}
+            for artifact_id in artifact_ids:
+                records.record_publication(
+                    draft_id=str(draft_id or ""),
+                    artifact_id=artifact_id,
+                    platform=str(getattr(result, "platform", "")
+                                 or ""),
+                    ok=bool(getattr(result, "ok", False)),
+                    external_id=str(getattr(result, "external_id", "")
+                                    or ""),
+                    url=str(getattr(result, "url", "") or ""),
+                    media_offered=int(metrics.get("media_offered")
+                                     or 0),
+                    media_carried=int(metrics.get("media_carried")
+                                      or 0),
+                    error=str(getattr(result, "error", "") or ""))
+    except Exception:  # noqa: BLE001 — receipts never block a post
+        _log.warning(
+            "could not record publication receipts for draft %s",
+            draft_id, exc_info=True)
 
 
 # ── the scheduled-post poster (WS3 P6 remainder) ─────────────────────────────

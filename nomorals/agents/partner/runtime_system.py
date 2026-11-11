@@ -1048,6 +1048,59 @@ class RuntimeSystemMixin:
             art = store.resolve_alias(ref)
         return art
 
+    def _delivery_record_store(self) -> Any:
+        """The delivery record registry over the context db (doc 15
+        transfer/delivery records), or None when no db is attached."""
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return None
+        from ...storage.delivery_records import DeliveryRecordStore
+
+        return DeliveryRecordStore(db)
+
+    def _begin_artifact_transfer(self, art: Any, *, kind: str,
+                                 chat: Any) -> Any:
+        """Journal an artifact hand-off BEFORE it is attempted
+        (doc 15 delivery records: a begun transfer is a queryable
+        record, so a send whose outcome is never recorded is a
+        question the steward can ask). Fail-open: a registry failure
+        is recorded and the send goes ahead unrecorded — recording
+        never blocks a delivery. Returns the entry, or None."""
+        try:
+            records = self._delivery_record_store()
+            if records is None:
+                return None
+            from ...storage.delivery_records import artifact_label
+
+            return records.begin_transfer(
+                artifact_id=art.id,
+                artifact_label=artifact_label(art), kind=kind,
+                from_surface="artifact store",
+                platform=str(getattr(chat, "platform", "") or ""),
+                chat_key=str(getattr(chat, "key", "") or ""))
+        except Exception as exc:  # noqa: BLE001 - recording fails open
+            record_failure("runtime_system._begin_artifact_transfer",
+                           exc)
+            return None
+
+    def _complete_artifact_transfer(self, entry: Any, *, ok: bool,
+                                    send_ref: str = "",
+                                    error: str = "") -> None:
+        """Land a begun transfer's outcome — on success the store
+        mints the delivery receipt the steward cites. Fail-open
+        like the begin: the send already happened either way."""
+        if entry is None:
+            return
+        try:
+            records = self._delivery_record_store()
+            if records is None:
+                return
+            records.complete_transfer(entry.id, ok=ok,
+                                      send_ref=send_ref, error=error)
+        except Exception as exc:  # noqa: BLE001 - recording fails open
+            record_failure(
+                "runtime_system._complete_artifact_transfer", exc)
+
     def _artifact_unknown(self, store: Any, ref: str) -> str:
         """Honest unknown-ref reply: name the miss, show what exists."""
         lines = [f"unknown artifact {ref!r} — no id, URI, or alias matches."]
@@ -1271,12 +1324,14 @@ class RuntimeSystemMixin:
                             f"{facet_key.lower()}:{facet_value} — "
                             "nothing to export.")
                 ids = [a.id for a in arts]
+                export_arts = arts
                 label = f"{facet_key.lower()}:{facet_value}"
             else:
                 art = self._resolve_artifact(store, ref)
                 if art is None:
                     return self._artifact_unknown(store, ref)
                 ids = [art.id]
+                export_arts = [art]
                 label = art.id
             import re
             from pathlib import Path
@@ -1293,14 +1348,27 @@ class RuntimeSystemMixin:
                 return (f"artifact export failed for {label}: {exc} "
                         "— nothing was sent.")
             chat = self._ref_from_key(chat_key)
+            transfers = [self._begin_artifact_transfer(
+                a, kind="export", chat=chat) for a in export_arts]
             outcome = self.context.tools.call(
                 "file_send", platform=chat.platform, chat_id=chat.chat_id,
                 path=str(bundle),
                 caption=(f"artifact bundle — {len(ids)} artifact(s) "
                          f"({label})"))
             if not outcome.ok:
+                error = str(getattr(outcome.error, "message",
+                                     outcome.error))
+                for entry in transfers:
+                    self._complete_artifact_transfer(
+                        entry, ok=False, error=error)
                 return (f"artifact export failed ({label}): "
                         f"{getattr(outcome.error, 'message', outcome.error)}")
+            value = getattr(outcome, "value", None)
+            send_ref = (str(value.get("message_id") or "")
+                        if isinstance(value, dict) else "")
+            for entry in transfers:
+                self._complete_artifact_transfer(
+                    entry, ok=True, send_ref=send_ref)
             # Unlike a plain send (whose file IS the whole answer),
             # an export CREATES a new bundle file — the reply names
             # what was made and how much it carries.
@@ -1341,12 +1409,23 @@ class RuntimeSystemMixin:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
             chat = self._ref_from_key(chat_key)
+            transfer = self._begin_artifact_transfer(
+                art, kind="send", chat=chat)
             outcome = self.context.tools.call(
                 "file_send", platform=chat.platform, chat_id=chat.chat_id,
                 path=str(path), caption=caption)
             if not outcome.ok:
+                self._complete_artifact_transfer(
+                    transfer, ok=False,
+                    error=str(getattr(outcome.error, "message",
+                                       outcome.error)))
                 return (f"artifact send failed ({len(data)} bytes): "
                         f"{getattr(outcome.error, 'message', outcome.error)}")
+            value = getattr(outcome, "value", None)
+            send_ref = (str(value.get("message_id") or "")
+                        if isinstance(value, dict) else "")
+            self._complete_artifact_transfer(
+                transfer, ok=True, send_ref=send_ref)
             # The artifact file IS the delivery — no "📎 sent …"
             # receipt beside it in the same chat (owner
             # no-meta-narration rule, 2026-11-01).  A converted send

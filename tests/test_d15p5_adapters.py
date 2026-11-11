@@ -15,11 +15,14 @@ sweeps and gathers evidence receipts; a healthy domain opens none;
 and the failure recorded in the sweep report; (e) the no-mutation
 discipline for every new domain — monkeypatched mutators never fire
 for the observed records, and the scheduler/outbox tables are
-byte-identical after a full cycle. Domains with no durable record
-(transfers, artifacts) are named unavailable by adapter_health() —
-never silently absent. (Browser + render were unavailable at P5;
-doc 18 P1 built their durable records and their adapters now read
-working — the health pins below state the current truth.)
+byte-identical after a full cycle. (Browser + render were
+unavailable at P5; doc 18 P1 built their durable records and their
+adapters now read working. Transfers + artifacts were likewise
+unavailable until the delivery record registry
+(storage/delivery_records) journaled transfer entries and
+delivery/publication receipts at the hand-off seams — their
+adapters now read working too. The health pins below state the
+current truth.)
 """
 
 from __future__ import annotations
@@ -622,19 +625,22 @@ class AdapterHealthTests(unittest.TestCase):
     def test_health_names_every_domain(self):
         health = {row["domain"]: row for row in adapter_health()}
         for domain in ("missions", "jobs", "contracts", "scheduler",
-                       "outbox", "browser", "render"):
+                       "outbox", "browser", "render", "transfers",
+                       "artifacts"):
             self.assertEqual(health[domain]["status"], "working",
                              domain)
             self.assertTrue(health[domain]["note"], domain)
-        for domain in ("transfers", "artifacts"):
-            self.assertEqual(health[domain]["status"], "unavailable",
-                             domain)
-            self.assertTrue(health[domain]["note"], domain)
+        self.assertTrue(all(row["status"] == "working"
+                            for row in health.values()))
         self.assertIn("browser_run_records",
                       health["browser"]["note"])
         self.assertIn("media_job_records", health["render"]["note"])
-        self.assertIn("no transfer registry",
+        self.assertIn("transfer_entries",
                       health["transfers"]["note"])
+        self.assertIn("delivery_receipts",
+                      health["artifacts"]["note"])
+        self.assertIn("publication_receipts",
+                      health["artifacts"]["note"])
 
     def test_cycle_and_tool_status_carry_adapter_health(self):
         db = _db()
