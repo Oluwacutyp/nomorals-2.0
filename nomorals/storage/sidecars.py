@@ -22,7 +22,10 @@ this install" is one call, not an archaeology dig:
   all — a port injected by the composition layer), behind the
   organ's existing public API; on the SQLite default the organ runs
   its native file path byte-for-byte. Collections are namespaced ``<store>__<table>``
-  (the census §5.6 rule), documents are carry-v1 shaped via
+  (the census §5.6 rule) — or ``<store>--<namespace>__<table>`` for
+  a namespaced port (Batch 3, C6 travel-groups: one namespace per
+  group key, each with its own import marker), documents are
+  carry-v1 shaped via
   :class:`~nomorals.storage.rowstore.RowTable`, and the organ's
   existing file data is imported lazily, once, through the same
   mapping the first time the seam path constructs (see
@@ -307,6 +310,7 @@ def sidecar_port(store_name: str, ddl: str, tables: tuple[str, ...],
                  sqlite_path: str | Path | None, *,
                  store: Any = None,
                  defaults: Mapping[str, Mapping[str, Any]] | None = None,
+                 namespace_suffix: str = "",
                  ) -> SidecarPort | None:
     """The seam path for a registered sidecar store, or ``None``.
 
@@ -315,6 +319,18 @@ def sidecar_port(store_name: str, ddl: str, tables: tuple[str, ...],
     native file path. A store that fails to construct the port is a
     loud error, never a silent fallback — the resolution already
     degraded at boot if the backend was unusable.
+
+    ``namespace_suffix`` partitions ONE registered store into
+    per-key collection families (Batch 3, C6 travel-groups: one
+    file per group chat becomes one namespace per group key). The
+    effective store name is ``<store>--<namespace>`` — collections
+    are ``<store>--<namespace>__<table>`` and the meta collection
+    (import marker + counters) is per-namespace by construction,
+    so each namespace gets its own one-time lazy import and no
+    namespace can see another's documents. Registry lookup and
+    the verdict check still resolve against the base entry; the
+    namespace itself is validated against the document store's
+    collection-name alphabet and rejected loudly otherwise.
     """
     resolved = store if store is not None else ambient_document_store()
     if resolved is None:
@@ -326,9 +342,19 @@ def sidecar_port(store_name: str, ddl: str, tables: tuple[str, ...],
         raise ValueError(
             f"sidecar store {store_name!r} is classified {spec.verdict!r}, "
             "not 'ported' — a port must be registered before it is wired")
+    effective_name = store_name
+    if namespace_suffix:
+        from .docstore import _COLLECTION_RE
+
+        if not _COLLECTION_RE.match(namespace_suffix):
+            raise ValueError(
+                f"sidecar namespace {namespace_suffix!r} for store "
+                f"{store_name!r} is not a valid collection-name "
+                "segment ([A-Za-z0-9_][A-Za-z0-9_.-]*)")
+        effective_name = f"{store_name}--{namespace_suffix}"
     try:
-        return SidecarPort(store_name, resolved, ddl, tables, sqlite_path,
-                           defaults=defaults)
+        return SidecarPort(effective_name, resolved, ddl, tables,
+                           sqlite_path, defaults=defaults)
     except Exception as exc:  # noqa: BLE001 - journaled, then raised
         record_failure("storage.sidecars.port", f"{store_name}: {exc}")
         raise
@@ -1775,12 +1801,44 @@ _residue("marketing-send", "marketing/send.py",
          "contains a QUEUE (send_queue) whose claim semantics need "
          "the P4 fencing treatment, so this port is a coordination "
          "port, not a plain CRUD port.")
-_residue("travel-groups", "travel/groups.py",
-         ("group_trips", "legs", "expenses", "payments", "budgets",
-          "proposals", "votes", "polls"),
-         "group trip state — eight tables with money-split flows "
-         "(expenses/payments); the port reviews its split "
-         "composition, like household.")
+_register(_S(
+    name="travel-groups", verdict="ported", kind="sqlite-file",
+    modules=("travel/groups.py",),
+    tables=("group_trips", "legs", "expenses", "payments", "budgets",
+            "proposals", "votes", "polls"),
+    reason=(
+        "ported in the Mongo residue Batch 3 pass (C6): "
+        "GroupTripStore routes through the seam "
+        "(travel-groups--<sanitized group key>__<table>) whenever a "
+        "store is resolved, behind its unchanged group-scoped API. "
+        "One file per group chat becomes one collection namespace "
+        "per group key (the Batch 3 factory extension "
+        "sidecar_port(..., namespace_suffix=<sanitized gkey>)): the "
+        "effective store name is <store>--<namespace>, the meta "
+        "collection (import marker) is per-group by construction, "
+        "so each group's file lazy-imports once into its own "
+        "collections and no group can see another's trips, "
+        "expenses or polls — the namespace is validated against "
+        "the document store's collection-name alphabet and "
+        "rejected loudly otherwise, and registry lookup/verdict "
+        "still resolve against this base entry. Composite PKs "
+        "(votes (poll_id, member), budgets (trip_id, member)) ride "
+        "the joined document id; their parts live only in _id, so "
+        "per-poll vote reads and per-budget reads scan the "
+        "namespaced table and filter in Python. Money disposition "
+        "(Batch 3 design dossier §C6): splits are single-row "
+        "writes with shares precomputed by the unchanged pure "
+        "compute_shares (equal / percent / exact, integer kobo, "
+        "sums exactly) — the census's multi-record set-write "
+        "concern was checked against the live code and does not "
+        "exist — and balances / settlement / member_totals / "
+        "category_totals stay recomputed reads over finds, never "
+        "stored state. The file's existing rows are imported once, "
+        "through the same mapping, at first construction. The "
+        "in-file ALTERs stay a native-path concern; the seam DDL "
+        "carries the final shape. The native sqlite3 path serves "
+        "the SQLite default byte-for-byte."),
+))
 
 
 def sidecar_status() -> dict[str, Any]:

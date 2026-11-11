@@ -61,6 +61,10 @@ P5 settles the stores that live BESIDE the central database:
   The residue Batch 3 C3 port (planning-congestion — hold expiry
   as document data via the sql_expires_at rename, never the
   store-managed TTL) follows the same pattern below.
+  The residue Batch 3 C6 port (travel-groups — one collection
+  namespace per group key via the sidecar_port namespace_suffix
+  extension; money splits are single-row writes, balances are
+  recomputed reads) follows the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -281,7 +285,9 @@ class TestSidecarRegistry:
             # residue Batch 3, C8 lane:
             "planning-graph",
             # residue Batch 3, C3 lane:
-            "planning-congestion"}
+            "planning-congestion",
+            # residue Batch 3, C6 lane:
+            "travel-groups"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -6507,3 +6513,420 @@ class TestPlanningCongestionPort:
         again = self._monitor(path, rung)
         assert again.queue_depth("imp-a") == 2
         assert rung.store.count(events_c) == 6
+
+
+# ---------------------------------------------------------------------------
+# travel-groups (residue Batch 3, C6)
+# ---------------------------------------------------------------------------
+
+class TestTravelGroupsPort:
+    """travel/groups.py — the travel-groups port (residue Batch 3,
+    C6): one file per group chat becomes one collection namespace
+    per group key — ``travel-groups--<sanitized group
+    key>__<table>`` — with its own import marker, so each group's
+    file lazy-imports once into its own collections and no group
+    can see another's trips, expenses or polls. Composite PKs
+    (votes (poll_id, member), budgets (trip_id, member)) ride the
+    joined document id; their parts live only in _id, so per-poll
+    vote reads scan the namespaced table and filter in Python.
+    Money disposition (design dossier §C6): splits are single-row
+    writes with shares precomputed by the unchanged pure
+    compute_shares, and balances / settlement / member_totals /
+    category_totals stay recomputed reads over finds, never stored
+    state."""
+
+    @staticmethod
+    def _store(path, rung, key="test:group1"):
+        # travel is L2: the store wires the factory itself behind
+        # the keyword-only store= — no injected port here.
+        from nomorals.travel.groups import GroupTripStore
+
+        if rung.store is None:
+            return GroupTripStore(key, db_path=str(path))
+        return GroupTripStore(key, db_path=str(path), store=rung.store)
+
+    def _scenario(self, path, rung) -> dict:
+        from nomorals.travel.itinerary import Flight
+
+        store = self._store(path, rung)
+        trip = store.create_trip(
+            "Lagos", ["Ada", "Mama", "Emeka"], created_by="Ada",
+            destination="Lagos", start_date="2026-12-01",
+            end_date="2026-12-05")
+        out: dict = {}
+        out["trip"] = (trip.name, trip.members, trip.destination,
+                       trip.start_date, trip.end_date)
+        out["fetched"] = (store.get_trip(trip.id).name,
+                          store.get_trip(trip.id).members)
+        out["trips"] = [t.name for t in store.list_trips()]
+        store.set_trip_details(trip.id, destination="Abuja")
+        out["details"] = store.get_trip(trip.id).destination
+        # equal (with dust) / percent / exact splits
+        e1 = store.add_expense(trip.id, "Ada", 10000, None, "suya",
+                               category="food")
+        out["e1_shares"] = e1.shares_kobo
+        e2 = store.add_expense(trip.id, "Mama", 9000, ["Ada", "Mama"],
+                               "taxi", split="percent", shares=[70, 30],
+                               category="transport")
+        out["e2_shares"] = e2.shares_kobo
+        # exact: the payer is auto-added to for_whom, so the
+        # shares list covers all three (Emeka's own share is 0)
+        e3 = store.add_expense(trip.id, "Emeka", 5000,
+                               ["Ada", "Mama", "Emeka"],
+                               "fuel", split="exact",
+                               shares=[2000, 3000, 0])
+        out["e3_shares"] = e3.shares_kobo
+        out["expenses"] = [(e.who_paid, e.amount_kobo, e.category)
+                           for e in store.list_expenses(trip.id)]
+        out["balances"] = store.balances(trip.id)
+        out["settlement"] = store.settlement(trip.id)
+        pay = store.record_payment(trip.id, "Ada", "Emeka", 1634)
+        out["pay"] = (pay.from_member, pay.to_member, pay.amount_kobo)
+        out["balances_after_pay"] = store.balances(trip.id)
+        out["settlement_after_pay"] = store.settlement(trip.id)
+        out["payments"] = [(p.from_member, p.to_member, p.amount_kobo)
+                           for p in store.list_payments(trip.id)]
+        store.set_budget(trip.id, "Ada", 20000)
+        store.set_budget(trip.id, "Mama", 15000)
+        out["budget_ada"] = store.get_budget(trip.id, "Ada")
+        out["budget_mama"] = store.get_budget(trip.id, "Mama")
+        out["budget_missing"] = store.get_budget(trip.id, "Nobody")
+        out["spending_ada"] = store.spending(trip.id, "Ada")
+        out["spending_mama"] = store.spending(trip.id, "Mama")
+        out["member_totals"] = store.member_totals(trip.id)
+        out["category_totals"] = store.category_totals(trip.id)
+        # polls: votes, replace, deadline, too-few-options
+        poll = store.create_poll(
+            trip.id, "Beach or city?", ["Beach", "City", "Mountains"],
+            deadline=time.time() + 3600, created_by="Ada")
+        store.vote(poll.id, "Ada", "Beach")
+        store.vote(poll.id, "Mama", 1)
+        store.vote(poll.id, "Emeka", "Beach")
+        store.vote(poll.id, "Ada", "City")  # replace: one vote per member
+        res = store.poll_result(poll.id)
+        out["poll_counts"] = res["counts"]
+        out["poll_winner"] = res["winner"]
+        out["poll_total"] = res["total"]
+        out["voters"] = res["voters"]
+        poll2 = store.create_poll(trip.id, "Second?", ["X", "Y"])
+        res2 = store.poll_result(poll2.id)
+        out["poll2"] = (res2["counts"], res2["winner"], res2["total"])
+        closed = store.create_poll(trip.id, "Late?", ["A", "B"],
+                                   deadline=time.time() - 10)
+        out["deadline_vote"] = store.vote(closed.id, "Ada", "A")
+        out["short_poll"] = store.create_poll(trip.id, "One?", ["Only"])
+        out["closing_soon"] = sorted(
+            p.question for p in store.polls_closing_soon(trip.id))
+        # Zara joins after the money: she has not voted yet
+        store.add_member(trip.id, "Zara")
+        out["after_add"] = store.get_trip(trip.id).members
+        out["nonvoters"] = store.poll_nonvoters(poll.id)
+        # legs + proposals
+        leg = store.add_leg(trip.id, "Ada", Flight(
+            airline="BA", flight_number="BA075", origin="LOS",
+            destination="LHR", departs="2026-12-01T22:45",
+            arrives="2026-12-02T05:30", pnr="ABC123"))
+        out["legs"] = [(lg.member, lg.flight.get("flight_number"))
+                       for lg in store.list_legs(trip.id)]
+        assert leg is not None
+        out["itinerary_has_flight"] = (
+            "BA075" in store.merged_itinerary(trip.id))
+        prop = store.propose(trip.id, "Mama", "Sunset cruise")
+        assert prop is not None
+        out["proposals_open_before"] = [
+            p.idea for p in store.list_proposals(trip.id, "proposed")]
+        agreed = store.agree(trip.id, prop.id)
+        assert agreed is not None and agreed.status == "agreed"
+        out["proposals_open"] = [
+            p.idea for p in store.list_proposals(trip.id, "proposed")]
+        out["proposals_agreed"] = [
+            p.idea for p in store.list_proposals(trip.id, "agreed")]
+        out["bad_expense"] = (
+            store.add_expense(trip.id, "Ada", 1000, ["Ada", "Mama"],
+                              "x", split="percent", shares=[50, 40])
+            is None,
+            store.add_expense(trip.id, "Ada", 0, None, "x") is None)
+        out["missing"] = (store.get_trip("nope") is None,
+                          store.get_poll("nope") is None,
+                          store.poll_result("nope") is None)
+        out["overview"] = ("🧳 Lagos" in store.trip_overview(trip.id)
+                           and "settle up" in store.trip_overview(trip.id))
+        # settle-guard: a nonzero balance cannot leave; zero can
+        out["leave_settler"] = store.leave_trip(trip.id, "Mama")
+        out["leave_clean"] = store.leave_trip(trip.id, "Ada")
+        out["members_after_leave"] = store.get_trip(trip.id).members
+        return out
+
+    def test_conformance(self, rung, tmp_path):
+        out = self._scenario(tmp_path / "g.db", rung)
+        assert out == {
+            "trip": ("Lagos", ["Ada", "Mama", "Emeka"], "Lagos",
+                     "2026-12-01", "2026-12-05"),
+            "fetched": ("Lagos", ["Ada", "Mama", "Emeka"]),
+            "trips": ["Lagos"],
+            "details": "Abuja",
+            "e1_shares": [3334, 3333, 3333],
+            "e2_shares": [6300, 2700],
+            "e3_shares": [2000, 3000, 0],
+            "expenses": [("Ada", 10000, "food"),
+                         ("Mama", 9000, "transport"),
+                         ("Emeka", 5000, "")],
+            "balances": {"Ada": -1634, "Mama": -33, "Emeka": 1667},
+            "settlement": [("Ada", "Emeka", 1634),
+                           ("Mama", "Emeka", 33)],
+            "pay": ("Ada", "Emeka", 1634),
+            "balances_after_pay": {"Ada": 0, "Mama": -33, "Emeka": 33},
+            "settlement_after_pay": [("Mama", "Emeka", 33)],
+            "payments": [("Ada", "Emeka", 1634)],
+            "budget_ada": 20000,
+            "budget_mama": 15000,
+            "budget_missing": 0,
+            "spending_ada": 11634,
+            "spending_mama": 9033,
+            "member_totals": {
+                "Ada": {"spent": 11634, "paid": 10000, "balance": 0,
+                        "budget": 20000, "remaining": 8366},
+                "Emeka": {"spent": 3333, "paid": 5000, "balance": 33,
+                          "budget": 0, "remaining": 0},
+                "Mama": {"spent": 9033, "paid": 9000, "balance": -33,
+                         "budget": 15000, "remaining": 5967},
+            },
+            "category_totals": {"food": 10000, "transport": 9000,
+                                "other": 5000},
+            "poll_counts": [1, 2, 0],
+            "poll_winner": 1,
+            "poll_total": 3,
+            "voters": {"Ada": 1, "Emeka": 0, "Mama": 1},
+            "poll2": ([0, 0], None, 0),
+            "deadline_vote": False,
+            "short_poll": None,
+            "closing_soon": ["Beach or city?"],
+            "after_add": ["Ada", "Mama", "Emeka", "Zara"],
+            "nonvoters": ["Zara"],
+            "legs": [("Ada", "BA075")],
+            "itinerary_has_flight": True,
+            "proposals_open_before": ["Sunset cruise"],
+            "proposals_open": [],
+            "proposals_agreed": ["Sunset cruise"],
+            "bad_expense": (True, True),
+            "missing": (True, True, True),
+            "overview": True,
+            "leave_settler": (False,
+                              "settle up first — you still owe ₦0."),
+            "leave_clean": (True, "Ada left Lagos."),
+            "members_after_leave": ["Mama", "Emeka", "Zara"],
+        }
+
+    def test_two_group_isolation(self, rung, tmp_path):
+        """THE partitioning pin (design dossier §C6.2): two stores
+        with different group keys over ONE seam backend share
+        nothing — and group B's file still lazy-imports after group
+        A is live on the seam (the collision the un-namespaced
+        factory would have served group A's trips to group B)."""
+        a = self._store(tmp_path / "a.db", rung, key="telegram:alpha")
+        trip_a = a.create_trip("Lagos", ["Ada", "Mama"], created_by="Ada")
+        a.add_expense(trip_a.id, "Ada", 10000, None, "suya",
+                      category="food")
+        a.set_budget(trip_a.id, "Ada", 20000)
+        poll_a = a.create_poll(trip_a.id, "Go?", ["Yes", "No"])
+        a.vote(poll_a.id, "Ada", "Yes")
+
+        b = self._store(tmp_path / "b.db", rung, key="telegram:beta")
+        assert b.list_trips() == []
+        assert b.get_trip(trip_a.id) is None
+        assert b.balances(trip_a.id) == {}
+        assert b.poll_result(poll_a.id) is None
+        assert b.get_budget(trip_a.id, "Ada") == 0
+        trip_b = b.create_trip("Abuja", ["Zara"], created_by="Zara")
+        assert [t.name for t in a.list_trips()] == ["Lagos"]
+        assert [t.name for t in b.list_trips()] == ["Abuja"]
+        assert a.get_trip(trip_b.id) is None
+
+        # group C's file, pre-built natively, opens on the seam
+        # AFTER A is live — its own import, its own namespace.
+        c_path = tmp_path / "c.db"
+        c_nat = self._store(c_path, SimpleNamespace(kind="native",
+                                                     store=None),
+                            key="telegram:gamma")
+        trip_c = c_nat.create_trip("Enugu", ["Obi"], created_by="Obi")
+        c_nat.add_expense(trip_c.id, "Obi", 5000, None, "fuel",
+                          category="transport")
+        c = self._store(c_path, rung, key="telegram:gamma")
+        assert [t.name for t in c.list_trips()] == ["Enugu"]
+        assert c.balances(trip_c.id) == {"Obi": 0}
+        assert c.get_budget(trip_c.id, "Obi") == 0
+        # A is untouched by C's import
+        assert [t.name for t in a.list_trips()] == ["Lagos"]
+        assert a.balances(trip_a.id) == {"Ada": 5000, "Mama": -5000}
+        if rung.store is not None:
+            assert rung.store.count(
+                "travel-groups--telegram_alpha__group_trips") == 1
+            assert rung.store.count(
+                "travel-groups--telegram_beta__group_trips") == 1
+            assert rung.store.count(
+                "travel-groups--telegram_gamma__group_trips") == 1
+            assert rung.store.count(
+                "travel-groups--telegram_alpha__expenses") == 1
+            assert rung.store.count(
+                "travel-groups--telegram_gamma__expenses") == 1
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        import sqlite3
+
+        from nomorals.travel.groups import GroupTripStore
+
+        # a LEGACY group file: pre-ALTER shape (no destination /
+        # dates on group_trips, no split / shares_json / category
+        # on expenses) — the import must take those columns from
+        # the seam DDL defaults, exactly as the native ALTERs do.
+        legacy = tmp_path / "legacy.db"
+        con = sqlite3.connect(str(legacy))
+        con.executescript("""
+            CREATE TABLE group_trips (id TEXT PRIMARY KEY, name TEXT NOT NULL,
+                members_json TEXT NOT NULL DEFAULT '[]',
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0);
+            CREATE TABLE polls (id TEXT PRIMARY KEY, trip_id TEXT NOT NULL,
+                question TEXT NOT NULL, options_json TEXT NOT NULL DEFAULT '[]',
+                deadline REAL NOT NULL DEFAULT 0,
+                created_by TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0);
+            CREATE TABLE votes (poll_id TEXT NOT NULL, member TEXT NOT NULL,
+                option_idx INTEGER NOT NULL, PRIMARY KEY (poll_id, member));
+            CREATE TABLE expenses (id TEXT PRIMARY KEY, trip_id TEXT NOT NULL,
+                who_paid TEXT NOT NULL, amount_kobo INTEGER NOT NULL,
+                for_whom_json TEXT NOT NULL DEFAULT '[]',
+                description TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0);
+            CREATE TABLE payments (id TEXT PRIMARY KEY, trip_id TEXT NOT NULL,
+                from_member TEXT NOT NULL, to_member TEXT NOT NULL,
+                amount_kobo INTEGER NOT NULL,
+                created_at REAL NOT NULL DEFAULT 0);
+            CREATE TABLE budgets (trip_id TEXT NOT NULL, member TEXT NOT NULL,
+                amount_kobo INTEGER NOT NULL, PRIMARY KEY (trip_id, member));
+            CREATE TABLE legs (id TEXT PRIMARY KEY, trip_id TEXT NOT NULL,
+                member TEXT NOT NULL, flight_json TEXT NOT NULL DEFAULT '{}',
+                note TEXT NOT NULL DEFAULT '',
+                created_at REAL NOT NULL DEFAULT 0);
+            CREATE TABLE proposals (id TEXT PRIMARY KEY, trip_id TEXT NOT NULL,
+                member TEXT NOT NULL, idea TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'proposed',
+                created_at REAL NOT NULL DEFAULT 0);
+        """)
+        con.execute(
+            "INSERT INTO group_trips VALUES (?,?,?,?,?)",
+            ("gtrip_old", "Old Trip", '["Ada", "Mama"]', "Ada", 1000.0))
+        con.execute(
+            "INSERT INTO expenses VALUES (?,?,?,?,?,?,?)",
+            ("exp_old", "gtrip_old", "Ada", 10000, '["Ada", "Mama"]',
+             "suya", 1001.0))
+        con.execute(
+            "INSERT INTO votes VALUES (?,?,?)", ("poll_old", "Ada", 0))
+        con.execute(
+            "INSERT INTO budgets VALUES (?,?,?)",
+            ("gtrip_old", "Ada", 20000))
+        con.commit()
+        con.close()
+
+        ns = "travel-groups--telegram_legacy"
+        store = GroupTripStore("telegram:legacy", db_path=str(legacy),
+                               store=rung.store)
+        trip = store.get_trip("gtrip_old")
+        assert trip is not None and trip.name == "Old Trip"
+        assert trip.destination == "" and trip.start_date == ""
+        assert trip.end_date == ""
+        exps = store.list_expenses("gtrip_old")
+        assert len(exps) == 1
+        # legacy row: no shares stored — the equal split is
+        # recomputed, exactly as on the native path
+        assert exps[0].split == "equal"
+        assert exps[0].shares_kobo == [5000, 5000]
+        assert exps[0].category == ""
+        assert store.get_budget("gtrip_old", "Ada") == 20000
+        assert store.balances("gtrip_old") == {"Ada": 5000, "Mama": -5000}
+        marker = rung.store.get(f"{ns}__meta", "import")
+        assert marker is not None and marker["done"] is True
+        assert rung.store.count(f"{ns}__group_trips") == 1
+        assert rung.store.count(f"{ns}__expenses") == 1
+        assert rung.store.count(f"{ns}__votes") == 1
+        assert rung.store.count(f"{ns}__budgets") == 1
+        # the imported trip document carries the final shape
+        doc = rung.store.get(f"{ns}__group_trips", "gtrip_old")
+        assert doc["destination"] == "" and doc["start_date"] == ""
+        # a second construction adopts — never re-imports
+        again = GroupTripStore("telegram:legacy", db_path=str(legacy),
+                               store=rung.store)
+        assert len(again.list_trips()) == 1
+        assert rung.store.count(f"{ns}__expenses") == 1
+        # seam-side writes land in the same namespace
+        again.add_expense("gtrip_old", "Mama", 2000, None, "water")
+        assert rung.store.count(f"{ns}__expenses") == 2
+        assert again.balances("gtrip_old") == {"Ada": 4000, "Mama": -4000}
+
+
+class TestTravelGroupsNamespace:
+    """The Batch 3 factory extension itself
+    (``sidecar_port(..., namespace_suffix=...)``), pinned in the
+    C6 commit: the namespace is validated against the document
+    store's collection-name alphabet and rejected loudly; the
+    registry lookup and verdict check still resolve against the
+    base entry; a port without a namespace is exactly the old
+    shape (effective name == base name)."""
+
+    def test_namespace_rejected_loudly(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung resolves no store")
+        from nomorals.storage.sidecars import sidecar_port
+        from nomorals.travel.groups import _DDL, _TABLES
+
+        with pytest.raises(ValueError, match="not a valid collection"):
+            sidecar_port("travel-groups", _DDL, _TABLES,
+                         str(tmp_path / "x.db"), store=rung.store,
+                         namespace_suffix="bad key!")
+        with pytest.raises(ValueError, match="not a valid collection"):
+            sidecar_port("travel-groups", _DDL, _TABLES,
+                         str(tmp_path / "x.db"), store=rung.store,
+                         namespace_suffix=".leading-dot")
+
+    def test_verdict_still_checked_through_namespace(self, rung,
+                                                    tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung resolves no store")
+        from nomorals.storage.sidecars import sidecar_port
+        from nomorals.travel.groups import _DDL, _TABLES
+
+        with pytest.raises(ValueError, match="classified 'residue'"):
+            sidecar_port("marketing-send", _DDL, _TABLES,
+                         str(tmp_path / "y.db"), store=rung.store,
+                         namespace_suffix="telegram_999")
+
+    def test_namespace_effective_name(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung resolves no store")
+        from nomorals.storage.sidecars import sidecar_port
+        from nomorals.travel.groups import _DDL, _TABLES
+
+        port = sidecar_port("travel-groups", _DDL, _TABLES,
+                            str(tmp_path / "z.db"), store=rung.store,
+                            namespace_suffix="telegram_123")
+        assert port.store_name == "travel-groups--telegram_123"
+        assert port.meta_collection == \
+            "travel-groups--telegram_123__meta"
+        assert port.tables["group_trips"].collection == \
+            "travel-groups--telegram_123__group_trips"
+
+    def test_non_namespaced_port_unaffected(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung resolves no store")
+        from nomorals.storage.sidecars import sidecar_port
+
+        port = sidecar_port(
+            "planning-congestion",
+            "CREATE TABLE congestion_resources "
+            "(resource_id TEXT PRIMARY KEY)",
+            ("congestion_resources",), str(tmp_path / "w.db"),
+            store=rung.store)
+        assert port.store_name == "planning-congestion"
+        assert port.meta_collection == "planning-congestion__meta"

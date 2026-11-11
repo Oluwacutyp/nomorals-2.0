@@ -78,6 +78,64 @@ SPLIT_EQUAL = "equal"
 SPLIT_PERCENT = "percent"
 SPLIT_EXACT = "exact"
 
+#: The store's own DDL — the native path executes it (plus the
+#: additive ALTERs in _init_schema for older group DBs) and the seam
+#: mapping is derived from it, so the two can never drift. The seam
+#: DDL carries the FINAL shape (destination / dates on group_trips,
+#: split / shares_json / category on expenses); the ALTERs stay a
+#: native-path concern, and imported pre-ALTER rows take those
+#: columns from the DDL defaults.
+_TRIPS_DDL = """CREATE TABLE IF NOT EXISTS group_trips (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL,
+    members_json TEXT NOT NULL DEFAULT '[]',
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    destination TEXT NOT NULL DEFAULT '',
+    start_date TEXT NOT NULL DEFAULT '',
+    end_date TEXT NOT NULL DEFAULT '')"""
+_POLLS_DDL = """CREATE TABLE IF NOT EXISTS polls (
+    id TEXT PRIMARY KEY, trip_id TEXT NOT NULL,
+    question TEXT NOT NULL, options_json TEXT NOT NULL DEFAULT '[]',
+    deadline REAL NOT NULL DEFAULT 0,
+    created_by TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0)"""
+_VOTES_DDL = """CREATE TABLE IF NOT EXISTS votes (
+    poll_id TEXT NOT NULL, member TEXT NOT NULL,
+    option_idx INTEGER NOT NULL,
+    PRIMARY KEY (poll_id, member))"""
+_EXPENSES_DDL = """CREATE TABLE IF NOT EXISTS expenses (
+    id TEXT PRIMARY KEY, trip_id TEXT NOT NULL,
+    who_paid TEXT NOT NULL, amount_kobo INTEGER NOT NULL,
+    for_whom_json TEXT NOT NULL DEFAULT '[]',
+    description TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0,
+    split TEXT NOT NULL DEFAULT 'equal',
+    shares_json TEXT NOT NULL DEFAULT '[]',
+    category TEXT NOT NULL DEFAULT '')"""
+_PAYMENTS_DDL = """CREATE TABLE IF NOT EXISTS payments (
+    id TEXT PRIMARY KEY, trip_id TEXT NOT NULL,
+    from_member TEXT NOT NULL, to_member TEXT NOT NULL,
+    amount_kobo INTEGER NOT NULL,
+    created_at REAL NOT NULL DEFAULT 0)"""
+_BUDGETS_DDL = """CREATE TABLE IF NOT EXISTS budgets (
+    trip_id TEXT NOT NULL, member TEXT NOT NULL,
+    amount_kobo INTEGER NOT NULL,
+    PRIMARY KEY (trip_id, member))"""
+_LEGS_DDL = """CREATE TABLE IF NOT EXISTS legs (
+    id TEXT PRIMARY KEY, trip_id TEXT NOT NULL,
+    member TEXT NOT NULL, flight_json TEXT NOT NULL DEFAULT '{}',
+    note TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0)"""
+_PROPOSALS_DDL = """CREATE TABLE IF NOT EXISTS proposals (
+    id TEXT PRIMARY KEY, trip_id TEXT NOT NULL,
+    member TEXT NOT NULL, idea TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'proposed',
+    created_at REAL NOT NULL DEFAULT 0)"""
+_DDL = ";\n".join((_TRIPS_DDL, _POLLS_DDL, _VOTES_DDL, _EXPENSES_DDL,
+                   _PAYMENTS_DDL, _BUDGETS_DDL, _LEGS_DDL, _PROPOSALS_DDL))
+_TABLES = ("group_trips", "polls", "votes", "expenses", "payments",
+           "budgets", "legs", "proposals")
+
 
 def compute_shares(amount_kobo: int, members: list[str], *,
                    split: str = SPLIT_EQUAL,
@@ -239,16 +297,69 @@ class GroupTripStore:
 
     One database file per group chat (``<sanitized group key>.db``) under
     ``~/.devon/community/group_trips/``.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as travel-groups): one
+    file per group chat becomes one collection namespace per group
+    key — ``travel-groups--<sanitized group key>__<table>`` — with
+    its own import marker, so each group's file lazy-imports once
+    into its own collections and no group can see another's trips,
+    expenses or polls. Composite PKs (votes, budgets) ride the
+    joined document id; their parts live only in _id, so per-poll
+    vote reads scan the namespaced table and filter in Python.
+    Money is never stored state: splits are single-row writes with
+    shares precomputed by the pure ``compute_shares``, and
+    balances / settlement / rollups are recomputed reads over
+    finds. The file's existing rows are imported once, through the
+    same mapping, at first construction.
     """
 
-    def __init__(self, group_key: str, db_path: str = "") -> None:
+    def __init__(self, group_key: str, db_path: str = "",
+                 *, store: Any = None) -> None:
         gkey = _sanitize_group_key(group_key or "group")
         path = db_path or str(_DEFAULT_DIR / f"{gkey}.db")
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
         self.group_key = gkey
-        self._db = sqlite3.connect(path)
-        self._db.row_factory = sqlite3.Row
-        self._init_schema()
+        self._db: sqlite3.Connection | None = None
+        self._port: Any = None
+        try:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "travel-groups", _DDL, _TABLES,
+                None if path == ":memory:" else path,
+                store=store, namespace_suffix=gkey)
+            if port is not None:
+                self._import_into(port)
+                self._port = port
+                return
+            self._db = sqlite3.connect(path)
+            self._db.row_factory = sqlite3.Row
+            self._init_schema()
+        except Exception:  # noqa: BLE001 — a bad DB path is an empty store
+            _log.warning("group_trips: db unavailable, running empty",
+                         exc_info=True)
+            self._db = None
+            self._port = None
+
+    def _import_into(self, port: Any) -> None:
+        """One-time lazy import of the group's file into its
+        namespaced seam collections. Every table is primary-keyed
+        (votes and budgets by their composite keys), so rows port
+        as-is through their RowTables — the joined document id
+        carries the composite parts. Runs through ensure_imported:
+        one-time, idempotent — a live namespaced store is adopted,
+        never overwritten."""
+        def _make(table: Any) -> Any:
+            def write(rows: list[dict[str, Any]]) -> int:
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+            return write
+
+        writers = {name: _make(port.tables[name]) for name in _TABLES}
+        port.ensure_imported(writers)
 
     # -- schema ---------------------------------------------------------
 
@@ -331,6 +442,16 @@ class GroupTripStore:
                          destination=(destination or "").strip(),
                          start_date=(start_date or "").strip(),
                          end_date=(end_date or "").strip())
+        if self._port is not None:
+            self._port.tables["group_trips"].put({
+                "id": trip.id, "name": trip.name,
+                "members_json": json.dumps(trip.members),
+                "created_by": trip.created_by,
+                "created_at": trip.created_at,
+                "destination": trip.destination,
+                "start_date": trip.start_date,
+                "end_date": trip.end_date})
+            return trip
         self._db.execute(
             "INSERT INTO group_trips (id, name, members_json, created_by,"
             " created_at, destination, start_date, end_date)"
@@ -341,7 +462,7 @@ class GroupTripStore:
         self._db.commit()
         return trip
 
-    def _trip_from_row(self, row: sqlite3.Row) -> GroupTrip:
+    def _trip_from_row(self, row: sqlite3.Row | dict[str, Any]) -> GroupTrip:
         cols = set(row.keys())
         return GroupTrip(
             id=row["id"], name=row["name"],
@@ -354,9 +475,12 @@ class GroupTripStore:
 
     def get_trip(self, trip_id: str) -> GroupTrip | None:
         try:
-            row = self._db.execute(
-                "SELECT * FROM group_trips WHERE id = ?", (trip_id,)
-            ).fetchone()
+            if self._port is not None:
+                row = self._port.tables["group_trips"].get(trip_id)
+            else:
+                row = self._db.execute(
+                    "SELECT * FROM group_trips WHERE id = ?", (trip_id,)
+                ).fetchone()
         except Exception:  # noqa: BLE001
             _log.debug("get_trip failed", exc_info=True)
             return None
@@ -366,8 +490,13 @@ class GroupTripStore:
 
     def list_trips(self) -> list[GroupTrip]:
         try:
-            rows = self._db.execute(
-                "SELECT * FROM group_trips ORDER BY created_at DESC").fetchall()
+            if self._port is not None:
+                rows = self._port.tables["group_trips"].all()
+                rows = sorted(rows, key=lambda r: r["created_at"],
+                              reverse=True)
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM group_trips ORDER BY created_at DESC").fetchall()
         except Exception:  # noqa: BLE001
             return []
         return [self._trip_from_row(r) for r in rows]
@@ -386,6 +515,12 @@ class GroupTripStore:
             trip.start_date = start_date.strip()
         if end_date is not None:
             trip.end_date = end_date.strip()
+        if self._port is not None:
+            self._port.tables["group_trips"].update(trip.id, {
+                "destination": trip.destination,
+                "start_date": trip.start_date,
+                "end_date": trip.end_date})
+            return trip
         self._db.execute(
             "UPDATE group_trips SET destination = ?, start_date = ?,"
             " end_date = ? WHERE id = ?",
@@ -410,10 +545,14 @@ class GroupTripStore:
             return False, (f"settle up first — you still owe "
                            f"{_naira(-bal)}.")
         trip.members = [m for m in trip.members if m != member]
-        self._db.execute(
-            "UPDATE group_trips SET members_json = ? WHERE id = ?",
-            (json.dumps(trip.members), trip.id))
-        self._db.commit()
+        if self._port is not None:
+            self._port.tables["group_trips"].update(
+                trip.id, {"members_json": json.dumps(trip.members)})
+        else:
+            self._db.execute(
+                "UPDATE group_trips SET members_json = ? WHERE id = ?",
+                (json.dumps(trip.members), trip.id))
+            self._db.commit()
         return True, f"{member} left {trip.name}."
 
     def add_member(self, trip_id: str, member: str) -> GroupTrip | None:
@@ -423,10 +562,14 @@ class GroupTripStore:
         member = (member or "").strip()
         if member and member not in trip.members:
             trip.members.append(member)
-            self._db.execute(
-                "UPDATE group_trips SET members_json = ? WHERE id = ?",
-                (json.dumps(trip.members), trip.id))
-            self._db.commit()
+            if self._port is not None:
+                self._port.tables["group_trips"].update(
+                    trip.id, {"members_json": json.dumps(trip.members)})
+            else:
+                self._db.execute(
+                    "UPDATE group_trips SET members_json = ? WHERE id = ?",
+                    (json.dumps(trip.members), trip.id))
+                self._db.commit()
         return trip
 
     # -- polls ----------------------------------------------------------
@@ -443,6 +586,15 @@ class GroupTripStore:
                          question=(question or "").strip() or "Decision",
                          options=opts, deadline=float(deadline or 0.0),
                          created_by=created_by, created_at=_now())
+        if self._port is not None:
+            self._port.tables["polls"].put({
+                "id": poll.id, "trip_id": poll.trip_id,
+                "question": poll.question,
+                "options_json": json.dumps(poll.options),
+                "deadline": poll.deadline,
+                "created_by": poll.created_by,
+                "created_at": poll.created_at})
+            return poll
         self._db.execute(
             "INSERT INTO polls (id, trip_id, question, options_json, deadline,"
             " created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -454,8 +606,11 @@ class GroupTripStore:
 
     def get_poll(self, poll_id: str) -> GroupPoll | None:
         try:
-            row = self._db.execute(
-                "SELECT * FROM polls WHERE id = ?", (poll_id,)).fetchone()
+            if self._port is not None:
+                row = self._port.tables["polls"].get(poll_id)
+            else:
+                row = self._db.execute(
+                    "SELECT * FROM polls WHERE id = ?", (poll_id,)).fetchone()
         except Exception:  # noqa: BLE001
             return None
         if row is None:
@@ -476,6 +631,11 @@ class GroupTripStore:
         if idx is None:
             return False
         member = (member or "").strip() or "anon"
+        if self._port is not None:
+            # put is an upsert — the seam twin of INSERT OR REPLACE.
+            self._port.tables["votes"].put({
+                "poll_id": poll_id, "member": member, "option_idx": idx})
+            return True
         self._db.execute(
             "INSERT OR REPLACE INTO votes (poll_id, member, option_idx)"
             " VALUES (?, ?, ?)", (poll_id, member, idx))
@@ -497,9 +657,17 @@ class GroupTripStore:
         if poll is None:
             return None
         try:
-            rows = self._db.execute(
-                "SELECT member, option_idx FROM votes WHERE poll_id = ?",
-                (poll_id,)).fetchall()
+            if self._port is not None:
+                # the composite key parts live only in the joined
+                # document id, so a find on poll_id can never match
+                # — scan the restored rows and filter in Python
+                # (the planning-graph precedent).
+                rows = [r for r in self._port.tables["votes"].all()
+                        if r["poll_id"] == poll_id]
+            else:
+                rows = self._db.execute(
+                    "SELECT member, option_idx FROM votes WHERE poll_id = ?",
+                    (poll_id,)).fetchall()
         except Exception:  # noqa: BLE001
             rows = []
         counts = [0] * len(poll.options)
@@ -521,8 +689,15 @@ class GroupTripStore:
         now = _now()
         out: list[GroupPoll] = []
         try:
-            rows = self._db.execute(
-                "SELECT * FROM polls WHERE trip_id = ?", (trip_id,)).fetchall()
+            if self._port is not None:
+                rows = self._port.tables["polls"].find(
+                    {"trip_id": trip_id})
+                # native returns insertion order; the seam find is
+                # _id-ordered, so sort by creation to match it.
+                rows = sorted(rows, key=lambda r: r["created_at"])
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM polls WHERE trip_id = ?", (trip_id,)).fetchall()
         except Exception:  # noqa: BLE001
             return []
         for r in rows:
@@ -588,6 +763,16 @@ class GroupTripStore:
                            created_at=_now(), split=split,
                            shares_kobo=shares_kobo,
                            category=(category or "").strip().lower())
+        if self._port is not None:
+            self._port.tables["expenses"].put({
+                "id": exp.id, "trip_id": exp.trip_id,
+                "who_paid": exp.who_paid, "amount_kobo": exp.amount_kobo,
+                "for_whom_json": json.dumps(exp.for_whom),
+                "description": exp.description,
+                "created_at": exp.created_at, "split": exp.split,
+                "shares_json": json.dumps(exp.shares_kobo),
+                "category": exp.category})
+            return exp
         self._db.execute(
             "INSERT INTO expenses (id, trip_id, who_paid, amount_kobo,"
             " for_whom_json, description, created_at, split, shares_json,"
@@ -598,7 +783,7 @@ class GroupTripStore:
         self._db.commit()
         return exp
 
-    def _expense_from_row(self, r: sqlite3.Row) -> GroupExpense:
+    def _expense_from_row(self, r: sqlite3.Row | dict[str, Any]) -> GroupExpense:
         cols = set(r.keys())
         whom = json.loads(r["for_whom_json"] or "[]")
         shares = (json.loads(r["shares_json"] or "[]")
@@ -616,9 +801,14 @@ class GroupTripStore:
 
     def list_expenses(self, trip_id: str) -> list[GroupExpense]:
         try:
-            rows = self._db.execute(
-                "SELECT * FROM expenses WHERE trip_id = ?"
-                " ORDER BY created_at", (trip_id,)).fetchall()
+            if self._port is not None:
+                rows = self._port.tables["expenses"].find(
+                    {"trip_id": trip_id})
+                rows = sorted(rows, key=lambda r: r["created_at"])
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM expenses WHERE trip_id = ?"
+                    " ORDER BY created_at", (trip_id,)).fetchall()
         except Exception as exc:  # noqa: BLE001
             record_failure("groups.list_expenses", exc)
             return []
@@ -660,6 +850,14 @@ class GroupTripStore:
                            trip_id=trip_id, from_member=from_member,
                            to_member=to_member, amount_kobo=amount_kobo,
                            created_at=_now())
+        if self._port is not None:
+            self._port.tables["payments"].put({
+                "id": pay.id, "trip_id": pay.trip_id,
+                "from_member": pay.from_member,
+                "to_member": pay.to_member,
+                "amount_kobo": pay.amount_kobo,
+                "created_at": pay.created_at})
+            return pay
         self._db.execute(
             "INSERT INTO payments (id, trip_id, from_member, to_member,"
             " amount_kobo, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -670,9 +868,14 @@ class GroupTripStore:
 
     def list_payments(self, trip_id: str) -> list[GroupPayment]:
         try:
-            rows = self._db.execute(
-                "SELECT * FROM payments WHERE trip_id = ?"
-                " ORDER BY created_at", (trip_id,)).fetchall()
+            if self._port is not None:
+                rows = self._port.tables["payments"].find(
+                    {"trip_id": trip_id})
+                rows = sorted(rows, key=lambda r: r["created_at"])
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM payments WHERE trip_id = ?"
+                    " ORDER BY created_at", (trip_id,)).fetchall()
         except Exception:  # noqa: BLE001
             return []
         return [GroupPayment(
@@ -690,6 +893,12 @@ class GroupTripStore:
         member = (member or "").strip()
         if not member or int(amount_kobo or 0) <= 0:
             return False
+        if self._port is not None:
+            # put is an upsert — the seam twin of INSERT OR REPLACE.
+            self._port.tables["budgets"].put({
+                "trip_id": trip_id, "member": member,
+                "amount_kobo": int(amount_kobo)})
+            return True
         self._db.execute(
             "INSERT OR REPLACE INTO budgets (trip_id, member, amount_kobo)"
             " VALUES (?, ?, ?)", (trip_id, member, int(amount_kobo)))
@@ -698,9 +907,14 @@ class GroupTripStore:
 
     def get_budget(self, trip_id: str, member: str) -> int:
         try:
-            row = self._db.execute(
-                "SELECT amount_kobo FROM budgets WHERE trip_id = ?"
-                " AND member = ?", (trip_id, member)).fetchone()
+            if self._port is not None:
+                # composite key: address the joined document id.
+                row = self._port.tables["budgets"].get(
+                    "\x1f".join((trip_id, member)))
+            else:
+                row = self._db.execute(
+                    "SELECT amount_kobo FROM budgets WHERE trip_id = ?"
+                    " AND member = ?", (trip_id, member)).fetchone()
         except Exception:  # noqa: BLE001
             return 0
         return int(row["amount_kobo"]) if row else 0
@@ -802,6 +1016,13 @@ class GroupTripStore:
         leg = TripLeg(id="leg_" + new_short_id(length=8), trip_id=trip_id,
                       member=member, flight=fdict,
                       note=(note or "").strip(), created_at=_now())
+        if self._port is not None:
+            self._port.tables["legs"].put({
+                "id": leg.id, "trip_id": leg.trip_id,
+                "member": leg.member,
+                "flight_json": json.dumps(leg.flight),
+                "note": leg.note, "created_at": leg.created_at})
+            return leg
         self._db.execute(
             "INSERT INTO legs (id, trip_id, member, flight_json, note,"
             " created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -812,9 +1033,14 @@ class GroupTripStore:
 
     def list_legs(self, trip_id: str) -> list[TripLeg]:
         try:
-            rows = self._db.execute(
-                "SELECT * FROM legs WHERE trip_id = ? ORDER BY created_at",
-                (trip_id,)).fetchall()
+            if self._port is not None:
+                rows = self._port.tables["legs"].find(
+                    {"trip_id": trip_id})
+                rows = sorted(rows, key=lambda r: r["created_at"])
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM legs WHERE trip_id = ? ORDER BY created_at",
+                    (trip_id,)).fetchall()
         except Exception:  # noqa: BLE001
             return []
         return [TripLeg(id=r["id"], trip_id=r["trip_id"], member=r["member"],
@@ -835,6 +1061,12 @@ class GroupTripStore:
                             member=(member or "").strip() or "anon",
                             idea=idea, status=_PROPOSAL_PROPOSED,
                             created_at=_now())
+        if self._port is not None:
+            self._port.tables["proposals"].put({
+                "id": prop.id, "trip_id": prop.trip_id,
+                "member": prop.member, "idea": prop.idea,
+                "status": prop.status, "created_at": prop.created_at})
+            return prop
         self._db.execute(
             "INSERT INTO proposals (id, trip_id, member, idea, status,"
             " created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -845,17 +1077,24 @@ class GroupTripStore:
 
     def agree(self, trip_id: str, proposal_id: str) -> TripProposal | None:
         try:
-            row = self._db.execute(
-                "SELECT * FROM proposals WHERE id = ? AND trip_id = ?",
-                (proposal_id, trip_id)).fetchone()
+            if self._port is not None:
+                row = self._port.tables["proposals"].get(proposal_id)
+                if row is None or row["trip_id"] != trip_id:
+                    return None
+                self._port.tables["proposals"].update(
+                    proposal_id, {"status": _PROPOSAL_AGREED})
+            else:
+                row = self._db.execute(
+                    "SELECT * FROM proposals WHERE id = ? AND trip_id = ?",
+                    (proposal_id, trip_id)).fetchone()
+                if row is None:
+                    return None
+                self._db.execute(
+                    "UPDATE proposals SET status = ? WHERE id = ?",
+                    (_PROPOSAL_AGREED, proposal_id))
+                self._db.commit()
         except Exception:  # noqa: BLE001
             return None
-        if row is None:
-            return None
-        self._db.execute(
-            "UPDATE proposals SET status = ? WHERE id = ?",
-            (_PROPOSAL_AGREED, proposal_id))
-        self._db.commit()
         return TripProposal(id=row["id"], trip_id=row["trip_id"],
                             member=row["member"], idea=row["idea"],
                             status=_PROPOSAL_AGREED,
@@ -864,7 +1103,13 @@ class GroupTripStore:
     def list_proposals(self, trip_id: str,
                        status: str = "") -> list[TripProposal]:
         try:
-            if status:
+            if self._port is not None:
+                filt: dict[str, Any] = {"trip_id": trip_id}
+                if status:
+                    filt["status"] = status
+                rows = self._port.tables["proposals"].find(filt)
+                rows = sorted(rows, key=lambda r: r["created_at"])
+            elif status:
                 rows = self._db.execute(
                     "SELECT * FROM proposals WHERE trip_id = ? AND status = ?"
                     " ORDER BY created_at", (trip_id, status)).fetchall()
