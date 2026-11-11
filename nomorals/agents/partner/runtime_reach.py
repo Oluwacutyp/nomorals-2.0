@@ -542,13 +542,34 @@ class RuntimeReachMixin:
             return "\n".join(lines)
         return f"takeover failed: {outcome.message}"[:500]
 
+    def _browser_run_approver(self, *, task_label: str,
+                              owner_chat: str) -> Any:
+        """The approver a browser run hands its loop.
+
+        Default (owner's standing order, 2026-11-11): she acts on
+        consequential steps herself — the ActingApprover approves
+        and records each one for the run's receipt. With
+        ``partner.browser_require_approval`` set, the approval
+        broker parks the run and asks the owner instead.
+        """
+        partner = getattr(self.settings, "partner", None)
+        if bool(getattr(partner, "browser_require_approval", False)):
+            return self._browser_approval_broker().approver(
+                task_label=task_label, owner_chat=owner_chat)
+        from ...browser.approvals import ActingApprover
+
+        return ActingApprover(task_label=task_label,
+                              owner_chat=owner_chat)
+
     def _browser_approval_broker(self) -> Any:
         """The ONE approval broker for browser runs (cached).
 
-        Consequential steps in a run ask through this broker: the ask
-        goes to the owner's chat via the takeover notifier seam, the
-        run parks, and ``/browser approve|deny <id>`` answers it. The
-        park timeout matches the takeover wait — silence is a no.
+        Used only in the opt-in ask-first mode
+        (``partner.browser_require_approval``): consequential steps
+        ask through this broker — the ask goes to the owner's chat
+        via the takeover notifier seam, the run parks, and
+        ``/browser approve|deny <id>`` answers it. The park timeout
+        matches the takeover wait — silence is a no.
         """
         broker = getattr(self, "_browser_approval_broker_inst", None)
         if broker is None:
@@ -666,8 +687,8 @@ class RuntimeReachMixin:
             # when no LLM is available or it returns nothing usable.
             # The decider is wrapped so a consequential proposal it
             # drops is surfaced to the loop as a Decision: the run's
-            # approver then asks the owner (see _runner) and the run
-            # pauses for the answer, instead of dying at the step.
+            # approver then rules on it (see _browser_run_approver)
+            # instead of the proposal dying at the step.
             brain = _run_brain()
             if brain is None:
                 return None
@@ -698,7 +719,7 @@ class RuntimeReachMixin:
             memory = ChallengeMemory(
                 self.settings.resolve("data/takeover")
                 / "challenge-memory.sqlite3")
-            approver = self._browser_approval_broker().approver(
+            approver = self._browser_run_approver(
                 task_label=f"browser run {url}",
                 owner_chat=chat_key or "")
             loop = build_wired_agent_loop(

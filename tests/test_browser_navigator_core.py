@@ -522,6 +522,43 @@ def test_broker_benign_acts_never_bother_the_owner():
     assert notes == [] and approver.outcomes == []
 
 
+# ── Autonomy default (owner order 2026-11-11): she acts herself ─────────────
+
+
+def test_acting_approver_benign_acts_stay_silent():
+    from nomorals.browser.approvals import ActingApprover
+
+    approver = ActingApprover(task_label="browse")
+    click = Decision(Action(kind="click", target="ref:e1"),
+                     reason="benign")
+    assert approver(click, _submit_obs()) is True
+    assert approver.outcomes == []
+
+
+def test_acting_approver_acts_and_records_consequential_steps():
+    from nomorals.browser.approvals import ActingApprover
+
+    approver = ActingApprover(task_label="browser run x")
+    submit = Decision(Action(kind="submit", target="ref:e2",
+                             label="Place order"), reason="checkout")
+    assert approver(submit, _submit_obs()) is True
+    assert len(approver.outcomes) == 1
+    outcome = approver.outcomes[0]
+    assert outcome["verdict"] == "acted"
+    assert outcome["kind"] == "submit"
+    assert outcome["answered_by"] == "devon"
+
+
+def test_acting_approver_acts_on_irreversible_steps_too():
+    from nomorals.browser.approvals import ActingApprover
+
+    approver = ActingApprover(task_label="browser run x")
+    click = Decision(Action(kind="click", target="ref:e9"),
+                     reason="final", irreversible=True)
+    assert approver(click, _submit_obs()) is True
+    assert approver.outcomes[0]["verdict"] == "acted"
+
+
 def _park_and_answer(broker: ApprovalBroker, approver: Any,
                      answer: bool | None) -> dict[str, Any]:
     """Run the approver on a thread; answer (or not) from here."""
@@ -721,6 +758,10 @@ def test_browser_run_parks_for_approval_and_the_verb_resumes_it(
         "partner.platforms": "telegram",
         "partner.owner_chats": "telegram:111",
         "partner.enabled": "false",
+        # Ask-first is OPT-IN since the owner's 2026-11-11 autonomy
+        # order (she acts herself by default); this test pins the
+        # parking channel, so it turns the knob on explicitly.
+        "partner.browser_require_approval": "true",
     })
     context = build_context(settings, with_executor=False,
                             with_tools=False)
@@ -772,6 +813,102 @@ def test_browser_run_parks_for_approval_and_the_verb_resumes_it(
             f"deny {request_id}", chat_key="telegram:111",
             message=_msg("/browser deny", True))
         assert "no waiting approval" in gone
+    finally:
+        with suppress(Exception):
+            runtime.stop()
+        with suppress(Exception):
+            runtime.context.close()
+        tmp.cleanup()
+
+
+def test_browser_run_by_default_acts_on_the_submit_itself(monkeypatch):
+    """Owner order 2026-11-11: no approval parking by default —
+    the run performs the consequential step itself, and the
+    approval broker is never engaged."""
+    import re
+
+    from nomorals.agents.context import build_context
+    from nomorals.agents.partner_runtime import PartnerRuntime
+    from nomorals.core.config import load_settings
+    from nomorals.social.chat.base import (
+        ChatAdapter,
+        ChatKind,
+        ChatMessage,
+        ChatRef,
+        SendResult,
+    )
+    from nomorals.social.chat.gateway import ChatGateway
+
+    monkeypatch.setattr("nomorals.llm.brain.brain_for",
+                        lambda ctx: _submit_brain(_SUBMIT_JSON))
+
+    class _Adapter(ChatAdapter):
+        def __init__(self) -> None:
+            super().__init__(media_dir="/tmp/nm-test-media")
+            self.name = "telegram"
+            self.sent: list[tuple[str, str]] = []
+
+        def run(self, handler: Any) -> None:
+            pass
+
+        def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
+                 buttons: Any = None, parse_mode: str = "") -> SendResult:
+            self.sent.append((chat.chat_id, text))
+            return SendResult(ok=True, platform=self.name,
+                              message_id=f"m{len(self.sent)}")
+
+    class _Service:
+        def __init__(self, tab: Any) -> None:
+            self._tab = tab
+
+        def open_rendered_tab(self, session_name: str,
+                              url: str = "") -> Any:
+            return self._tab
+
+        def solved_session_store(self) -> Any:
+            return None
+
+    def _msg(text: str, owner: bool) -> ChatMessage:
+        return ChatMessage(
+            chat=ChatRef(platform="telegram",
+                         chat_id="111" if owner else "999",
+                         kind=ChatKind.DM),
+            incoming=True, text=text,
+            sender="owner" if owner else "stranger",
+            sender_id="111" if owner else "999",
+            meta={"is_owner": True} if owner else {})
+
+    tmp = tempfile.TemporaryDirectory(prefix="nm-webnav-auto-")
+    settings = load_settings(overrides={
+        "home": tmp.name,
+        "partner.platforms": "telegram",
+        "partner.owner_chats": "telegram:111",
+        "partner.enabled": "false",
+    })
+    context = build_context(settings, with_executor=False,
+                            with_tools=False)
+    adapter = _Adapter()
+    gateway = ChatGateway({"telegram": adapter}, db=context.db)
+    runtime = PartnerRuntime(context, gateway=gateway)
+    try:
+        tab = _CheckoutTab()
+        runtime._browser_service_for_run_job = (  # type: ignore[method-assign]
+            lambda job_id: _Service(tab))
+        reply = runtime._control_browser(
+            "run https://shop.test/checkout buy the thing",
+            chat_key="telegram:111",
+            message=_msg("/browser run", True))
+        match = re.search(r"br-[0-9a-f]{12}", reply)
+        assert match, f"no job id in reply: {reply!r}"
+        job = runtime._browser_run_jobs().get(match.group(0))
+        assert job is not None and job.wait(15)
+        # She did the step herself: the click landed, one step ran,
+        # and the approval channel was never touched.
+        assert tab.clicks == ["ref:e2"]
+        assert job.steps == 1
+        broker = runtime._browser_approval_broker()
+        assert broker.pending() == []
+        assert broker.history == []
     finally:
         with suppress(Exception):
             runtime.stop()

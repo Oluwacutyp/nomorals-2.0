@@ -545,6 +545,13 @@ class PartnerSettings:
     #: WhatsApp downgrades receipts itself when the owner turned
     #: them off there; this rung never forces one past it.
     receipt_read_rung: bool = True
+    #: Browser runs (the model-driven navigator): by the owner's
+    #: standing order (2026-11-11) she ACTS on consequential steps
+    #: herself — submit/post included — each one recorded in the
+    #: run's receipt (browser.approvals.ActingApprover). Set True to
+    #: park consequential steps for the owner's word instead, via
+    #: the ApprovalBroker channel (/browser approve|deny).
+    browser_require_approval: bool = False
     #: Dynamic lexicon voice feed (nomorals/partner/lexicon_feed.py): blend
     #: scored lexicon terms into her phrasing — catchphrases, pet names,
     #: openers, transitions, acknowledgments, mood expressions, fallback

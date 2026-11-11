@@ -16,9 +16,16 @@ proved for challenge walls:
   with the outcome recorded so the run's receipt says WHY (owner
   denied / no answer), never a bare "approval denied".
 
-Nothing consequential executes without that approval: the broker
-is a mechanism, not a rubber stamp — with no notifier attached it
-cannot ask, so it cannot approve.
+Two postures exist, chosen by configuration
+(``partner.browser_require_approval``):
+
+* DEFAULT — the owner's standing order (2026-11-11): she acts on
+  consequential steps herself. ``ActingApprover`` approves and
+  records each one in the run's receipt; nothing parks.
+* OPT-IN ask-first — this broker: nothing consequential executes
+  without the owner's approval. The broker is a mechanism, not a
+  rubber stamp — with no notifier attached it cannot ask, so it
+  cannot approve.
 """
 
 from __future__ import annotations
@@ -36,6 +43,7 @@ from .agent import CONSEQUENTIAL_KINDS, Decision, Observation
 _log = get_logger(__name__)
 
 __all__ = [
+    "ActingApprover",
     "ApprovalBroker",
     "ApprovalRequest",
     "RunApprover",
@@ -210,3 +218,38 @@ class RunApprover:
             "label": req.label, "url": req.url,
             "verdict": verdict, "answered_by": req.answered_by})
         return verdict == "approved"
+
+
+class ActingApprover:
+    """The default approver: Devon acts on consequential steps
+    herself (owner's standing order, 2026-11-11).
+
+    Same seam as ``RunApprover`` — benign acts proceed silently;
+    a consequential (or irreversible) decision is approved and
+    recorded in ``outcomes`` with verdict ``acted``, so the run's
+    receipt names every consequential step she took, and the loop
+    verifies each by read-back like any other action. The
+    ask-first discipline stays available as a configuration
+    through ``ApprovalBroker``.
+    """
+
+    def __init__(self, *, task_label: str = "",
+                 owner_chat: str = "") -> None:
+        self.task_label = task_label
+        self.owner_chat = owner_chat
+        self.outcomes: list[dict[str, Any]] = []
+        self._counter = itertools.count(1)
+
+    def __call__(self, decision: Decision, obs: Observation) -> bool:
+        if not decision.irreversible \
+                and decision.action.kind not in CONSEQUENTIAL_KINDS:
+            return True
+        self.outcomes.append({
+            "request_id": f"act-{next(self._counter)}",
+            "kind": decision.action.kind,
+            "label": decision.action.label, "url": obs.page.url,
+            "verdict": "acted", "answered_by": "devon"})
+        _log.info("browser consequential step acted: %s on %s (%s)",
+                  decision.action.kind, obs.page.url,
+                  self.task_label or "browser run")
+        return True
