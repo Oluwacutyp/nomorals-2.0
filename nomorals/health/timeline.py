@@ -9,6 +9,13 @@ Privacy: owner-scoped ONLY. The health DB lives at
 ``~/.nomorals/health/timeline.db`` and is never touched by community /
 social code. ``HealthTimeline`` refuses to initialize in a community
 context.
+
+Backend (Mongo program P5): the timeline owns ``timeline.db`` through
+the Database class; when a document store is resolved (an explicit
+``store=`` or the boot ambient) it attaches to that handle and the
+``health_events`` table routes via ``attached_rows``, with the file's
+rows imported once. The SQLite default runs the native statements
+byte-for-byte.
 """
 
 from __future__ import annotations
@@ -88,11 +95,13 @@ class HealthTimeline:
     """Owner-scoped health event timeline. Tracking only — never interprets.
 
     Pass ``community=True`` and construction raises: health data is never
-    available in community/social contexts.
+    available in community/social contexts. Pass ``store=`` (or let the
+    boot ambient resolve) and the timeline's table routes over the
+    DocumentStore seam (see the module docstring).
     """
 
     def __init__(self, db_path: str | Path | None = None, *,
-                 community: bool = False) -> None:
+                 community: bool = False, store: Any = None) -> None:
         if community:
             raise PermissionError(
                 "health timeline is owner-scoped — not available in "
@@ -102,6 +111,7 @@ class HealthTimeline:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = Database(path)
         self._init_schema()
+        self._attach_seam(store)
 
     def _init_schema(self) -> None:
         self._db.execute(
@@ -121,6 +131,58 @@ class HealthTimeline:
         self._db.execute(
             "CREATE INDEX IF NOT EXISTS idx_health_type "
             "ON health_events(event_type)")
+
+    # ── the document seam (Mongo program P5, health-timeline) ──────
+
+    def _attach_seam(self, store: Any) -> None:
+        """Attach the resolved document store to this timeline's handle.
+
+        The timeline owns ``timeline.db`` through the Database class;
+        its port attaches the resolved store (an explicit ``store``,
+        or the boot ambient) to that handle, after which
+        ``health_events`` routes via :func:`attached_rows` and the
+        file's rows import once. With nothing resolved, every method
+        below runs its native SQL byte-for-byte.
+        """
+        resolved = store
+        if resolved is None:
+            from ..storage.docstore import ambient_document_store
+            resolved = ambient_document_store()
+        if resolved is None:
+            return
+        self._db.document_store = resolved
+        self._import_file_rows(resolved)
+
+    def _import_file_rows(self, store: Any) -> None:
+        """One-time lazy import of timeline.db's rows into the seam.
+
+        Mirrors the workspace-inbox import contract: completion is
+        recorded in the ``health-timeline__meta`` collection, a store
+        that is already live is adopted (never overwritten), and
+        every write is an upsert by id through the same attached_rows
+        table the live path uses. Rows are read off this timeline's
+        own handle after ``_init_schema``, so the import sees exactly
+        what the native path sees.
+        """
+        meta = store.get("health-timeline__meta", "import")
+        if meta and meta.get("done"):
+            return
+        counts = {"health_events": 0}
+        table = self._events_table()
+        if table is not None and not store.count("health_events"):
+            rows = self._db.query(
+                'SELECT * FROM "health_events" ORDER BY rowid')
+            for row in rows:
+                table.put(dict(row))
+            counts["health_events"] = len(rows)
+        store.put("health-timeline__meta", "import",
+                  {"done": True, "tables": counts, "at": time.time()})
+
+    def _events_table(self):
+        """The seam-backed health_events table, or None on the SQLite
+        default, where the native statements run unchanged."""
+        from ..storage.rowstore import attached_rows
+        return attached_rows(self._db, "health_events")
 
     # ── write ──────────────────────────────────────────────────────────
 
@@ -150,6 +212,14 @@ class HealthTimeline:
             ts=ts if ts is not None else time.time(),
             severity=severity, value=value, unit=unit,
             source=source, extra=dict(extra))
+        table = self._events_table()
+        if table is not None:
+            table.put({
+                "id": ev.id, "event_type": ev.event_type,
+                "text": ev.text, "ts": ev.ts, "severity": ev.severity,
+                "value": ev.value, "unit": ev.unit, "source": ev.source,
+                "extra": json.dumps(ev.extra)})
+            return ev
         self._db.execute(
             "INSERT INTO health_events "
             "(id, event_type, text, ts, severity, value, unit, source, extra)"
@@ -165,6 +235,17 @@ class HealthTimeline:
                  limit: int = 200) -> list[HealthEvent]:
         """Chronological events, oldest first. Never raises."""
         try:
+            table = self._events_table()
+            if table is not None:
+                if event_type:
+                    rows = table.find(
+                        {"event_type": event_type.strip().lower()})
+                else:
+                    rows = table.all()
+                out = [self._row_to_event(r) for r in rows
+                       if since is None or float(r["ts"]) >= since]
+                out.sort(key=lambda e: e.ts)
+                return out[:limit]
             q = "SELECT * FROM health_events"
             clauses: list[str] = []
             args: list[Any] = []
@@ -215,6 +296,14 @@ class HealthTimeline:
             if not q:
                 return []
             since = time.time() - days * 86400 if days else 0.0
+            table = self._events_table()
+            if table is not None:
+                needle = q.lower()
+                out = [self._row_to_event(r) for r in table.all()
+                       if needle in str(r["text"]).lower()
+                       and float(r["ts"]) >= since]
+                out.sort(key=lambda e: e.ts, reverse=True)
+                return out[:max(1, limit)]
             like = f"%{q}%"
             rows = self._db.query(
                 "SELECT * FROM health_events "
@@ -310,10 +399,22 @@ class HealthTimeline:
         """Consecutive days (ending today/yesterday) with ≥1 logged event."""
         try:
             now = now if now is not None else time.time()
-            rows = self._db.query(
-                "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') AS d "
-                "FROM health_events ORDER BY d DESC LIMIT 400")
-            days = {r["d"] for r in rows}
+            table = self._events_table()
+            if table is not None:
+                # the native query's date(ts, 'unixepoch',
+                # 'localtime'), re-expressed as Python localtime
+                # dates over the seam rows, newest 400 kept
+                dates = sorted(
+                    {time.strftime("%Y-%m-%d",
+                                   time.localtime(float(r["ts"])))
+                     for r in table.all()},
+                    reverse=True)[:400]
+                days = set(dates)
+            else:
+                rows = self._db.query(
+                    "SELECT DISTINCT date(ts, 'unixepoch', 'localtime') "
+                    "AS d FROM health_events ORDER BY d DESC LIMIT 400")
+                days = {r["d"] for r in rows}
             if not days:
                 return 0
             streak = 0

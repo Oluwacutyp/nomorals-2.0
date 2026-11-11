@@ -42,6 +42,8 @@ P5 settles the stores that live BESIDE the central database:
   The residue Batch 2 slice-7 ports (matching-questionnaire,
   property-passport, social-profiles, triggers-saved-search) follow
   the same pattern below.
+  The health-timeline lane follows the same pattern below
+  (attached_rows hybrid).
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -246,7 +248,9 @@ class TestSidecarRegistry:
             "travel-watchers", "social-leads",
             # residue Batch 2, slice 7:
             "matching-questionnaire", "property-passport",
-            "social-profiles", "triggers-saved-search"}
+            "social-profiles", "triggers-saved-search",
+            # residue Batch 2, health-timeline lane:
+            "health-timeline"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -4914,3 +4918,126 @@ class TestTriggersSavedSearchPort:
         assert rung.store.count(
             "triggers-saved-search__saved_searches") == 1
         assert again.pending_digest_count(w.id) == 0
+
+
+class TestHealthTimelinePort:
+    """health/timeline.py — the health timeline port (residue
+    Batch 2, health-timeline lane): a Database-class organ with a
+    single table, so the store attaches to the timeline's own
+    Database handle and health_events routes via attached_rows
+    (collection carries the table name — the workspace-inbox
+    pattern, not the shopping shared-file deviation: one module,
+    one handle, one table, a name no other store owns). No
+    claim/CAS flow exists in the module; log() is a put by id and
+    the reads are finds + Python ordering/filtering."""
+
+    @staticmethod
+    def _noon(days_ago: float) -> float:
+        """Local noon, ``days_ago`` days before today — a timestamp
+        whose local calendar date is stable in every timezone."""
+        lt = time.localtime(time.time() - days_ago * 86400.0)
+        return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
+                            12, 0, 0, 0, 0, -1))
+
+    def _scenario(self, tl) -> dict:
+        tl.log("symptom", "knee hurt today", severity=3,
+               ts=self._noon(2))
+        tl.log("measurement", "bp reading", value="120/80",
+               unit="mmHg", ts=self._noon(1))
+        tl.log("note", "clinic called", ts=self._noon(1) + 60,
+               pharmacy="green cross")
+        tl.log("symptom", "knee hurt again", severity=4,
+               ts=self._noon(0))
+        tl.log("mood", "feeling okay", severity=2, ts=self._noon(0) + 30)
+        return {
+            "timeline": [(e.event_type, e.text, e.severity)
+                         for e in tl.timeline()],
+            "symptoms": [(e.text, e.severity)
+                         for e in tl.timeline(event_type="symptom")],
+            "since": [e.text
+                      for e in tl.timeline(since=self._noon(1))],
+            "search": [e.text for e in tl.search("knee")],
+            "search_case": [e.text for e in tl.search("KNEE")],
+            "streak": tl.logging_streak(now=self._noon(0) + 120),
+            "vitals": [(t.metric, t.latest) for t in tl.vitals_trend()],
+            "stats": [(s.symptom, s.count, s.avg_severity)
+                      for s in tl.symptom_stats()],
+            "extra": [e.extra for e in tl.timeline(event_type="note")],
+            "summary_has": "knee hurt again" in tl.summary(),
+        }
+
+    def test_scenario_matches_across_rungs(self, rung, tmp_path):
+        from nomorals.health.timeline import HealthTimeline
+
+        tl = HealthTimeline(db_path=str(tmp_path / "timeline.db"),
+                            store=rung.store)
+        assert self._scenario(tl) == {
+            "timeline": [("symptom", "knee hurt today", 3),
+                         ("measurement", "bp reading", None),
+                         ("note", "clinic called", None),
+                         ("symptom", "knee hurt again", 4),
+                         ("mood", "feeling okay", 2)],
+            "symptoms": [("knee hurt today", 3),
+                         ("knee hurt again", 4)],
+            "since": ["bp reading", "clinic called",
+                      "knee hurt again", "feeling okay"],
+            "search": ["knee hurt again", "knee hurt today"],
+            "search_case": ["knee hurt again", "knee hurt today"],
+            "streak": 3,
+            "vitals": [("blood_pressure_diastolic", 80.0),
+                       ("blood_pressure_systolic", 120.0)],
+            "stats": [("knee", 2, 3.5)],
+            "extra": [{"pharmacy": "green cross"}],
+            "summary_has": True,
+        }
+
+    def test_lazy_import_from_native_file(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.health.timeline import HealthTimeline
+
+        path = str(tmp_path / "timeline.db")
+        native = HealthTimeline(db_path=path)
+        native.log("symptom", "knee hurt today", severity=3,
+                   ts=self._noon(2))
+        native.log("measurement", "bp reading", value="120/80",
+                   unit="mmHg", ts=self._noon(1))
+        native.log("visit", "saw the doctor", ts=self._noon(0))
+        native.close()
+
+        seam = HealthTimeline(db_path=path, store=rung.store)
+        assert [e.text for e in seam.timeline()] == [
+            "knee hurt today", "bp reading", "saw the doctor"]
+        assert rung.store.count("health_events") == 3
+        marker = rung.store.get("health-timeline__meta", "import")
+        assert marker is not None and marker["done"] is True
+        assert marker["tables"]["health_events"] == 3
+        # logging continues on the seam after the import
+        seam.log("note", "clinic called", ts=self._noon(0) + 60)
+        assert rung.store.count("health_events") == 4
+        # a second construction adopts — never re-imports
+        again = HealthTimeline(db_path=path, store=rung.store)
+        assert [e.text for e in again.timeline()] == [
+            "knee hurt today", "bp reading", "saw the doctor",
+            "clinic called"]
+        assert rung.store.count("health_events") == 4
+
+    def test_seam_shape(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.health.timeline import HealthTimeline
+
+        tl = HealthTimeline(db_path=str(tmp_path / "timeline.db"),
+                            store=rung.store)
+        ev = tl.log("note", "clinic called", ts=self._noon(0),
+                    pharmacy="green cross")
+        tl.log("symptom", "knee hurt today", severity=3,
+               ts=self._noon(0) + 30)
+        assert rung.store.count("health_events") == 2
+        doc = rung.store.get("health_events", ev.id)
+        assert doc is not None and doc["_id"] == ev.id
+        assert doc["event_type"] == "note"
+        assert doc["text"] == "clinic called"
+        # the extra payload rides as the same JSON string the
+        # native INSERT writes — no data re-shaping on the seam
+        assert doc["extra"] == '{"pharmacy": "green cross"}'

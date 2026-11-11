@@ -1431,15 +1431,41 @@ _register(_S(
 ))
 
 _register(_S(
-    name="health-timeline", verdict="residue", kind="database-file",
+    name="health-timeline", verdict="ported", kind="database-file",
     modules=("health/timeline.py",),
+    tables=("health_events",),
     anchors=(("health/timeline.py", "timeline.db"),),
     reason=(
-        "the health timeline owns timeline.db through the Database "
-        "class. Same disposition as workspace-inbox (ported in "
-        "Batch 2 by exactly this pattern): a "
-        "Database-class sidecar awaiting its domain port pass."),
+        "ported in the Mongo residue Batch 2 pass (health-timeline "
+        "lane): the health timeline owns timeline.db through the "
+        "Database class — one module, one handle, one table "
+        "(health_events) — so its port follows workspace-inbox "
+        "exactly, NOT the shopping-deals shared-file deviation "
+        "(three modules, two engines, one file, table names that "
+        "collide with the central carry): the resolved store (an "
+        "explicit store= on HealthTimeline, else the boot ambient) "
+        "attaches to the timeline's own handle and health_events "
+        "routes via attached_rows (collection carries the table "
+        "name, the attached_rows convention; no other store owns "
+        "that name) behind the unchanged HealthTimeline API, and "
+        "the file's rows import once through the same table "
+        "(completion marked in the health-timeline__meta "
+        "collection; a live store is adopted, never overwritten). "
+        "There is no claim/CAS flow to re-express — the module is "
+        "a single-writer owner-scoped log: log() is a put by id, "
+        "reads are finds + Python ordering/filtering, search's "
+        "SQL LIKE re-expresses as a case-insensitive substring "
+        "scan (a %/_ wildcard in the query text differs, the "
+        "accepted life-archive class), and logging_streak's "
+        "date(ts, 'unixepoch', 'localtime') re-expresses as "
+        "Python localtime dates over the seam rows. The two "
+        "indexes stay native-path DDL. goals/providers.py keeps "
+        "its documented direct read of the file on the native "
+        "rung; that reader is not part of this store's module set "
+        "and its disposition is unchanged by this port. The "
+        "native SQL path serves the SQLite default byte-for-byte."),
 ))
+
 
 # ── residue: contained domain file stores, classified, port queued ────────
 #
