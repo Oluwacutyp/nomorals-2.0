@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -96,6 +97,15 @@ CREATE INDEX IF NOT EXISTS idx_event_log_mission ON event_log (mission_id);
 CREATE INDEX IF NOT EXISTS idx_event_log_session ON event_log (session_id);
 CREATE INDEX IF NOT EXISTS idx_event_log_correlation ON event_log (correlation_id);
 """
+
+#: The event_log CREATE TABLE statement on its own — the seam port's
+#: DDL, derived from _SCHEMA (the exact text the native path executes)
+#: so the two can never drift. The indexes and the FTS5 shadow table
+#: stay native-only: the seam has no FTS5 (see Timeline.search), and
+#: the envelope-column ALTER backfill in _ensure_envelope_columns is
+#: a native-path concern — an imported file's rows take the final
+#: shape through the mapping's column defaults instead.
+_EVENT_LOG_DDL = _SCHEMA.split("CREATE INDEX")[0].strip().rstrip(";")
 
 #: Optional envelope columns backfilled onto older event_log tables.
 _ENVELOPE_COLUMNS = (
@@ -180,6 +190,60 @@ def _glob_to_like(pattern: str) -> str:
     return "".join(out)
 
 
+def _glob_match(pattern: str, value: str) -> bool:
+    """fnmatch-style glob test mirroring the native LIKE semantics
+    (ASCII case-insensitive; ``*``/``?`` wildcards; the rest literal)."""
+    regex = "".join(
+        ".*" if ch == "*" else "." if ch == "?" else re.escape(ch)
+        for ch in pattern)
+    return re.fullmatch(regex, value, flags=re.IGNORECASE) is not None
+
+
+def _search_tokens(text: str) -> list[str]:
+    """Tokenize like the FTS5 unicode61 tokenizer, approximately:
+    runs of letters/digits (underscore is a separator)."""
+    return re.findall(r"[^\W_]+", (text or "").lower())
+
+
+def _parse_search_query(
+        query: str) -> list[list[tuple[str, Any]]]:
+    """Parse the FTS5 query subset into OR-groups of AND-factors.
+
+    Factors are ``("term", token, is_prefix)`` or
+    ``("phrase", (token, ...))``. Bare terms in a group are ANDed
+    (the FTS5 default); ``OR`` starts a new group.
+    """
+    groups: list[list[tuple[str, Any]]] = [[]]
+    for match in re.finditer(r'"([^"]*)"|(\S+)', query or ""):
+        phrase, word = match.group(1), match.group(2)
+        if phrase is not None:
+            toks = tuple(_search_tokens(phrase))
+            if toks:
+                groups[-1].append(("phrase", toks))
+            continue
+        if word.upper() == "OR":
+            groups.append([])
+            continue
+        if word.upper() == "AND":
+            continue
+        prefix = word.endswith("*")
+        for tok in _search_tokens(word.rstrip("*") if prefix else word):
+            groups[-1].append(("term", tok, prefix))
+    return [g for g in groups if g]
+
+
+def _factor_matches(factor: tuple[str, Any], tokens: list[str]) -> bool:
+    if factor[0] == "term":
+        _, tok, prefix = factor
+        if prefix:
+            return any(t.startswith(tok) for t in tokens)
+        return tok in tokens
+    seq = factor[1]
+    n = len(seq)
+    return any(tuple(tokens[i:i + n]) == seq
+               for i in range(len(tokens) - n + 1))
+
+
 def _fmt_ts(ts: Any) -> str:
     try:
         return datetime.fromtimestamp(float(ts or 0), tz=timezone.utc).strftime(
@@ -219,19 +283,46 @@ class Timeline:
     db_path:
         Path to the SQLite file. ``None`` keeps the log in memory (useful
         in tests). The ``event_log`` table is created on demand.
+    store:
+        A resolved DocumentStore (Mongo program P5). When a store is
+        resolved — explicitly or via the boot ambient — the log runs
+        over the seam instead (registered in storage.sidecars as
+        os-timeline): events are documents in ``os-timeline__event_log``
+        and the file's existing rows are imported once, through the
+        same mapping, at first construction. Search's disposition on
+        the seam is stated on :meth:`search`.
     """
 
-    def __init__(self, db_path: str | Path | None = None) -> None:
+    def __init__(self, db_path: str | Path | None = None, *,
+                 store: Any = None) -> None:
         self._path = Path(db_path) if db_path is not None else None
         self._lock = threading.RLock()
+        self._sub_ids: list[str] = []
+        self._fts_ok = False
+        self._port: Any = None
+        self._conn: sqlite3.Connection | None = None
+        from ..storage.sidecars import sidecar_port
+
+        port = sidecar_port(
+            "os-timeline", _EVENT_LOG_DDL, ("event_log",),
+            None if self._path is None else self._path, store=store)
+        if port is not None:
+            table = port.tables["event_log"]
+
+            def write_events(rows: list[dict[str, Any]]) -> int:
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+
+            port.ensure_imported({"event_log": write_events})
+            self._port = port
+            return
         self._conn = sqlite3.connect(
             ":memory:" if self._path is None else str(self._path),
             check_same_thread=False,
             timeout=30.0,
         )
         self._conn.row_factory = sqlite3.Row
-        self._sub_ids: list[str] = []
-        self._fts_ok = False
         with self._lock:
             self._conn.executescript(_SCHEMA)
             _ensure_envelope_columns(self._conn)
@@ -245,11 +336,19 @@ class Timeline:
 
     @property
     def fts_available(self) -> bool:
-        return self._fts_ok
+        """True only when a live FTS5 index serves search.
+
+        On the seam rung there is no FTS5 index, so this says False —
+        honestly. :meth:`search` still works there, served by a
+        document scan with identical results (see :meth:`search`).
+        """
+        return self._fts_ok and self._port is None
 
     # -- lifecycle ------------------------------------------------------
     def close(self) -> None:
         with self._lock:
+            if self._conn is None:
+                return
             try:
                 self._conn.close()
             except sqlite3.Error:  # noqa: BLE001 - best effort on teardown
@@ -295,6 +394,9 @@ class Timeline:
             return None
         try:
             with self._lock:
+                if self._port is not None:
+                    self._port.tables["event_log"].put(row)
+                    return row["event_id"]
                 self._conn.execute(
                     "INSERT OR REPLACE INTO event_log "
                     "(event_id, topic, ts, source, session_id, project_id, "
@@ -415,6 +517,12 @@ class Timeline:
         limit = int(limit)
         if limit < 0:
             limit = 200
+        if self._port is not None:
+            return self._query_seam(
+                session_id=session_id, project_id=project_id,
+                mission_id=mission_id, artifact_id=artifact_id,
+                topic=topic, since_ts=since_ts, until_ts=until_ts,
+                limit=limit)
         sql = (
             "SELECT " + ", ".join(_ROW_COLUMNS) + " FROM event_log"
             + (" WHERE " + " AND ".join(clauses) if clauses else "")
@@ -430,6 +538,87 @@ class Timeline:
         """Newest-first convenience wrapper over :meth:`query`."""
         return self.query(limit=limit)
 
+    # -- seam-rung querying ----------------------------------------------
+    def _query_seam(
+        self,
+        *,
+        session_id: str | None,
+        project_id: str | None,
+        mission_id: str | None,
+        artifact_id: str | None,
+        topic: str | None,
+        since_ts: float | None,
+        until_ts: float | None,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """query() over seam finds: the same filters, applied in Python.
+
+        Ordering is ts descending, as native; the native rowid
+        tiebreak has no seam equivalent (documents carry no insertion
+        order), so equal-ts rows keep the find's ``_id`` order.
+        """
+        rows: list[dict[str, Any]] = []
+        for row in self._port.tables["event_log"].all():
+            if session_id and row.get("session_id") != session_id:
+                continue
+            if project_id and row.get("project_id") != project_id:
+                continue
+            if mission_id and row.get("mission_id") != mission_id:
+                continue
+            if artifact_id and row.get("artifact_id") != artifact_id:
+                continue
+            if topic and not _glob_match(topic,
+                                         str(row.get("topic") or "")):
+                continue
+            if since_ts is not None and float(row["ts"]) < since_ts:
+                continue
+            if until_ts is not None and float(row["ts"]) > until_ts:
+                continue
+            rows.append(row)
+        rows.sort(key=lambda r: float(r["ts"]), reverse=True)
+        return [self._doc_to_event(r) for r in rows[:limit]]
+
+    def _search_seam(self, query: str, *,
+                     limit: int = 50) -> list[dict[str, Any]]:
+        """search() over seam finds — a scan, stated as such.
+
+        The document seam has no FTS5 index, so each stored row's
+        topic + payload is tokenized and the query (the FTS5 subset
+        the timeline's callers use: ANDed bare terms, ``"phrases"``,
+        ``OR`` groups, ``prefix*``) is evaluated against the tokens.
+        The result SET matches the FTS5 rung's for the same query;
+        ordering is match-strength then recency, where the native
+        rung orders by bm25 rank.
+        """
+        groups = _parse_search_query(query)
+        if not groups:
+            return []
+        scored: list[tuple[int, float, dict[str, Any]]] = []
+        for row in self._port.tables["event_log"].all():
+            tokens = _search_tokens(
+                f"{row.get('topic') or ''} {row.get('data_json') or ''}")
+            best = 0
+            for group in groups:
+                if all(_factor_matches(f, tokens) for f in group):
+                    best = max(best, len(group))
+            if best:
+                scored.append((best, float(row["ts"]), row))
+        scored.sort(key=lambda t: (-t[0], -t[1]))
+        return [self._doc_to_event(r)
+                for _, _, r in scored[: max(1, int(limit))]]
+
+    @staticmethod
+    def _doc_to_event(row: dict[str, Any]) -> dict[str, Any]:
+        """Seam twin of :meth:`_row_to_dict` for document rows."""
+        out = {column: row.get(column) for column in _ROW_COLUMNS
+               if column != "data_json"}
+        raw = row.get("data_json") or "{}"
+        try:
+            out["data"] = json.loads(raw)
+        except (TypeError, ValueError):
+            out["data"] = {"_raw": raw}
+        return out
+
     # -- full-text search -------------------------------------------------
     def search(self, query: str, *, limit: int = 50) -> list[dict[str, Any]]:
         """Full-text search over topics and payloads (FTS5).
@@ -437,7 +626,19 @@ class Timeline:
         ``query`` uses FTS5 syntax (``"exact phrase"``, ``a OR b``,
         ``prefix*``).  Returns newest-first rows with a ``rank`` field.
         Raises RuntimeError when FTS5 is unavailable.
+
+        SEARCH DISPOSITION (Mongo program P5): a split disposition —
+        the log on the seam, FTS reading the native file — would go
+        silently stale the moment a new event landed on the seam, so
+        search does NOT split. On the seam rung there is no FTS5
+        index: :attr:`fts_available` reports False, honestly, and
+        search() is served by a document scan (``_search_seam``)
+        evaluating the same query subset over the stored rows, with
+        the same result set. The native rung is unchanged: real FTS5,
+        and RuntimeError when FTS5 itself is unavailable.
         """
+        if self._port is not None:
+            return self._search_seam(query, limit=limit)
         if not self._fts_ok:
             raise RuntimeError("FTS5 full-text search is unavailable")
         sql = (
@@ -474,6 +675,13 @@ class Timeline:
         if cutoff_ts is None:
             raise ValueError(f"cannot parse cutoff {cutoff!r}")
         with self._lock:
+            if self._port is not None:
+                table = self._port.tables["event_log"]
+                victims = [r for r in table.all()
+                           if float(r["ts"]) <= cutoff_ts]
+                for r in victims:
+                    table.delete(str(r["event_id"]))
+                return len(victims)
             if self._fts_ok:
                 self._conn.execute(
                     "DELETE FROM event_log_fts WHERE event_id IN"
@@ -489,6 +697,14 @@ class Timeline:
         """Keep only the newest ``keep`` events.  Returns rows deleted."""
         keep = max(0, int(keep))
         with self._lock:
+            if self._port is not None:
+                table = self._port.tables["event_log"]
+                rows = table.all()
+                rows.sort(key=lambda r: float(r["ts"]), reverse=True)
+                victims = rows[keep:]
+                for r in victims:
+                    table.delete(str(r["event_id"]))
+                return len(victims)
             cur = self._conn.execute(
                 "SELECT event_id FROM event_log ORDER BY ts DESC, rowid DESC"
                 " LIMIT -1 OFFSET ?", (keep,))
@@ -560,6 +776,16 @@ class Timeline:
         if since_ts is not None:
             clauses.append("ts >= ?")
             params.append(since_ts)
+        if self._port is not None:
+            counts: dict[str, int] = {}
+            for row in self._port.tables["event_log"].all():
+                if since_ts is not None and float(row["ts"]) < since_ts:
+                    continue
+                topic = str(row.get("topic") or "")
+                counts[topic] = counts.get(topic, 0) + 1
+            # native GROUP BY emits groups in topic order under the
+            # count sort (stable) — ties break by topic here too
+            return sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
         sql = ("SELECT topic, COUNT(*) FROM event_log"
                + (" WHERE " + " AND ".join(clauses) if clauses else "")
                + " GROUP BY topic ORDER BY COUNT(*) DESC")
@@ -569,6 +795,16 @@ class Timeline:
 
     def stats(self) -> dict[str, Any]:
         """Size, time span, topic count, FTS availability."""
+        if self._port is not None:
+            rows = self._port.tables["event_log"].all()
+            tss = [float(r["ts"]) for r in rows]
+            return {
+                "events": len(rows),
+                "topics": len({str(r.get("topic") or "") for r in rows}),
+                "span_from": min(tss) if tss else None,
+                "span_to": max(tss) if tss else None,
+                "fts_available": self.fts_available,
+            }
         with self._lock:
             total = self._conn.execute(
                 "SELECT COUNT(*), MIN(ts), MAX(ts) FROM event_log").fetchone()
@@ -579,7 +815,7 @@ class Timeline:
             "topics": int(topics[0] or 0),
             "span_from": total[1],
             "span_to": total[2],
-            "fts_available": self._fts_ok,
+            "fts_available": self.fts_available,
         }
 
     def render(self, limit: int = 20) -> str:

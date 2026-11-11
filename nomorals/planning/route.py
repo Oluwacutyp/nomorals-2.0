@@ -245,6 +245,39 @@ _DEFAULT_UNKNOWN_MINUTES = 30.0
 
 _PAIR_RESOLUTION = 6  # coarse cells so pair-learning generalizes
 
+#: The store's own DDL — the native paths execute it (CostModel for
+#: actuals/globals, RoutePlanner for stops) and the seam mapping is
+#: derived from it, so the two can never drift. The in-file ALTER
+#: migrations for pre-column files stay native-path concerns; an
+#: imported file's rows take the final shape through the mapping's
+#: column defaults.
+_ACTUALS_DDL = """CREATE TABLE IF NOT EXISTS route_actuals (
+                       cell_a TEXT, cell_b TEXT, minutes REAL, cost_kobo REAL,
+                       n INTEGER, recorded_at REAL DEFAULT 0,
+                       PRIMARY KEY (cell_a, cell_b))"""
+_GLOBALS_DDL = """CREATE TABLE IF NOT EXISTS route_globals (
+                       key TEXT PRIMARY KEY, value REAL)"""
+_STOPS_DDL = """CREATE TABLE IF NOT EXISTS route_stops (
+                           stop_id TEXT PRIMARY KEY, label TEXT, lat REAL,
+                           lng REAL, dwell_minutes REAL,
+                           window_start REAL DEFAULT 0,
+                           window_end REAL DEFAULT 0)"""
+_DDL = ";\n".join((_ACTUALS_DDL, _GLOBALS_DDL, _STOPS_DDL))
+_TABLES = ("route_stops", "route_actuals", "route_globals")
+
+
+def _port_writers(port: Any) -> dict[str, Any]:
+    """Lazy-import writers for the planning-route port: all three
+    tables are plain primary-key tables, so rows port as-is."""
+    def _make(table):
+        def write(rows):
+            for row in rows:
+                table.put(row)
+            return len(rows)
+        return write
+
+    return {name: _make(port.tables[name]) for name in _TABLES}
+
 
 class CostModel:
     """Learned travel-time/cost estimates.  Accuracy dominates solver choice.
@@ -252,38 +285,53 @@ class CostModel:
     Learns from ``record_actual()``: per cell-pair EMAs of minutes and
     cost, plus global speed and cost-per-km.  Falls back to honest
     distance heuristics when nothing is known.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as planning-route): all
+    three of the file's tables are documents in
+    ``planning-route__route_actuals`` / ``__route_globals`` /
+    ``__route_stops``. The globals are stored rollups and port as-is
+    — served, never re-derived. The file's existing rows are imported
+    once, through the same mapping, at first construction.
     """
 
-    def __init__(self, db_path: str = "", *, profile: str = "") -> None:
+    def __init__(self, db_path: str = "", *, profile: str = "",
+                 store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             path = db_path or self._default_path(profile)
             if path != ":memory:":
                 os.makedirs(os.path.dirname(path), exist_ok=True)
-            self._db = sqlite3.connect(path)
-            self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS route_actuals (
-                       cell_a TEXT, cell_b TEXT, minutes REAL, cost_kobo REAL,
-                       n INTEGER, recorded_at REAL DEFAULT 0,
-                       PRIMARY KEY (cell_a, cell_b))""")
-            # Migration for DBs created before recorded_at existed.
-            try:
-                cols = [r[1] for r in self._db.execute(
-                    "PRAGMA table_info(route_actuals)").fetchall()]
-                if "recorded_at" not in cols:
-                    self._db.execute(
-                        "ALTER TABLE route_actuals ADD COLUMN recorded_at REAL DEFAULT 0")
-            except Exception as exc:  # noqa: BLE001
-                record_failure("route.cost_init_migration", exc)
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS route_globals (
-                       key TEXT PRIMARY KEY, value REAL)""")
-            self._db.commit()
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "planning-route", _DDL, _TABLES,
+                None if path == ":memory:" else path, store=store)
+            if port is not None:
+                port.ensure_imported(_port_writers(port))
+                self._port = port
+            else:
+                self._db = sqlite3.connect(path)
+                self._db.row_factory = sqlite3.Row
+                self._db.execute(_ACTUALS_DDL)
+                # Migration for DBs created before recorded_at existed.
+                try:
+                    cols = [r[1] for r in self._db.execute(
+                        "PRAGMA table_info(route_actuals)").fetchall()]
+                    if "recorded_at" not in cols:
+                        self._db.execute(
+                            "ALTER TABLE route_actuals ADD COLUMN recorded_at REAL DEFAULT 0")
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("route.cost_init_migration", exc)
+                self._db.execute(_GLOBALS_DDL)
+                self._db.commit()
         except Exception:  # noqa: BLE001 - a bad path is an empty model
             _log.warning("route: cost model db unavailable, memory-only",
                          exc_info=True)
             self._db = None
+            self._port = None
         self._speed_kmh = self._get_global("speed_kmh", _DEFAULT_SPEED_KMH)
         self._cost_per_km = self._get_global("cost_per_km_kobo",
                                             _DEFAULT_COST_PER_KM_KOBO)
@@ -312,7 +360,34 @@ class CostModel:
                 return False
             alpha = 0.35  # EMA weight for the new observation
             now = time.time()
-            if self._db is not None:
+            if self._port is not None:
+                # composite PK: the cell pair lives in the joined
+                # document id — the EMA update is a read-modify-write
+                # on that id, with the same freshness decay
+                table = self._port.tables["route_actuals"]
+                row = table.get(f"{ca}\x1f{cb}")
+                if row:
+                    try:
+                        age_days = max(
+                            0.0, (now - float(row["recorded_at"] or now))
+                            / 86400.0)
+                    except (TypeError, ValueError):
+                        age_days = 0.0
+                    w = min(0.85, alpha + age_days / 30.0 * 0.5)
+                    table.put({
+                        "cell_a": ca, "cell_b": cb,
+                        "minutes": float(row["minutes"]) * (1 - w)
+                                   + minutes * w,
+                        "cost_kobo": float(row["cost_kobo"]) * (1 - w)
+                                     + float(cost_kobo) * w,
+                        "n": int(row["n"] or 0) + 1,
+                        "recorded_at": now})
+                else:
+                    table.put({
+                        "cell_a": ca, "cell_b": cb, "minutes": minutes,
+                        "cost_kobo": float(cost_kobo), "n": 1,
+                        "recorded_at": now})
+            elif self._db is not None:
                 row = self._db.execute(
                     "SELECT minutes, cost_kobo, n, recorded_at FROM route_actuals "
                     "WHERE cell_a = ? AND cell_b = ?", (ca, cb)).fetchone()
@@ -381,10 +456,16 @@ class CostModel:
         return (ca, cb) if ca and cb else None
 
     def _learned(self, a: Stop, b: Stop) -> tuple[float, float] | None:
-        if self._db is None:
-            return None
         key = self._pair_key(a, b)
         if key is None:
+            return None
+        if self._port is not None:
+            row = self._port.tables["route_actuals"].get(
+                f"{key[0]}\x1f{key[1]}")
+            if row:
+                return float(row["minutes"]), float(row["cost_kobo"])
+            return None
+        if self._db is None:
             return None
         row = self._db.execute(
             "SELECT minutes, cost_kobo FROM route_actuals "
@@ -406,6 +487,9 @@ class CostModel:
 
     def _get_global(self, key: str, default: float) -> float:
         try:
+            if self._port is not None:
+                row = self._port.tables["route_globals"].get(key)
+                return float(row["value"]) if row else default
             if self._db is None:
                 return default
             row = self._db.execute(
@@ -417,6 +501,10 @@ class CostModel:
 
     def _set_global(self, key: str, value: float) -> None:
         try:
+            if self._port is not None:
+                self._port.tables["route_globals"].put(
+                    {"key": key, "value": float(value)})
+                return
             if self._db is None:
                 return
             self._db.execute(
@@ -430,7 +518,18 @@ class CostModel:
         """Learning summary: how much the model actually knows."""
         try:
             n = recent = 0
-            if self._db is not None:
+            if self._port is not None:
+                rows = self._port.tables["route_actuals"].all()
+                n = sum(int(r["n"] or 0) for r in rows)
+                try:
+                    cutoff = time.time() - 30 * 86400
+                    recent = sum(
+                        int(r["n"] or 0) for r in rows
+                        if float(r["recorded_at"] or 0) >= cutoff)
+                except Exception as exc:  # noqa: BLE001
+                    record_failure("route.stats_recent", exc)
+                    recent = n
+            elif self._db is not None:
                 row = self._db.execute(
                     "SELECT COUNT(*) AS c, SUM(n) AS s FROM route_actuals").fetchone()
                 n = int(row["s"] or 0) if row else 0
@@ -752,25 +851,51 @@ class RouteSolver:
 
 
 class RoutePlanner:
-    """Predict → Build → Solve in one place.  Owns stops + the cost model."""
+    """Predict → Build → Solve in one place.  Owns stops + the cost model.
+
+    With a resolved document store, stops persist through the same
+    planning-route seam port as the cost model (see CostModel): a
+    second port facade over the same namespaced collections — its
+    lazy import is the shared one-time import, already done.
+    """
 
     def __init__(self, db_path: str = "", *, profile: str = "",
-                 backend: str = "auto") -> None:
-        self.cost = CostModel(db_path=db_path, profile=profile)
+                 backend: str = "auto", store: Any = None) -> None:
+        self.cost = CostModel(db_path=db_path, profile=profile,
+                              store=store)
         self.solver = RouteSolver(backend, profile=profile)
         self.geo = GeoIndex()
         self._stops: dict[str, Stop] = {}
+        self._port: Any = None
         try:
             self._db_path = db_path or self.cost._default_path(profile)
-            if self._db_path != ":memory:":
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "planning-route", _DDL, _TABLES,
+                None if self._db_path == ":memory:" else self._db_path,
+                store=store)
+            if port is not None:
+                port.ensure_imported(_port_writers(port))
+                self._port = port
+                for row in port.tables["route_stops"].all():
+                    stop = Stop(row["stop_id"], row["label"], row["lat"],
+                                row["lng"], row["dwell_minutes"] or 15.0)
+                    try:
+                        ws = float(row["window_start"] or 0)
+                        we = float(row["window_end"] or 0)
+                        if ws > 0 and we > ws:
+                            stop.window = (ws, we)
+                    except (TypeError, ValueError, IndexError,
+                            KeyError) as exc:
+                        record_failure("route.planner_row_window", exc)
+                    self._stops[stop.stop_id] = stop
+                    if stop.has_coords():
+                        self.geo.add(stop.stop_id, stop.lat, stop.lng)
+            elif self._db_path != ":memory:":
                 db = sqlite3.connect(self._db_path)
                 db.row_factory = sqlite3.Row
-                db.execute(
-                    """CREATE TABLE IF NOT EXISTS route_stops (
-                           stop_id TEXT PRIMARY KEY, label TEXT, lat REAL,
-                           lng REAL, dwell_minutes REAL,
-                           window_start REAL DEFAULT 0,
-                           window_end REAL DEFAULT 0)""")
+                db.execute(_STOPS_DDL)
                 try:
                     cols = [r[1] for r in db.execute(
                         "PRAGMA table_info(route_stops)").fetchall()]
@@ -817,7 +942,12 @@ class RoutePlanner:
             if stop.has_coords():
                 self.geo.add(sid, lat, lng)
             try:
-                if self._db_path != ":memory:":
+                if self._port is not None:
+                    self._port.tables["route_stops"].put({
+                        "stop_id": sid, "label": label, "lat": lat,
+                        "lng": lng, "dwell_minutes": stop.dwell_minutes,
+                        "window_start": 0.0, "window_end": 0.0})
+                elif self._db_path != ":memory:":
                     db = sqlite3.connect(self._db_path)
                     db.execute(
                         "INSERT OR REPLACE INTO route_stops "
@@ -848,7 +978,11 @@ class RoutePlanner:
             if w1 <= w0:
                 w1 += _dt.timedelta(days=1)
             stop.window = (w0.timestamp(), w1.timestamp())
-            if self._db_path != ":memory:":
+            if self._port is not None:
+                self._port.tables["route_stops"].update(
+                    stop.stop_id, {"window_start": stop.window[0],
+                                   "window_end": stop.window[1]})
+            elif self._db_path != ":memory:":
                 db = sqlite3.connect(self._db_path)
                 db.execute(
                     "UPDATE route_stops SET window_start = ?, window_end = ? "

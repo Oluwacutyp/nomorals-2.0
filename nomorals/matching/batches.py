@@ -27,6 +27,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..core.logging_setup import get_logger
 
@@ -240,6 +241,27 @@ def explain_pick(candidate: Candidate,
 _DEFAULT_DB = os.path.expanduser("~/.nomorals/matching/batches.db")
 _DAY = 86400.0
 
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_CANDIDATES_DDL = """CREATE TABLE IF NOT EXISTS candidates (
+                       candidate_id TEXT PRIMARY KEY, surface TEXT,
+                       title TEXT, summary TEXT, tags TEXT,
+                       quality REAL, attributes TEXT)"""
+_BATCHES_DDL = """CREATE TABLE IF NOT EXISTS batches (
+                       id TEXT PRIMARY KEY, surface TEXT, owner TEXT,
+                       day TEXT, candidate_ids TEXT, created_at REAL)"""
+_SHOWN_DDL = """CREATE TABLE IF NOT EXISTS shown (
+                       surface TEXT, owner TEXT, candidate_id TEXT,
+                       shown_day TEXT,
+                       PRIMARY KEY (surface, owner, candidate_id))"""
+_FEEDBACK_DDL = """CREATE TABLE IF NOT EXISTS feedback (
+                       surface TEXT, owner TEXT, candidate_id TEXT,
+                       impressions INTEGER DEFAULT 0,
+                       likes INTEGER DEFAULT 0,
+                       PRIMARY KEY (surface, owner, candidate_id))"""
+_DDL = ";\n".join((_CANDIDATES_DDL, _BATCHES_DDL, _SHOWN_DDL,
+                   _FEEDBACK_DDL))
+
 
 class DailyBatchStore:
     """Persistent daily batches: stable all day, fresh tomorrow.
@@ -248,54 +270,78 @@ class DailyBatchStore:
     for the current UTC day, otherwise curates and stores a new one.
     Like/pass feedback trains future batches (Thompson exploration);
     every shown batch counts impressions. SQLite, never raises.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as matching-batches):
+    all four tables are documents in ``matching-batches__candidates``
+    / ``__batches`` / ``__shown`` / ``__feedback``; shown and feedback
+    are keyed by their composite (surface, owner, candidate_id)
+    primary key, whose parts live in the joined document id. The
+    file's existing rows are imported once, through the same mapping,
+    at first construction.
     """
 
-    def __init__(self, db_path: str = "") -> None:
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db = None
+        self._port: Any = None
         try:
             path = db_path or _DEFAULT_DB
             os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "matching-batches", _DDL,
+                ("batches", "candidates", "shown", "feedback"),
+                path, store=store)
+            if port is not None:
+                def _writer(table):
+                    def write(rows):
+                        for row in rows:
+                            table.put(row)
+                        return len(rows)
+                    return write
+
+                port.ensure_imported({
+                    name: _writer(port.tables[name])
+                    for name in ("batches", "candidates", "shown",
+                                 "feedback")})
+                self._port = port
+                return
             self._db = sqlite3.connect(path)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS candidates (
-                       candidate_id TEXT PRIMARY KEY, surface TEXT,
-                       title TEXT, summary TEXT, tags TEXT,
-                       quality REAL, attributes TEXT)"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS batches (
-                       id TEXT PRIMARY KEY, surface TEXT, owner TEXT,
-                       day TEXT, candidate_ids TEXT, created_at REAL)"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS shown (
-                       surface TEXT, owner TEXT, candidate_id TEXT,
-                       shown_day TEXT,
-                       PRIMARY KEY (surface, owner, candidate_id))"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS feedback (
-                       surface TEXT, owner TEXT, candidate_id TEXT,
-                       impressions INTEGER DEFAULT 0,
-                       likes INTEGER DEFAULT 0,
-                       PRIMARY KEY (surface, owner, candidate_id))"""
-            )
+            self._db.execute(_CANDIDATES_DDL)
+            self._db.execute(_BATCHES_DDL)
+            self._db.execute(_SHOWN_DDL)
+            self._db.execute(_FEEDBACK_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001 — a bad DB path is an empty store
             _log.warning("matching.batches: db unavailable, running empty",
                          exc_info=True)
             self._db = None
+            self._port = None
 
     # ── candidates ──────────────────────────────────────────────
 
     def add_candidate(self, candidate: Candidate, surface: str = "gig") -> bool:
         """Register a candidate for future batches. Never raises."""
         try:
-            if self._db is None or not candidate.candidate_id:
+            if (self._db is None and self._port is None) \
+                    or not candidate.candidate_id:
                 return False
             import json
 
+            if self._port is not None:
+                self._port.tables["candidates"].put({
+                    "candidate_id": candidate.candidate_id,
+                    "surface": surface or "gig",
+                    "title": candidate.title,
+                    "summary": candidate.summary,
+                    "tags": ",".join(candidate.tags),
+                    "quality": candidate.quality,
+                    "attributes": json.dumps(candidate.attributes or {}),
+                })
+                return True
             self._db.execute(
                 """INSERT OR REPLACE INTO candidates
                    (candidate_id, surface, title, summary, tags, quality,
@@ -316,9 +362,25 @@ class DailyBatchStore:
                          surface: str = "gig") -> bool:
         """Remove a candidate (and its feedback) from a surface."""
         try:
-            if self._db is None or not candidate_id:
+            if (self._db is None and self._port is None) \
+                    or not candidate_id:
                 return False
             surface = surface or "gig"
+            if self._port is not None:
+                gone = self._port.tables["candidates"].delete_where(
+                    {"candidate_id": candidate_id, "surface": surface})
+                # feedback's key is the composite (surface, owner,
+                # candidate_id): its parts live only in the joined
+                # document id, so the sweep scans restored rows and
+                # deletes by id — never a find on PK fields
+                feedback = self._port.tables["feedback"]
+                for r in feedback.all():
+                    if r["candidate_id"] == candidate_id \
+                            and r["surface"] == surface:
+                        feedback.delete("\x1f".join(
+                            (r["surface"], r["owner"],
+                             r["candidate_id"])))
+                return gone > 0
             cur = self._db.execute(
                 "DELETE FROM candidates WHERE candidate_id = ? AND surface = ?",
                 (candidate_id, surface))
@@ -335,13 +397,17 @@ class DailyBatchStore:
     def candidates(self, surface: str = "gig") -> list[Candidate]:
         """All registered candidates for a surface. Never raises."""
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
             import json
 
-            rows = self._db.execute(
-                "SELECT * FROM candidates WHERE surface = ?",
-                (surface or "gig",)).fetchall()
+            if self._port is not None:
+                rows = self._port.tables["candidates"].find(
+                    {"surface": surface or "gig"})
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM candidates WHERE surface = ?",
+                    (surface or "gig",)).fetchall()
             out = []
             for r in rows:
                 try:
@@ -366,8 +432,27 @@ class DailyBatchStore:
                         liked: bool) -> bool:
         """Like/pass on a shown candidate — trains future batches."""
         try:
-            if self._db is None or not candidate_id:
+            if (self._db is None and self._port is None) \
+                    or not candidate_id:
                 return False
+            if self._port is not None:
+                # composite PK: the (surface, owner, candidate_id)
+                # triple lives in the joined document id — the
+                # upsert is a read-modify-write on that id
+                table = self._port.tables["feedback"]
+                joined = "\x1f".join(
+                    (surface or "gig", owner or "owner", candidate_id))
+                row = table.get(joined)
+                table.put({
+                    "surface": surface or "gig",
+                    "owner": owner or "owner",
+                    "candidate_id": candidate_id,
+                    "impressions": (int(row["impressions"] or 0)
+                                    if row else 0) + 1,
+                    "likes": (int(row["likes"] or 0) if row else 0)
+                             + (1 if liked else 0),
+                })
+                return True
             self._db.execute(
                 """INSERT INTO feedback
                    (surface, owner, candidate_id, impressions, likes)
@@ -388,8 +473,18 @@ class DailyBatchStore:
                        owner: str) -> dict[str, tuple[int, int]]:
         """``{candidate_id: (likes, impressions)}``. Never raises."""
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return {}
+            if self._port is not None:
+                # surface/owner are composite-PK parts — they live
+                # only in the joined document id, so filter the
+                # restored rows here, never via find on PK fields
+                rows = [r for r in self._port.tables["feedback"].all()
+                        if r["surface"] == (surface or "gig")
+                        and r["owner"] == (owner or "owner")]
+                return {r["candidate_id"]: (int(r["likes"] or 0),
+                                            int(r["impressions"] or 0))
+                        for r in rows}
             rows = self._db.execute(
                 """SELECT candidate_id, likes, impressions FROM feedback
                    WHERE surface = ? AND owner = ?""",
@@ -405,6 +500,19 @@ class DailyBatchStore:
     def _bump_impressions(self, surface: str, owner: str,
                           batch: list[Candidate]) -> None:
         """A freshly shown batch counts impressions (that's what shown means)."""
+        if self._port is not None:
+            table = self._port.tables["feedback"]
+            for c in batch:
+                joined = "\x1f".join((surface, owner, c.candidate_id))
+                row = table.get(joined)
+                table.put({
+                    "surface": surface, "owner": owner,
+                    "candidate_id": c.candidate_id,
+                    "impressions": (int(row["impressions"] or 0)
+                                    if row else 0) + 1,
+                    "likes": int(row["likes"] or 0) if row else 0,
+                })
+            return
         for c in batch:
             self._db.execute(
                 """INSERT INTO feedback
@@ -438,15 +546,20 @@ class DailyBatchStore:
         slots for Thompson exploration over like/pass feedback.
         """
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
             surface = surface or "gig"
             owner = owner or "owner"
             day = time.strftime("%Y-%m-%d", time.gmtime(now))
-            row = self._db.execute(
-                """SELECT candidate_ids FROM batches
-                   WHERE surface = ? AND owner = ? AND day = ?""",
-                (surface, owner, day)).fetchone()
+            if self._port is not None:
+                found = self._port.tables["batches"].find(
+                    {"surface": surface, "owner": owner, "day": day})
+                row = found[0] if found else None
+            else:
+                row = self._db.execute(
+                    """SELECT candidate_ids FROM batches
+                       WHERE surface = ? AND owner = ? AND day = ?""",
+                    (surface, owner, day)).fetchone()
             if row and row["candidate_ids"]:
                 ids = [i for i in (row["candidate_ids"] or "").split(",") if i]
                 by_id = {c.candidate_id: c for c in self.candidates(surface)}
@@ -454,13 +567,22 @@ class DailyBatchStore:
             # Fresh batch: avoid candidates shown in the last 7 days.
             week_ago = time.strftime(
                 "%Y-%m-%d", time.gmtime((now or time.time()) - 7 * _DAY))
-            recent = {
-                r["candidate_id"]
-                for r in self._db.execute(
-                    """SELECT candidate_id FROM shown
-                       WHERE surface = ? AND owner = ? AND shown_day >= ?""",
-                    (surface, owner, week_ago)).fetchall()
-            }
+            if self._port is not None:
+                # shown's key is composite too — scan restored rows
+                recent = {
+                    r["candidate_id"]
+                    for r in self._port.tables["shown"].all()
+                    if r["surface"] == surface and r["owner"] == owner
+                    and (r["shown_day"] or "") >= week_ago
+                }
+            else:
+                recent = {
+                    r["candidate_id"]
+                    for r in self._db.execute(
+                        """SELECT candidate_id FROM shown
+                           WHERE surface = ? AND owner = ? AND shown_day >= ?""",
+                        (surface, owner, week_ago)).fetchall()
+                }
             pool = list(pool) if pool is not None else self.candidates(surface)
             stats = self.feedback_stats(surface, owner)
             batch = curate_daily(pool, preferences, n, exclude_ids=recent,
@@ -473,21 +595,36 @@ class DailyBatchStore:
                                      mmr_lambda=mmr_lambda,
                                      explore=explore, stats=stats, seed=seed)
             if batch:
-                self._db.execute(
-                    """INSERT OR REPLACE INTO batches
-                       (id, surface, owner, day, candidate_ids, created_at)
-                       VALUES (?, ?, ?, ?, ?, ?)""",
-                    ("b_" + uuid.uuid4().hex[:12], surface, owner, day,
-                     ",".join(c.candidate_id for c in batch),
-                     now or time.time()))
-                for c in batch:
+                if self._port is not None:
+                    self._port.tables["batches"].put({
+                        "id": "b_" + uuid.uuid4().hex[:12],
+                        "surface": surface, "owner": owner, "day": day,
+                        "candidate_ids": ",".join(
+                            c.candidate_id for c in batch),
+                        "created_at": now or time.time()})
+                    shown = self._port.tables["shown"]
+                    for c in batch:
+                        shown.put({
+                            "surface": surface, "owner": owner,
+                            "candidate_id": c.candidate_id,
+                            "shown_day": day})
+                else:
                     self._db.execute(
-                        """INSERT OR REPLACE INTO shown
-                           (surface, owner, candidate_id, shown_day)
-                           VALUES (?, ?, ?, ?)""",
-                        (surface, owner, c.candidate_id, day))
+                        """INSERT OR REPLACE INTO batches
+                           (id, surface, owner, day, candidate_ids, created_at)
+                           VALUES (?, ?, ?, ?, ?, ?)""",
+                        ("b_" + uuid.uuid4().hex[:12], surface, owner, day,
+                         ",".join(c.candidate_id for c in batch),
+                         now or time.time()))
+                    for c in batch:
+                        self._db.execute(
+                            """INSERT OR REPLACE INTO shown
+                               (surface, owner, candidate_id, shown_day)
+                               VALUES (?, ?, ?, ?)""",
+                            (surface, owner, c.candidate_id, day))
                 self._bump_impressions(surface, owner, batch)
-                self._db.commit()
+                if self._db is not None:
+                    self._db.commit()
             return batch
         except Exception:  # noqa: BLE001
             _log.warning("matching.batches: today failed", exc_info=True)
@@ -497,14 +634,22 @@ class DailyBatchStore:
                       limit: int = 7) -> list[tuple[str, list[str]]]:
         """Recent batches: ``[(day, [candidate_ids])]`` newest first."""
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
-            rows = self._db.execute(
-                """SELECT day, candidate_ids FROM batches
-                   WHERE surface = ? AND owner = ?
-                   ORDER BY day DESC LIMIT ?""",
-                (surface or "gig", owner or "owner",
-                 max(1, int(limit or 7)))).fetchall()
+            if self._port is not None:
+                rows = self._port.tables["batches"].find(
+                    {"surface": surface or "gig",
+                     "owner": owner or "owner"})
+                rows = sorted(
+                    rows, key=lambda r: r["day"] or "",
+                    reverse=True)[: max(1, int(limit or 7))]
+            else:
+                rows = self._db.execute(
+                    """SELECT day, candidate_ids FROM batches
+                       WHERE surface = ? AND owner = ?
+                       ORDER BY day DESC LIMIT ?""",
+                    (surface or "gig", owner or "owner",
+                     max(1, int(limit or 7)))).fetchall()
             return [(r["day"],
                      [i for i in (r["candidate_ids"] or "").split(",") if i])
                     for r in rows]

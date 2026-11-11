@@ -28,7 +28,12 @@ P5 settles the stores that live BESIDE the central database:
   residue Batch 2 slice-3 ports (email-integration,
   travel-whitelabel, social-whatsapp-cost, planning-estimates)
   follow the same pattern below — email with the cursor-continuity
-  case its registry entry demands.
+  case its registry entry demands. The residue Batch 2 slice-6
+  ports (matching-batches, os-timeline, planning-route) follow the
+  same pattern below — os-timeline with the search-disposition case
+  its registry entry demands: no split disposition, fts_available
+  honest on the seam, search served by a document scan whose result
+  set matches the FTS5 rung's.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -223,7 +228,9 @@ class TestSidecarRegistry:
             "digital-twin", "health-training", "legal-portfolio",
             "legal-regulatory",
             # residue Batch 1, A16 catch-up:
-            "travel-itinerary"}
+            "travel-itinerary",
+            # residue Batch 2, slice 6:
+            "matching-batches", "os-timeline", "planning-route"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -3211,3 +3218,424 @@ class TestTravelItineraryPort:
                                  store=rung.store)
         assert [t.id for t in again.list_trips()] == ["trip_kept"]
         assert rung.store.count("travel-itinerary__trips") == 1
+
+
+# ---------------------------------------------------------------------------
+# residue Batch 2, slice 6: matching-batches, os-timeline, planning-route
+# ---------------------------------------------------------------------------
+
+class TestMatchingBatchesPort:
+    """matching/batches.py — DailyBatchStore port (residue Batch 2,
+    slice 6): all four tables over the seam behind the unchanged
+    never-raises API; shown/feedback are composite-keyed child state
+    whose parts live in the joined document id — the feedback
+    upserts are read-modify-writes on that id, and the reads that
+    filter on key parts scan restored rows, never find on PK fields.
+    Helpers live on the class, per the slice-2 placement lesson."""
+
+    _NOW = 1_700_000_000.0  # 2023-11-14 (UTC)
+
+    def _scenario(self, store, path) -> dict:
+        import time
+
+        from nomorals.matching.batches import Candidate, DailyBatchStore
+
+        s = DailyBatchStore(str(path), store=store)
+        added = [
+            s.add_candidate(Candidate(
+                candidate_id="c1", title="Gig One", tags=("afrobeats",),
+                quality=0.9, attributes={"pay": 500})),
+            s.add_candidate(Candidate(
+                candidate_id="c2", title="Gig Two", tags=("jazz",),
+                quality=0.8)),
+            s.add_candidate(Candidate(
+                candidate_id="c3", title="Gig Three",
+                tags=("afrobeats", "live"), quality=0.7)),
+            s.add_candidate(Candidate(
+                candidate_id="c4", title="Gig Four", tags=("jazz",),
+                quality=0.6)),
+        ]
+        pool = sorted(
+            (c.candidate_id, c.title, c.quality, c.tags, c.attributes)
+            for c in s.candidates())
+        batch1 = [c.candidate_id for c in s.today(
+            now=self._NOW, preferences={"afrobeats": 2.0}, n=2,
+            explore=0.0, seed=7)]
+        again = [c.candidate_id for c in s.today(
+            now=self._NOW, n=2, explore=0.0)]
+        stats1 = sorted(s.feedback_stats("gig", "owner").items())
+        assert s.record_feedback("gig", "owner", "c1", True)
+        assert s.record_feedback("gig", "owner", "c2", False)
+        stats2 = sorted(s.feedback_stats("gig", "owner").items())
+        # next day: yesterday's shown pair is excluded by the
+        # 7-day no-repeat rule, so the batch must move on
+        batch2 = [c.candidate_id for c in s.today(
+            now=self._NOW + 86400.0, preferences={"afrobeats": 2.0},
+            n=2, explore=0.0, seed=7)]
+        history = s.batch_history()
+        removed = s.remove_candidate("c2")
+        removed_again = s.remove_candidate("c2")
+        day1 = time.strftime("%Y-%m-%d", time.gmtime(self._NOW))
+        day2 = time.strftime("%Y-%m-%d",
+                             time.gmtime(self._NOW + 86400.0))
+        return {
+            "added": added,
+            "pool": pool,
+            "batch1": batch1,
+            "again": again,
+            "stats1": stats1,
+            "stats2": stats2,
+            "batch2": batch2,
+            "history": history,
+            "day1": day1,
+            "day2": day2,
+            "removed": removed,
+            "removed_again": removed_again,
+            "pool_after": sorted(c.candidate_id
+                                 for c in s.candidates()),
+            "stats_after_remove": sorted(
+                s.feedback_stats("gig", "owner").items()),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        observed = self._scenario(rung.store, tmp_path / "b.db")
+        assert observed["added"] == [True, True, True, True]
+        assert observed["pool"] == [
+            ("c1", "Gig One", 0.9, ("afrobeats",), {"pay": 500}),
+            ("c2", "Gig Two", 0.8, ("jazz",), {}),
+            ("c3", "Gig Three", 0.7, ("afrobeats", "live"), {}),
+            ("c4", "Gig Four", 0.6, ("jazz",), {}),
+        ]
+        assert observed["batch1"] == ["c1", "c3"]
+        # the day's batch is stable: the stored one comes back
+        assert observed["again"] == ["c1", "c3"]
+        assert observed["stats1"] == [("c1", (0, 1)), ("c3", (0, 1))]
+        assert observed["stats2"] == [
+            ("c1", (1, 2)), ("c2", (0, 1)), ("c3", (0, 1))]
+        assert observed["batch2"] == ["c2", "c4"]
+        assert observed["history"] == [
+            (observed["day2"], ["c2", "c4"]),
+            (observed["day1"], ["c1", "c3"])]
+        assert observed["removed"] is True
+        assert observed["removed_again"] is False
+        assert observed["pool_after"] == ["c1", "c3", "c4"]
+        # remove_candidate swept c2's feedback row too
+        assert observed["stats_after_remove"] == [
+            ("c1", (1, 2)), ("c3", (0, 1)), ("c4", (0, 1))]
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.matching.batches import Candidate, DailyBatchStore
+
+        path = tmp_path / "b.db"
+        native = DailyBatchStore(str(path))
+        native.add_candidate(Candidate(
+            candidate_id="k1", title="Kept One", tags=("afrobeats",),
+            quality=0.9, attributes={"pay": 500}))
+        native.add_candidate(Candidate(
+            candidate_id="k2", title="Kept Two", tags=("jazz",),
+            quality=0.8))
+        native.today(now=self._NOW, preferences={"afrobeats": 2.0},
+                     n=1, explore=0.0, seed=7)
+        native.record_feedback("gig", "owner", "k1", True)
+
+        seam = DailyBatchStore(str(path), store=rung.store)
+        assert rung.store.count("matching-batches__candidates") == 2
+        assert rung.store.count("matching-batches__batches") == 1
+        assert rung.store.count("matching-batches__shown") == 1
+        assert rung.store.count("matching-batches__feedback") == 1
+        # the composite key lives in the joined document id
+        doc = rung.store.get("matching-batches__feedback",
+                             "gig\x1fowner\x1fk1")
+        assert doc is not None
+        assert doc["impressions"] == 2 and doc["likes"] == 1
+        # the imported batch is the day's batch on the seam too
+        assert [c.candidate_id for c in seam.today(
+            now=self._NOW, n=1, explore=0.0)] == ["k1"]
+        assert seam.feedback_stats("gig", "owner") == {"k1": (1, 2)}
+        # learning continues on the seam, on the imported rows
+        assert seam.record_feedback("gig", "owner", "k1", False)
+        assert seam.feedback_stats("gig", "owner") == {"k1": (1, 3)}
+        again = DailyBatchStore(str(path), store=rung.store)
+        assert rung.store.count("matching-batches__candidates") == 2
+        assert again.feedback_stats("gig", "owner") == {"k1": (1, 3)}
+
+
+class TestOsTimelinePort:
+    """os/timeline.py — Timeline port (residue Batch 2, slice 6):
+    the append-only event log as documents behind the unchanged
+    API. THE SEARCH DISPOSITION is pinned here, not just stated:
+    fts_available is True on the native rung (real FTS5) and False
+    on the seam rungs — honestly, there is no FTS5 index there —
+    while search() returns the same result SET on every rung,
+    served on the seam by a document scan. A split disposition
+    (seam log, FTS reading the fossil file) would fail the second
+    half of the seam-shape test: an event recorded on the seam,
+    never written to the file, must be findable. Helpers live on
+    the class, per the slice-2 placement lesson."""
+
+    @staticmethod
+    def _event(event_id, topic, ts, data):
+        return SimpleNamespace(event_id=event_id, topic=topic, ts=ts,
+                               source="p5-test", data=data)
+
+    def _corpus(self, tl) -> None:
+        tl.record(self._event("e1", "mission.transition", 1000.0,
+                              {"mission_id": "m1",
+                               "note": "alpha started"}))
+        tl.record(self._event("e2", "mission.verify", 1001.0,
+                              {"mission_id": "m1", "verdict": "pass",
+                               "details": "alpha checks"}))
+        tl.record(self._event("e3", "session.created", 1002.0,
+                              {"session_id": "s1", "frontend": "cli"}))
+        tl.record(self._event("e4", "artifact.created", 1003.0,
+                              {"artifact_id": "a1",
+                               "uri": "artifact://a1",
+                               "mission_id": "m1"}))
+        tl.record(self._event("e5", "task.done", 1004.0,
+                              {"note": "beta finished",
+                               "session_id": "s1"}))
+
+    @staticmethod
+    def _ids(rows) -> list:
+        return sorted(r["event_id"] for r in rows)
+
+    def _scenario(self, tl) -> dict:
+        self._corpus(tl)
+        out = {
+            "fts_available": tl.fts_available,
+            "all_topics": [r["topic"] for r in tl.query(limit=100)],
+            "by_mission": [r["topic"]
+                           for r in tl.query(mission_id="m1",
+                                             limit=100)],
+            "glob": sorted(r["topic"]
+                           for r in tl.query(topic="mission.*",
+                                             limit=100)),
+            "since": len(tl.query(since=1002.0, limit=100)),
+            "search_alpha": self._ids(tl.search("alpha")),
+            "search_phrase": self._ids(tl.search('"alpha started"')),
+            "search_or": self._ids(tl.search("beta OR verdict")),
+            "search_prefix": self._ids(tl.search("miss*")),
+            "counts": tl.topic_counts(),
+            "stats": tl.stats(),
+        }
+        out["pruned_keep"] = tl.prune_keep_latest(2)
+        out["after_keep"] = [r["event_id"] for r in tl.query(limit=100)]
+        out["pruned_old"] = tl.prune_older_than(1003.0)
+        out["after_old"] = [r["event_id"] for r in tl.query(limit=100)]
+        return out
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.os.timeline import Timeline
+
+        tl = Timeline(str(tmp_path / "tl.db"), store=rung.store)
+        try:
+            observed = self._scenario(tl)
+        finally:
+            tl.close()
+        # the honesty pin: FTS5 exists only on the native rung
+        assert observed["fts_available"] is (rung.store is None)
+        assert observed["all_topics"] == [
+            "task.done", "artifact.created", "session.created",
+            "mission.verify", "mission.transition"]
+        assert observed["by_mission"] == [
+            "artifact.created", "mission.verify", "mission.transition"]
+        assert observed["glob"] == [
+            "mission.transition", "mission.verify"]
+        assert observed["since"] == 3
+        # identical search RESULT SETS on every rung — the bar the
+        # disposition is held to (mechanism differs, results don't)
+        assert observed["search_alpha"] == ["e1", "e2"]
+        assert observed["search_phrase"] == ["e1"]
+        assert observed["search_or"] == ["e2", "e5"]
+        assert observed["search_prefix"] == ["e1", "e2", "e4"]
+        assert observed["counts"] == [
+            ("artifact.created", 1), ("mission.transition", 1),
+            ("mission.verify", 1), ("session.created", 1),
+            ("task.done", 1)]
+        stats = observed["stats"]
+        assert stats["events"] == 5 and stats["topics"] == 5
+        assert stats["span_from"] == 1000.0
+        assert stats["span_to"] == 1004.0
+        assert stats["fts_available"] is (rung.store is None)
+        assert observed["pruned_keep"] == 3
+        assert observed["after_keep"] == ["e5", "e4"]
+        assert observed["pruned_old"] == 1
+        assert observed["after_old"] == ["e5"]
+
+    def test_export_import_round_trip(self, rung, tmp_path):
+        from nomorals.os.timeline import Timeline
+
+        tl = Timeline(str(tmp_path / "tl.db"), store=rung.store)
+        try:
+            self._corpus(tl)
+            dump = tmp_path / "dump.jsonl"
+            assert tl.export_jsonl(dump) == 5
+            # re-import upserts by event_id: nothing duplicates
+            assert tl.import_jsonl(dump) == 5
+            assert tl.stats()["events"] == 5
+        finally:
+            tl.close()
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.os.timeline import Timeline
+
+        path = str(tmp_path / "tl.db")
+        native = Timeline(path)
+        self._corpus(native)
+        native.close()
+
+        seam = Timeline(path, store=rung.store)
+        try:
+            assert rung.store.count("os-timeline__event_log") == 5
+            doc = rung.store.get("os-timeline__event_log", "e1")
+            assert doc is not None and doc["topic"] == \
+                "mission.transition"
+            assert "alpha started" in doc["data_json"]
+            # honest on the seam: no FTS5 index exists there
+            assert seam.fts_available is False
+            # imported events are searchable through the scan
+            assert self._ids(seam.search("alpha")) == ["e1", "e2"]
+            # an event recorded ON THE SEAM — never in the fossil
+            # file — is searchable too: the disposition does not split
+            seam.record(self._event(
+                "e6", "task.done", 1005.0,
+                {"note": "zephyr uniqueoneseam"}))
+            assert self._ids(seam.search("uniqueoneseam")) == ["e6"]
+            assert seam.stats()["events"] == 6
+        finally:
+            seam.close()
+        again = Timeline(path, store=rung.store)
+        try:
+            assert rung.store.count("os-timeline__event_log") == 6
+            assert again.stats()["events"] == 6
+        finally:
+            again.close()
+
+
+class TestPlanningRoutePort:
+    """planning/route.py — CostModel + RoutePlanner port (residue
+    Batch 2, slice 6): the module's four raw connect sites are one
+    store — both classes build a port facade over the same
+    namespaced collections. The route_globals rollups port as-is
+    (served, never re-derived); route_actuals' freshness-decayed
+    EMA re-expresses as a read-modify-write on the joined
+    (cell_a, cell_b) document id. Helpers live on the class, per
+    the slice-2 placement lesson."""
+
+    @staticmethod
+    def _pair():
+        from nomorals.planning.route import Stop
+
+        return (Stop("a", "Alpha", 6.50, 3.20),
+                Stop("b", "Beta", 6.60, 3.30))
+
+    def _scenario(self, store, path) -> dict:
+        from nomorals.planning.route import CostModel, RoutePlanner, Stop
+
+        a, b = self._pair()
+        cm = CostModel(str(path), store=store)
+        recorded = [cm.record_actual(a, b, 30.0, 5000),
+                    cm.record_actual(a, b, 40.0, 6000)]
+        learned = cm._learned(a, b)
+        detail = cm.estimate_detail(a, b)
+        unknown = cm.estimate_detail(
+            Stop("c", "Gamma", 9.0, 9.0), Stop("d", "Delta", 9.5, 9.5))
+        stats = cm.stats()
+        out = {
+            "recorded": recorded,
+            "learned": (round(learned[0], 3), round(learned[1], 3)),
+            "detail": (round(detail[0], 3), detail[1], detail[2]),
+            "unknown_source": unknown[2],
+            "trips": stats["recorded_trips"],
+            "recent": stats["recent_trips_30d"],
+            "source": stats["source"],
+            "speed": stats["speed_kmh"],
+            "speed_global": round(
+                cm._get_global("speed_kmh", -1.0), 6),
+        }
+        rp = RoutePlanner(str(path), store=store)
+        s1 = rp.add_stop("Market", lat=6.51, lng=3.21,
+                         dwell_minutes=20)
+        rp.add_stop("Office", lat=6.61, lng=3.31)
+        out["window_set"] = rp.set_window("Market", "09:00", "17:00")
+        out["stop_id_shape"] = bool(
+            s1 and s1.stop_id.startswith("stop_"))
+        # a fresh planner over the same store sees the persisted
+        # registry — stops, windows and the learned model alike
+        rp2 = RoutePlanner(str(path), store=store)
+        market = rp2.find_stop("market")
+        out["labels"] = sorted(s.label for s in rp2.list_stops())
+        out["dwell"] = market.dwell_minutes if market else None
+        out["window_hours"] = (
+            round((market.window[1] - market.window[0]) / 3600.0, 3)
+            if market and market.window else None)
+        out["trips_via_planner"] = rp2.record_trip(a, b, 50.0, 7000)
+        out["trips_after"] = rp2.cost.stats()["recorded_trips"]
+        learned2 = rp2.cost._learned(a, b)
+        out["learned_after"] = (round(learned2[0], 3),
+                                 round(learned2[1], 3))
+        return out
+
+    def test_conformance(self, rung, tmp_path):
+        observed = self._scenario(rung.store, tmp_path / "route.db")
+        assert observed["recorded"] == [True, True]
+        # freshness-decayed EMA, w=0.35 on a fresh pair:
+        # minutes 30 -> 30*.65 + 40*.35 = 33.5; cost likewise 5350
+        assert observed["learned"] == (33.5, 5350.0)
+        assert observed["detail"] == (33.5, 5350, "learned")
+        assert observed["unknown_source"] == "heuristic"
+        assert observed["trips"] == 2
+        assert observed["recent"] == 2
+        assert observed["source"] == "learned"
+        # the learned speed is a STORED rollup: the global the model
+        # reports is the global it persisted, on every rung
+        assert observed["speed"] == round(observed["speed_global"], 1)
+        assert observed["labels"] == ["Market", "Office"]
+        assert observed["stop_id_shape"] is True
+        assert observed["window_set"] is True
+        assert observed["dwell"] == 20.0
+        assert observed["window_hours"] == 8.0
+        assert observed["trips_via_planner"] is True
+        assert observed["trips_after"] == 3
+        # third observation: 33.5*.65 + 50*.35 = 39.275; cost 5927.5
+        assert observed["learned_after"] == (39.275, 5927.5)
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.planning.route import CostModel, RoutePlanner
+
+        a, b = self._pair()
+        path = str(tmp_path / "route.db")
+        native = CostModel(path)
+        assert native.record_actual(a, b, 30.0, 5000)
+        native_planner = RoutePlanner(path)
+        native_planner.add_stop("Market", lat=6.51, lng=3.21,
+                                dwell_minutes=20)
+
+        seam = CostModel(path, store=rung.store)
+        assert rung.store.count("planning-route__route_actuals") == 1
+        # speed + cost-per-km rollups were learned and stored natively
+        assert rung.store.count("planning-route__route_globals") == 2
+        assert rung.store.count("planning-route__route_stops") == 1
+        doc = rung.store.get("planning-route__route_globals",
+                             "speed_kmh")
+        assert doc is not None
+        assert doc["value"] == pytest.approx(
+            native._get_global("speed_kmh", -1.0))
+        # the imported actual is served as-is, learning continues
+        assert seam._learned(a, b) == (30.0, 5000.0)
+        assert seam.record_actual(a, b, 40.0, 6000)
+        doc = rung.store.get("planning-route__route_actuals",
+                             seam._pair_key(a, b)[0] + "\x1f"
+                             + seam._pair_key(a, b)[1])
+        assert doc is not None and doc["n"] == 2
+        seam_planner = RoutePlanner(path, store=rung.store)
+        assert [s.label for s in seam_planner.list_stops()] == ["Market"]
+        again = CostModel(path, store=rung.store)
+        assert rung.store.count("planning-route__route_actuals") == 1
+        assert again.stats()["recorded_trips"] == 2

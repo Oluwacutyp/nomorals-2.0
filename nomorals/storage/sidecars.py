@@ -1155,6 +1155,65 @@ _register(_S(
 ))
 
 _register(_S(
+    name="matching-batches", verdict="ported", kind="sqlite-file",
+    modules=("matching/batches.py",),
+    tables=("batches", "candidates", "shown", "feedback"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 6): "
+        "DailyBatchStore's four tables route through the seam "
+        "(matching-batches__candidates / __batches / __shown / "
+        "__feedback) whenever a store is resolved, behind its "
+        "unchanged never-raises API. Shown and feedback are keyed "
+        "by their composite (surface, owner, candidate_id) primary "
+        "key — the parts live in the joined document id, and the "
+        "feedback upserts re-express as read-modify-writes on that "
+        "id. The native sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="os-timeline", verdict="ported", kind="sqlite-file",
+    modules=("os/timeline.py",),
+    tables=("event_log",),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 6): the "
+        "persistent event log routes through the seam "
+        "(os-timeline__event_log) whenever a store is resolved, "
+        "behind its unchanged API; events are append-only documents "
+        "and query's filters/ordering re-express over seam finds "
+        "(ts descending; the native rowid tiebreak has no seam "
+        "equivalent). SEARCH DISPOSITION, stated plainly: no split "
+        "— a seam-written log with FTS search reading the fossil "
+        "file would go silently stale, so on the seam rung there "
+        "is no FTS5 index, fts_available reports False honestly, "
+        "and search() is served by a document scan evaluating the "
+        "same query subset (ANDed terms, phrases, OR groups, "
+        "prefix*) with the same result set; the native rung keeps "
+        "real FTS5 and its RuntimeError when FTS5 is unavailable. "
+        "The FTS5 shadow table, the indexes and the envelope-column "
+        "ALTER backfill stay native-path concerns. The native "
+        "sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="planning-route", verdict="ported", kind="sqlite-file",
+    modules=("planning/route.py",),
+    tables=("route_stops", "route_actuals", "route_globals"),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (slice 6): "
+        "CostModel and RoutePlanner — the module's four raw connect "
+        "sites — are one store: all three tables route through the "
+        "seam (planning-route__route_actuals / __route_globals / "
+        "__route_stops) whenever a store is resolved, behind their "
+        "unchanged APIs. The route_globals are stored rollups and "
+        "port as-is — served, never re-derived; route_actuals' "
+        "freshness-decayed EMA re-expresses as a read-modify-write "
+        "on the joined (cell_a, cell_b) document id. The in-file "
+        "ALTER migrations (recorded_at, window columns) stay "
+        "native-path concerns. The native sqlite3 path serves the "
+        "SQLite default."),
+))
+
+_register(_S(
     name="health-timeline", verdict="residue", kind="database-file",
     modules=("health/timeline.py",),
     anchors=(("health/timeline.py", "timeline.db"),),
@@ -1240,16 +1299,9 @@ _residue("marketing-send", "marketing/send.py",
          "contains a QUEUE (send_queue) whose claim semantics need "
          "the P4 fencing treatment, so this port is a coordination "
          "port, not a plain CRUD port.")
-_residue("matching-batches", "matching/batches.py",
-         ("batches", "candidates", "shown", "feedback"),
-         "matching batches with shown/feedback state.")
 _residue("matching-questionnaire", "matching/questionnaire.py",
          ("answers", "ranks", "dealbreakers", "capacities"),
          "matching questionnaire answers and rankings.")
-_residue("os-timeline", "os/timeline.py", ("event_log",),
-         "the persistent event timeline: an append-only event log "
-         "written by an EventBus subscriber — append-mostly and "
-         "document-shaped; it ports with the os domain.")
 _residue("people", "people/store.py",
          ("persons", "notes", "links", "gifts", "obligations"),
          "the people store: five tables with JOIN-shaped reads "
@@ -1268,9 +1320,6 @@ _residue("planning-graph", "planning/graph.py",
          "nodes/edges; its port follows the graph story (the kg "
          "tables' disposition in carry.PORT_RESIDUE), not the "
          "document-fit pattern.")
-_residue("planning-route", "planning/route.py",
-         ("route_stops", "route_actuals", "route_globals"),
-         "route plans, actuals and global stats.")
 _residue("property-passport", "property/passport.py",
          ("passports", "history", "refs", "doc_refs"),
          "property passports and their history in passport.db.")
