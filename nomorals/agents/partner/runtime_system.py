@@ -1837,7 +1837,12 @@ class RuntimeSystemMixin:
                 lines.append("…and " + str(len(ideas) - 15) + " more")
             lines.append("grow one: /ideas develop <#> — the raw "
                          "words never change")
-            return "\n".join(lines)
+            # Presentation Phase 3 remainder: a leaderboard
+            # Card framing the board's own lines verbatim.
+            from ...social.chat.typography import card_for_text
+
+            return card_for_text("\n".join(lines), "leaderboard",
+                                 title="Ideas")
 
         if verb in ("", "list"):
             text = _board()
@@ -1890,6 +1895,13 @@ class RuntimeSystemMixin:
             all_ideas = run_sync(tracker.list_ideas(user, limit=100))
             pos = next((n for n, i in enumerate(all_ideas, start=1)
                         if i.idea_id == idea.idea_id), None)
+            # Presentation Phase 3 remainder: the detail is a
+            # briefing Card framing the record's own lines.
+            from ...social.chat.typography import card_for_text
+
+            body = card_for_text(
+                body, "briefing",
+                title=f"Idea #{pos}" if pos is not None else "Idea")
             if pos is None:
                 return body
             from ...social.chat.tgbot_buttons import actionable, grid_layout
@@ -1934,7 +1946,12 @@ class RuntimeSystemMixin:
                     mission_store=MissionStore(self.context.db))
             except (KeyError, ValueError) as exc:
                 return "couldn't develop that idea: " + str(exc)
-            return render_record(record)
+            # Presentation Phase 3 remainder: the developed
+            # record is a briefing Card framing its own lines.
+            from ...social.chat.typography import card_for_text
+
+            return card_for_text(render_record(record), "briefing",
+                                 title="Idea development")
         return ("usage: /ideas [list] | add <title> [| <detail>] | "
                 "show <#> | develop <#> [as goal|draft|mission|park] "
                 "[in <class>] [when <trigger>]")
@@ -2179,6 +2196,14 @@ class RuntimeSystemMixin:
                 text += ("\n\nopen one: /drafts show <n> · post it: "
                          "/drafts post <n> · discard: "
                          "/drafts discard <n>")
+                # Presentation Phase 3 remainder: a leaderboard
+                # Card framing the batch's own lines verbatim.
+                # The empty answer above stays a plain honest
+                # line — no board exists to frame.
+                from ...social.chat.typography import card_for_text
+
+                text = card_for_text(text, "leaderboard",
+                                     title="Drafts")
                 from ...social.chat.tgbot_buttons import actionable, grid_layout
                 buttons = []
                 for i, d in enumerate(drafts[:8], 1):
@@ -2227,6 +2252,13 @@ class RuntimeSystemMixin:
                         buttons = review_buttons(draft)
                     text += (f"\n\nor type: /drafts post {idx} · "
                              f"/drafts discard {idx}")
+                    # Presentation Phase 3 remainder: the draft
+                    # card is a briefing Card framing its own
+                    # lines verbatim.
+                    from ...social.chat.typography import card_for_text
+
+                    text = card_for_text(text, "briefing",
+                                         title=f"Draft #{idx}")
                     return actionable(text, grid_layout([buttons]))
             else:
                 return ("usage: /drafts [list] | show <n> | post <n> | "
@@ -2291,6 +2323,14 @@ class RuntimeSystemMixin:
             text = render_day(self.context, day,
                               tracker=self._goal_tracker(),
                               artifact_store=self._artifact_store())
+            # Presentation Phase 3 remainder: the day is a
+            # briefing Card framing the record's own lines
+            # verbatim (render_day is shared with the record
+            # itself, so the wrap stays at this call site).
+            from ...social.chat.typography import card_for_text
+
+            text = card_for_text(text, "briefing",
+                                 title=f"Day — {day}")
             from ...social.chat.tgbot_buttons import actionable, grid_layout
             buttons: list[tuple[str, str]] = [
                 ("✍️ Make drafts", f"day make {day}")]
@@ -2441,6 +2481,12 @@ class RuntimeSystemMixin:
             if not text or low == "list":
                 board = render_calendar(db, queue, shorts=_shorts(),
                                         store=store)
+                # Presentation Phase 3 remainder: a leaderboard
+                # Card framing the calendar's own lines verbatim.
+                from ...social.chat.typography import card_for_text
+
+                board = card_for_text(board, "leaderboard",
+                                      title="Calendar")
                 buttons = _series_buttons()
                 if not buttons:
                     return board
@@ -2459,12 +2505,19 @@ class RuntimeSystemMixin:
                     lines.append(
                         f"  • **{s['name']}**{obj} —"
                         f" {len(members)} piece(s)")
+                # Presentation Phase 3 remainder: a leaderboard
+                # Card framing the list's own lines verbatim.
+                # The empty answer above stays a plain honest
+                # line — no board exists to frame.
+                from ...social.chat.typography import card_for_text
+
+                text = card_for_text("\n".join(lines), "leaderboard",
+                                     title="Series")
                 buttons = _series_buttons()
                 if not buttons:
-                    return "\n".join(lines)
+                    return text
                 from ...social.chat.tgbot_buttons import actionable, grid_layout
-                return actionable("\n".join(lines),
-                                  grid_layout([buttons]))
+                return actionable(text, grid_layout([buttons]))
             if low.startswith("series "):
                 name = text[len("series "):].strip()
                 s = _series_named(name)
@@ -2481,7 +2534,12 @@ class RuntimeSystemMixin:
                     label = self._calendar_piece_label(
                         m, queue=queue, shorts=_shorts(), db=db)
                     lines.append(f"  {i}. {label}")
-                return "\n".join(lines)
+                # Presentation Phase 3 remainder: a leaderboard
+                # Card framing the series' own lines verbatim.
+                from ...social.chat.typography import card_for_text
+
+                return card_for_text("\n".join(lines), "leaderboard",
+                                     title=f"Series — {s['name']}")
             if low.startswith("new "):
                 body = text[len("new "):].strip()
                 name, _, objective = body.partition("|")
@@ -2664,11 +2722,16 @@ class RuntimeSystemMixin:
                         ("📔 Day → thread", "repurpose day thread"))
                     buttons.append(
                         ("📔 Day → post", "repurpose day post"))
+                # Presentation Phase 3 remainder: a leaderboard
+                # Card framing the board's own lines verbatim.
+                from ...social.chat.typography import card_for_text
+
+                text = card_for_text("\n".join(lines), "leaderboard",
+                                     title="Repurpose")
                 if not buttons:
-                    return "\n".join(lines)
+                    return text
                 from ...social.chat.tgbot_buttons import actionable, grid_layout
-                return actionable("\n".join(lines),
-                                  grid_layout([buttons]))
+                return actionable(text, grid_layout([buttons]))
             parts = text.split()
             head = parts[0].lower()
             if head == "post" and len(parts) == 3:
@@ -2776,6 +2839,12 @@ class RuntimeSystemMixin:
                 except Exception:  # noqa: BLE001 - board stands alone
                     truth = None
                 text = render_board(store, truth=truth)
+                # Presentation Phase 3 remainder: a leaderboard
+                # Card framing the board's own lines verbatim.
+                from ...social.chat.typography import card_for_text
+
+                text = card_for_text(text, "leaderboard",
+                                     title="Engage")
                 from ...social.chat.tgbot_buttons import actionable, grid_layout
                 buttons: list[tuple[str, str]] = []
                 for idx in range(1, min(len(items), 10) + 1):
@@ -2811,7 +2880,13 @@ class RuntimeSystemMixin:
                     if item["state"] == STATE_NEW:
                         store.set_state(item["id"], STATE_TRIAGED)
                         item = store.get(item["id"]) or item
-                    return render_item(item, idx)
+                    # Presentation Phase 3 remainder: the item
+                    # is a briefing Card framing its own lines.
+                    from ...social.chat.typography import card_for_text
+
+                    return card_for_text(render_item(item, idx),
+                                         "briefing",
+                                         title=f"Engagement #{idx}")
                 if verb == "ignore":
                     store.set_state(item["id"], STATE_IGNORED)
                     author = item.get("author") or "that item"
@@ -2911,6 +2986,11 @@ class RuntimeSystemMixin:
 
         if verb in ("list", ""):
             text = render_case_board(store)
+            # Presentation Phase 3 remainder: a leaderboard
+            # Card framing the board's own lines verbatim.
+            from ...social.chat.typography import card_for_text
+
+            text = card_for_text(text, "leaderboard", title="Cases")
             from ...social.chat.tgbot_buttons import actionable, grid_layout
             from ..outcome_steward import ack_changed, ack_snapshot
             buttons: list[tuple[str, str]] = []
@@ -2932,17 +3012,30 @@ class RuntimeSystemMixin:
                                         else verb)
             if case is None:
                 return err
-            return detail(case)
+            # Presentation Phase 3 remainder: the case is a
+            # briefing Card framing the detail's own lines.
+            from ...social.chat.typography import card_for_text
+
+            return card_for_text(detail(case), "briefing",
+                                 title=f"Case — {case.subject}")
         if verb == "verify":
             case, err = resolve_ordinal(rest)
             if case is None:
                 return err
             if case.state in ("resolved", "closed-unknown"):
-                return (f"that case is already closed ({case.state}"
+                head = (f"that case is already closed ({case.state}"
                         f"{', verdict ' + case.verdict if case.state == 'resolved' else ''})"
                         " — a closed-unknown case reopens on its own "
                         "when the work is seen again; nothing to "
-                        "re-check by hand.\n" + detail(case))
+                        "re-check by hand.")
+                # Presentation Phase 3 remainder: the verdict
+                # rides as the briefing Card's first paragraph,
+                # the detail verbatim beneath it.
+                from ...social.chat.typography import card_for_text
+
+                return card_for_text(
+                    head + "\n" + detail(case), "briefing",
+                    title=f"Case — {case.subject}")
             result = OutcomeSteward(db).run_case(case.id)
             outcome = result.get("outcome", "")
             if outcome == "resolved":
@@ -2956,7 +3049,14 @@ class RuntimeSystemMixin:
                 shown = outcome or "incomplete"
                 head = (f"re-check ran — outcome: {shown}; the case "
                         "stays open")
-            return head + "\n" + detail(store.get(case.id))
+            # Presentation Phase 3 remainder: the verdict rides
+            # as the briefing Card's first paragraph, the detail
+            # verbatim beneath it.
+            from ...social.chat.typography import card_for_text
+
+            return card_for_text(
+                head + "\n" + detail(store.get(case.id)), "briefing",
+                title=f"Case — {case.subject}")
         if verb == "ack":
             case, err = resolve_ordinal(rest)
             if case is None:
@@ -3087,6 +3187,13 @@ class RuntimeSystemMixin:
 
         if verb in ("list", ""):
             text = render_board(board)
+            # Presentation Phase 3 remainder: a leaderboard
+            # Card framing the board's own lines verbatim —
+            # including the empty board, whose head still
+            # frames a message.
+            from ...social.chat.typography import card_for_text
+
+            text = card_for_text(text, "leaderboard", title="Runs")
             if not rows:
                 return text
             from ...social.chat.tgbot_buttons import actionable, grid_layout
@@ -3101,12 +3208,22 @@ class RuntimeSystemMixin:
                          f"runs stop {row['ordinal']}"))
             return actionable(text, grid_layout([buttons]))
         if verb == "coverage":
-            return render_coverage(board)
+            # Presentation Phase 3 remainder: the coverage
+            # view is a briefing Card framing its own lines.
+            from ...social.chat.typography import card_for_text
+
+            return card_for_text(render_coverage(board), "briefing",
+                                 title="Runs coverage")
         if verb == "show" or verb.isdigit():
             row, err = resolve_ordinal(rest if verb == "show" else verb)
             if row is None:
                 return err
-            return render_ticket(row)
+            # Presentation Phase 3 remainder: the ticket is a
+            # briefing Card framing its own lines verbatim.
+            from ...social.chat.typography import card_for_text
+
+            return card_for_text(render_ticket(row), "briefing",
+                                 title=f"Ticket #{row['ordinal']}")
         if verb == "stop":
             sub = rest.split(None, 1)
             row, err = resolve_ordinal(sub[0] if sub else "")
@@ -3196,8 +3313,21 @@ class RuntimeSystemMixin:
         world = default_world(self.context)
         topic = (tail or "").strip()
         if topic:
-            return render_topic(world, topic)
+            # Presentation Phase 3 remainder: the topic is a
+            # briefing Card framing the view's own lines.
+            from ...social.chat.typography import card_for_text
+
+            return card_for_text(render_topic(world, topic),
+                                 "briefing",
+                                 title=f"World model — {topic}")
         text = render_world(world)
+        # Presentation Phase 3 remainder: a leaderboard Card
+        # framing the board's own lines verbatim — including
+        # the empty board, whose head still frames a message.
+        from ...social.chat.typography import card_for_text
+
+        text = card_for_text(text, "leaderboard",
+                             title="World model")
         facts = world.facts()
         if not facts:
             return text
@@ -3296,6 +3426,13 @@ class RuntimeSystemMixin:
             report = coverage_report(db, library=library,
                                      grants=grants)
             text = render_board(report)
+            # Presentation Phase 3 remainder: a leaderboard
+            # Card framing the board's own lines verbatim —
+            # including the empty board, whose head still
+            # frames a message.
+            from ...social.chat.typography import card_for_text
+
+            text = card_for_text(text, "leaderboard", title="Craft")
             if not report.domains:
                 return text
             from ...social.chat.tgbot_buttons import actionable, check_callback_data, grid_layout
@@ -3310,16 +3447,26 @@ class RuntimeSystemMixin:
                 buttons.append((f"🔧 {row.title[:18]}", payload))
             return actionable(text, grid_layout([buttons]))
         if verb == "coverage":
-            return render_coverage(coverage_report(
-                db, library=library, grants=grants))
+            # Presentation Phase 3 remainder: the coverage
+            # view is a briefing Card framing its own lines.
+            from ...social.chat.typography import card_for_text
+
+            return card_for_text(render_coverage(coverage_report(
+                db, library=library, grants=grants)), "briefing",
+                title="Craft coverage")
         if verb == "status":
             if not rest:
                 return ("usage: /craft status <field> — one "
                         "field's capability claim, read from its "
                         "records: a live pack, a temporary grant, "
                         "or unmade with the reason named")
-            return render_capability_status(capability_status(
-                library, rest, grants=grants))
+            # Presentation Phase 3 remainder: the capability
+            # claim is a briefing Card framing its own lines.
+            from ...social.chat.typography import card_for_text
+
+            return card_for_text(render_capability_status(
+                capability_status(library, rest, grants=grants)),
+                "briefing", title=f"Craft — {rest}")
         if verb == "intake":
             if not rest:
                 return ("usage: /craft intake <goal> — a "
@@ -3400,6 +3547,14 @@ class RuntimeSystemMixin:
                  "owner, domain, global")
         if verb in ("", "board"):
             text = self._glossary_board(store)
+            # Presentation Phase 3 remainder: a leaderboard
+            # Card framing the board's own lines verbatim
+            # (_glossary_board is the shared builder; the wrap
+            # stays at this call site).
+            from ...social.chat.typography import card_for_text
+
+            text = card_for_text(text, "leaderboard",
+                                 title="Translation glossaries")
             from ...social.chat.tgbot_buttons import actionable, check_callback_data, grid_layout
             buttons: list[tuple[str, str]] = []
             for gid in store.glossary_ids():
@@ -3531,6 +3686,14 @@ class RuntimeSystemMixin:
             if len(buttons) >= 12:
                 break
         text = "\n".join(lines)
+        # Presentation Phase 3 remainder: a leaderboard Card
+        # framing the list's own lines verbatim.  The empty
+        # answers above stay plain honest lines — no list
+        # exists to frame.
+        from ...social.chat.typography import card_for_text
+
+        text = card_for_text(text, "leaderboard",
+                             title="Glossary entries")
         if not buttons:
             return text
         return actionable(text, grid_layout([buttons]))
@@ -3694,13 +3857,20 @@ class RuntimeSystemMixin:
                 goal, preset=preset, pack=pack,
                 domain=row.domain if row is not None else "")
         except ComposerError as exc:
+            # A refusal stays a plain line — it is not a board.
             return str(exc)
         text = render_intake(plan, row, pack=pack)
-        return (text + "\npreview only — this composed the plan "
+        text = (text + "\npreview only — this composed the plan "
                 "and read the gate's verdicts; it opened no "
                 "contract, settled nothing and ran nothing. "
                 "Execution stays with the surfaces that run work "
                 "(/mission, /delegate).")
+        # Presentation Phase 3 remainder: the intake preview
+        # is a briefing Card framing its own lines verbatim.
+        from ...social.chat.typography import card_for_text
+
+        return card_for_text(text, "briefing",
+                             title="Craft intake")
 
     def _desk_bundle_hook(self) -> Any:
         """The gateway's inbound-artifact hook (WS3 P7): when a

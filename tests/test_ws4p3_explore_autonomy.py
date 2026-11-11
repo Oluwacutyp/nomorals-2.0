@@ -66,6 +66,13 @@ from nomorals.media.explore.trends import current_claims, evaluate_trends
 from nomorals.storage.db import Database
 from nomorals.tools.registry import ToolRegistry
 
+
+def _text(reply):
+    """A board render's text — boards return actionable replies
+    since button lane 5; read the text half here."""
+    return reply.text if hasattr(reply, "text") else reply
+
+
 LAGOS = ZoneInfo("Africa/Lagos")
 
 
@@ -485,7 +492,7 @@ def test_control_explore_board_and_usage(monkeypatch):
     surface = RuntimeMediaMixin()
     surface.context = _ctx()
     surface._scheduler = None
-    board_text = surface._control_explore("")
+    board_text = _text(surface._control_explore(""))
     assert "Exploration" in board_text
     assert PROXY_DEPENDENCY_LINE in board_text
     trends_text = surface._control_explore("trends")

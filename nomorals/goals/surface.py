@@ -226,15 +226,34 @@ def render_classes() -> str:
 
 
 def render_briefing(tracker: GoalTracker, user_id: str) -> str:
-    """GoalTracker's get_briefing — its first production caller."""
-    return run_sync(tracker.get_briefing(user_id))
+    """GoalTracker's get_briefing — its first production caller.
+
+    Presentation Phase 3 remainder: a briefing-class Card
+    framing the tracker's own lines verbatim (the tracker owns
+    the formatting; this surface owns the presentation).  The
+    empty answer stays a plain honest line — no board exists
+    to frame."""
+    text = run_sync(tracker.get_briefing(user_id))
+    if not text.strip() or text.strip() == "No active goals.":
+        return text
+    from ..social.chat.typography import card_for_text
+
+    return card_for_text(text, "briefing",
+                         title="Goals — progress briefing")
 
 
 def render_review(tracker: GoalTracker, user_id: str, *,
                   now: float | None = None) -> str:
-    """GoalTracker's weekly_review, formatted by its own formatter."""
+    """GoalTracker's weekly_review, formatted by its own formatter.
+
+    Presentation Phase 3 remainder: a briefing-class Card
+    framing the tracker's own lines verbatim."""
     review = run_sync(tracker.weekly_review(user_id, now=now))
-    return tracker.format_weekly_review(review)
+    text = tracker.format_weekly_review(review)
+    from ..social.chat.typography import card_for_text
+
+    return card_for_text(text, "briefing",
+                         title="Goals — weekly review")
 
 
 def render_focus(tracker: GoalTracker, user_id: str, *,

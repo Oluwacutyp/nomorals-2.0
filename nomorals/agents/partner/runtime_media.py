@@ -1339,17 +1339,31 @@ class RuntimeMediaMixin:
 
         words = (tail or "").strip().split()
         verb = words[0].lower() if words else ""
+        # Presentation Phase 3 remainder: every explore view is
+        # a Card framing the board module's own lines verbatim
+        # (the board module is shared with the durable jobs, so
+        # the wrap stays at this call site).
+        from ...social.chat.typography import card_for_text
+
         if verb == "run":
             cycle = run_sweep_cycle(self.context, manual=True)
-            return explore_board.render_sweep_cycle(cycle)
+            return card_for_text(
+                explore_board.render_sweep_cycle(cycle), "briefing",
+                title="Explore sweep")
         if verb == "trends":
-            return explore_board.render_explore_trends(self.context)
+            return card_for_text(
+                explore_board.render_explore_trends(self.context),
+                "briefing", title="Explore trends")
         if verb == "candidates":
-            return explore_board.render_explore_candidates(
-                self.context)
+            return card_for_text(
+                explore_board.render_explore_candidates(
+                    self.context),
+                "briefing", title="Explore candidates")
         if verb == "niches":
             rendered = explore_board.render_explore_niches(
                 self.context)
+            rendered = card_for_text(rendered, "briefing",
+                                     title="Explore niches")
             from ...media.explore.niches import proposal_board_order
 
             store = explore_board.resolve_store(self.context)
@@ -1375,12 +1389,20 @@ class RuntimeMediaMixin:
             store = explore_board.resolve_store(self.context)
             act = (explore_niches.adopt_niche if verb == "adopt"
                    else explore_niches.dismiss_niche)
-            return explore_board.render_niche_act(act(store, ref),
-                                                  verb)
+            result = act(store, ref)
+            rendered = explore_board.render_niche_act(result, verb)
+            if not result.get("ok"):
+                # A refused act stays a plain line — it is not
+                # a board.
+                return rendered
+            return card_for_text(rendered, "briefing",
+                                 title=f"Niche {verb}ed")
         if verb == "":
             rendered = explore_board.render_explore_board(
                 self.context,
                 scheduler=getattr(self, "_scheduler", None))
+            rendered = card_for_text(rendered, "leaderboard",
+                                     title="Explore")
             from ...social.chat.tgbot_buttons import actionable, grid_layout
             buttons = [("▶️ Run sweep", "explore run"),
                        ("📈 Trends", "explore trends"),

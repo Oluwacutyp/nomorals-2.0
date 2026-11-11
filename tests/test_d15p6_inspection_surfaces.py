@@ -38,6 +38,12 @@ from nomorals.core.jobs import JobRegistry
 from nomorals.missions.mission import Mission, MissionStatus, MissionStore
 from nomorals.storage.db import Database
 
+
+def _text(reply):
+    """A board render's text — boards return actionable replies
+    since button lane 5; read the text half here."""
+    return reply.text if hasattr(reply, "text") else reply
+
 # ── harness (P2/P3 shapes) ────────────────────────────────────────────
 
 
@@ -150,7 +156,7 @@ class NotifySurfaceTests(unittest.TestCase):
 
     def test_decisions_board_and_coverage(self):
         self._publish_deploy()
-        board = self.runtime._control_notify("decisions")
+        board = _text(self.runtime._control_notify("decisions"))
         self.assertIn("paged you", board)
         self.assertIn("deploy", board)
         coverage = self.runtime._control_notify("coverage")
@@ -177,7 +183,7 @@ class NotifySurfaceTests(unittest.TestCase):
         self.assertIn("suppressed", text)
         self.assertIn("unchanged tick", text)
         self.assertIn("never sent", text)
-        board = self.runtime._control_notify("decisions")
+        board = _text(self.runtime._control_notify("decisions"))
         self.assertIn("suppressed", board)
 
     def test_why_for_directly_stored_row_is_honest(self):
@@ -207,7 +213,7 @@ class CasesSurfaceTests(unittest.TestCase):
 
     def test_board_and_show_render_evidence_without_ids(self):
         case = self._open_mission_case()
-        board = self.runtime._control_cases("")
+        board = _text(self.runtime._control_cases(""))
         self.assertIn("render the report", board)
         self.assertIn("outcome unknown", board)
         self.assertNotIn(case.id, board)
@@ -252,7 +258,7 @@ class CasesSurfaceTests(unittest.TestCase):
         still = self.steward.cases.get(case.id)
         self.assertEqual(still.state, "open")
         # The board parks it in the quiet tail.
-        board = self.runtime._control_cases("")
+        board = _text(self.runtime._control_cases(""))
         self.assertIn("acknowledged (quiet unless they change)",
                       board)
         # A material change re-surfaces it: an explicit verify runs
@@ -261,7 +267,7 @@ class CasesSurfaceTests(unittest.TestCase):
         self.steward.run_case(case.id)
         moved = self.steward.cases.get(case.id)
         self.assertTrue(ack_changed(moved))
-        board = self.runtime._control_cases("")
+        board = _text(self.runtime._control_cases(""))
         self.assertNotIn("acknowledged (quiet unless they change)",
                          board)
         self.assertIn("closed-unknown", board)

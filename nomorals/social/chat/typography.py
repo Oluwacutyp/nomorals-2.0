@@ -675,6 +675,33 @@ def card_text(card: Card, *,
     return text
 
 
+def card_for_text(text: Any, surface_class: Any, *,
+                  title: str = "") -> str:
+    """Frame helper-produced text as a Card (presentation Phase
+    3 remainder): the boards whose lines a helper module assembles
+    (drafts, day, calendar, engage, cases, runs, worldmodel,
+    craft, glossary, explore, the goals briefing/review) are
+    presented at the control boundary without touching the helper
+    — its text rides verbatim, one block per paragraph, so the
+    helper's own section breaks survive as card sections under
+    the card title.  Empty text stays empty: a Card never
+    manufactures a message out of silence."""
+    body = str(text or "")
+    if not body.strip():
+        return body
+    card = Card(surface_class, title=title)
+    para: list[str] = []
+    for line in body.splitlines():
+        if line.strip():
+            para.append(line)
+        elif para:
+            card.block_lines(para, title="")
+            para = []
+    if para:
+        card.block_lines(para, title="")
+    return card_text(card)
+
+
 # ── shared one-line compositions ─────────────────────────────────
 
 def moderation_warning(mention: str, rule_text: str,
