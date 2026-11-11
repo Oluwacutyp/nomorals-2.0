@@ -14,6 +14,12 @@ Ledger REUSED: nomorals/property/failures.py (same package —
 read-only for pins; no record call, no import added to the target,
 which contains no record_failure call at all).
 
+Isolation: every test redirects the ledger's store with the app's
+own ``NM_HOME`` override (per-test tmp home) and clears the ring —
+the package's own idiom (test_property_passport_failures.py) — so
+``recent_failures()`` here reads this test's ledger, never the live
+home's, and no run of this file can write the live one.
+
 Each test pins the degraded behavior AND the NOT-recording property
 (ledger empty after the trigger). No bare ``except: pass`` anywhere
 in this file — the scanner counts test files too; the tests below
@@ -25,6 +31,8 @@ import os
 import tempfile
 from types import SimpleNamespace
 from unittest import mock
+
+import pytest
 
 from nomorals.property import failures as pf
 from nomorals.property import value as V
@@ -38,6 +46,19 @@ from nomorals.property.value import (
     pick_comps,
     seed_comp_source,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    pf.clear_failures()
+    yield
+    # Re-pin before the teardown clear: a test may have deleted
+    # NM_HOME mid-test, and clear_failures() resolves the store
+    # path at call time — it must still land on the tmp home,
+    # never unlink the live home's ledger.
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    pf.clear_failures()
 
 
 def _silent():
@@ -161,7 +182,9 @@ class _GetOkSaveBoomStore:
 def test_466_pick_survives_save_failure():
     # Same best-effort persistence: the refinement is returned; a
     # later lookup miss surfaces honestly via pick_comps' None path.
-    base = estimate_value("2br flat in Surulere")
+    base = estimate_value(
+        "2br flat in Surulere",
+        store=ValueStore(os.path.join(tempfile.mkdtemp(), "v.db")))
     assert base.comps
     refined = pick_comps(base.id, ["1", "2"],
                          store=_GetOkSaveBoomStore(base))

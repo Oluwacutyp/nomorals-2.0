@@ -35,6 +35,12 @@ def _isolated_home(tmp_path, monkeypatch):
     monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
     pf.clear_failures()
     yield
+    # Re-pin before the teardown clear: a test may have deleted
+    # NM_HOME mid-test (the home-resolution pins below do), and
+    # clear_failures() resolves the store path at call time — it
+    # must still land on the tmp home, never unlink the live
+    # home's ledger.
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
     pf.clear_failures()
 
 

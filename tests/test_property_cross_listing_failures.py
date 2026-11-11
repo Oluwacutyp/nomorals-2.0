@@ -11,7 +11,10 @@ cross_listing.py calls no failures-ledger record function
 anywhere (grep-proven; its non-site _load/_save handlers log
 via _log.debug instead), so NOT-recording is pinned against
 the property package ledger (nomorals/property/failures.py):
-recent_failures() snapshot before/after every trigger.
+recent_failures() snapshot before/after every trigger, taken
+under the package's NM_HOME isolation idiom (per-test tmp home +
+clear_failures), so the snapshots are this file's own ledger,
+never the live home's.
 
 Verdict notes (full grounds in the tail-60 SURVEY.md):
 - 66: normalize_address failure -> ""; "" is the genuine
@@ -40,8 +43,22 @@ Verdict notes (full grounds in the tail-60 SURVEY.md):
 
 from unittest import mock
 
+import pytest
+
 import nomorals.property.cross_listing as CL
-from nomorals.property.failures import recent_failures
+from nomorals.property.failures import clear_failures, recent_failures
+
+
+@pytest.fixture(autouse=True)
+def _isolated_home(tmp_path, monkeypatch):
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    clear_failures()
+    yield
+    # Re-pin before the teardown clear: clear_failures() resolves
+    # the store path at call time — it must still land on the tmp
+    # home, never unlink the live home's ledger.
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    clear_failures()
 
 
 def _snap():
