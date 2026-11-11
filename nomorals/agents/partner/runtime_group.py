@@ -4466,10 +4466,18 @@ class RuntimeGroupMixin:
         return on_step, finish, fail
 
     def _webshot_deliver(self, message, data: bytes, *,
-                         caption: str, pdf: bool) -> str:
+                         caption: str, pdf: bool,
+                         audience: str = "") -> str:
         """Write the shot beside the social data and send it
         as a file (photo for images — the gateway renders by
-        kind) with its caption.  Returns the path sent."""
+        kind) with its caption.  Returns the path sent.
+
+        ``audience="public"`` classifies the shot as bound for
+        a public surface: the gateway's send seam then burns
+        the designed brand pill into a derived copy (the file
+        written here is never mutated).  The default "" sends
+        byte-historically — a personal surface's shot is never
+        marked."""
         import time as _time
         from pathlib import Path
 
@@ -4492,10 +4500,15 @@ class RuntimeGroupMixin:
                               expected_format="pdf" if pdf else "png")
         if not acc.ok:
             raise ValueError(f"capture rejected: {acc.reason}")
+        extra: dict = {}
+        if audience == "public":
+            # only a public-classified delivery changes the
+            # call shape; every other send is byte-historical.
+            extra["audience"] = "public"
         self.gateway.send_file(
             message.chat.platform, str(message.chat.key),
             str(path), caption=caption,
-            kind="" if pdf else "image")
+            kind="" if pdf else "image", **extra)
         return str(path)
 
     def _control_webshot(self, tail, message):  # type: ignore[no-untyped-def]
@@ -4592,33 +4605,41 @@ class RuntimeGroupMixin:
                     options=options_line + (
                         f" · {result.presentation}"
                         if result.presentation else ""))
-        # §19's media mark, from the one presentation home:
-        # the destination group's settings in a group, the
-        # house defaults + the owner's mark in DM.
+        # §19's media mark still RESOLVES from the one
+        # presentation home (the destination group's settings
+        # in a group, the house defaults + the owner's mark in
+        # DM) — it decides WHETHER this surface marks at all.
+        # The FORM is the designed treatment (Fix 4, audience
+        # tails): a marked image bound for a public surface
+        # carries the corner pill, burned at the gateway send
+        # seam from the delivery's audience classification —
+        # never a caption-text stamp, never an in-band stamp.
+        # The caption is a caption again in every mode.  A PDF
+        # capture is not a Devon-rendered document: it keeps
+        # the §19 caption signature exactly as before.
         settings = surface.store.settings(key) if key else None
         registry = self._owner_registry()
         mark = resolve_media_mark(settings, "announcement",
                                   mark_text=registry.mark_text())
         data = result.data
-        if mark.image and not result.pdf:
-            from ...social.chat.owner_system import \
-                apply_media_watermark
-
-            data, applied = apply_media_watermark(
-                data, mark.image_text)
-            if applied:
-                book.record(url=url, ok=True, rung="watermark",
-                            size=len(data), scope=scope,
-                            requester=requester,
-                            options=f"image stamp · {mark.mode}")
+        marked = bool(mark.image or mark.text)
+        audience = ""
+        if marked and key is not None and not result.pdf:
+            audience = "public"
+            book.record(url=url, ok=True, rung="watermark",
+                        size=len(data), scope=scope,
+                        requester=requester,
+                        options=f"brand pill · send seam · "
+                                f"{mark.mode}")
         title = result.title or url
         caption = f"🌐 {title}\n{url}"
-        if mark.text:
+        if result.pdf and mark.text:
             caption += f"\n{mark.text}"
         try:
             self._webshot_deliver(message, data,
                                   caption=caption,
-                                  pdf=result.pdf)
+                                  pdf=result.pdf,
+                                  audience=audience)
         except Exception as exc:  # noqa: BLE001 - the shot is
             return (f"📸 shot {url} ({len(data)} bytes via "
                     f"{result.rung}) but the send failed: "
@@ -4682,7 +4703,6 @@ class RuntimeGroupMixin:
 
         from ...social.chat import webnav as nav_organ
         from ...social.chat import webshot as shot_organ
-        from ...social.chat.typography import resolve_media_mark
 
         if message is None:
             return ("webrec answers with a video in a live "
@@ -4748,18 +4768,17 @@ class RuntimeGroupMixin:
                         f" · {outcome.nav.presentation}"
                         if outcome.nav
                         and outcome.nav.presentation else ""))
-        settings = surface.store.settings(key) if key else None
-        registry = self._owner_registry()
-        mark = resolve_media_mark(settings, "announcement",
-                                  mark_text=registry.mark_text())
         title = (outcome.nav.title if outcome.nav else "") \
             or url
         caption = f"🎬 {title}\n{url}"
         if outcome.includes_clearing:
             caption += ("\n🚪 the opening frames include the "
                         "gate clearing")
-        if mark.text:
-            caption += f"\n{mark.text}"
+        # No caption-text stamp (Fix 4, audience tails): the
+        # §19 caption signature that used to ride here is
+        # replaced by the designed treatment — and no send
+        # seam burns a mark into video, so a recording's
+        # caption is simply a caption again, on every surface.
         from urllib.parse import urlsplit
 
         host = urlsplit(url).hostname or "page"
@@ -4913,8 +4932,16 @@ class RuntimeGroupMixin:
                                      "webshot watch", caption):
                     continue
             try:
-                self._webshot_deliver(probe, result.data,
-                                      caption=caption, pdf=False)
+                # A watch alert landing in a group scope is a
+                # public-surface image: it rides the same
+                # designed treatment as an interactive shot
+                # (the pill at the send seam); a DM scope is
+                # the owner's own — personal, unmarked.
+                self._webshot_deliver(
+                    probe, result.data,
+                    caption=caption, pdf=False,
+                    audience="public"
+                    if scope in surface.store.data else "")
             except Exception:  # noqa: BLE001 - one bad alert
                 _log.debug("webshot watch alert send failed",
                            exc_info=True)

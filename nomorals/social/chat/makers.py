@@ -2087,7 +2087,16 @@ class MakerService:
         return out
 
     # -- removebg -----------------------------------------------
-    def removebg(self, data: bytes, *, send) -> dict[str, Any]:
+    def removebg(self, data: bytes, *, send,
+                 audience: str = "") -> dict[str, Any]:
+        """Cut the background out + deliver.  ``audience`` is
+        the artifact's public/personal classification, carried
+        on the MediaRef exactly as :meth:`card` carries it: the
+        runtime passes "public" when the cutout is made in a
+        group chat (the send seam then burns the brand mark
+        in), "personal" in the owner's own DM.  The cutout
+        bytes at rest are never marked — the mark is a property
+        of the send."""
         if (self.remover is None and not rembg_available()
                 and not self.ensure_rembg_fn()):
             return {"sent": False, "reason": (
@@ -2102,12 +2111,22 @@ class MakerService:
         except MakerError as exc:
             return {"sent": False, "reason": str(exc)}
         out = self._deliver(png, ".png", "image/png",
-                            "✂️ background removed", send)
+                            "✂️ background removed", send,
+                            audience=audience)
         out["model"] = model
         return out
 
     # -- qr -------------------------------------------------------
-    def qr_make(self, text: str, *, send) -> dict[str, Any]:
+    def qr_make(self, text: str, *, send,
+                audience: str = "") -> dict[str, Any]:
+        """Make a QR code + deliver it.  ``audience`` is the
+        artifact's public/personal classification, carried on
+        the MediaRef exactly as :meth:`card` carries it: the
+        runtime passes "public" when the code is made in a
+        group chat (the send seam then burns the brand mark
+        in), "personal" in the owner's own DM.  The code's
+        bytes at rest are never marked — the mark is a property
+        of the send."""
         if (self.qr_lib is None and not qrcode_available()
                 and not self.ensure_qrcode_fn()):
             return {"sent": False, "reason": (
@@ -2120,7 +2139,8 @@ class MakerService:
             return {"sent": False, "reason": str(exc)}
         return self._deliver(png, ".png", "image/png",
                              _trim_caption(str(text).strip(),
-                                           200), send)
+                                           200), send,
+                             audience=audience)
 
     def qr_read(self, data: bytes) -> dict[str, Any]:
         try:
@@ -2182,7 +2202,8 @@ class MakerService:
     # -- couplepp ---------------------------------------------------
     def _deliver_pair(self, left_png: bytes, right_png: bytes,
                       first_caption: str, second_caption: str,
-                      send, buttons=None) -> dict[str, Any]:
+                      send, buttons=None,
+                      audience: str = "") -> dict[str, Any]:
         """Deliver a matched pair as TWO separate photos —
         the delivery-shape law: each half is its own picture,
         settable as a profile photo the moment it lands.  The
@@ -2202,7 +2223,8 @@ class MakerService:
                  with_buttons: bool, label: str = "") -> Any:
             ref = MediaRef(path=str(path), mime="image/png",
                            kind="image",
-                           name=f"couple pp {label}.png")
+                           name=f"couple pp {label}.png",
+                           audience=audience)
             if with_buttons and buttons:
                 try:
                     return send(ref, caption, buttons=buttons)
@@ -2232,7 +2254,16 @@ class MakerService:
                 "incomplete, try again")}
         return {"sent": True, "parts": 2}
 
-    def couplepp(self, *, send, buttons=None) -> dict[str, Any]:
+    def couplepp(self, *, send, buttons=None,
+                 audience: str = "") -> dict[str, Any]:
+        """Deliver a matched pair.  ``audience`` is the pair's
+        public/personal classification, carried on BOTH halves'
+        MediaRefs exactly as :meth:`card` carries it: the
+        runtime passes "public" when the pair is made in a
+        group chat (the send seam then burns the brand mark
+        into each half), "personal" in the owner's own DM.
+        The halves at rest are never marked — the mark is a
+        property of the send."""
         last = ""
         providers = list(self.chains.get("couplepp") or [])
         # The chain is a pool, not a queue: shuffle the walk
@@ -2281,7 +2312,7 @@ class MakerService:
                     "💞 and the right half — for the other (2 of 2). "
                     "Each half is its own picture: set it as your "
                     "profile photo just as it is",
-                    send, buttons=buttons)
+                    send, buttons=buttons, audience=audience)
                 out.update({"source": name, **info})
                 return out
         # Her own hand (expression completion, 2026-11-07):
@@ -2315,6 +2346,6 @@ class MakerService:
             "💞 and the right half — for the other (2 of 2). "
             "Each half is its own picture: set it as your "
             "profile photo just as it is",
-            send, buttons=buttons)
+            send, buttons=buttons, audience=audience)
         out.update({"source": "self:render", **info})
         return out

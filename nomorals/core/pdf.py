@@ -184,21 +184,38 @@ def _num(value: float) -> str:
     return f"{value:.4f}".rstrip("0").rstrip(".")
 
 
+def _watermark_placements(mark: BrandMark, *, page_width: int,
+                          page_height: int
+                          ) -> tuple[float, float, list]:
+    """The tiled diagonal geometry BOTH PDF writers share:
+    (cos, sin, [(x, y), ...]) — one placement per watermark
+    row, the text's start point after the 32° rotation about
+    the page-centre anchor.  ``render_pdf`` shows the text as
+    a WinAnsi literal; ``render_pdf_embedded`` shows the same
+    text as embedded-font glyphs — the placement math is one
+    home so the two paths can never drift apart."""
+    angle = math.radians(_WATERMARK_ANGLE_DEG)
+    cos_a, sin_a = math.cos(angle), math.sin(angle)
+    # Helvetica advances average ~0.52 em for mixed-case brand text
+    text_w = len(mark.text) * _WATERMARK_SIZE * 0.52
+    points = []
+    for frac in _WATERMARK_ROWS:
+        cx, cy = page_width / 2, page_height * frac
+        points.append((cx - (text_w / 2) * cos_a,
+                       cy - (text_w / 2) * sin_a))
+    return cos_a, sin_a, points
+
+
 def _watermark_ops(mark: BrandMark, *, page_width: int,
                    page_height: int) -> str:
     """The watermark op block for one page (empty for no mark)."""
     text = _pdf_escape(_to_pdf_text(mark.text))
     if not text:
         return ""
-    angle = math.radians(_WATERMARK_ANGLE_DEG)
-    cos_a, sin_a = math.cos(angle), math.sin(angle)
-    # Helvetica advances average ~0.52 em for mixed-case brand text
-    text_w = len(mark.text) * _WATERMARK_SIZE * 0.52
+    cos_a, sin_a, points = _watermark_placements(
+        mark, page_width=page_width, page_height=page_height)
     ops = ["q /GSW gs"]
-    for frac in _WATERMARK_ROWS:
-        cx, cy = page_width / 2, page_height * frac
-        x = cx - (text_w / 2) * cos_a
-        y = cy - (text_w / 2) * sin_a
+    for x, y in points:
         ops.append(
             f"BT /F1 {_WATERMARK_SIZE} Tf {_WATERMARK_GRAY:.2f} g "
             f"{_num(cos_a)} {_num(sin_a)} {_num(-sin_a)} {_num(cos_a)} "
@@ -206,6 +223,32 @@ def _watermark_ops(mark: BrandMark, *, page_width: int,
         )
     ops.append("Q")
     return "\n".join(ops)
+
+
+def _watermark_ops_embedded(mark: BrandMark, glyphs: bytes, *,
+                            page_width: int,
+                            page_height: int) -> bytes:
+    """The same watermark block for the embedded-font writer:
+    identical geometry, alpha and tiling as :func:`_watermark_ops`,
+    but the text is shown as Identity-H glyph ids (a hex string)
+    because the page's F1 is the subsetted TrueType face, not
+    Helvetica.  Empty when the font carries none of the mark's
+    glyphs — the caller then omits the ExtGState entirely,
+    exactly as the WinAnsi path omits an unshowable mark."""
+    if not glyphs:
+        return b""
+    cos_a, sin_a, points = _watermark_placements(
+        mark, page_width=page_width, page_height=page_height)
+    hex_text = glyphs.hex().encode("ascii")
+    ops = [b"q /GSW gs"]
+    for x, y in points:
+        ops.append(
+            f"BT /F1 {_WATERMARK_SIZE} Tf {_WATERMARK_GRAY:.2f} g "
+            f"{_num(cos_a)} {_num(sin_a)} {_num(-sin_a)} "
+            f"{_num(cos_a)} {x:.1f} {y:.1f} Tm <".encode("ascii")
+            + hex_text + b"> Tj ET")
+    ops.append(b"Q")
+    return b"\n".join(ops)
 
 
 def _extgstate_body(mark: BrandMark) -> bytes:
@@ -1690,6 +1733,7 @@ def render_pdf_embedded(
     footer: str = "",
     headings: bool = False,
     metadata: dict | None = None,
+    watermark: BrandMark | str | None = None,
 ) -> bytes:
     """Render ``text`` to PDF with a subsetted TrueType font embedded.
 
@@ -1701,11 +1745,23 @@ def render_pdf_embedded(
 
     Layout is the plain/structured block model of :func:`render_pdf`
     with one face: headings scale the same font (no synthetic bold).
+
+    ``watermark`` draws the designed brand watermark on EVERY page,
+    under the content, with the same geometry, alpha and tiling as
+    :func:`render_pdf` — a :class:`~nomorals.core.branding.BrandMark`
+    (resolve one from a policy with
+    :func:`~nomorals.core.branding.resolve_brand_mark`), or a plain
+    string for its text.  The mark's glyphs join the subset, so the
+    mark renders in the embedded face and extracts through the
+    /ToUnicode CMap like any other text.  ``None`` (the default)
+    draws no mark — producers of public-bound PDFs pass the
+    resolved mark; personal documents simply don't.
     Raises :class:`PdfError` for a bad page size, empty text, or a
     font that is not subsettable TrueType.
     """
     if page_size not in {"A4", "Letter"}:
         raise PdfError(f"unknown page size {page_size!r}; use A4 or Letter")
+    mark = _coerce_watermark(watermark)
     text = (text or "").strip()
     if not text:
         raise PdfError("refusing to render an empty PDF")
@@ -1731,10 +1787,14 @@ def render_pdf_embedded(
     if not footer:
         footer = f"{title} — page N — {now}"
 
-    # Which codepoints does the document actually use?
+    # Which codepoints does the document actually use?  The
+    # watermark's text joins the coverage set: its glyphs must
+    # be in the subset or the mark could not be drawn (the
+    # subset is built from exactly this set).
     used: dict[int, int] = {}
     all_text = ("\n".join(t for _k, t in blocks) + header + footer + title
-                + "0123456789")
+                + "0123456789"
+                + (mark.text if mark is not None else ""))
     for ch in all_text:
         cp = ord(ch)
         if cp in font.cmap:
@@ -1771,20 +1831,39 @@ def render_pdf_embedded(
     widths = {new: font.width1000(old)
               for new, old in enumerate(sorted(keep))}
 
+    # The watermark block (identical on every page): drawn FIRST
+    # in each page's content stream, under the content, when a
+    # mark is owed and the embedded face carries its glyphs.
+    wm_ops = b""
+    if mark is not None:
+        wm_ops = _watermark_ops_embedded(
+            mark, glyphs_of(mark.text), page_width=page_width,
+            page_height=page_height)
+
     slots: dict[int, bytes] = {}
     n_pages = len(pages)
     # Object plan: 1 catalog, 2 pages, 3 Type0 font, 4 CIDFont, 5
-    # FontDescriptor, 6 FontFile2, 7 ToUnicode, 8 info (optional),
-    # then per page: page + content.
+    # FontDescriptor, 6 FontFile2, 7 ToUnicode, then per page:
+    # page + content, then the info object.  A drawn watermark's
+    # ExtGState takes the first post-font slot and the pages
+    # shift by one — an unmarked document's numbering is exactly
+    # what it has always been.
     base = 8
-    page_obj_ids = [base + 2 * i for i in range(n_pages)]
-    content_obj_ids = [base + 1 + 2 * i for i in range(n_pages)]
-    info_id = base + 2 * n_pages
+    extgs_id = base
+    page_base = base + 1 if wm_ops else base
+    page_obj_ids = [page_base + 2 * i for i in range(n_pages)]
+    content_obj_ids = [page_base + 1 + 2 * i
+                       for i in range(n_pages)]
+    info_id = page_base + 2 * n_pages
+    extgs_entry = (f" /ExtGState << /GSW {extgs_id} 0 R >>"
+                   if wm_ops else "")
 
     left = 56
     top = page_height - 56
     for i, page in enumerate(pages):
         ops: list[bytes] = []
+        if wm_ops:
+            ops.append(wm_ops)
         y = top
         if header:
             ops.append(
@@ -1813,7 +1892,7 @@ def render_pdf_embedded(
         slots[page_obj_ids[i]] = (
             f"<< /Type /Page /Parent 2 0 R /MediaBox "
             f"[0 0 {page_width} {page_height}] "
-            f"/Resources << /Font << /F1 3 0 R >> >> "
+            f"/Resources << /Font << /F1 3 0 R >>{extgs_entry} >> "
             f"/Contents {content_obj_ids[i]} 0 R >>".encode())
 
     w_runs: list[str] = []
@@ -1846,6 +1925,8 @@ def render_pdf_embedded(
     slots[7] = (
         f"<< /Length {len(touni)} >>\nstream\n".encode()
         + touni + b"\nendstream")
+    if wm_ops:
+        slots[extgs_id] = _extgstate_body(mark)
     catalog = "<< /Type /Catalog /Pages 2 0 R"
     if metadata:
         catalog += f" /Info {info_id} 0 R"

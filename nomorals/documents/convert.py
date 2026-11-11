@@ -296,7 +296,11 @@ def to_pdf_embedded(doc: Document, font_path: str) -> bytes:
     """
     from pathlib import Path
 
+    from ..core.branding import resolve_brand_mark
+    from .manifest import manifest_from_document
+
     markdown = to_markdown(doc)  # raises DocumentError when there is no content
+    manifest = manifest_from_document(doc)
     try:
         font_data = Path(font_path).expanduser().read_bytes()
     except OSError as exc:
@@ -305,7 +309,12 @@ def to_pdf_embedded(doc: Document, font_path: str) -> bytes:
     try:
         return render_pdf_embedded(
             markdown, font_data=font_data,
-            title=doc.title or "Document", headings=True)
+            title=doc.title or "Document", headings=True,
+            # a document export is public-bound, exactly as in
+            # to_pdf: the designed watermark rides every page,
+            # resolved from the manifest's brand policy.
+            watermark=resolve_brand_mark(
+                manifest.presentation.brand_policy))
     except PdfError as exc:
         raise DocumentError(f"PDF rendering failed: {exc}", kind="write") from exc
 

@@ -62,6 +62,26 @@ class RuntimeMakersMixin:
         self._makers_service_obj = service
         return service
 
+    # ---- the surface classification -------------------------
+    def _makers_audience(self, message) -> str:  # type: ignore[no-untyped-def]
+        """The audience of the surface a maker artifact is made
+        on — the ONE classification every maker kind rides
+        (cards first, the Fix 4 pass; couplepp/removebg/qr
+        joined them in the audience-tails pass): made in a
+        group chat, the artifact leaves to a public surface and
+        carries the classification the send seam burns the
+        designed brand mark from; in a DM it is the owner's
+        own — personal, never marked.  A message-less dispatch
+        knows no surface, so it stays unclassified ("" — which
+        every seam reads as personal)."""
+        from ...social.chat.base import ChatKind
+
+        if message is None:
+            return ""
+        return ("public"
+                if getattr(message.chat, "kind", None)
+                == ChatKind.GROUP else "personal")
+
     # ---- the one handler ----------------------------------------
     def _control_makers(self, kind: str, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
         """One maker/tool command.  Media kinds return ""
@@ -113,7 +133,8 @@ class RuntimeMakersMixin:
                     self._expression_send(
                         message, ref, caption=caption,
                         buttons=buttons),
-                buttons=[[("🔁 Another pair", "couplepp")]])
+                buttons=[[("🔁 Another pair", "couplepp")]],
+                audience=self._makers_audience(message))
             if out.get("sent"):
                 return ""
             return str(out.get("reason") or "no couple pp "
@@ -177,14 +198,9 @@ class RuntimeMakersMixin:
         avatar = self._makers_avatar(
             message, replied=bool(reply_text))
         service = self._makers_service()
-        # the card's audience is KNOWN here: made in a group chat
-        # it leaves to a public surface and carries the brand
-        # mark; in a DM it is the owner's own — personal, unmarked.
-        from ...social.chat.base import ChatKind
-
-        audience = ("public"
-                    if getattr(message.chat, "kind", None)
-                    == ChatKind.GROUP else "personal")
+        # the card's audience is KNOWN here: the serving
+        # surface's classification (see _makers_audience).
+        audience = self._makers_audience(message)
         out = service.card(
             kind, tail, reply_name=reply_name,
             reply_text=reply_text,
@@ -220,7 +236,8 @@ class RuntimeMakersMixin:
         out = service.removebg(
             data,
             send=lambda ref, caption: self._expression_send(
-                message, ref, caption=caption))
+                message, ref, caption=caption),
+            audience=self._makers_audience(message))
         if out.get("sent"):
             return ""
         return str(out.get("reason") or "no cutout right now")
@@ -265,7 +282,8 @@ class RuntimeMakersMixin:
         out = service.qr_make(
             tail,
             send=lambda ref, caption: self._expression_send(
-                message, ref, caption=caption))
+                message, ref, caption=caption),
+            audience=self._makers_audience(message))
         if out.get("sent"):
             return ""
         return str(out.get("reason") or "no QR right now")
