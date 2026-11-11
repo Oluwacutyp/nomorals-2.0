@@ -51,6 +51,7 @@ from .runtime_reach import RuntimeReachMixin
 from .runtime_anime import RuntimeAnimeMixin
 from .runtime_chatops import RuntimeChatOpsMixin
 from .runtime_makers import RuntimeMakersMixin
+from .runtime_mock_screens import RuntimeMockScreensMixin
 from .failures import failure_count, recent_failures, record_failure
 from .reply_guard import (
     deliberation_reason,
@@ -436,6 +437,7 @@ class PartnerRuntime(
     RuntimeReachMixin,
     RuntimeAnimeMixin,
     RuntimeMakersMixin,
+    RuntimeMockScreensMixin,
     RuntimeChatOpsMixin,
 ):
     """Runs the partner across all configured platforms, at the same time."""
@@ -7721,6 +7723,16 @@ class PartnerRuntime(
             # rungs and renderer, and tests/test_maker_tools.py
             # pins the two equal.
             return self._control_makers(
+                kind, command.tail or "", message)
+        if kind == "mock":
+            # Mock screens (FakeDetail port phases 0+1): the
+            # organ lives in social/chat/mock_screens/ and
+            # the handler in runtime_mock_screens.py.  The
+            # kind set is spelled out for the catalog's
+            # handler-path scan; mock_screens.MOCK_COMMANDS
+            # is the same set, pinned equal by
+            # tests/test_mock_screens.py.
+            return self._control_mock(
                 kind, command.tail or "", message)
         if kind in {
                 "archive", "unarchive", "mutechat", "unmutechat",

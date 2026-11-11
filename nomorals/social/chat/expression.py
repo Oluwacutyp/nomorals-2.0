@@ -1956,7 +1956,10 @@ MEDIA_DELIVERED_KINDS: frozenset[str] = frozenset(
      # runs — the handler's empty text means the ack already
      # posted, the same delivery contract as the kinds above.
      "play", "download", "tiktok", "ttdl", "instagram",
-     "spotify", "aio"})
+     "spotify", "aio",
+     # /mock answers by attaching its rendered phone-screen
+     # PNG — the same delivery contract again.
+     "mock"})
 
 
 def reaction_caption(command: str, *, actor: str, target: str = "",

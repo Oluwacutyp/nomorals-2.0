@@ -522,6 +522,12 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "bible": (1, None),       # /bible <book> <ch>[:<v>] · /bible search …
     "couplepp": (0, None),    # /couplepp — one artwork, a matched pair
     "pp": (0, None),          # alias of /couplepp
+    # mock screens (FakeDetail port): OWNER-ONLY — deliberately
+    # NOT in PUBLIC_COMMANDS, so caller_may_run admits the
+    # owner alone.  The organ lives in
+    # social/chat/mock_screens/, the handler in
+    # agents/partner/runtime_mock_screens.py.
+    "mock": (0, None),        # /mock [demo|whatsapp|group|instagram] …
     # chat & privacy (FEI gap wave F): OWNER-ONLY account ops
     # on his personal surfaces — deliberately NOT in
     # PUBLIC_COMMANDS, so caller_may_run admits the owner
@@ -2827,6 +2833,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/pp",
               "example": "/pp",
               "related": "/couplepp · /waifu"},
+    "mock": {"what": "a MOCK phone screen, rendered from data you author: a WhatsApp 1:1 chat, a WhatsApp group chat or an Instagram DM, in iPhone or Android chrome, with ticks, seen states, reactions, reply quotes and day dividers drawn in the platform's own visual language. It is a generated mockup of the conversation you describe — never a captured screenshot. Owner-only.",
+              "usage": "/mock demo [whatsapp|group|instagram] [iphone|android] · /mock whatsapp [iphone|android] [with <Name>] me: words ;; <Name>: words ;; … ([read] sets ticks, [react ❤️] a reaction, ^ replies, ! a system row, # a day divider)",
+              "example": "/mock whatsapp Adaeze: we still on? ;; me: yes, by 11 [read]",
+              "related": "/qcard · /fakemsg · /sticker"},
     "archive": {"what": "archive a chat on YOUR personal account (WhatsApp app-state / Telegram peer folders). The target is named the human way — a chat name, a number, or nothing for this chat; never a raw key.",
               "usage": "/archive [chat name]",
               "example": "/archive Family Group",
@@ -4753,6 +4763,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "fakemsg", "fakettc", "nokiamsg", "fakeff", "fakeffduo",
       "ffgirl", "removebg", "qr", "shorturl", "unshorten",
       "bible", "couplepp", "pp"]),
+    ("mock screens — authored chat screens",
+     ["mock"]),
     ("chat & privacy — your chats · your accounts",
      ["archive", "unarchive", "mutechat", "unmutechat",
       "readchat", "unreadchat", "star", "unstar",
@@ -5003,6 +5015,7 @@ LIST_ONELINERS: dict[str, str] = {
     "bible": "look up a passage — /bible John 3:16 · /bible search love",
     "couplepp": "a matched pair of profile pictures from one artwork — /couplepp",
     "pp": "alias of /couplepp",
+    "mock": "render a mock WhatsApp / Instagram chat screen as a photo — /mock demo whatsapp",
     "archive": "archive a chat on your account — /archive [chat name]",
     "unarchive": "unarchive a chat — /unarchive [chat name]",
     "mutechat": "mute a whole chat — /mutechat [chat name]",

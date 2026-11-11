@@ -122,7 +122,9 @@ def test_media_kinds_ride_the_delivered_set():
     # unpinned until now) + "emoji" (creation rung, 2026-11-06:
     # a created emoji answers by sending its sticker) +
     # "quote" (2026-11-10: /quote answers by attaching its
-    # rendered PNG card) — nothing more, nothing less.
+    # rendered PNG card) + "mock" (2026-11-11: /mock answers
+    # by attaching its rendered mock screen) — nothing more,
+    # nothing less.
     assert frozenset({
         "steal", "sticker", "convert", "gif", "react", "emoji",
         "dog", "cat", "fox", "meme", "nasa", "pokemon", "quote",
@@ -131,7 +133,7 @@ def test_media_kinds_ride_the_delivered_set():
         "fakeffduo", "ffgirl", "removebg", "qr", "couplepp",
         "pp",
         "play", "download", "tiktok", "ttdl", "instagram",
-        "spotify", "aio"}) == MEDIA_DELIVERED_KINDS
+        "spotify", "aio", "mock"}) == MEDIA_DELIVERED_KINDS
 
 
 def test_dispatch_literal_set_equals_maker_commands():
