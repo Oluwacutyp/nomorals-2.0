@@ -894,13 +894,44 @@ _register(_S(
 ))
 
 _register(_S(
-    name="shopping-deals", verdict="residue", kind="database-file",
-    modules=("tools/deals.py",),
+    name="shopping-deals", verdict="ported", kind="database-file",
+    modules=("tools/deals.py", "integrations/naija_shopping.py",
+             "integrations/naija_deals.py"),
+    tables=("naija_price_snapshots", "watchlists", "steals",
+            "deals", "price_alerts", "price_history"),
     anchors=(("tools/deals.py", "shopping.db"),),
     reason=(
-        "the deals tool opens shopping.db through the Database "
-        "class per call. Same disposition as workspace-inbox: a "
-        "Database-class sidecar awaiting its domain port pass."),
+        "ported in the Mongo residue Batch 2 pass (B2): shopping.db "
+        "is ONE store shared by three modules — tools/deals.py "
+        "builds the two engines over a Database handle (the registry "
+        "context's handle, or a standalone shopping.db handle), "
+        "integrations/naija_shopping.py owns naija_price_snapshots / "
+        "watchlists / steals in it and integrations/naija_deals.py "
+        "owns deals / price_alerts / price_history — so all three "
+        "ported together, or the file would fork across backends. "
+        "Both engines resolve ONE shared port at construction "
+        "(shopping-deals__<table>; the builder lives in "
+        "naija_shopping.shopping_port): an explicit store, else the "
+        "store attached to their Database handle (the P3/P4 "
+        "pickup), else the boot ambient. The first construction "
+        "imports the file's six tables once, through the same "
+        "mapping; the second engine's construction adopts. The "
+        "composite-key tables (naija_price_snapshots, "
+        "price_history) carry their key parts in the document id, "
+        "so their window/MIN reads re-express as finds + Python "
+        "filter/sort. naija_shopping's legacy price_snapshots "
+        "adoption rule is untouched and runs in the native schema "
+        "pass before any import: an engine-shaped legacy table (it "
+        "has product_url) is renamed over with its history — which "
+        "the import then carries into "
+        "shopping-deals__naija_price_snapshots — while a "
+        "migrations-shaped table (it has listing_id) is left "
+        "exactly as it is; the namespaced collection can never "
+        "collide with the central carry's price_snapshots residue "
+        "entry. price_history's seam DDL is the final shape (the "
+        "native path reaches the same six columns by CREATE + two "
+        "ALTERs in the hunter's _ensure_schema). The native SQL "
+        "path serves the SQLite default byte-for-byte."),
 ))
 
 _register(_S(

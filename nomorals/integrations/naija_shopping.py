@@ -443,19 +443,169 @@ class Watchlist:
         }
 
 
+# ── Document-store seam (Mongo program P5, residue Batch 2 B2) ──────────────
+#
+# shopping.db is ONE store shared by two engines: this module owns
+# naija_price_snapshots / watchlists / steals in it, and
+# integrations/naija_deals.py owns deals / price_alerts /
+# price_history in the same file. The registry entry
+# (storage.sidecars "shopping-deals") covers all three modules
+# (tools/deals.py builds the engines over a Database handle), so the
+# port is built once, for all six tables, by whichever engine
+# constructs first: the lazy-import marker lives in the shared meta
+# collection, so a second engine's construction adopts the imported
+# history instead of re-importing a partial table set — and no
+# construction path can fork the file across backends.
+
+#: The store's own DDL, final shape — each engine's _ensure_schema
+#: executes these tables' CREATEs on the native path (price_history
+#: reaches its last two columns by ALTER there; the seam shape is the
+#: same six columns), and the seam mapping is derived from this
+#: string, so the two can never drift.
+_DDL = """
+CREATE TABLE IF NOT EXISTS naija_price_snapshots (
+    product_url TEXT NOT NULL,
+    site TEXT NOT NULL,
+    price_ngn REAL NOT NULL,
+    title TEXT NOT NULL,
+    timestamp REAL NOT NULL,
+    in_stock INTEGER NOT NULL DEFAULT 1,
+    original_price REAL NOT NULL DEFAULT 0,
+    discount_badge REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (product_url, timestamp)
+);
+CREATE TABLE IF NOT EXISTS watchlists (
+    watchlist_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    product_url TEXT NOT NULL,
+    site TEXT NOT NULL,
+    target_price REAL NOT NULL,
+    title TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    last_checked REAL NOT NULL DEFAULT 0,
+    last_price REAL NOT NULL DEFAULT 0,
+    is_triggered INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS steals (
+    product_url TEXT NOT NULL,
+    site TEXT NOT NULL,
+    title TEXT NOT NULL,
+    current_price REAL NOT NULL,
+    median_30d REAL NOT NULL,
+    cross_site_best REAL NOT NULL,
+    steal_score REAL NOT NULL,
+    savings_vs_median REAL NOT NULL,
+    savings_vs_cross_site REAL NOT NULL,
+    discovered_at REAL NOT NULL,
+    PRIMARY KEY (product_url, discovered_at)
+);
+CREATE TABLE IF NOT EXISTS deals (
+    deal_id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    vendor TEXT NOT NULL,
+    current_price REAL NOT NULL,
+    original_price REAL NOT NULL,
+    discount_percent REAL NOT NULL,
+    url TEXT NOT NULL,
+    image_url TEXT NOT NULL DEFAULT '',
+    category TEXT NOT NULL DEFAULT '',
+    deal_score REAL NOT NULL DEFAULT 0,
+    is_flash_sale INTEGER NOT NULL DEFAULT 0,
+    expires_at REAL,
+    in_stock INTEGER NOT NULL DEFAULT 1,
+    discovered_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS price_alerts (
+    alert_id TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL,
+    product_url TEXT NOT NULL,
+    product_title TEXT NOT NULL,
+    vendor TEXT NOT NULL,
+    target_price REAL NOT NULL,
+    current_price REAL NOT NULL DEFAULT 0,
+    is_triggered INTEGER NOT NULL DEFAULT 0,
+    triggered_at REAL,
+    created_at REAL NOT NULL,
+    last_checked REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS price_history (
+    product_url TEXT NOT NULL,
+    vendor TEXT NOT NULL,
+    price REAL NOT NULL,
+    timestamp REAL NOT NULL,
+    in_stock INTEGER NOT NULL DEFAULT 1,
+    coupon TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (product_url, timestamp)
+);
+"""
+
+_TABLES = ("naija_price_snapshots", "watchlists", "steals",
+           "deals", "price_alerts", "price_history")
+
+
+def shopping_port(db: Database, store: Any = None) -> Any:
+    """The seam port for the shared shopping store, or ``None``.
+
+    Resolution order: an explicit ``store``, then the store attached
+    to the engines' own Database handle (the P3/P4 pickup — boot
+    attaches the resolved store to the central handle the tool layer
+    hands these engines), then the boot ambient (sidecar_port's own
+    fallback). ``None`` anywhere along the chain is the SQLite
+    default: both engines run their native SQL path byte-for-byte.
+    When a store IS resolved, the file's existing rows are imported
+    once, through the same mapping, before the port is handed out.
+    """
+    from ..storage.sidecars import sidecar_port
+
+    resolved = store if store is not None else getattr(
+        db, "document_store", None)
+    path = getattr(db, "path", None)
+    port = sidecar_port("shopping-deals", _DDL, _TABLES,
+                        str(path) if path else None, store=resolved)
+    if port is None:
+        return None
+
+    def _writer(table: Any) -> Any:
+        row_table = port.tables[table]
+
+        def write(rows: list[dict[str, Any]]) -> int:
+            for row in rows:
+                row_table.put(row)
+            return len(rows)
+
+        return write
+
+    port.ensure_imported({t: _writer(t) for t in _TABLES})
+    return port
+
+
 class NaijaShoppingEngine:
-    """Price tracking and deal detection across Nigerian marketplaces."""
-    
+    """Price tracking and deal detection across Nigerian marketplaces.
+
+    The engine's tables live in the shared shopping store (see
+    :func:`shopping_port`): when a document store is resolved they
+    run over the seam in the ``shopping-deals__<table>`` collections
+    behind this unchanged API, and the file's existing rows are
+    imported once at construction. On the SQLite default the native
+    SQL path below serves byte-for-byte.
+    """
+
+    #: The seam port, when a store resolved at construction.
+    _port: Any = None
+
     def __init__(
         self,
         db: Database,
         browser: BrowserSession,
         proxy_manager: Any = None,
+        *,
+        store: Any = None,
     ) -> None:
         self.db = db
         self.browser = browser
         self.proxy_manager = proxy_manager
         self._ensure_schema()
+        self._port = shopping_port(db, store)
         _log.info("Naija Shopping Engine initialized")
     
     def _adopt_legacy_snapshots(self) -> None:
@@ -786,13 +936,22 @@ class NaijaShoppingEngine:
         """
         # Get 30-day price history
         thirty_days_ago = time.time() - (30 * 24 * 3600)
-        
-        snapshots = self.db.query("""
-            SELECT * FROM naija_price_snapshots
-            WHERE product_url = ? AND timestamp >= ?
-            ORDER BY timestamp ASC
-        """, (product_url, thirty_days_ago))
-        
+
+        if self._port is not None:
+            # composite key: the key parts live in the document id,
+            # so the window read is a find + Python filter/sort
+            snapshots = [r for r in
+                         self._port.tables["naija_price_snapshots"].all()
+                         if r["product_url"] == product_url
+                         and r["timestamp"] >= thirty_days_ago]
+            snapshots.sort(key=lambda r: r["timestamp"])
+        else:
+            snapshots = self.db.query("""
+                SELECT * FROM naija_price_snapshots
+                WHERE product_url = ? AND timestamp >= ?
+                ORDER BY timestamp ASC
+            """, (product_url, thirty_days_ago))
+
         if not snapshots:
             return None
         
@@ -809,12 +968,19 @@ class NaijaShoppingEngine:
         median_30d = prices[len(prices) // 2]
         
         # Cross-site best (lowest price for same product across all sites)
-        cross_site = self.db.query("""
-            SELECT MIN(price_ngn) as best FROM naija_price_snapshots
-            WHERE title = ? AND timestamp >= ?
-        """, (current["title"], thirty_days_ago))
-        
-        cross_site_best = cross_site[0]["best"] if cross_site else current_price
+        if self._port is not None:
+            titled = [r["price_ngn"] for r in
+                      self._port.tables["naija_price_snapshots"].all()
+                      if r["title"] == current["title"]
+                      and r["timestamp"] >= thirty_days_ago]
+            cross_site_best = min(titled) if titled else current_price
+        else:
+            cross_site = self.db.query("""
+                SELECT MIN(price_ngn) as best FROM naija_price_snapshots
+                WHERE title = ? AND timestamp >= ?
+            """, (current["title"], thirty_days_ago))
+
+            cross_site_best = cross_site[0]["best"] if cross_site else current_price
         
         # Compute savings
         savings_vs_median = ((median_30d - current_price) / median_30d) * 100 if median_30d > 0 else 0
@@ -852,12 +1018,20 @@ class NaijaShoppingEngine:
     
     async def get_steals(self, *, threshold: float = 70, limit: int = 20) -> list[Steal]:
         """Get recent steals above threshold."""
-        rows = self.db.query("""
-            SELECT * FROM steals
-            WHERE steal_score >= ? AND discovered_at >= ?
-            ORDER BY steal_score DESC
-            LIMIT ?
-        """, (threshold, time.time() - (7 * 24 * 3600), limit))
+        if self._port is not None:
+            since = time.time() - (7 * 24 * 3600)
+            rows = [r for r in self._port.tables["steals"].all()
+                    if r["steal_score"] >= threshold
+                    and r["discovered_at"] >= since]
+            rows.sort(key=lambda r: r["steal_score"], reverse=True)
+            rows = rows[:limit]
+        else:
+            rows = self.db.query("""
+                SELECT * FROM steals
+                WHERE steal_score >= ? AND discovered_at >= ?
+                ORDER BY steal_score DESC
+                LIMIT ?
+            """, (threshold, time.time() - (7 * 24 * 3600), limit))
 
         return [
             Steal(
@@ -921,14 +1095,20 @@ class NaijaShoppingEngine:
         """Add a product to watchlist."""
         watchlist_id = new_id("watch")
         site = self._detect_site_from_url(product_url)
-        
-        with self.db.transaction():
-            self.db.execute("""
-                INSERT INTO watchlists
-                (watchlist_id, user_id, product_url, site, target_price, created_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (watchlist_id, user_id, product_url, site, target_price, time.time()))
-        
+
+        if self._port is not None:
+            self._port.tables["watchlists"].put({
+                "watchlist_id": watchlist_id, "user_id": user_id,
+                "product_url": product_url, "site": site,
+                "target_price": target_price, "created_at": time.time()})
+        else:
+            with self.db.transaction():
+                self.db.execute("""
+                    INSERT INTO watchlists
+                    (watchlist_id, user_id, product_url, site, target_price, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (watchlist_id, user_id, product_url, site, target_price, time.time()))
+
         return Watchlist(
             watchlist_id=watchlist_id,
             user_id=user_id,
@@ -939,39 +1119,60 @@ class NaijaShoppingEngine:
     
     async def check_watchlists(self) -> list[Watchlist]:
         """Check all active watchlists for price drops."""
-        watchlists = self.db.query("""
-            SELECT * FROM watchlists WHERE is_triggered = 0
-        """)
+        if self._port is not None:
+            watchlists = [r for r in self._port.tables["watchlists"].all()
+                          if not r["is_triggered"]]
+        else:
+            watchlists = self.db.query("""
+                SELECT * FROM watchlists WHERE is_triggered = 0
+            """)
         
         triggered = []
         
         for row in watchlists:
             try:
                 # Get latest price
-                latest = self.db.query_one("""
-                    SELECT price_ngn FROM naija_price_snapshots
-                    WHERE product_url = ?
-                    ORDER BY timestamp DESC LIMIT 1
-                """, (row["product_url"],))
-                
+                if self._port is not None:
+                    snaps = [r for r in
+                             self._port.tables["naija_price_snapshots"].all()
+                             if r["product_url"] == row["product_url"]]
+                    latest = (max(snaps, key=lambda r: r["timestamp"])
+                              if snaps else None)
+                else:
+                    latest = self.db.query_one("""
+                        SELECT price_ngn FROM naija_price_snapshots
+                        WHERE product_url = ?
+                        ORDER BY timestamp DESC LIMIT 1
+                    """, (row["product_url"],))
+
                 if not latest:
                     continue
-                
+
                 current_price = latest["price_ngn"]
-                
+
                 # Update last checked
-                with self.db.transaction():
-                    self.db.execute("""
-                        UPDATE watchlists SET last_checked = ?, last_price = ?
-                        WHERE watchlist_id = ?
-                    """, (time.time(), current_price, row["watchlist_id"]))
-                
-                # Check if target reached
-                if row["target_price"] > 0 and current_price <= row["target_price"]:
+                if self._port is not None:
+                    self._port.tables["watchlists"].update(
+                        row["watchlist_id"],
+                        {"last_checked": time.time(),
+                         "last_price": current_price})
+                else:
                     with self.db.transaction():
                         self.db.execute("""
-                            UPDATE watchlists SET is_triggered = 1 WHERE watchlist_id = ?
-                        """, (row["watchlist_id"]))
+                            UPDATE watchlists SET last_checked = ?, last_price = ?
+                            WHERE watchlist_id = ?
+                        """, (time.time(), current_price, row["watchlist_id"]))
+
+                # Check if target reached
+                if row["target_price"] > 0 and current_price <= row["target_price"]:
+                    if self._port is not None:
+                        self._port.tables["watchlists"].update(
+                            row["watchlist_id"], {"is_triggered": 1})
+                    else:
+                        with self.db.transaction():
+                            self.db.execute("""
+                                UPDATE watchlists SET is_triggered = 1 WHERE watchlist_id = ?
+                            """, (row["watchlist_id"],))
                     
                     watchlist = Watchlist(
                         watchlist_id=row["watchlist_id"],
@@ -990,8 +1191,34 @@ class NaijaShoppingEngine:
     
     # ── Helpers ──────────────────────────────────────────────────────────────
     
+    def list_watchlists(self, user_id: str) -> list[dict[str, Any]]:
+        """One user's untriggered watchlist rows, as dicts.
+
+        The deals tool's ``watchlist`` action reads through here so
+        the seam rung serves it too, not the SQLite fossil.
+        """
+        if self._port is not None:
+            return [dict(r) for r in self._port.tables["watchlists"].all()
+                    if r["user_id"] == user_id and not r["is_triggered"]]
+        rows = self.db.query(
+            "SELECT * FROM watchlists WHERE user_id = ? AND is_triggered = 0",
+            (user_id,))
+        return [dict(w) for w in rows]
+
     def _store_snapshot(self, snapshot: PriceSnapshot) -> None:
         """Store a price snapshot."""
+        if self._port is not None:
+            self._port.tables["naija_price_snapshots"].put({
+                "product_url": snapshot.product_url,
+                "site": snapshot.site,
+                "price_ngn": snapshot.price_ngn,
+                "title": snapshot.title,
+                "timestamp": snapshot.timestamp,
+                "in_stock": int(snapshot.in_stock),
+                "original_price": snapshot.original_price,
+                "discount_badge": snapshot.discount_badge,
+            })
+            return
         with self.db.transaction():
             self.db.execute("""
                 INSERT OR REPLACE INTO naija_price_snapshots
@@ -1005,6 +1232,20 @@ class NaijaShoppingEngine:
     
     def _store_steal(self, steal: Steal) -> None:
         """Store a detected steal."""
+        if self._port is not None:
+            self._port.tables["steals"].put({
+                "product_url": steal.product_url,
+                "site": steal.site,
+                "title": steal.title,
+                "current_price": steal.current_price,
+                "median_30d": steal.median_30d,
+                "cross_site_best": steal.cross_site_best,
+                "steal_score": steal.steal_score,
+                "savings_vs_median": steal.savings_vs_median,
+                "savings_vs_cross_site": steal.savings_vs_cross_site,
+                "discovered_at": steal.discovered_at,
+            })
+            return
         with self.db.transaction():
             self.db.execute("""
                 INSERT OR REPLACE INTO steals

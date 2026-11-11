@@ -247,16 +247,37 @@ class NaijaVendor:
 
 
 class NaijaDealHunter:
-    """Finds and tracks deals across Nigerian marketplaces."""
-    
+    """Finds and tracks deals across Nigerian marketplaces.
+
+    The hunter's tables (deals / price_alerts / price_history) live
+    in the shared shopping store alongside the shopping engine's
+    (see :func:`nomorals.integrations.naija_shopping.shopping_port`):
+    when a document store is resolved they run over the seam in the
+    ``shopping-deals__<table>`` collections behind this unchanged
+    API, and the file's existing rows are imported once at
+    construction. On the SQLite default the native SQL path below
+    serves byte-for-byte.
+    """
+
+    #: The seam port, when a store resolved at construction.
+    _port: Any = None
+
     def __init__(
         self,
         account_manager: AccountManager,
         db: Database,
+        *,
+        store: Any = None,
     ) -> None:
         self.account_manager = account_manager
         self.db = db
         self._ensure_schema()
+        # Lazy cross-import: the two engines are siblings over one
+        # store, and naija_shopping already reaches into this module
+        # lazily (match_cross_site) for the same reason.
+        from .naija_shopping import shopping_port
+
+        self._port = shopping_port(db, store)
         _log.info("Naija Deal Hunter initialized")
     
     def _ensure_schema(self) -> None:
@@ -415,14 +436,25 @@ class NaijaDealHunter:
         
         # Get current price
         current_price = await self._get_price(url, vendor)
-        
-        with self.db.transaction():
-            self.db.execute("""
-                INSERT INTO price_alerts
-                (alert_id, user_id, product_url, product_title, vendor,
-                 target_price, current_price, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """, (alert_id, user_id, url, "", vendor, target_price, current_price, time.time()))
+
+        if self._port is not None:
+            self._port.tables["price_alerts"].put({
+                "alert_id": alert_id, "user_id": user_id,
+                "product_url": url, "product_title": "",
+                "vendor": vendor, "target_price": target_price,
+                "current_price": current_price,
+                # the nullable, default-less column rides explicitly
+                # — the native INSERT stores NULL for it
+                "triggered_at": None,
+                "created_at": time.time()})
+        else:
+            with self.db.transaction():
+                self.db.execute("""
+                    INSERT INTO price_alerts
+                    (alert_id, user_id, product_url, product_title, vendor,
+                     target_price, current_price, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (alert_id, user_id, url, "", vendor, target_price, current_price, time.time()))
         
         alert = PriceAlert(
             alert_id=alert_id,
@@ -443,31 +475,46 @@ class NaijaDealHunter:
         Returns:
             List of newly triggered alerts
         """
-        alerts = self.db.query("""
-            SELECT * FROM price_alerts WHERE is_triggered = 0
-        """)
+        if self._port is not None:
+            alerts = [r for r in self._port.tables["price_alerts"].all()
+                      if not r["is_triggered"]]
+        else:
+            alerts = self.db.query("""
+                SELECT * FROM price_alerts WHERE is_triggered = 0
+            """)
         
         triggered = []
         
         for row in alerts:
             try:
                 current_price = await self._get_price(row["product_url"], row["vendor"])
-                
+
                 # Update last checked
-                with self.db.transaction():
-                    self.db.execute("""
-                        UPDATE price_alerts SET current_price = ?, last_checked = ?
-                        WHERE alert_id = ?
-                    """, (current_price, time.time(), row["alert_id"]))
-                
+                if self._port is not None:
+                    self._port.tables["price_alerts"].update(
+                        row["alert_id"],
+                        {"current_price": current_price,
+                         "last_checked": time.time()})
+                else:
+                    with self.db.transaction():
+                        self.db.execute("""
+                            UPDATE price_alerts SET current_price = ?, last_checked = ?
+                            WHERE alert_id = ?
+                        """, (current_price, time.time(), row["alert_id"]))
+
                 # Check if target reached
                 if current_price <= row["target_price"]:
                     now = time.time()
-                    with self.db.transaction():
-                        self.db.execute("""
-                            UPDATE price_alerts SET is_triggered = 1, triggered_at = ?
-                            WHERE alert_id = ?
-                        """, (now, row["alert_id"]))
+                    if self._port is not None:
+                        self._port.tables["price_alerts"].update(
+                            row["alert_id"],
+                            {"is_triggered": 1, "triggered_at": now})
+                    else:
+                        with self.db.transaction():
+                            self.db.execute("""
+                                UPDATE price_alerts SET is_triggered = 1, triggered_at = ?
+                                WHERE alert_id = ?
+                            """, (now, row["alert_id"]))
                     
                     alert = PriceAlert(
                         alert_id=row["alert_id"],
@@ -490,11 +537,16 @@ class NaijaDealHunter:
     async def price_history(self, product_url: str) -> PriceHistory:
         """Get price history for a product."""
         vendor = self._detect_vendor_from_url(product_url)
-        
-        rows = self.db.query("""
-            SELECT price, timestamp FROM price_history
-            WHERE product_url = ? ORDER BY timestamp ASC
-        """, (product_url,))
+
+        if self._port is not None:
+            rows = [r for r in self._port.tables["price_history"].all()
+                    if r["product_url"] == product_url]
+            rows.sort(key=lambda r: r["timestamp"])
+        else:
+            rows = self.db.query("""
+                SELECT price, timestamp FROM price_history
+                WHERE product_url = ? ORDER BY timestamp ASC
+            """, (product_url,))
         
         prices = [{"price": r["price"], "timestamp": r["timestamp"]} for r in rows]
         
@@ -514,12 +566,18 @@ class NaijaDealHunter:
     
     async def get_user_alerts(self, user_id: str, *, active_only: bool = True) -> list[PriceAlert]:
         """Get all alerts for a user."""
-        query = "SELECT * FROM price_alerts WHERE user_id = ?"
-        if active_only:
-            query += " AND is_triggered = 0"
-        query += " ORDER BY created_at DESC"
-        
-        rows = self.db.query(query, (user_id,))
+        if self._port is not None:
+            rows = [r for r in self._port.tables["price_alerts"].all()
+                    if r["user_id"] == user_id
+                    and (not active_only or not r["is_triggered"])]
+            rows.sort(key=lambda r: r["created_at"], reverse=True)
+        else:
+            query = "SELECT * FROM price_alerts WHERE user_id = ?"
+            if active_only:
+                query += " AND is_triggered = 0"
+            query += " ORDER BY created_at DESC"
+
+            rows = self.db.query(query, (user_id,))
         
         return [
             PriceAlert(
@@ -739,14 +797,21 @@ class NaijaDealHunter:
 
             if price:
                 # Record in history (with stock + coupon context)
-                with self.db.transaction():
-                    self.db.execute("""
-                        INSERT OR REPLACE INTO price_history
-                        (product_url, vendor, price, timestamp, in_stock,
-                         coupon)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (url, vendor, price, time.time(),
-                          int(in_stock), ",".join(coupons[:3])))
+                if self._port is not None:
+                    self._port.tables["price_history"].put({
+                        "product_url": url, "vendor": vendor,
+                        "price": price, "timestamp": time.time(),
+                        "in_stock": int(in_stock),
+                        "coupon": ",".join(coupons[:3])})
+                else:
+                    with self.db.transaction():
+                        self.db.execute("""
+                            INSERT OR REPLACE INTO price_history
+                            (product_url, vendor, price, timestamp, in_stock,
+                             coupon)
+                            VALUES (?, ?, ?, ?, ?, ?)
+                        """, (url, vendor, price, time.time(),
+                              int(in_stock), ",".join(coupons[:3])))
 
             return {"price": price, "in_stock": in_stock,
                     "coupons": coupons,
@@ -760,6 +825,15 @@ class NaijaDealHunter:
 
     def _is_lowest_90d(self, product_url: str, price: float) -> bool:
         """True when ``price`` beats every point on the 90-day curve."""
+        if self._port is not None:
+            cutoff = time.time() - 90 * 86400
+            curve = [r["price"] for r in
+                     self._port.tables["price_history"].all()
+                     if r["product_url"] == product_url
+                     and r["timestamp"] > cutoff]
+            if not curve:
+                return False
+            return price <= float(min(curve))
         rows = self.db.query("""
             SELECT MIN(price) AS m FROM price_history
             WHERE product_url = ? AND timestamp > ?
@@ -770,6 +844,22 @@ class NaijaDealHunter:
     
     def _store_deal(self, deal: Deal) -> None:
         """Store a deal in the database."""
+        if self._port is not None:
+            self._port.tables["deals"].put({
+                "deal_id": deal.deal_id, "title": deal.title,
+                "vendor": deal.vendor,
+                "current_price": deal.current_price,
+                "original_price": deal.original_price,
+                "discount_percent": deal.discount_percent,
+                "url": deal.url, "image_url": deal.image_url,
+                "category": deal.category,
+                "deal_score": deal.deal_score,
+                "is_flash_sale": int(deal.is_flash_sale),
+                "expires_at": deal.expires_at,
+                "in_stock": int(deal.in_stock),
+                "discovered_at": deal.discovered_at,
+            })
+            return
         with self.db.transaction():
             self.db.execute("""
                 INSERT OR REPLACE INTO deals
@@ -787,17 +877,24 @@ class NaijaDealHunter:
     
     async def get_top_deals(self, *, limit: int = 10, category: str = "") -> list[Deal]:
         """Get top scored deals from database."""
-        query = "SELECT * FROM deals WHERE in_stock = 1"
-        params: list[Any] = []
-        
-        if category:
-            query += " AND category = ?"
-            params.append(category)
-        
-        query += " ORDER BY deal_score DESC LIMIT ?"
-        params.append(limit)
-        
-        rows = self.db.query(query, params)
+        if self._port is not None:
+            rows = [r for r in self._port.tables["deals"].all()
+                    if r["in_stock"]
+                    and (not category or r["category"] == category)]
+            rows.sort(key=lambda r: r["deal_score"], reverse=True)
+            rows = rows[:limit]
+        else:
+            query = "SELECT * FROM deals WHERE in_stock = 1"
+            params: list[Any] = []
+
+            if category:
+                query += " AND category = ?"
+                params.append(category)
+
+            query += " ORDER BY deal_score DESC LIMIT ?"
+            params.append(limit)
+
+            rows = self.db.query(query, params)
         
         return [
             Deal(

@@ -371,13 +371,23 @@ def document_to_row(mapping: TableMapping,
 def _restore_pk(part: str, mapping: TableMapping,
                 column: str | None = None) -> Any:
     """Restore a stringified PK part to its column type where the DDL
-    declares an integer key (carry stringifies ``5`` and ``\"5\"`` to the
-    same id; an INTEGER PRIMARY KEY column reads back as an int)."""
+    declares an integer or real key (carry stringifies ``5`` and
+    ``\"5\"`` to the same id; an INTEGER PRIMARY KEY column reads back
+    as an int, a REAL one as a float — the shopping sidecar's
+    composite (product_url, timestamp) keys are the first REAL parts
+    to make the trip)."""
     name = column or (mapping.pk_columns[0] if mapping.pk_columns else "")
     col = next((c for c in mapping.columns if c.name == name), None)
     if col is not None and "INT" in (col.type or "").upper():
         try:
             return int(part)
+        except ValueError:
+            return part
+    if col is not None and any(
+            k in (col.type or "").upper()
+            for k in ("REAL", "FLOA", "DOUB", "NUME", "DECI")):
+        try:
+            return float(part)
         except ValueError:
             return part
     return part

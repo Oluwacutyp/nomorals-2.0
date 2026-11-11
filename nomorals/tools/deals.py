@@ -191,15 +191,14 @@ async def deals(action: str, **kwargs: Any) -> dict[str, Any]:
         if not user_id:
             return {"error": "user_id required"}
         
-        watchlists = engine.db.query(
-            "SELECT * FROM watchlists WHERE user_id = ? AND is_triggered = 0",
-            (user_id,)
-        )
-        
+        # Through the engine, so the seam rung serves the read too
+        # (a direct query here would read the SQLite fossil).
+        items = engine.list_watchlists(user_id)
+
         return {
             "action": "watchlist",
-            "count": len(watchlists),
-            "items": [dict(w) for w in watchlists],
+            "count": len(items),
+            "items": items,
         }
     
     elif action == "check_watchlists":

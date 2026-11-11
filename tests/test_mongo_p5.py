@@ -20,7 +20,10 @@ P5 settles the stores that live BESIDE the central database:
   llm-cost-display, marketing-aeo) and the slice-3 ports
   (audio-melodic, property-scam, property-value, social-voice,
   social-voice-notes, calendar-integration — the last with the
-  cursor-continuity case its registry entry demands).
+  cursor-continuity case its registry entry demands). The residue
+  Batch 2 B2 port (shopping-deals) is the shared-file shape: two
+  engines over one Database handle, six tables, one shared port —
+  with the legacy price_snapshots adoption cases on the seam.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -203,7 +206,9 @@ class TestSidecarRegistry:
             "calendar-integration",
             # residue Batch 1, slice 2:
             "health-coach", "health-form", "life-archive",
-            "llm-cost-display", "marketing-aeo"}
+            "llm-cost-display", "marketing-aeo",
+            # residue Batch 2, B2 (the shared-file group):
+            "shopping-deals"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -1785,3 +1790,265 @@ class TestAEOTrackerPort:
         again = AEOTracker(db_path=str(path), store=rung.store)
         assert again.latest().report_id == "aeo_kept"
         assert rung.store.count("marketing-aeo__aeo_reports") == 1
+
+
+class _FakeUrlResp:
+    """urlopen stand-in owned by TestShoppingDealsPort: a product
+    page carrying one data-price (the failures suite's shape)."""
+
+    def __init__(self, html: str) -> None:
+        self._html = html
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        return self._html.encode()
+
+
+class TestShoppingDealsPort:
+    """B2, the shared-file group: two engines over one Database
+    handle, six tables, ONE shared port — whichever engine
+    constructs first imports the file's history for all six."""
+
+    @staticmethod
+    def _engines(path, store, monkeypatch):
+        import urllib.request
+        from unittest.mock import MagicMock
+
+        from nomorals.integrations.naija_deals import NaijaDealHunter
+        from nomorals.integrations.naija_shopping import (
+            NaijaShoppingEngine,
+        )
+        from nomorals.storage.db import Database
+
+        monkeypatch.setattr(
+            urllib.request, "urlopen",
+            lambda *a, **k: _FakeUrlResp(
+                '<div data-price="700"></div>'))
+        db = Database(str(path))
+        engine = NaijaShoppingEngine(db, MagicMock(), store=store)
+        hunter = NaijaDealHunter(MagicMock(), db, store=store)
+        return engine, hunter
+
+    def _scenario(self, engine, hunter) -> dict:
+        import asyncio
+        import time
+
+        from nomorals.integrations.naija_deals import Deal
+        from nomorals.integrations.naija_shopping import (
+            PriceSnapshot,
+            Steal,
+        )
+
+        now = time.time()
+        url = "https://www.jumia.com.ng/p/1"
+        engine._store_snapshot(PriceSnapshot(
+            product_url=url, site="jumia", price_ngn=1000.0,
+            title="Phone X", timestamp=now - 300))
+        engine._store_snapshot(PriceSnapshot(
+            product_url=url, site="jumia", price_ngn=800.0,
+            title="Phone X", timestamp=now - 200))
+        engine._store_snapshot(PriceSnapshot(
+            product_url="https://www.konga.com/p/1", site="konga",
+            price_ngn=900.0, title="Phone X", timestamp=now - 100))
+
+        steal = asyncio.run(engine.compute_steal_score(url))
+        engine._store_steal(Steal(
+            product_url=url, site="jumia", title="Phone X",
+            current_price=800.0, median_30d=1000.0,
+            cross_site_best=800.0, steal_score=90.0,
+            savings_vs_median=20.0, savings_vs_cross_site=0.0,
+            discovered_at=now))
+        steals = asyncio.run(engine.get_steals(threshold=70))
+
+        watched = asyncio.run(engine.track_url(
+            url, "user1", target_price=850.0))
+        asyncio.run(engine.track_url(
+            "https://www.konga.com/p/1", "user1", target_price=100.0))
+        triggered = asyncio.run(engine.check_watchlists())
+        remaining = engine.list_watchlists("user1")
+
+        hunter._store_deal(Deal(
+            deal_id="deal_1", title="Phone X", vendor="Jumia Nigeria",
+            current_price=800.0, original_price=1000.0,
+            discount_percent=20.0, url=url, deal_score=90.0,
+            discovered_at=now))
+        hunter._store_deal(Deal(
+            deal_id="deal_2", title="Rice 50kg", vendor="Konga",
+            current_price=5000.0, original_price=6000.0,
+            discount_percent=16.0, url="https://www.konga.com/p/2",
+            deal_score=50.0, discovered_at=now))
+        top = asyncio.run(hunter.get_top_deals(limit=10))
+
+        alert = asyncio.run(hunter.track_product(url, 750.0, "user1"))
+        history = asyncio.run(hunter.price_history(url))
+        fired = asyncio.run(hunter.check_alerts())
+        alerts = asyncio.run(hunter.get_user_alerts(
+            "user1", active_only=False))
+        return {
+            "steal": (steal.current_price, steal.median_30d,
+                      steal.cross_site_best,
+                      round(steal.steal_score, 6)),
+            "steals": [(s.product_url, s.steal_score) for s in steals],
+            "watched_site": watched.site,
+            "triggered": [(w.product_url, w.last_price, w.is_triggered)
+                          for w in triggered],
+            "remaining": [(r["product_url"], r["target_price"])
+                          for r in remaining],
+            "top": [(d.deal_id, d.deal_score) for d in top],
+            "alert": (alert.current_price, alert.vendor),
+            "history": (history.lowest_price, history.highest_price,
+                        history.average_price, len(history.prices)),
+            "fired": [(a.product_url, a.current_price, a.is_triggered)
+                      for a in fired],
+            "alerts": [(a.alert_id == alert.alert_id, a.is_triggered,
+                        a.current_price) for a in alerts],
+        }
+
+    def test_conformance(self, rung, tmp_path, monkeypatch):
+        engine, hunter = self._engines(
+            tmp_path / "shopping.db", rung.store, monkeypatch)
+        # one shared disposition: both engines seam-backed together
+        # or both native — never one of each
+        assert (engine._port is None) == (rung.store is None)
+        assert (hunter._port is None) == (rung.store is None)
+        observed = self._scenario(engine, hunter)
+        assert observed["steal"] == (800.0, 1000.0, 800.0, 27.0)
+        assert observed["steals"] == [
+            ("https://www.jumia.com.ng/p/1", 90.0)]
+        assert observed["watched_site"] == "jumia"
+        assert observed["triggered"] == [
+            ("https://www.jumia.com.ng/p/1", 800.0, True)]
+        assert observed["remaining"] == [
+            ("https://www.konga.com/p/1", 100.0)]
+        assert observed["top"] == [("deal_1", 90.0), ("deal_2", 50.0)]
+        assert observed["alert"] == (700.0, "jumia")
+        assert observed["history"] == (700.0, 700.0, 700.0, 1)
+        assert observed["fired"] == [
+            ("https://www.jumia.com.ng/p/1", 700.0, True)]
+        assert observed["alerts"] == [(True, True, 700.0)]
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path,
+                                        monkeypatch):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        import asyncio
+        import time
+
+        from nomorals.integrations.naija_deals import Deal
+        from nomorals.integrations.naija_shopping import PriceSnapshot
+
+        path = tmp_path / "shopping.db"
+        engine, hunter = self._engines(path, None, monkeypatch)
+        now = time.time()
+        url = "https://www.jumia.com.ng/p/1"
+        engine._store_snapshot(PriceSnapshot(
+            product_url=url, site="jumia", price_ngn=1000.0,
+            title="Phone X", timestamp=now - 300))
+        engine._store_snapshot(PriceSnapshot(
+            product_url=url, site="jumia", price_ngn=800.0,
+            title="Phone X", timestamp=now - 200))
+        watched = asyncio.run(engine.track_url(
+            url, "user1", target_price=850.0))
+        hunter._store_deal(Deal(
+            deal_id="deal_1", title="Phone X", vendor="Jumia Nigeria",
+            current_price=800.0, original_price=1000.0,
+            discount_percent=20.0, url=url, deal_score=90.0,
+            discovered_at=now))
+        alert = asyncio.run(hunter.track_product(url, 750.0, "user1"))
+
+        # seam construction imports all six tables' history once —
+        # the engine constructs first, the hunter's tables come too
+        engine2, _hunter2 = self._engines(path, rung.store, monkeypatch)
+        store = rung.store
+        assert store.count("shopping-deals__naija_price_snapshots") == 2
+        assert store.count("shopping-deals__watchlists") == 1
+        assert store.count("shopping-deals__steals") == 0
+        assert store.count("shopping-deals__deals") == 1
+        assert store.count("shopping-deals__price_alerts") == 1
+        assert store.count("shopping-deals__price_history") == 1
+        docs = store.find("shopping-deals__naija_price_snapshots")
+        assert sorted(d["price_ngn"] for d in docs) == [800.0, 1000.0]
+        assert all(d["title"] == "Phone X" for d in docs)
+        doc = store.get("shopping-deals__watchlists",
+                        watched.watchlist_id)
+        assert doc is not None and doc["target_price"] == 850.0
+        doc = store.get("shopping-deals__price_alerts", alert.alert_id)
+        assert doc is not None and doc["current_price"] == 700.0
+        # a second seam construction adopts — never re-imports
+        self._engines(path, rung.store, monkeypatch)
+        assert store.count("shopping-deals__naija_price_snapshots") == 2
+        assert store.count("shopping-deals__price_alerts") == 1
+        # and the seam path keeps serving: a new snapshot lands there
+        engine2._store_snapshot(PriceSnapshot(
+            product_url=url, site="jumia", price_ngn=750.0,
+            title="Phone X", timestamp=now - 50))
+        assert store.count("shopping-deals__naija_price_snapshots") == 3
+        steal = asyncio.run(engine2.compute_steal_score(url))
+        assert steal is not None and steal.current_price == 750.0
+
+    def test_legacy_adoption_carries_into_the_seam(
+            self, rung, tmp_path, monkeypatch):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.storage.db import Database
+
+        path = tmp_path / "shopping.db"
+        db = Database(str(path))
+        db.execute(
+            """CREATE TABLE price_snapshots (
+                 product_url TEXT NOT NULL, site TEXT NOT NULL,
+                 price_ngn REAL NOT NULL, title TEXT NOT NULL,
+                 timestamp REAL NOT NULL,
+                 in_stock INTEGER NOT NULL DEFAULT 1,
+                 original_price REAL NOT NULL DEFAULT 0,
+                 discount_badge REAL NOT NULL DEFAULT 0,
+                 PRIMARY KEY (product_url, timestamp))""")
+        db.execute(
+            "INSERT INTO price_snapshots VALUES "
+            "('https://x.example/1', 'jumia', 100.0, 't', 5.0, 1, 0, 0)")
+        db.close()
+
+        self._engines(path, rung.store, monkeypatch)
+        # the rename happened in the file (the rule, verbatim) …
+        check = Database(str(path))
+        try:
+            assert check.table_exists("naija_price_snapshots")
+            assert not check.table_exists("price_snapshots")
+        finally:
+            check.close()
+        # … and the adopted history is what the seam imported
+        assert rung.store.count(
+            "shopping-deals__naija_price_snapshots") == 1
+        docs = rung.store.find("shopping-deals__naija_price_snapshots")
+        assert docs[0]["price_ngn"] == 100.0
+        assert docs[0]["site"] == "jumia"
+
+    def test_migrations_shaped_table_left_untouched(
+            self, rung, tmp_path, monkeypatch):
+        from nomorals.storage.db import Database
+
+        path = tmp_path / "shopping.db"
+        db = Database(str(path))
+        db.migrate()
+        assert db.table_exists("price_snapshots")
+        db.close()
+
+        self._engines(path, rung.store, monkeypatch)
+        check = Database(str(path))
+        try:
+            cols = {r["name"]
+                    for r in check.table_info("price_snapshots")}
+            assert "listing_id" in cols and "product_url" not in cols
+            assert check.table_exists("naija_price_snapshots")
+        finally:
+            check.close()
+        if rung.store is not None:
+            # the migrations shape is not this engine's data: the
+            # import found only the engine's own (empty) table
+            assert rung.store.count(
+                "shopping-deals__naija_price_snapshots") == 0
