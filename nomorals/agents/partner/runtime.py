@@ -5391,8 +5391,10 @@ class PartnerRuntime(
         own studio the first time, then shelved).  The Telegram
         surfaces take it natively; WhatsApp takes it since the
         buttons completion (2026-11-08) — its media sends carry
-        the keyboard in the interactive header, so photo +
-        caption + buttons is a real form there too. The MTProto
+        the keyboard under the adapter's form policy (on the
+        media's interactive header when the whole keyboard fits
+        the native set, else as a follow-up list message), so
+        photo + caption + buttons is a real form there too. The MTProto
         menu keeps the text head (capability-checked, never
         faked).  None on any failure: the menu never breaks for
         its picture."""

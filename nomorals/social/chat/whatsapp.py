@@ -193,6 +193,12 @@ UNCONFIRMED_SEND_ERROR = (
     "bridge ack unconfirmed after dispatch — held, not re-sent "
     "(a duplicate is worse than a held send)")
 
+#: Body of the follow-up text message that carries a media send's
+#: keyboard when the producer wrote no caption to ride with it
+#: (see WhatsAppAdapter.send_media): a bare pointer — the message
+#: exists for its buttons, which are the content.
+_MEDIA_KEYBOARD_BODY = "👇"
+
 
 class Outbox:
     """Persistent send queue for bridge outages.
@@ -782,6 +788,40 @@ class WhatsAppAdapter(ChatAdapter):
                       "account's sends now use the list form "
                       "(evidence, /pair buttons can pin it back)",
                       jid)
+
+    # ── the keyboard form policy (one seam) ─────────────────────
+    def _buttons_list_form(self, buttons: Any) -> bool:
+        """True when a declared keyboard must go out in the
+        bridges' LIST form — the adapter's ONE form policy. Every
+        WhatsApp delivery path that carries a keyboard decides
+        through here, never per call site: text sends
+        (:meth:`_send_text_outcome`, which the outbox flush also
+        funnels through), keyboard edits (:meth:`edit_message`),
+        and media ride-alongs (:meth:`send_media`).
+
+        Two independent grounds, either sufficient:
+
+        * the persisted per-account preference is "list" — the
+          owner's pin, or the learned evidence that quick_reply
+          degrades on this account (see :meth:`_note_buttons_form`);
+        * the keyboard carries more buttons than WhatsApp's
+          native quick_reply set holds. Both bridges cap that
+          set at three and demote the overflow to inert body
+          text (``splitNative`` in bridge/gobridge/messages.go,
+          ``buildInteractive`` in bridge/whatsapp-bridge.mjs),
+          so a wider keyboard in the native form silently stops
+          being buttons past #3 — the draft card's Edit/Discard
+          and the session menu's sections were that bug. In the
+          list form every row stays tappable.
+
+        Keyboards of three or fewer with no list preference in
+        force keep the native quick_reply form, byte-identically.
+        """
+        if not buttons:
+            return False
+        if self._buttons_form_pref == "list":
+            return True
+        return sum(len(row) for row in buttons if row) > 3
 
     def _buttons_form_store_path(self) -> str:
         """Where the button-form evidence persists: beside the
@@ -1828,19 +1868,13 @@ class WhatsAppAdapter(ChatAdapter):
             request["buttons"] = [
                 [[str(label), str(data)] for label, data in row]
                 for row in buttons if row]
-            # Form follows the KEYBOARD's shape too, not only the
-            # account's degradation history: both bridges cap the
-            # native quick_reply set at 3 buttons and demote the
-            # overflow to inert body text, so a keyboard carrying
-            # more than 3 buttons goes out in the list form — where
-            # every row stays tappable — from the start. (The
-            # draft review card's Edit/Discard sat at #4/#5 and
-            # were never buttons at all under the old rule: the
-            # persisted preference only ever flipped after a
-            # degradation REPORT, which a "successful" 3-native
-            # send never produces.)
-            flat_count = sum(len(row) for row in buttons if row)
-            if self._buttons_form_pref == "list" or flat_count > 3:
+            # Form follows the adapter's one keyboard policy
+            # (_buttons_list_form): the persisted list preference,
+            # or a keyboard wider than the bridges' native
+            # quick_reply cap of 3 — whose overflow would demote
+            # to inert body text — goes out in the list form,
+            # where every row stays tappable.
+            if self._buttons_list_form(buttons):
                 request["buttons_style"] = "list"
         for attempt in (1, 2):
             response = self._send_cmd(request)
@@ -2001,18 +2035,32 @@ class WhatsAppAdapter(ChatAdapter):
                    ) -> SendResult:
         """Send a photo/video/audio/document via the bridge's send_media.
 
-        ``buttons`` (buttons completion, 2026-11-08): the media
-        itself carries the keyboard — both bridges head an
-        InteractiveMessage with the uploaded media (image / video
-        / document; audio's actions ride as a follow-up text), the
-        same 3-native + text-line degradation contract as text
-        sends, and the reply's buttons_form is ledgered the same
-        way. This parameter existing is also what unblocks the
-        gateway's media path, which passes declared buttons only
-        to adapters whose send_media declares them.
+        ``buttons``: the keyboard placement follows the adapter's
+        one form policy (:meth:`_buttons_list_form`). A keyboard
+        rides ON the media only when the media can head an
+        InteractiveMessage (image / video / document, not
+        view-once, not a video note) AND the whole keyboard fits
+        WhatsApp's native quick_reply set — three or fewer, no
+        list preference in force; the bridges head the uploaded
+        media with those buttons and the reply's buttons_form is
+        ledgered the same way as text sends. Every other keyboard
+        rides a follow-up text message instead
+        (:meth:`_send_media_buttons_followup`): the media goes
+        out bare, and the text door carries the caption + the
+        full keyboard under the same policy — native quick_reply
+        or the list form — so every action lands as a real
+        tappable button. Neither bridge can head media with a
+        ListMessage (their send_media paths never read
+        ``buttons_style``), and their on-media fallback for an
+        over-wide keyboard is inert caption lines — the demotion
+        the button fix programme (Lane 2) ends here. This
+        parameter existing is also what unblocks the gateway's
+        media path, which passes declared buttons only to
+        adapters whose send_media declares them.
 
         When the bridge is down the media is queued (path + caption
-        + buttons) and flushed on reconnect — same as text."""
+        + buttons) and flushed on reconnect — same as text; the
+        placement is decided when the flush re-enters here."""
         started = time.perf_counter()
         path = (media.path or "").strip()
         if not path:
@@ -2041,6 +2089,20 @@ class WhatsAppAdapter(ChatAdapter):
         wire_buttons = (
             [[[str(label), str(data)] for label, data in row]
              for row in buttons if row] if buttons else None)
+        # Keyboard placement (the form policy decides, see the
+        # docstring): ON the media only when the media can head an
+        # interactive message and the policy keeps the native form;
+        # otherwise the keyboard rides the follow-up text message
+        # and the media goes out bare — caption included, since
+        # the caption is the follow-up's body there. View-once and
+        # video-note sends never take the interactive head (the
+        # wrap would replace the very form the caller asked for).
+        headable = (kind in ("image", "photo", "video", "document",
+                             "file")
+                    and not view_once and not video_note)
+        on_media = bool(wire_buttons) and headable and not \
+            self._buttons_list_form(buttons)
+        ride_along = bool(wire_buttons) and not on_media
         if not self.connected.is_set():
             return self._enqueue({
                 "kind": "media",
@@ -2068,7 +2130,10 @@ class WhatsAppAdapter(ChatAdapter):
             "cmd": "send_media",
             "chat": self._jid(chat),
             "path": path,
-            "caption": caption,
+            # In the ride-along form the media goes out bare: the
+            # caption is the follow-up text's body (the send-once
+            # guard key above still keys on the original caption).
+            "caption": "" if ride_along else caption,
             # The kind rides along (the offline enqueue payload has
             # always carried it): a sticker WebP or an animation
             # should reach the bridge AS what it is (§21). Whether
@@ -2076,10 +2141,7 @@ class WhatsAppAdapter(ChatAdapter):
             # side of the contract — reported, not assumed.
             "media_kind": kind,
         }
-        if wire_buttons:
-            # No buttons_style: a ListMessage cannot head media —
-            # the media form is the interactive header on both
-            # bridges regardless of the text-form preference.
+        if on_media:
             cmd["buttons"] = wire_buttons
         if kind in ("voice", "ptt"):
             cmd["ptt"] = True  # voice-note bubble instead of an audio file
@@ -2093,11 +2155,17 @@ class WhatsAppAdapter(ChatAdapter):
         if response.get("ok"):
             self._clear_unconfirmed(media_key)
             self.stats["sent"] += 1
-            if wire_buttons:
+            if on_media:
                 self._note_buttons_form(
                     str(response.get("buttons_form") or ""),
                     self._jid(chat))
             self._note_sent_id(str(response.get("message_id") or ""))
+            if ride_along:
+                # The media is confirmed out; only now does the
+                # keyboard follow (an unconfirmed dispatch must
+                # not sprout a follow-up the guard cannot hold).
+                self._send_media_buttons_followup(
+                    chat, caption, buttons)
             return SendResult(ok=True, platform=self.name,
                               message_id=str(response.get("message_id") or ""),
                               seconds=time.perf_counter() - started)
@@ -2112,6 +2180,41 @@ class WhatsAppAdapter(ChatAdapter):
         return SendResult(ok=False, platform=self.name,
                           error=str(response.get("error") or "bridge rejected media"),
                           seconds=time.perf_counter() - started)
+
+    def _send_media_buttons_followup(self, chat: ChatRef,
+                                     caption: str,
+                                     buttons: Any) -> None:
+        """The text message that carries a media send's keyboard
+        when the media itself cannot head it (see :meth:`send_media`
+        for the placement rule): the producer's caption — or the
+        bare pointer :data:`_MEDIA_KEYBOARD_BODY` when there is
+        none — plus the full keyboard, through the ordinary text
+        door, so the one form policy gives it native quick_reply
+        or the list form exactly like any text delivery and every
+        action stays tappable.
+
+        The media is already delivered when this runs: a failed
+        follow-up never fails the media send (an error verdict
+        would invite the gateway's retry to duplicate the media).
+        It is journaled by name instead — the delivery's record
+        says the keyboard did not land, rather than the actions
+        silently printing as dead rows somewhere."""
+        body = str(caption or "").strip() or _MEDIA_KEYBOARD_BODY
+        try:
+            result = self.send(chat, body, buttons=buttons)
+            error = "" if result.ok else str(
+                result.error or "send failed")
+        except Exception as exc:  # noqa: BLE001 - journaled, not raised
+            error = str(exc)
+        if error:
+            count = sum(len(row) for row in buttons if row) \
+                if buttons else 0
+            record_failure(
+                "whatsapp.WhatsAppAdapter.send_media.buttons",
+                RuntimeError(
+                    "media landed but its keyboard follow-up did "
+                    f"not: {error} (chat {chat.key}, "
+                    f"{count} buttons)"))
 
     def send_voice(self, chat: ChatRef, audio_path: str, *,
                    caption: str = "") -> SendResult:
@@ -2350,13 +2453,11 @@ class WhatsAppAdapter(ChatAdapter):
             payload["buttons"] = [
                 [[str(label), str(data)] for label, data in row]
                 for row in buttons if row]
-            # Same form rule as the send path: the persisted list
-            # preference, or any keyboard too wide for the native
-            # quick_reply cap of 3 — an edited card's overflow
-            # buttons must not demote to inert text either.
-            flat_count = sum(len(row) for row in buttons if row)
-            if buttons and (self._buttons_form_pref == "list"
-                            or flat_count > 3):
+            # The same one form policy as every other delivery
+            # path (_buttons_list_form) — an edited card's
+            # overflow buttons must not demote to inert text
+            # either.
+            if self._buttons_list_form(buttons):
                 payload["buttons_style"] = "list"
         verdict = self._admin_cmd("edit", payload, timeout=15)
         if verdict.get("ok") or buttons is None or len(buttons) > 0:
