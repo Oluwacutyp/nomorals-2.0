@@ -43,13 +43,18 @@ that already exist rather than inventing parallel machinery:
 - **The watchdog** runs as a ``core/jobs.py`` JobRegistry job,
   inheriting that registry's heartbeat/reap plumbing.
 
-Promotion itself is Lane 2: this module leaves the seam as an
-explicit state, not a stub — :meth:`BenchMonitor.submit` moves a
-task to ``submitted`` (leases retained, per dossier §3.4) and
+Promotion itself is Lane 2's integration queue
+(:mod:`.integration`): :meth:`BenchMonitor.submit` moves a task
+to ``submitted`` (leases retained, per dossier §3.4) — with a
+staging manager attached, submit first captures the staging
+diff as the candidate (:mod:`.staging`) — and
 :meth:`BenchMonitor.promotion_candidates` is the ordered input
-the integration queue will consume. Nothing here promotes, and
-the store's read view (``BenchStore.peer_view``) keeps an
-unpromoted candidate invisible to peers meanwhile.
+the queue consumes. Nothing here promotes, and the store's read
+view (``BenchStore.peer_view``) keeps an unpromoted candidate
+invisible to peers meanwhile. With a staging manager attached,
+claims also create the task's staging area, releases discard
+it, expiries quarantine it, and the watchdog's stall detection
+reads artifact change in the staging tree as progress.
 
 Layer: agents (L5) — imports core (L1) and the agents/missions
 peers it composes.
@@ -150,13 +155,20 @@ class BenchMonitor:
 
     def __init__(self, db: Any, *,
                  lease_ttl_s: float = DEFAULT_LEASE_TTL_S,
-                 stall_after_s: float = DEFAULT_STALL_AFTER_S) -> None:
+                 stall_after_s: float = DEFAULT_STALL_AFTER_S,
+                 staging: Any = None) -> None:
         self.db = db
         self.store = BenchStore(db)
         self.leases = LeaseStore(db)
         self.delegation = DelegationStore(db)
         self.lease_ttl_s = float(lease_ttl_s)
         self.stall_after_s = float(stall_after_s)
+        #: Lane 2: the staging manager (``bench/staging.py``), or
+        #: None — a monitor without one claims exactly as Lane 1
+        #: did; with one, claims create staging areas, submits
+        #: capture candidates, and the watchdog reads artifact
+        #: progress. Attached at construction by the wiring layer.
+        self.staging = staging
         self._watchdog_stop = threading.Event()
         self._watchdog_job: Any = None
 
@@ -271,6 +283,7 @@ class BenchMonitor:
                                       now=now):
             # Idempotent re-claim by the live claimant: the fence
             # checked out at the store.
+            self._ensure_staging(run, task, now)
             return {"claimed": True, "already_held": True,
                     "task_id": task["id"],
                     "generation": task["claim_generation"],
@@ -335,7 +348,35 @@ class BenchMonitor:
                     "base_revision": granted["base_revision"],
                     "attempt": granted["attempt"]},
             now=now)
+        try:
+            self._ensure_staging(
+                run, self.store.get_task(run_id, key) or task, now)
+        except BenchError:
+            # The claim landed but its staging could not be
+            # created: yield the claim rather than hand the
+            # cursor a claim it cannot work in.
+            self.release(run_id, key, cursor_id,
+                         granted["generation"],
+                         reason="staging_failed", now=now)
+            raise
         return granted
+
+    def _ensure_staging(self, run: dict[str, Any],
+                        task: dict[str, Any], now: float) -> None:
+        """Lane 2: create the claimed task's staging area
+        (idempotent) and journal its creation. A monitor without
+        a staging manager skips this entirely (Lane 1 shape)."""
+        if self.staging is None:
+            return
+        area, created = self.staging.create(run["id"], task, now=now)
+        if created:
+            self.store.append_event(
+                run["id"], task["id"], "staging_created", MONITOR_REF,
+                generation=int(task.get("claim_generation") or 0),
+                detail={"mechanism": area.mechanism,
+                        "base_revision": area.base_revision,
+                        "path": str(area.path)},
+                now=now)
 
     def _claim_in_transaction(self, run: dict[str, Any],
                               task: dict[str, Any], cursor_id: str,
@@ -539,6 +580,31 @@ class BenchMonitor:
                 reason="stale_generation", now=now)
             return {"submitted": False, "reason": "stale_generation",
                     "task_id": task["id"]}
+        if self.staging is not None and not candidate_ref:
+            # Lane 2: submit = capture. The staging diff becomes
+            # the candidate NOW, while the fencing above still
+            # holds; a capture failure refuses the submit with
+            # the reason journaled — no phantom candidate.
+            try:
+                capture = self.staging.capture(run_id, task["id"])
+            except BenchError as exc:
+                self.store.append_event(
+                    run_id, task["id"], "submit_refused",
+                    str(cursor_id), generation=int(generation),
+                    reason="capture_failed",
+                    detail={"error": str(exc)}, now=now)
+                return {"submitted": False,
+                        "reason": "capture_failed",
+                        "task_id": task["id"]}
+            candidate_ref = str(capture["candidate_ref"])
+            self.store.append_event(
+                run_id, task["id"], "candidate_captured",
+                str(cursor_id), generation=int(generation),
+                detail={"candidate_ref": candidate_ref,
+                        "files": capture["files"],
+                        "empty": bool(capture["empty"]),
+                        "base_revision": capture["base_revision"]},
+                now=now)
         moved = self.store.transition(
             task["id"], [TASK_CLAIMED, TASK_WORKING], TASK_SUBMITTED,
             now=now, candidate_ref=str(candidate_ref or ""),
@@ -596,6 +662,10 @@ class BenchMonitor:
                 run_id, task["id"], "claim_released", str(cursor_id),
                 generation=int(generation), reason=str(reason or ""),
                 now=now)
+            if self.staging is not None:
+                # A voluntary yield abandons the staging area;
+                # its content was never captured, so it goes.
+                self.staging.discard(run_id, task["id"])
         return {"released": bool(moved), "task_id": task["id"]}
 
     # -- watchdog ---------------------------------------------------------
@@ -636,19 +706,43 @@ class BenchMonitor:
                                              if history else 0.0)})
                 expired.append(task["key"])
                 continue
+            # Lane 2 refines the progress signal: a live claim
+            # whose STAGING ARTIFACT changed since the last pass
+            # has made progress whether or not its cursor said
+            # so in a heartbeat — the artifact is the evidence,
+            # the heartbeat was only the claim. The ``stalled``
+            # event is the same event, now carrying the artifact
+            # evidence it was judged on.
+            artifact: dict[str, Any] | None = None
+            if self.staging is not None:
+                artifact = self.staging.observe_progress(
+                    task["run_id"], task["id"])
+                if artifact["changed"]:
+                    self.store.transition(
+                        task["id"], [task["state"]], task["state"],
+                        now=now, last_progress_at=now, stalled=0)
+                    task = {**task, "last_progress_at": now,
+                            "stalled": False}
             if not task["stalled"] and self.stall_after_s > 0 and \
                     now - float(task["last_progress_at"] or 0) \
                     > self.stall_after_s:
                 self.store.transition(
                     task["id"], [task["state"]], task["state"],
                     now=now, stalled=1)
+                detail: dict[str, Any] = {
+                    "stall_after_s": self.stall_after_s,
+                    "last_progress_at": task["last_progress_at"]}
+                if artifact is not None:
+                    detail["artifact"] = {
+                        "digest": artifact["digest"],
+                        "files": artifact["files"],
+                        "last_change_at":
+                            artifact["last_change_at"]}
                 self.store.append_event(
                     task["run_id"], task["id"], "stalled", MONITOR_REF,
                     generation=int(task["claim_generation"]),
                     reason=STALL_NO_ARTIFACT_CHANGE,
-                    detail={"stall_after_s": self.stall_after_s,
-                            "last_progress_at":
-                                task["last_progress_at"]},
+                    detail=detail,
                     now=now)
                 stalled.append(task["key"])
         return {"expired": expired, "stalled": stalled}
@@ -672,6 +766,16 @@ class BenchMonitor:
             candidate_ref="", last_seen=now)
         if not moved:
             return
+        if self.staging is not None:
+            # The dead cursor's staging is quarantined: kept for
+            # inspection, never promoted, never a starting point.
+            area = self.staging.quarantine(task["run_id"], task["id"])
+            if area is not None and area.state == "quarantined":
+                self.store.append_event(
+                    task["run_id"], task["id"],
+                    "staging_quarantined", MONITOR_REF,
+                    generation=generation, reason=reason,
+                    detail={"path": str(area.path)}, now=now)
         self.store.append_event(
             task["run_id"], task["id"], "claim_expired", MONITOR_REF,
             generation=generation, reason=reason, detail=evidence,

@@ -134,6 +134,10 @@ EVENT_KINDS = frozenset({
     "claim_expired", "task_requeued", "heartbeat",
     "heartbeat_refused", "task_submitted", "submit_refused",
     "stalled",
+    # Lane 2 — staging + integration queue.
+    "staging_created", "staging_quarantined",
+    "candidate_captured", "task_promoted", "task_conflicted",
+    "monitor_defect",
 })
 
 #: The verdict vocabulary — the delegation claim verdicts, reused
