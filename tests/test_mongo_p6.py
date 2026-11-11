@@ -471,11 +471,18 @@ class TestConfigFlip:
 # ── dispositions + residue probe + preflight refusals ────────────────────
 
 def _residue_home(tmp_path: Path) -> Path:
+    # The two planted residue stores are the registry's two structural
+    # holds — books-library (its port waits on the FTS search-parity
+    # story) and planning-graph (its port follows the kg/graph
+    # disposition). Both stay residue until those stories land, so
+    # this fixture does not stale as port batches proceed — its
+    # previous second store, agent-identities, was ported in Mongo
+    # Batch 1 and broke every test below that named it.
     home = tmp_path / "home"
     home.mkdir()
-    conn = sqlite3.connect(home / "identities.db")
-    conn.execute("CREATE TABLE identities (id TEXT PRIMARY KEY, name TEXT)")
-    conn.executemany("INSERT INTO identities VALUES (?, ?)",
+    conn = sqlite3.connect(home / "world_graph.db")
+    conn.execute("CREATE TABLE graph_nodes (id TEXT PRIMARY KEY, label TEXT)")
+    conn.executemany("INSERT INTO graph_nodes VALUES (?, ?)",
                      [("a", "Ada"), ("b", "Bola")])
     conn.commit()
     conn.close()
@@ -497,9 +504,9 @@ class TestDispositionsAndProbe:
         db_path = home / "data" / "nomorals.db"
         db_path.parent.mkdir(parents=True)
         report = cutover.residue_report(home, db_path)
-        ident = report["stores"]["agent-identities"]
-        assert ident["has_data"]
-        assert ident["files"][0]["rows"] == 2
+        graph = report["stores"]["planning-graph"]
+        assert graph["has_data"]
+        assert graph["files"][0]["rows"] == 2
         books = report["stores"]["books-library"]
         assert books["has_data"] and books["files"][0]["rows"] == 1
         assert [u["path"] for u in report["unattributed"]] == \
@@ -509,15 +516,15 @@ class TestDispositionsAndProbe:
         home = _residue_home(tmp_path)
         db, _r, _n = open_database(home / "data.db")
         recorded = cutover.record_disposition(
-            db, "agent-identities", "ports-later-accepted", "queued")
+            db, "planning-graph", "ports-later-accepted", "queued")
         assert recorded["disposition"] == "ports-later-accepted"
-        assert cutover.dispositions(db)["agent-identities"]["note"] == "queued"
+        assert cutover.dispositions(db)["planning-graph"]["note"] == "queued"
         with pytest.raises(ValueError):
             cutover.record_disposition(db, "no-such-store", "exported")
         with pytest.raises(ValueError):
             cutover.record_disposition(db, "backup-machinery", "exported")
         with pytest.raises(ValueError):
-            cutover.record_disposition(db, "agent-identities", "whatever")
+            cutover.record_disposition(db, "planning-graph", "whatever")
         status = cutover.cutover_status(db, SimpleNamespace(
             home_path=home, db_path=home / "data.db"))
         assert status["missing_dispositions"] == ["books-library"]
@@ -564,8 +571,8 @@ class TestPreflightRefusals:
         assert pre["checks"]["cache_capped"]
         assert not pre["checks"]["residue_dispositions"]
         assert set(pre["missing_dispositions"]) == \
-            {"agent-identities", "books-library"}
-        cutover.record_disposition(db, "agent-identities", "exported")
+            {"books-library", "planning-graph"}
+        cutover.record_disposition(db, "planning-graph", "exported")
         cutover.record_disposition(db, "books-library", "owner-data-risk")
         pre = cutover.preflight(db, settings, _StubTarget(_GOOD_FACTS))
         assert pre["ok"], pre["checks"]
@@ -651,10 +658,12 @@ class TestCutoverRehearsal:
         seeded_job = queue.enqueue("p6.pending", {"seed": True})
         _seed_pinned_row(db, "memories", "p6-memory")
         _seed_pinned_row(db, "game_wallet", "p6-wallet")
-        # Residue sidecar files with data.
-        conn = sqlite3.connect(home / "identities.db")
-        conn.execute("CREATE TABLE identities (id TEXT PRIMARY KEY, name TEXT)")
-        conn.execute("INSERT INTO identities VALUES ('a', 'Ada')")
+        # Residue sidecar files with data (the two registry holds —
+        # see _residue_home for why these two stores).
+        conn = sqlite3.connect(home / "world_graph.db")
+        conn.execute(
+            "CREATE TABLE graph_nodes (id TEXT PRIMARY KEY, label TEXT)")
+        conn.execute("INSERT INTO graph_nodes VALUES ('a', 'Ada')")
         conn.commit()
         conn.close()
         conn = sqlite3.connect(home / "library.db")
@@ -679,14 +688,14 @@ class TestCutoverRehearsal:
         pre = cutover.preflight(db, settings, target)
         assert not pre["ok"]
         assert set(pre["missing_dispositions"]) == \
-            {"agent-identities", "books-library"}
+            {"books-library", "planning-graph"}
         assert pre["checks"]["target_reachable"]
         assert pre["checks"]["replica_set"]
         assert pre["checks"]["writable_primary"]
         assert pre["checks"]["cache_capped"]
 
         # 2. Record the dispositions; preflight goes green.
-        cutover.record_disposition(db, "agent-identities",
+        cutover.record_disposition(db, "planning-graph",
                                    "ports-later-accepted")
         cutover.record_disposition(db, "books-library", "owner-data-risk")
         assert cutover.preflight(db, settings, target)["ok"]
@@ -814,11 +823,11 @@ class TestCutoverCli:
 
         args = SimpleNamespace(
             task=["cutover", "dispositions",
-                  "--record", "agent-identities",
+                  "--record", "planning-graph",
                   "--as", "ports-later-accepted"], json=False)
         assert _cmd_db(args, context) == 0
         out = capsys.readouterr().out
-        assert "agent-identities" in out
+        assert "planning-graph" in out
         args = SimpleNamespace(
             task=["cutover", "dispositions",
                   "--record-missing", "--as", "exported"], json=False)
