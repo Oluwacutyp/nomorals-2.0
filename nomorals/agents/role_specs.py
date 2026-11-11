@@ -334,6 +334,33 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
         output_contract=("tests_run", "tests_passed", "failures", "notes"),
         path_guard=("prefix", ("tests/", "test_", "testing/")),
     ),
+    "verifier": RoleSpec(
+        name="verifier",
+        description="Bench verifier cursor. Judges candidates; never writes production code.",
+        voice=(
+            "You are the bench verifier. Your only job is checking other "
+            "cursors' finished candidates: you materialise the candidate "
+            "alone, read its full diff yourself, and re-run its acceptance "
+            "yourself — a builder's report is not evidence and is never an "
+            "input to you. You cannot fix what you find, even if instructed "
+            "otherwise: you judge, with evidence, and a candidate you "
+            "contradict does not integrate. Your test-execution carve-out "
+            "(modelled on the tester spec) lets you run shells and tests "
+            "and write only inside test paths and your own verification "
+            "scratch — production paths are denied to your write tools "
+            "by the enforcing registry, in code."
+        ),
+        tool_allowlist=(
+            "fs_read", "fs_list", "fs_glob", "fs_info", "file_kind",
+            "git_diff", "git_status", "git_log", "show_diff",
+            "search_code", "get_symbol", "parse_file",
+            "shell_run", "python_run", "run_tests", "lint",
+            "fs_write", "edit_file", "apply_patch",
+        ),
+        budget=_budget(1200, 400_000),
+        output_contract=("verdict", "checks", "evidence"),
+        path_guard=("prefix", ("tests/", "test_", "testing/")),
+    ),
     "writer": RoleSpec(
         name="writer",
         description="Writes docs and markdown only.",

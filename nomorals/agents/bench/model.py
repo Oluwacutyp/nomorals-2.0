@@ -138,6 +138,9 @@ EVENT_KINDS = frozenset({
     "staging_created", "staging_quarantined",
     "candidate_captured", "task_promoted", "task_conflicted",
     "monitor_defect",
+    # Lane 3 — the verifier cursor.
+    "verification_started", "verdict_recorded", "task_returned",
+    "verification_escalated", "verification_timeout",
 })
 
 #: The verdict vocabulary — the delegation claim verdicts, reused
@@ -627,6 +630,16 @@ class BenchStore:
                 "verifier": str(verifier), "verdict": verdict,
                 "evidence_ref": str(evidence_ref),
                 "detail": detail or {}, "created_at": now}
+
+    def latest_verdict(self, task_id: str,
+                       candidate_ref: str) -> dict[str, Any] | None:
+        """The newest verdict recorded for EXACTLY this candidate
+        — the integration gate's only input (Lane 3). A verdict
+        written against an earlier candidate has no power over a
+        resubmitted one: the refs differ, so it cannot match."""
+        rows = [row for row in self.verdicts(task_id)
+                if row["candidate_ref"] == str(candidate_ref)]
+        return rows[-1] if rows else None
 
     def verdicts(self, task_id: str) -> list[dict[str, Any]]:
         rows = self.db.query(

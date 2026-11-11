@@ -25,7 +25,7 @@ A promotion:
    the optional acceptance smoke on the staged result, and
    commits as ONE commit carrying the candidate's bench
    trailers.
-3. **Journals atomically**: task ``submitted -> promoted``,
+3. **Journals atomically**: task ``verifying -> promoted``,
    ``note_promoted_revision``, lease release, and the
    ``task_promoted`` event land in one store transaction.
 
@@ -48,9 +48,20 @@ task back (``requeued``) so its cursor can re-claim it at the
 new promoted base and redo the change against current code.
 There is no --ours/--theirs and no model merge anywhere here.
 
-Verification gating (a recorded verifier pass before the queue
-may take a candidate) is Lane 3's wiring; this queue consumes
-the ``submitted`` state Lane 1 left as its seam.
+Verification gating is Lane 3's, and it sits at exactly one
+point: :meth:`BenchIntegrator.pending` returns only tasks in
+``verifying`` whose LATEST verdict for the CURRENT candidate
+ref is ``supported`` — the verifier's word, written to
+``bench_verdicts`` by the verifier organ (verifier.py), is the
+gate's only input. A merely submitted candidate, a returned
+one, a resubmission whose new ref carries no verdict yet: all
+absent by construction, and :meth:`BenchIntegrator._promote_once`
+re-checks the same gate at the moment of promotion, so a
+verdict written between listing and promoting still rules.
+The queue mechanics (serial order, exactly-once, conflict
+honesty) are unchanged by the gate; promotion and conflict
+journaling now transition from ``verifying``, the state the
+verifier leaves a supported task in.
 
 Layer: agents (L5) — composes the bench model/monitor/staging
 and the missions peer's idempotency store.
@@ -69,6 +80,7 @@ from .model import (
     TASK_PROMOTED,
     TASK_REQUEUED,
     TASK_SUBMITTED,
+    TASK_VERIFYING,
     BenchError,
 )
 
@@ -118,11 +130,50 @@ class BenchIntegrator:
     # -- queue shape ---------------------------------------------------
 
     def pending(self, run_id: str) -> list[dict[str, Any]]:
-        """Submitted candidates awaiting promotion, in submit
-        order — the queue's remaining work."""
-        return [task for task in
-                self.monitor.promotion_candidates(run_id)
-                if task["state"] == TASK_SUBMITTED]
+        """The queue's whole input (Lane 3's verdict gate):
+        tasks in ``verifying`` whose latest verdict for the
+        CURRENT candidate ref is ``supported``, in verdict
+        order. Nothing else promotes — not a submitted-but-
+        unverified candidate, not a returned one, not a
+        resubmission whose new ref carries no verdict yet."""
+        out: list[tuple[float, dict[str, Any]]] = []
+        for task in self.store.list_tasks(run_id):
+            if task["state"] != TASK_VERIFYING:
+                continue
+            verdict = self.store.latest_verdict(
+                task["id"], str(task.get("candidate_ref") or ""))
+            if verdict is None or verdict["verdict"] != "supported":
+                continue
+            out.append((float(verdict["created_at"]), task))
+        out.sort(key=lambda pair: pair[0])
+        return [task for _, task in out]
+
+    def blocked(self, run_id: str) -> list[dict[str, Any]]:
+        """Submitted/verifying tasks the gate is holding, each
+        with its reason — observability for the run surface
+        (Lane 4 renders it), never a second promotion path."""
+        out: list[dict[str, Any]] = []
+        for task in self.store.list_tasks(run_id):
+            if task["state"] not in (TASK_SUBMITTED, TASK_VERIFYING):
+                continue
+            verdict = self.store.latest_verdict(
+                task["id"], str(task.get("candidate_ref") or ""))
+            if task["state"] == TASK_VERIFYING and verdict is not None \
+                    and verdict["verdict"] == "supported":
+                continue
+            if verdict is None:
+                reason = ("awaiting_verdict"
+                          if task["state"] == TASK_SUBMITTED
+                          else "verdict_missing")
+            else:
+                reason = "verdict_" + str(verdict["verdict"])
+            out.append({
+                "task_id": task["id"], "key": task["key"],
+                "state": task["state"],
+                "candidate_ref": str(task.get("candidate_ref") or ""),
+                "reason": reason,
+                "verdict": (verdict or {}).get("verdict", "")})
+        return out
 
     def promote_all(self, run_id: str, *,
                     now: float | None = None) -> list[dict[str, Any]]:
@@ -138,9 +189,10 @@ class BenchIntegrator:
 
     def promote_next(self, run_id: str, *,
                      now: float | None = None) -> dict[str, Any] | None:
-        """Promote (or conflict) the oldest submitted candidate.
-        Returns its outcome record, or None when the queue is
-        empty. The promotion itself runs under its idempotency
+        """Promote (or conflict) the oldest gate-cleared
+        candidate. Returns its outcome record, or None when no
+        task passes the verdict gate. The promotion itself runs
+        under its idempotency
         key — a retry after a crash returns the recorded
         outcome or re-executes into reconciliation, landing
         exactly once either way."""
@@ -181,10 +233,21 @@ class BenchIntegrator:
                     "task_id": task_id,
                     "revision": str(run["promoted_revision"]),
                     "already_journaled": True}
-        if task["state"] != TASK_SUBMITTED:
+        if task["state"] != TASK_VERIFYING:
             return {"promoted": False, "task": task["key"],
                     "task_id": task_id,
-                    "reason": "not_submitted",
+                    "reason": "not_verifying",
+                    "state": task["state"]}
+        # The gate, re-checked at the moment of promotion: the
+        # latest verdict for the CURRENT candidate ref must be
+        # supported — a listing from a moment ago does not rule.
+        verdict = self.store.latest_verdict(
+            task_id, str(task.get("candidate_ref") or ""))
+        if verdict is None or verdict["verdict"] != "supported":
+            return {"promoted": False, "task": task["key"],
+                    "task_id": task_id,
+                    "reason": "verdict_gate",
+                    "verdict": (verdict or {}).get("verdict", ""),
                     "state": task["state"]}
         # Step 1 — reconcile tree and journal.
         head = self.staging.head()
@@ -252,7 +315,7 @@ class BenchIntegrator:
                            adopted: bool) -> dict[str, Any]:
         with self.monitor.db.transaction():
             moved = self.store.transition(
-                task["id"], [TASK_SUBMITTED], TASK_PROMOTED,
+                task["id"], [TASK_VERIFYING], TASK_PROMOTED,
                 now=now, holder="", pid=0, claim_generation=0,
                 leases=[])
             if not moved:
@@ -294,7 +357,7 @@ class BenchIntegrator:
         }
         with self.monitor.db.transaction():
             moved = self.store.transition(
-                task["id"], [TASK_SUBMITTED], TASK_CONFLICTED,
+                task["id"], [TASK_VERIFYING], TASK_CONFLICTED,
                 now=now, holder="", pid=0, claim_generation=0,
                 leases=[])
             if not moved:

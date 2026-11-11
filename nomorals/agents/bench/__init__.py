@@ -18,9 +18,17 @@ never see each other's unfinished work.
   (missions idempotency + tree/journal reconciliation), and a
   candidate that does not apply becomes a named ``conflicted``
   event — never a silent merge.
+- :mod:`.verifier` — Lane 3: the verifier cursor. It takes
+  exactly the task spec, the base revision, and the immutable
+  candidate ref (the request type has no field for a builder's
+  self-report), re-runs the acceptance and adjoining suites
+  itself on a clean checkout, applies the per-class check
+  table, and writes the verdict the integration gate consumes:
+  nothing promotes without a ``supported`` verdict for the
+  current candidate ref, and a verifier can never verify its
+  own work (the delegation store's independence law).
 
-The verifier cursor is Lane 3; orchestrator/surface wiring is
-Lane 4.
+Orchestrator/surface wiring is Lane 4.
 """
 
 from __future__ import annotations
@@ -35,16 +43,19 @@ from .model import (
 )
 from .monitor import BenchMonitor
 from .staging import BenchViews, StagingArea, StagingManager
+from .verifier import BenchVerifier, VerifyRequest
 
 __all__ = [
     "BenchError",
     "BenchIntegrator",
     "BenchMonitor",
     "BenchStore",
+    "BenchVerifier",
     "BenchViews",
     "StagingArea",
     "StagingManager",
     "TaskSpec",
+    "VerifyRequest",
     "contract_kwargs",
     "promotion_key",
     "write_sets_overlap",

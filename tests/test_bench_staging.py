@@ -45,7 +45,11 @@ from nomorals.agents.bench import (
     TaskSpec,
     promotion_key,
 )
-from nomorals.agents.bench.model import BenchError
+from nomorals.agents.bench.model import (
+    TASK_SUBMITTED,
+    TASK_VERIFYING,
+    BenchError,
+)
 from nomorals.agents.bench.staging import BenchViews
 from nomorals.missions.idempotency import IdempotencyStore
 from nomorals.storage.db import Database
@@ -127,6 +131,22 @@ class _BenchCase(unittest.TestCase):
         got = self.monitor.submit(self.run_id, key, cursor,
                                   generation, now=now)
         self.assertTrue(got["submitted"], got)
+        # Lane 3: promotion is verdict-gated — the queue only
+        # consumes verifying tasks whose latest verdict for the
+        # current candidate ref is supported. These Lane-2
+        # suites pin staging/integration mechanics, so the
+        # helper drives the gate exactly as a supported
+        # verifier verdict leaves it (the verifier organ itself
+        # is pinned in tests/test_bench_verifier.py).
+        task = self.task(key)
+        self.assertTrue(self.monitor.store.transition(
+            task["id"], [TASK_SUBMITTED], TASK_VERIFYING,
+            now=now + 0.1))
+        self.monitor.store.record_verdict(
+            self.run_id, task["id"],
+            candidate_ref=task["candidate_ref"],
+            verifier="bench-verifier", verdict="supported",
+            evidence_ref="lane2-helper", now=now + 0.2)
         return got
 
     def task(self, key):
@@ -411,7 +431,10 @@ class ExactlyOnceTests(_BenchCase):
         # The git commit landed; the journal did not — the exact
         # divergence reconciliation exists for.
         self.assertEqual(self.commit_count(), base_count + 1)
-        self.assertEqual(self.task("a")["state"], "submitted")
+        # Lane 3 re-pin: the task entered promotion from
+        # `verifying` (the verdict gate), so the crash leaves it
+        # verifying — not submitted as in the Lane-2 shape.
+        self.assertEqual(self.task("a")["state"], "verifying")
         run = self.monitor.store.get_run(self.run_id)
         self.assertEqual(run["promoted_revision"], self.base)
         self.assertNotEqual(self.integrator.staging.head(),

@@ -80,6 +80,7 @@ from .model import (
     TASK_PENDING,
     TASK_PROMOTED,
     TASK_REQUEUED,
+    TASK_RETURNED,
     TASK_SUBMITTED,
     TASK_VERIFYING,
     TASK_WORKING,
@@ -561,8 +562,13 @@ class BenchMonitor:
                generation: int, *, candidate_ref: str = "",
                now: float | None = None) -> dict[str, Any]:
         """Hand the task's candidate to the bench: state moves
-        claimed/working -> submitted and the record waits for the
-        verifier + integration queue (Lane 2/3). The fencing
+        claimed/working -> submitted — and, for a task the
+        verifier returned (Lane 3), returned -> submitted with
+        the rework's NEW candidate ref (the old verdict, keyed
+        to the old ref, has no power over the new one). The
+        record then waits for the verifier; promotion happens
+        only behind a supported verdict (the gate lives in
+        integration.py). The fencing
         check is the lease store's: a claimant whose generation
         was superseded (its claim expired and the task was
         re-claimed) is refused ``stale_generation`` HERE, by the
@@ -606,7 +612,8 @@ class BenchMonitor:
                         "base_revision": capture["base_revision"]},
                 now=now)
         moved = self.store.transition(
-            task["id"], [TASK_CLAIMED, TASK_WORKING], TASK_SUBMITTED,
+            task["id"], [TASK_CLAIMED, TASK_WORKING, TASK_RETURNED],
+            TASK_SUBMITTED,
             now=now, candidate_ref=str(candidate_ref or ""),
             submitted_at=now, last_seen=now)
         if not moved:
@@ -621,11 +628,14 @@ class BenchMonitor:
                 "state": TASK_SUBMITTED}
 
     def promotion_candidates(self, run_id: str) -> list[dict[str, Any]]:
-        """The integration queue's input, in submit order: tasks
-        in ``submitted`` (awaiting verification) then
-        ``verifying``. Lane 2 consumes this list; nothing on it
-        is visible to peers as code until it is promoted
-        (``BenchStore.peer_view``)."""
+        """Tasks past submit, in submit order: ``submitted``
+        (awaiting verification) then ``verifying``. This is the
+        monitor's observability list; the integration queue's
+        actual input is narrower — Lane 3's verdict gate in
+        ``BenchIntegrator.pending`` admits only verifying tasks
+        with a supported verdict for the current candidate ref.
+        Nothing on either list is visible to peers as code
+        until it is promoted (``BenchStore.peer_view``)."""
         tasks = [t for t in self.store.list_tasks(run_id)
                  if t["state"] in (TASK_SUBMITTED, TASK_VERIFYING)]
         return sorted(tasks,
