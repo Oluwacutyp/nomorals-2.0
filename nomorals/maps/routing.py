@@ -77,6 +77,36 @@ pack re-routes from the cache, a changed pack rebuilds, and
 stale graphs of superseded pack digests are dropped at build
 time.  The cache is derived data, rebuildable at any time.
 
+**Corridor widening (the corridor-pad pass).**  The shipped
+corridor is a pure function of the endpoints: it cannot see
+that the road a route needs bulges past its edge — lagoon
+crossings, causeways and one-way circulations do exactly that,
+and the in-corridor optimum was returned silently as *the*
+route (measured on the real pack: a Lagos hop served 11,702 m
+at ratio 4.00 while 9,370 m ran just outside the corridor's
+east edge).  So :meth:`Router.route` keeps its first attempt
+byte-identical to the shipped corridor, and only when that
+attempt is *suspect* — a found route whose ratio exceeds
+:data:`ROUTE_RATIO_SUSPECT`, or a no-route of a class widening
+can honestly retry (disconnected, snap, no road data) — it
+re-materializes at geometrically growing pads
+(:data:`CORRIDOR_WIDEN_FACTOR`, ceiling
+:data:`CORRIDOR_WIDEN_MAX_DEG`), checking the tile cap
+*before* each step and stopping at the first attempt that is
+not suspect.  A bigger corridor's graph is a superset, so
+steps can only tie or improve; the shortest route measured
+across attempts is the answer regardless.  The result records
+the ladder it climbed (``ladder_steps``, ``corridor_pad_deg``,
+``widened``, ``ladder_stop``) and a ``detour_class`` computed
+from the ladder's own measurements — ``corridor_bound`` when
+widening materially improved the answer (the shipped corridor
+was the binding constraint), ``network_detour`` when the
+ladder exhausted and the ratio stands as the network's real
+shape, ``unremarkable`` inside the healthy envelope.  The
+classification labels measurements; it never moves the
+battery's ratio bar, and a route the ladder never touches is
+byte-identical to the route before this pass.
+
 **Routing.**  Dijkstra over distance — exact, and the corridor
 cap keeps the graph small enough that A*'s bookkeeping buys
 nothing; duration is then a stated *estimate*: each arc's length
@@ -133,14 +163,18 @@ from .receipts import (
 
 __all__ = [
     "CORRIDOR_PAD_FRACTION", "CORRIDOR_PAD_MIN_DEG",
-    "DEFAULT_SPEED_KMH", "GRAPH_FILENAME", "MAX_CORRIDOR_TILES",
+    "CORRIDOR_WIDEN_FACTOR", "CORRIDOR_WIDEN_MAX_DEG",
+    "DEFAULT_SPEED_KMH", "DETOUR_CORRIDOR_BOUND",
+    "DETOUR_NETWORK_DETOUR", "DETOUR_UNREMARKABLE",
+    "GRAPH_FILENAME", "MAX_CORRIDOR_TILES",
     "NON_ROAD_CLASSES", "REASON_CORRIDOR_TOO_LARGE",
     "REASON_DISCONNECTED", "REASON_NO_ROAD_DATA",
     "REASON_NOT_VECTOR", "REASON_SNAP_FROM", "REASON_SNAP_TO",
-    "ROUTE_ZOOM", "SEAM_CLASS", "SEAM_JOIN_MAX_M",
+    "ROUTE_RATIO_SUSPECT", "ROUTE_ZOOM", "SEAM_CLASS",
+    "SEAM_JOIN_MAX_M",
     "SNAP_CANDIDATES", "SNAP_MAX_M", "SPEED_KMH", "TRANSPORT_LAYERS",
-    "GraphStats", "RouteProvider", "RouteResult", "RouteStep",
-    "Router",
+    "GraphStats", "LadderStep", "RouteProvider", "RouteResult",
+    "RouteStep", "Router",
 ]
 
 #: The graph store's filename inside the packs directory.
@@ -159,6 +193,40 @@ MAX_CORRIDOR_TILES = 1024
 #: side, with a floor so a short hop still gets breathing room.
 CORRIDOR_PAD_FRACTION = 0.30
 CORRIDOR_PAD_MIN_DEG = 0.01
+
+#: A first-attempt route whose distance/haversine ratio exceeds
+#: this is *suspect*: the corridor, not the network, may be the
+#: binding constraint, so the widening ladder climbs.  Set under
+#: the acceptance battery's 3.0 bar and above the healthy legs'
+#: measured envelope (1.23–2.16 on the real pack) — a healthy
+#: route never pays for a second materialization.
+ROUTE_RATIO_SUSPECT = 2.5
+
+#: The widening ladder: the pad floor grows by this factor per
+#: step from CORRIDOR_PAD_MIN_DEG (0.01° → 0.02° → 0.04° →
+#: 0.08°), never past CORRIDOR_WIDEN_MAX_DEG, and never into a
+#: corridor over MAX_CORRIDOR_TILES (checked before the step is
+#: attempted, exactly as the first attempt's cap is checked).
+CORRIDOR_WIDEN_FACTOR = 2.0
+CORRIDOR_WIDEN_MAX_DEG = 0.08
+
+#: Detour classes — the route ticket's measured classification
+#: of a high ratio (the corridor-pad pass; see the docstring).
+#: corridor_bound: widening materially improved the answer, so
+#: the shipped corridor was the binding constraint.
+#: network_detour: the ladder exhausted and the ratio stands —
+#: the detour lives in the network (terrain, one-way shape).
+#: unremarkable: the ratio sits inside the healthy envelope.
+DETOUR_CORRIDOR_BOUND = "corridor_bound"
+DETOUR_NETWORK_DETOUR = "network_detour"
+DETOUR_UNREMARKABLE = "unremarkable"
+
+#: The relative shortening that counts as the corridor having
+#: bound the route: a widened step must beat the first attempt
+#: by more than this fraction before the ticket calls the route
+#: corridor_bound (superset steps tie often; ties are not
+#: evidence the corridor bound anything).
+_IMPROVEMENT_MIN_FRACTION = 0.01
 
 #: An endpoint farther than this from the nearest road node is
 #: not snapped — the route refuses, naming the distance.
@@ -219,6 +287,16 @@ REASON_NO_ROAD_DATA = "no-road-data"
 REASON_CORRIDOR_TOO_LARGE = "corridor-too-large"
 REASON_NOT_VECTOR = "pack-not-vector"
 
+#: No-route reasons the widening ladder may honestly retry: a
+#: bigger corridor can hold roads the shipped one cut (a path,
+#: a snap node, any road data at all).  Corridor-too-large is
+#: deliberately absent — widening only adds tiles, so a retry
+#: there is futile by construction — and pack-not-vector never
+#: reaches the ladder (it is refused before the first attempt).
+_LADDER_TRIGGER_REASONS = frozenset((
+    REASON_DISCONNECTED, REASON_SNAP_FROM, REASON_SNAP_TO,
+    REASON_NO_ROAD_DATA))
+
 _SCHEMA = (
     "CREATE TABLE IF NOT EXISTS routing_graphs ("
     " cache_key TEXT PRIMARY KEY, pack_id TEXT NOT NULL,"
@@ -257,6 +335,26 @@ class RouteStep:
 
 
 @dataclass(frozen=True)
+class LadderStep:
+    """One corridor attempt's measurements (the widening ladder).
+
+    ``pad_deg`` is the pad floor the attempt's corridor was
+    built with; ``tiles`` the corridor's tile count at the
+    graph zoom; ``distance_m``/``ratio`` are the attempt's
+    route measurements (None when the attempt found no route);
+    ``outcome`` is "route" or the attempt's no-route reason.
+    Every field is measured by the attempt itself — the ladder
+    records what it did, never what it hoped.
+    """
+
+    pad_deg: float
+    tiles: int
+    distance_m: float | None = None
+    ratio: float | None = None
+    outcome: str = ""
+
+
+@dataclass(frozen=True)
 class RouteResult:
     """A route attempt's whole answer: the route, or the refusal.
 
@@ -268,6 +366,17 @@ class RouteResult:
     ``seam_joins`` counts the zero-length synthetic seam arcs
     the path crossed: labelled like the snaps, contributing no
     distance, and named in ``detail`` whenever nonzero.
+
+    The corridor fields are the widening ladder's record:
+    ``corridor_pad_deg`` is the pad floor of the corridor that
+    produced this answer, ``ladder_steps`` every attempt's
+    measurements in order, ``widened`` whether the answer came
+    from a widened attempt, ``ladder_stop`` why the ladder
+    stopped ("" when it never climbed; "not-suspect",
+    "ceiling", "tile-cap" or "corridor-unchanged"), and
+    ``detour_class`` the measured classification of the ratio
+    (one of the DETOUR_* values; "" when no corridor attempt
+    ran at all, e.g. a raster pack refused up front).
     """
 
     ok: bool
@@ -288,6 +397,11 @@ class RouteResult:
     posture: str = POSTURE_LOCAL
     provider: str = "local"
     receipt: MapReceipt | None = None
+    corridor_pad_deg: float = 0.0
+    ladder_steps: tuple[LadderStep, ...] = ()
+    widened: bool = False
+    ladder_stop: str = ""
+    detour_class: str = ""
 
 
 @dataclass(frozen=True)
@@ -356,17 +470,22 @@ def _global_px_to_latlon(gx: float, gy: float, zoom: int,
     return lat, lon
 
 
-def _corridor(start: LatLon, end: LatLon) -> BBox:
+def _corridor(start: LatLon, end: LatLon, *,
+              pad_floor: float = CORRIDOR_PAD_MIN_DEG) -> BBox:
     """The route corridor: the endpoints' box, padded.
 
     Longitude is computed in whichever frame (direct or wrapped)
     is shorter, so a route across the antimeridian gets the
     corridor it actually travels; latitudes clamp to the
-    Mercator band the tiles cover.
+    Mercator band the tiles cover.  ``pad_floor`` is the pad's
+    floor in degrees (the shipped CORRIDOR_PAD_MIN_DEG unless
+    the widening ladder is climbing); the fraction term rides
+    on top of it exactly as before, so the default call is
+    byte-identical to the shipped corridor.
     """
     lat_lo = min(start.lat, end.lat)
     lat_hi = max(start.lat, end.lat)
-    pad_lat = max(CORRIDOR_PAD_MIN_DEG,
+    pad_lat = max(pad_floor,
                   CORRIDOR_PAD_FRACTION * (lat_hi - lat_lo))
     south = max(-85.05112878, lat_lo - pad_lat)
     north = min(85.05112878, lat_hi + pad_lat)
@@ -377,7 +496,7 @@ def _corridor(start: LatLon, end: LatLon) -> BBox:
         lon_b += 360.0
     lon_lo = min(lon_a, lon_b)
     lon_hi = max(lon_a, lon_b)
-    pad_lon = max(CORRIDOR_PAD_MIN_DEG,
+    pad_lon = max(pad_floor,
                   CORRIDOR_PAD_FRACTION * (lon_hi - lon_lo))
     west_raw = lon_lo - pad_lon
     east_raw = lon_hi + pad_lon
@@ -423,6 +542,19 @@ def _speed_ms(road_class: str) -> float:
 
 
 # ── the router ────────────────────────────────────────────────────
+
+
+@dataclass
+class _Attempt:
+    """One widening-ladder attempt's local answer and its
+    measurements (internal: the ladder's working record; the
+    ticket carries LadderStep copies out)."""
+
+    pad_deg: float
+    tiles: int
+    result: RouteResult
+    outcome: str
+    ratio: float | None
 
 
 class Router:
@@ -1014,6 +1146,77 @@ class Router:
 
     # ── the route operation ─────────────────────────────────────
 
+    @staticmethod
+    def _ladder_floors() -> tuple[float, ...]:
+        """The widening ladder's pad floors, shipped pad first:
+        CORRIDOR_PAD_MIN_DEG growing by CORRIDOR_WIDEN_FACTOR to
+        the CORRIDOR_WIDEN_MAX_DEG ceiling."""
+        floors = [CORRIDOR_PAD_MIN_DEG]
+        while floors[-1] < CORRIDOR_WIDEN_MAX_DEG:
+            floors.append(min(
+                CORRIDOR_WIDEN_MAX_DEG,
+                floors[-1] * CORRIDOR_WIDEN_FACTOR))
+        return tuple(floors)
+
+    @staticmethod
+    def _suspect(result: RouteResult, ratio: float | None) -> bool:
+        """Whether one corridor attempt's answer is suspect: a
+        route whose ratio says the corridor may have bound it,
+        or a no-route of a class a bigger corridor can honestly
+        answer differently."""
+        if result.ok:
+            return ratio is not None and ratio > ROUTE_RATIO_SUSPECT
+        return result.reason in _LADDER_TRIGGER_REASONS
+
+    @staticmethod
+    def _detour_class(attempts: list[_Attempt],
+                      best: _Attempt | None) -> str:
+        """Classify the answer's ratio from the ladder's own
+        measurements — never from the ratio alone: widening must
+        have *moved* the answer (a route where the shipped
+        corridor had none, or a materially shorter one) before
+        the corridor is called the binding constraint; a suspect
+        answer the ladder could not move is the network's own
+        shape; anything else sits in the healthy envelope."""
+        first = attempts[0]
+        if best is not None and best is not first:
+            if not first.result.ok:
+                return DETOUR_CORRIDOR_BOUND
+            if best.result.distance_m < first.result.distance_m * (
+                    1.0 - _IMPROVEMENT_MIN_FRACTION):
+                return DETOUR_CORRIDOR_BOUND
+        winner = best if best is not None else attempts[-1]
+        if Router._suspect(winner.result, winner.ratio):
+            return DETOUR_NETWORK_DETOUR
+        return DETOUR_UNREMARKABLE
+
+    @staticmethod
+    def _ladder_sentence(attempts: list[_Attempt],
+                         detour: str) -> str:
+        """The ladder's line in the route's detail: the attempts
+        and their measured ratios, named like the seam joins —
+        a widened answer is labelled, never silent."""
+        ratios = ", ".join(
+            "no route" if attempt.ratio is None
+            else format(attempt.ratio, ".2f")
+            for attempt in attempts)
+        gloss = {
+            DETOUR_CORRIDOR_BOUND:
+                "the shipped corridor was the binding constraint",
+            DETOUR_NETWORK_DETOUR:
+                "the detour is the road network's own shape",
+            DETOUR_UNREMARKABLE:
+                "inside the healthy envelope",
+        }[detour]
+        return (" · corridor widening: the first attempt was"
+                " suspect, so the corridor was re-materialized"
+                " over " + str(len(attempts)) + " attempts (pad "
+                + format(attempts[0].pad_deg, ".2f") + "° → "
+                + format(attempts[-1].pad_deg, ".2f")
+                + "°, ratios " + ratios + ") and the best"
+                " measured answer stands — detour class: "
+                + detour + " (" + gloss + ")")
+
     def route(self, pack_dir: Path | str, manifest: PackManifest,
               start: LatLon, end: LatLon, *,
               from_label: str = "", to_label: str = "",
@@ -1024,8 +1227,14 @@ class Router:
         named no-route — is final unless federation is on, in
         which case a local no-route may fall to the wired
         provider (none ships; the fall is named when unwired).
-        Every attempt mints its OP_ROUTE receipt when a store is
+        Every route mints its OP_ROUTE receipt when a store is
         attached.
+
+        The first corridor attempt is the shipped corridor,
+        byte-identical to the router before the widening ladder;
+        the ladder (see the module docstring) climbs only from a
+        suspect first answer, and the receipt is minted once,
+        for the final answer the ladder settles on.
         """
         pack_dir = Path(pack_dir)
         base = RouteResult(
@@ -1039,58 +1248,150 @@ class Router:
                 + manifest.tile_format + " pack — raster tiles"
                 " carry no road graph to route over",
                 OUTCOME_UNAVAILABLE)
-        corridor = _corridor(start, end)
         zoom = _graph_zoom(manifest)
-        tile_count = len(corridor.tiles(zoom))
-        if tile_count > MAX_CORRIDOR_TILES:
-            return self._no_route(
-                base, manifest, REASON_CORRIDOR_TOO_LARGE,
-                "the route corridor spans " + str(tile_count)
-                + " tiles at z" + str(zoom) + ", over the "
-                + str(MAX_CORRIDOR_TILES) + "-tile corridor bound"
-                " — route in legs, or install a deeper pack",
-                OUTCOME_UNAVAILABLE)
+        straight = haversine_m(start, end)
+        attempts: list[_Attempt] = []
+        best: _Attempt | None = None
+        ladder_stop = ""
+        previous: BBox | None = None
+        floors = self._ladder_floors()
+        for step, pad_floor in enumerate(floors):
+            corridor = _corridor(start, end, pad_floor=pad_floor)
+            if previous is not None and corridor == previous:
+                # The fraction term already pads past this floor:
+                # a wider floor would rebuild the same graph.
+                ladder_stop = "corridor-unchanged"
+                break
+            tile_count = len(corridor.tiles(zoom))
+            if tile_count > MAX_CORRIDOR_TILES:
+                if step == 0:
+                    return self._no_route(
+                        base, manifest, REASON_CORRIDOR_TOO_LARGE,
+                        "the route corridor spans " + str(tile_count)
+                        + " tiles at z" + str(zoom) + ", over the "
+                        + str(MAX_CORRIDOR_TILES)
+                        + "-tile corridor bound"
+                        " — route in legs, or install a deeper pack",
+                        OUTCOME_UNAVAILABLE)
+                # Checked before the step is attempted, exactly
+                # as the first attempt's cap is: the best answer
+                # so far stands.
+                ladder_stop = "tile-cap"
+                break
+            result, outcome = self._route_local(
+                pack_dir, manifest, base, start, end, corridor, zoom)
+            ratio: float | None = None
+            if result.ok:
+                ratio = (result.distance_m / straight
+                         if straight > 0.0 else 0.0)
+            attempt = _Attempt(pad_deg=pad_floor, tiles=tile_count,
+                               result=result, outcome=outcome,
+                               ratio=ratio)
+            attempts.append(attempt)
+            previous = corridor
+            if result.ok and (best is None or result.distance_m
+                              < best.result.distance_m):
+                best = attempt
+            if not self._suspect(result, ratio):
+                if step > 0:
+                    ladder_stop = "not-suspect"
+                break
+            if step == len(floors) - 1:
+                ladder_stop = "ceiling"
+        winner = best if best is not None else attempts[-1]
+        detour = self._detour_class(attempts, best)
+        ticket = {
+            "corridor_pad_deg": winner.pad_deg,
+            "ladder_steps": tuple(
+                LadderStep(
+                    pad_deg=attempt.pad_deg, tiles=attempt.tiles,
+                    distance_m=(attempt.result.distance_m
+                                if attempt.result.ok else None),
+                    ratio=attempt.ratio,
+                    outcome=("route" if attempt.result.ok
+                             else attempt.result.reason))
+                for attempt in attempts),
+            "widened": winner is not attempts[0],
+            "ladder_stop": ladder_stop,
+            "detour_class": detour,
+        }
+        sentence = ""
+        if len(attempts) > 1:
+            sentence = self._ladder_sentence(attempts, detour)
+        if winner.result.ok:
+            result = replace(winner.result,
+                             detail=winner.result.detail + sentence,
+                             **ticket)
+            receipt = self._mint(manifest, OUTCOME_OK, POSTURE_LOCAL,
+                                 "local", result.detail)
+            return replace(result, receipt=receipt)
+        return replace(
+            self._no_route(
+                base, manifest, winner.result.reason,
+                winner.result.detail + sentence, winner.outcome,
+                from_snap=winner.result.from_snap_m,
+                to_snap=winner.result.to_snap_m),
+            **ticket)
+
+    def _route_local(self, pack_dir: Path, manifest: PackManifest,
+                     base: RouteResult, start: LatLon, end: LatLon,
+                     corridor: BBox, zoom: int,
+                     ) -> tuple[RouteResult, str]:
+        """One corridor attempt's local answer: the shipped
+        routing body over one materialized corridor — the route,
+        or the named no-route — with no receipt minted and no
+        federation posture applied (:meth:`route` owns both,
+        once, for the ladder's final answer).  The second return
+        is the receipt outcome class a no-route carries
+        (OUTCOME_OK for the truthful "disconnected",
+        OUTCOME_UNAVAILABLE when the plane could not serve);
+        ignored for a route.  The corridor's tile cap is the
+        caller's check, made before the attempt."""
         graph = self._graph(pack_dir, manifest, corridor, zoom)
         if graph.tiles_present == 0:
-            return self._no_route(
-                base, manifest, REASON_NO_ROAD_DATA,
-                "pack " + manifest.name + " holds no tiles for"
-                " the route corridor — no road data there",
+            return (replace(
+                base, reason=REASON_NO_ROAD_DATA,
+                detail="pack " + manifest.name + " holds no tiles"
+                " for the route corridor — no road data there"),
                 OUTCOME_UNAVAILABLE)
         if not graph.nodes:
-            return self._no_route(
-                base, manifest, REASON_NO_ROAD_DATA,
-                "no roads in the route corridor of pack "
-                + manifest.name, OUTCOME_UNAVAILABLE)
+            return (replace(
+                base, reason=REASON_NO_ROAD_DATA,
+                detail="no roads in the route corridor of pack "
+                + manifest.name),
+                OUTCOME_UNAVAILABLE)
         from_cands, from_nearest = self._snap_candidates(graph, start)
         if not from_cands:
-            return self._no_route(
-                base, manifest, REASON_SNAP_FROM,
-                "the start point cannot snap to the road network:"
-                " its nearest road node is "
-                + format(from_nearest, ",.0f") + " m away, beyond the "
-                + format(SNAP_MAX_M, ",.0f") + " m snap bound",
+            return (replace(
+                base, reason=REASON_SNAP_FROM,
+                detail="the start point cannot snap to the road"
+                " network: its nearest road node is "
+                + format(from_nearest, ",.0f") + " m away, beyond"
+                " the " + format(SNAP_MAX_M, ",.0f")
+                + " m snap bound"),
                 OUTCOME_UNAVAILABLE)
         to_cands, to_nearest = self._snap_candidates(graph, end)
         if not to_cands:
-            return self._no_route(
-                base, manifest, REASON_SNAP_TO,
-                "the end point cannot snap to the road network:"
-                " its nearest road node is "
-                + format(to_nearest, ",.0f") + " m away, beyond the "
-                + format(SNAP_MAX_M, ",.0f") + " m snap bound",
+            return (replace(
+                base, reason=REASON_SNAP_TO,
+                detail="the end point cannot snap to the road"
+                " network: its nearest road node is "
+                + format(to_nearest, ",.0f") + " m away, beyond"
+                " the " + format(SNAP_MAX_M, ",.0f")
+                + " m snap bound"),
                 OUTCOME_UNAVAILABLE)
         found = self._dijkstra_multi(
             graph, [key for key, _d in from_cands],
             [key for key, _d in to_cands])
         if found is None:
-            return self._no_route(
-                base, manifest, REASON_DISCONNECTED,
-                "the road graph has no connected path between the"
-                " two points — the roads near each end do not"
-                " meet in pack " + manifest.name,
-                OUTCOME_OK, from_snap=from_cands[0][1],
-                to_snap=to_cands[0][1])
+            return (replace(
+                base, reason=REASON_DISCONNECTED,
+                detail="the road graph has no connected path"
+                " between the two points — the roads near each"
+                " end do not meet in pack " + manifest.name,
+                from_snap_m=from_cands[0][1],
+                to_snap_m=to_cands[0][1]),
+                OUTCOME_OK)
         keys, arcs, from_key, to_key = found
         from_snap = dict(from_cands)[from_key]
         to_snap = dict(to_cands)[to_key]
@@ -1120,9 +1421,7 @@ class Router:
             duration_s=duration, steps=self._steps(arcs),
             from_snap_m=from_snap, to_snap_m=to_snap,
             seam_joins=seam_joins, detail=detail)
-        receipt = self._mint(manifest, OUTCOME_OK, POSTURE_LOCAL,
-                             "local", result.detail)
-        return replace(result, receipt=receipt)
+        return result, OUTCOME_OK
 
     def _no_route(self, base: RouteResult, manifest: PackManifest,
                   reason: str, detail: str, outcome: str, *,
