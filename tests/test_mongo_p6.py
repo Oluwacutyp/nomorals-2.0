@@ -34,7 +34,7 @@ import pytest
 
 from nomorals.core.config import Settings, load_settings
 from nomorals.os.snapshots import SnapshotManager, SnapshotRefused
-from nomorals.storage import cutover
+from nomorals.storage import cutover, sidecars
 from nomorals.storage.backup import (
     BackupManager,
     load_document_dump,
@@ -57,6 +57,7 @@ from nomorals.storage.parity import (
     collection_checksum,
 )
 from nomorals.storage.queue import WorkQueue
+from nomorals.storage.sidecars import SidecarSpec
 
 pymongo = pytest.importorskip("pymongo")
 
@@ -470,14 +471,56 @@ class TestConfigFlip:
 
 # ── dispositions + residue probe + preflight refusals ────────────────────
 
+#: Synthetic residue stores for the disposition/preflight/cutover
+#: tests below. Batch 3 ported the last real residue stores, so the
+#: cutover machinery's residue gate has nothing real left to chew
+#: on — these two test-only entries stand in for them (precedent:
+#: the C7 ship's test_verdict_still_checked_through_namespace).
+#: Each names the file the fixture plants for it in its reason,
+#: which is the evidence residue_report attributes by; ``tables``
+#: is the table the probe counts rows in. ``modules=()`` keeps the
+#: sidecar drift scan's covered sets unchanged.
+_TEST_RESIDUE_SPECS = (
+    SidecarSpec(
+        name="test-residue-graph", verdict="residue",
+        kind="sqlite-file", tables=("graph_nodes",),
+        reason="test fixture store backed by world_graph.db"),
+    SidecarSpec(
+        name="test-residue-books", verdict="residue",
+        kind="sqlite-file", tables=("books",),
+        reason="test fixture store backed by library.db"),
+)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _synthetic_residue_stores():
+    """Register the synthetic residue stores, pop them at teardown.
+
+    Module scope because the rehearsal plants its own files and
+    names the same stores — one registration point for all five
+    tests — and no other test in this file reads the registry, so
+    nothing else can observe them.
+    """
+    for spec in _TEST_RESIDUE_SPECS:
+        sidecars._register(spec)
+    yield
+    for spec in _TEST_RESIDUE_SPECS:
+        sidecars.SIDECAR_STORES.pop(spec.name, None)
+
+
 def _residue_home(tmp_path: Path) -> Path:
-    # The two planted residue stores are the registry's two structural
-    # holds — books-library (its port waits on the FTS search-parity
-    # story) and planning-graph (its port follows the kg/graph
-    # disposition). Both stay residue until those stories land, so
-    # this fixture does not stale as port batches proceed — its
-    # previous second store, agent-identities, was ported in Mongo
-    # Batch 1 and broke every test below that named it.
+    # The two planted files are the residue stores the tests below
+    # exercise — world_graph.db (graph_nodes, 2 rows) for
+    # test-residue-graph and library.db (books, 1 row) for
+    # test-residue-books, registered for the module by
+    # _synthetic_residue_stores above. They stand in for the
+    # registry's two former structural holds, books-library and
+    # planning-graph, both ported in Mongo Batch 3 (C1 and C8) —
+    # the fixture's previous second store, agent-identities, was
+    # ported in Mongo Batch 1 and broke every test below that
+    # named it, and the same staling has now caught the last two.
+    # mystery.db is unattributed by design: an unowned database
+    # file on cutover day is a finding in its own right.
     home = tmp_path / "home"
     home.mkdir()
     conn = sqlite3.connect(home / "world_graph.db")
@@ -504,10 +547,10 @@ class TestDispositionsAndProbe:
         db_path = home / "data" / "nomorals.db"
         db_path.parent.mkdir(parents=True)
         report = cutover.residue_report(home, db_path)
-        graph = report["stores"]["planning-graph"]
+        graph = report["stores"]["test-residue-graph"]
         assert graph["has_data"]
         assert graph["files"][0]["rows"] == 2
-        books = report["stores"]["books-library"]
+        books = report["stores"]["test-residue-books"]
         assert books["has_data"] and books["files"][0]["rows"] == 1
         assert [u["path"] for u in report["unattributed"]] == \
             [str(home / "mystery.db")]
@@ -516,18 +559,18 @@ class TestDispositionsAndProbe:
         home = _residue_home(tmp_path)
         db, _r, _n = open_database(home / "data.db")
         recorded = cutover.record_disposition(
-            db, "planning-graph", "ports-later-accepted", "queued")
+            db, "test-residue-graph", "ports-later-accepted", "queued")
         assert recorded["disposition"] == "ports-later-accepted"
-        assert cutover.dispositions(db)["planning-graph"]["note"] == "queued"
+        assert cutover.dispositions(db)["test-residue-graph"]["note"] == "queued"
         with pytest.raises(ValueError):
             cutover.record_disposition(db, "no-such-store", "exported")
         with pytest.raises(ValueError):
             cutover.record_disposition(db, "backup-machinery", "exported")
         with pytest.raises(ValueError):
-            cutover.record_disposition(db, "planning-graph", "whatever")
+            cutover.record_disposition(db, "test-residue-graph", "whatever")
         status = cutover.cutover_status(db, SimpleNamespace(
             home_path=home, db_path=home / "data.db"))
-        assert status["missing_dispositions"] == ["books-library"]
+        assert status["missing_dispositions"] == ["test-residue-books"]
         db.close()
 
 
@@ -571,9 +614,9 @@ class TestPreflightRefusals:
         assert pre["checks"]["cache_capped"]
         assert not pre["checks"]["residue_dispositions"]
         assert set(pre["missing_dispositions"]) == \
-            {"books-library", "planning-graph"}
-        cutover.record_disposition(db, "planning-graph", "exported")
-        cutover.record_disposition(db, "books-library", "owner-data-risk")
+            {"test-residue-books", "test-residue-graph"}
+        cutover.record_disposition(db, "test-residue-graph", "exported")
+        cutover.record_disposition(db, "test-residue-books", "owner-data-risk")
         pre = cutover.preflight(db, settings, _StubTarget(_GOOD_FACTS))
         assert pre["ok"], pre["checks"]
         db.close()
@@ -658,8 +701,8 @@ class TestCutoverRehearsal:
         seeded_job = queue.enqueue("p6.pending", {"seed": True})
         _seed_pinned_row(db, "memories", "p6-memory")
         _seed_pinned_row(db, "game_wallet", "p6-wallet")
-        # Residue sidecar files with data (the two registry holds —
-        # see _residue_home for why these two stores).
+        # Residue sidecar files with data (the two synthetic
+        # residue stores — see _residue_home for why these two).
         conn = sqlite3.connect(home / "world_graph.db")
         conn.execute(
             "CREATE TABLE graph_nodes (id TEXT PRIMARY KEY, label TEXT)")
@@ -688,16 +731,16 @@ class TestCutoverRehearsal:
         pre = cutover.preflight(db, settings, target)
         assert not pre["ok"]
         assert set(pre["missing_dispositions"]) == \
-            {"books-library", "planning-graph"}
+            {"test-residue-books", "test-residue-graph"}
         assert pre["checks"]["target_reachable"]
         assert pre["checks"]["replica_set"]
         assert pre["checks"]["writable_primary"]
         assert pre["checks"]["cache_capped"]
 
         # 2. Record the dispositions; preflight goes green.
-        cutover.record_disposition(db, "planning-graph",
+        cutover.record_disposition(db, "test-residue-graph",
                                    "ports-later-accepted")
-        cutover.record_disposition(db, "books-library", "owner-data-risk")
+        cutover.record_disposition(db, "test-residue-books", "owner-data-risk")
         assert cutover.preflight(db, settings, target)["ok"]
 
         # 3. Dry run: walks everything, flips nothing, records no gate.
@@ -823,17 +866,17 @@ class TestCutoverCli:
 
         args = SimpleNamespace(
             task=["cutover", "dispositions",
-                  "--record", "planning-graph",
+                  "--record", "test-residue-graph",
                   "--as", "ports-later-accepted"], json=False)
         assert _cmd_db(args, context) == 0
         out = capsys.readouterr().out
-        assert "planning-graph" in out
+        assert "test-residue-graph" in out
         args = SimpleNamespace(
             task=["cutover", "dispositions",
                   "--record-missing", "--as", "exported"], json=False)
         assert _cmd_db(args, context) == 0
         capsys.readouterr()
-        assert cutover.dispositions(db)["books-library"]["disposition"] \
+        assert cutover.dispositions(db)["test-residue-books"]["disposition"] \
             == "exported"
         args = SimpleNamespace(task=["cutover", "status"],
                                json=True)
