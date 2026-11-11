@@ -55,9 +55,11 @@ class CallerMayRunTests(unittest.TestCase):
             self.assertFalse(caller_may_run(kind, False), kind)
 
     def test_public_list_shape(self):
-        # 52 = 19 named + /game + 32 game commands.
+        # 32 public game commands, all of them in the public catalog,
+        # and /game itself is public. The catalog's total size is
+        # pinned in exactly one place (test_craft_surface) — it grows
+        # by design and is not part of this test's property.
         self.assertEqual(len(PUBLIC_GAME_COMMANDS), 32)
-        self.assertEqual(len(PUBLIC_COMMANDS), 52)
         self.assertIn("game", PUBLIC_COMMANDS)
         for kind in PUBLIC_GAME_COMMANDS:
             self.assertIn(kind, PUBLIC_COMMANDS)

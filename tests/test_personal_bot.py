@@ -1,10 +1,14 @@
 """Personal bot (USER-ONLY): BotFather command list + inline buttons.
 
 Covers:
-* the BotFather list — parses (``command - description``), ≤100 commands,
-  descriptions ≤256 chars, no duplicates, covers the public 52 + the 48
-  owner-only commands, and the doc (``docs/PERSONAL_BOT_COMMANDS.md``)
-  matches the generator (no drift);
+* the BotFather list — parses (``command - description``), ≤100 commands
+  (BotFather's cap), descriptions ≤256 chars, no duplicates; composition
+  is pinned as relationships, not counts: every owner-only command is
+  present, every entry is an owner or public command, the public side
+  is the priority fill (curated order, then games, then registry
+  order), the result is deterministic and stays valid however large
+  the public catalog grows; and the doc
+  (``docs/PERSONAL_BOT_COMMANDS.md``) matches the generator (no drift);
 * personal inline keyboards — /help gets category buttons, /power gets
   Power On/Off/Status, button callbacks route to the right handler
   through the adapter (signed callback → synthetic ``/command``);
@@ -39,15 +43,21 @@ def _doc_block() -> str:
 
 
 class BotfatherListTests(unittest.TestCase):
-    def test_list_is_100_and_valid(self):
+    def test_list_fills_the_cap_and_is_valid(self):
+        from nomorals.social.chat.control import PUBLIC_COMMANDS
+
         entries = personal_botfather_commands()
-        self.assertEqual(len(entries), 100)
+        self.assertLessEqual(len(entries), 100)
+        # The cap is fully used whenever owner + public overflow it.
+        self.assertEqual(
+            len(entries),
+            min(100, len(set(PERSONAL_OWNER_COMMANDS) | set(PUBLIC_COMMANDS))))
         self.assertEqual(validate_botfather_commands(), [])
 
     def test_lines_parse_botfather_format(self):
         text = render_botfather_text()
         lines = text.strip().split("\n")
-        self.assertEqual(len(lines), 100)
+        self.assertEqual(len(lines), len(personal_botfather_commands()))
         seen: set[str] = set()
         for line in lines:
             m = _LINE_RE.match(line)
@@ -59,23 +69,71 @@ class BotfatherListTests(unittest.TestCase):
             self.assertLessEqual(len(desc), 256, f"description too long for {cmd}")
             self.assertTrue(desc.strip(), f"empty description for {cmd}")
 
-    def test_covers_public_52_and_owner_48(self):
-        from nomorals.social.chat.control import PUBLIC_COMMANDS
+    def test_composition_owner_plus_priority_public(self):
+        # The relationship that replaced the dead "public 52 + owner 48"
+        # arithmetic: the public catalog (248) exceeds BotFather's 100
+        # cap, so the list is every owner command plus the public side
+        # in priority order — curated _PUBLIC_ORDER, then the public
+        # games, then the rest of the catalog in registry order —
+        # filling exactly the slots the owner list leaves.
+        from nomorals.social.chat.control import (
+            CONTROL_COMMANDS,
+            PUBLIC_COMMANDS,
+            PUBLIC_GAME_COMMANDS,
+        )
+        from nomorals.social.chat.personal_commands import _PUBLIC_ORDER
 
         kinds = [k for k, _ in personal_botfather_commands()]
-        self.assertEqual(set(PUBLIC_COMMANDS), set(kinds[:52]))
-        self.assertEqual(list(PERSONAL_OWNER_COMMANDS), kinds[52:])
+        # Every entry is an owner command or a public command.
+        self.assertLessEqual(
+            set(kinds), set(PERSONAL_OWNER_COMMANDS) | set(PUBLIC_COMMANDS))
+        # The owner side is complete, in its curated order, at the tail.
+        self.assertEqual(
+            kinds[len(kinds) - len(PERSONAL_OWNER_COMMANDS):],
+            list(PERSONAL_OWNER_COMMANDS))
         self.assertEqual(len(PERSONAL_OWNER_COMMANDS), 48)
+        # The public side is exactly the priority fill.
+        priority: list[str] = []
+        for kind in (*_PUBLIC_ORDER, *PUBLIC_GAME_COMMANDS,
+                     *CONTROL_COMMANDS):
+            if kind in PUBLIC_COMMANDS and kind not in priority:
+                priority.append(kind)
+        for kind in sorted(PUBLIC_COMMANDS):
+            if kind not in priority:
+                priority.append(kind)
+        slots = 100 - len(PERSONAL_OWNER_COMMANDS)
+        self.assertEqual(kinds[:slots], priority[:slots])
 
     def test_doc_matches_generator(self):
         self.assertEqual(_doc_block().strip(), render_botfather_text().strip())
 
-    def test_gated_public_list_untouched(self):
-        # The gated bot's list is PUBLIC_COMMANDS — this change must not
-        # have touched it: still exactly the 52.
-        from nomorals.social.chat.control import PUBLIC_COMMANDS
+    def test_deterministic_and_growth_proof(self):
+        from unittest import mock
 
-        self.assertEqual(len(PUBLIC_COMMANDS), 52)
+        from nomorals.social.chat import control
+
+        self.assertEqual(personal_botfather_commands(),
+                         personal_botfather_commands())
+        # A much larger public catalog still yields a valid list:
+        # ≤100, owner-complete, nothing outside owner ∪ public.
+        grown = frozenset(
+            set(control.PUBLIC_COMMANDS)
+            | {f"fakecmd{i}" for i in range(60)})
+        with mock.patch.object(control, "PUBLIC_COMMANDS", grown):
+            entries = personal_botfather_commands()
+            kinds = {k for k, _ in entries}
+            self.assertLessEqual(len(entries), 100)
+            self.assertLessEqual(set(PERSONAL_OWNER_COMMANDS), kinds)
+            self.assertLessEqual(
+                kinds, set(PERSONAL_OWNER_COMMANDS) | set(grown))
+            self.assertEqual(entries, personal_botfather_commands())
+        # A catalog smaller than the cap is listed in full.
+        shrunk = frozenset({"help", "search"})
+        with mock.patch.object(control, "PUBLIC_COMMANDS", shrunk):
+            kinds = [k for k, _ in personal_botfather_commands()]
+            self.assertEqual(
+                len(kinds), len(PERSONAL_OWNER_COMMANDS) + len(shrunk))
+            self.assertLessEqual(shrunk, set(kinds))
 
 
 def _callbacks(keyboard):

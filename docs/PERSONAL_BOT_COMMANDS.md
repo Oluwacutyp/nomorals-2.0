@@ -1,10 +1,13 @@
 # Personal bot — BotFather command list (USER-ONLY)
 
-The personal bot is **owner-only**: only the owner can use it, so its
-BotFather `/setcommands` list shows **everything** — the public 52
-commands PLUS the 48 owner-only commands = **100 total** (the BotFather
-maximum). The gated bot's public list stays exactly as-is (52 commands,
-owner-only hidden) — this file does not change it.
+The personal bot is **owner-only**: only the owner can use it. Its
+BotFather `/setcommands` list holds **100 commands** (the BotFather
+maximum): all **48 owner-only commands** plus the **52 highest-priority
+public commands**. The full public catalog is far larger than
+BotFather's cap, so the personal list is a curated subset by design —
+public commands that do not fit stay fully available in the catalog,
+the menus and `/list`; they are only absent from this picker. The
+gated bot's own lists are unchanged by this file.
 
 ## How to set it in BotFather
 

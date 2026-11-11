@@ -398,7 +398,9 @@ class GatingTests(unittest.TestCase):
     def test_gating_layer(self):
         self.assertIn("craft", CONTROL_COMMANDS)
         # owner-only: never on the public list, and the public
-        # count is exactly what it was before this surface
+        # count is exactly what it was before this surface.
+        # (This is the canonical home of the PUBLIC_COMMANDS size pin —
+        # the one place the catalog's exact count is asserted.)
         self.assertNotIn("craft", PUBLIC_COMMANDS)
         self.assertEqual(len(PUBLIC_COMMANDS), 248)
         self.assertFalse(caller_may_run("craft", False))

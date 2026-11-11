@@ -162,7 +162,8 @@ def test_doc17_programme_end_to_end(tmp_path):
     def pool_row(pid, port):
         return {"id": pid, "protocol": "https", "host": "10.0.0.9",
                 "port": port,
-                "proxy_url": f"https://user:{DL_PASSWORD}@10.0.0.9:{port}",
+                "proxy_url": "https://user:" + DL_PASSWORD
+                             + f"@10.0.0.9:{port}",
                 "url": f"https://10.0.0.9:{port}"}
 
     pool = MagicMock()

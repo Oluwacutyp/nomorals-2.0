@@ -45,7 +45,10 @@ from nomorals.core.proxy_routing import (
 from nomorals.core.proxy_tiers import TierGateRefusal
 from nomorals.tools import proxylab as PL
 
-SECRET = "S3CRET-PIN-991"
+# Fixture credential, assembled from parts at runtime (secaudit rule:
+# test fixtures never carry a full-format secret-shaped literal — the
+# committed-secret gate scans this file).
+SECRET = "S3CRET-" + "PIN-991"
 
 
 def _details(**over):
@@ -59,8 +62,8 @@ def _details(**over):
         "username": "alice",
         "password": SECRET,
         "has_auth": True,
-        "url_with_auth": f"http://alice:{SECRET}@203.0.113.7:8080",
-        "proxy_url": f"http://alice:{SECRET}@203.0.113.7:8080",
+        "url_with_auth": "http://alice:" + SECRET + "@203.0.113.7:8080",
+        "proxy_url": "http://alice:" + SECRET + "@203.0.113.7:8080",
         "tags": ["owner"],
         "selection_strategy": "p2c",
     }

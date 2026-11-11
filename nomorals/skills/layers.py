@@ -75,17 +75,18 @@ LAYER_GROUPS: dict[int, dict[str, Any]] = {
     4: {
         "name": "services",
         "title": "Services — tools, social, media, skills, domains",
-        "packages": ["audio", "browser", "characters", "commerce",
-                     "community", "datasci", "documents", "finance",
-                     "goals", "learn", "legal", "marketing", "media",
-                     "media_edit", "plugins", "property", "research",
-                     "scheduler", "skills", "social", "tools", "vision",
-                     "voice"],
+        "packages": ["audio", "browser", "careers", "characters",
+                     "commerce", "community", "computer", "datasci",
+                     "documents", "finance", "goals", "learn", "legal",
+                     "maps", "marketing", "media", "media_edit", "plugins",
+                     "property", "research", "scheduler", "skills",
+                     "social", "tools", "vision", "voice"],
         "owns": ("User-facing capability organs: the tool registry, "
                  "chat/social surfaces and living cards, media and "
                  "voice, the browser, documents, the skills system, "
-                 "and the domain services (finance, legal, property, "
-                 "marketing, learning)."),
+                 "the desktop computer organ, the offline maps, and "
+                 "the domain services (finance, legal, property, "
+                 "marketing, learning, careers)."),
         "may_not": ("Import layer-5 application organs (agents, "
                     "missions, partner, context). A service that needs "
                     "orchestration receives it as an injected callable."),

@@ -270,23 +270,14 @@ def test_scan_safety_remainder_is_exactly_the_excluded_sites():
     finally:
         import importlib
         importlib.reload(es)
-    # 22 (Pass #129 remainder) minus exactly the 6 safety conversions
-    # (Pass #130) minus exactly the 8 tail conversions (Pass #131).
-    # Line-shift arithmetic: each conversion inserts one record line
-    # after its except line, shifting every later line by +1 each.
-    # Original lines -> shifted: 642 -> 648, 708 -> 714, 800 -> 806,
-    # 947 -> 955, 1030 -> 1038, 1102 -> 1110, 1707 -> 1715, 1839 -> 1847,
-    # 2534 -> 2540, 2860 -> 2866, 2881 -> 2887, 3006 -> 3012,
-    # 3032 -> 3044, 3041 -> 3047, 3053 -> 3066, 3064 -> 3070;
-    # Pass #131 then converts 714, 806, 2540, 2866, 2887, 3012, 3047,
-    # 3070, leaving exactly the 8 honest + deliberate sites below.
-    # #140: the scanner now recognizes exc_info=True logging, so the
-    # 4 debug-honest lines (955, 1038, 1847, 3044) no longer count,
-    # leaving exactly the 4 deliberate sites below.
-    expected = {648, 1110, 1715, 3066}
-    assert {f.line for f in report.findings} == expected
-    # The one remaining safety-region site is the excluded transport
-    # handler (status 0 = designed answer), not a converted site.
+    # The remainder is pinned by (rule, owner-function) identity, not
+    # by line numbers. The four deliberate sites below are the
+    # survivors of the Pass #129 remainder after the Pass #130/#131
+    # conversions and the #140 exc_info=True recognition (the line
+    # arithmetic that used to pin them is in git history). Line
+    # numbers shift under every edit above them; the identity set
+    # only moves when a site is converted or a new one accepted,
+    # which is exactly what this pin exists to catch.
     tree = ast.parse(open(path).read())
     owner_of = {}
     for node in ast.walk(tree):
@@ -295,13 +286,26 @@ def test_scan_safety_remainder_is_exactly_the_excluded_sites():
                 if isinstance(t, ast.Try):
                     for h in t.handlers:
                         owner_of[h.lineno] = node.name
+    found = {(f.rule, owner_of.get(f.line)) for f in report.findings}
+    expected = {
+        ("E104", "_default_health_fetch"),
+        ("E104", "_host_of"),
+        ("E104", "_verify_one"),
+        ("E104", "lookup_url"),
+    }
+    assert found == expected
+    # No surviving site lives in the safety helpers themselves: the
+    # one safety-adjacent remainder is the excluded transport handler
+    # (_default_health_fetch — status 0 = designed answer), not a
+    # converted site.
     safety = [owner_of.get(f.line) for f in report.findings
               if owner_of.get(f.line) in (
                   "contains_instruction_attempt", "as_data_block",
                   "requires_owner_approval", "policy_allows_tool_call",
                   "redact_identity")]
     assert safety == []
-    assert 648 in {f.line for f in report.findings}  # transport handler stays
+    # …and the transport handler itself stays in the remainder.
+    assert ("E104", "_default_health_fetch") in found
 
 
 def test_ledger_file_is_clean():

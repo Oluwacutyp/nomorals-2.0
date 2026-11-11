@@ -1,10 +1,15 @@
 """Personal-bot (USER-ONLY) BotFather command list + button categories.
 
-The personal bot is owner-only, so its BotFather ``/setcommands`` list is
-the public 52 commands PLUS a curated 48 owner-only commands — 100 total,
-the BotFather maximum. The gated bot's public list stays exactly as-is
-(``PUBLIC_COMMANDS`` in :mod:`nomorals.social.chat.control`); this module
-never touches it.
+The personal bot is owner-only. Its BotFather ``/setcommands`` list is
+capped by BotFather at 100 commands, while the public catalog
+(``PUBLIC_COMMANDS`` in :mod:`nomorals.social.chat.control`) has long
+outgrown that cap — so the personal list is a curated subset by design:
+all 48 owner-only commands (``PERSONAL_OWNER_COMMANDS``) plus the
+highest-priority public commands filling the remaining slots (see
+:func:`personal_botfather_commands` for the priority order). Public
+commands that do not fit are not gone: they stay in the public catalog,
+the menus and /list — the BotFather list is only the client's command
+picker. The gated bot's own lists are untouched by this module.
 
 The list is generated from the registry at call time (descriptions from
 ``COMMAND_DETAILS``), never pasted by hand, so it cannot drift from the
@@ -26,8 +31,10 @@ __all__ = [
     "PERSONAL_HELP_CATEGORIES",
 ]
 
-#: Public 52 in BotFather order: the 19 named public commands + /game +
-#: the 32 public game commands (same order as ``public_menu_keyboard``).
+#: Public commands in BotFather priority order: the 19 named public
+#: commands + /game (same order as ``public_menu_keyboard``). This is
+#: the top of the fill priority for the personal list — see
+#: :func:`personal_botfather_commands`.
 _PUBLIC_ORDER: tuple[str, ...] = (
     "help", "search", "news", "book", "music", "play", "video", "podcast",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
@@ -39,7 +46,8 @@ _PUBLIC_ORDER: tuple[str, ...] = (
 #: (``books``/``wis``/``commands``/``menu`` are covered by their primaries;
 #: ``gmail``/``mail``/``inbox`` are covered by ``email``).
 #: Ordered by group: control → updates → search → build → memory/money →
-#: catalog. 52 public + 48 here = 100, the BotFather maximum.
+#: catalog. All 48 always fit: the public side fills only the slots this
+#: list leaves under the BotFather maximum of 100.
 #: ``searchleads`` is NOT on the menu (email took its slot — the mailbox
 #: surface matters more in the menu); it stays registered and runs when
 #: typed, like every other off-menu owner command.
@@ -85,25 +93,55 @@ def _description(kind: str) -> str:
     return text
 
 
-def personal_botfather_commands() -> list[tuple[str, str]]:
-    """``[(command, description)]`` for the personal bot — 100 entries.
+def _public_priority() -> list[str]:
+    """Public commands in BotFather fill-priority order.
 
-    Public 52 first (BotFather order), then the 48 owner-only commands.
+    The curated surfaces first — ``_PUBLIC_ORDER`` (the named public
+    commands in menu order), then ``PUBLIC_GAME_COMMANDS`` (the public
+    games in their curated order) — then every remaining public command
+    in registry order (``CONTROL_COMMANDS``), with any public kind the
+    registry does not carry appended alphabetically. Deterministic:
+    the same catalog always yields the same order.
     """
-    from .control import PUBLIC_COMMANDS, PUBLIC_GAME_COMMANDS
+    from .control import CONTROL_COMMANDS, PUBLIC_COMMANDS, PUBLIC_GAME_COMMANDS
 
-    ordered: list[str] = []
+    priority: list[str] = []
     for kind in _PUBLIC_ORDER:
-        if kind not in ordered:
-            ordered.append(kind)
+        if kind in PUBLIC_COMMANDS and kind not in priority:
+            priority.append(kind)
     for kind in PUBLIC_GAME_COMMANDS:
+        if kind in PUBLIC_COMMANDS and kind not in priority:
+            priority.append(kind)
+    for kind in CONTROL_COMMANDS:
+        if kind in PUBLIC_COMMANDS and kind not in priority:
+            priority.append(kind)
+    for kind in sorted(PUBLIC_COMMANDS):
+        if kind not in priority:
+            priority.append(kind)
+    return priority
+
+
+def personal_botfather_commands() -> list[tuple[str, str]]:
+    """``[(command, description)]`` for the personal bot — ≤100 entries.
+
+    BotFather caps a bot's list at 100 commands and the public catalog
+    is far larger than that, so the personal list is a curated subset:
+    public commands in :func:`_public_priority` order fill the slots
+    the owner list leaves, then every owner-only command follows.
+    Every entry is an owner command or a public command; the result
+    is deterministic and can never exceed the cap, however large the
+    public catalog grows.
+    """
+    slots = BOTFATHER_MAX_COMMANDS - len(PERSONAL_OWNER_COMMANDS)
+    ordered: list[str] = []
+    for kind in _public_priority():
+        if len(ordered) >= slots:
+            break
         if kind not in ordered:
             ordered.append(kind)
     for kind in PERSONAL_OWNER_COMMANDS:
         if kind not in ordered:
             ordered.append(kind)
-    # Guard: the public set must be exactly covered, nothing dropped.
-    assert set(ordered) >= set(PUBLIC_COMMANDS), "personal list drops public commands"
     return [(kind, _description(kind)) for kind in ordered]
 
 
@@ -137,9 +175,10 @@ def validate_botfather_commands() -> list[str]:
             )
         if " - " in kind or " " in kind:
             problems.append(f"command contains spaces: {kind!r}")
-    missing_public = sorted(set(PUBLIC_COMMANDS) - seen)
-    if missing_public:
-        problems.append(f"missing public commands: {missing_public}")
+    # Owner commands are all small enough to fit by design and every
+    # one must be listed; public commands beyond the cap are excluded
+    # by design (they stay in the public catalog, menus and /list), so
+    # only the owner side is checked for completeness.
     missing_owner = sorted(set(PERSONAL_OWNER_COMMANDS) - seen)
     if missing_owner:
         problems.append(f"missing owner commands: {missing_owner}")

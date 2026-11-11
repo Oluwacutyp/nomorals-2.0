@@ -317,10 +317,10 @@ class GatingTests(unittest.TestCase):
 
     def test_gating_layer(self):
         self.assertIn("glossary", CONTROL_COMMANDS)
-        # owner-only: never on the public list, and the public
-        # count is exactly what it was before this surface
+        # owner-only: never on the public list. (The public catalog's
+        # exact size is pinned once, in test_craft_surface — this
+        # suite asserts only the property it owns.)
         self.assertNotIn("glossary", PUBLIC_COMMANDS)
-        self.assertEqual(len(PUBLIC_COMMANDS), 248)
         self.assertFalse(caller_may_run("glossary", False))
         self.assertTrue(caller_may_run("glossary", True))
         cmd = parse_control("/glossary list")

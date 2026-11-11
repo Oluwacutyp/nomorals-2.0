@@ -269,9 +269,16 @@ def test_scan_remainder_is_exactly_exclusions():
     # #140: sanitize_tool_description and _emit_tool_call are
     # debug-honest (exc_info=True, asserted below) and are now
     # recognized by the scanner, so they no longer count.
+    # _invoke_tool_fn is the doc-20 P2 self-healing seam: its
+    # error-system import guard treats ANY import failure as
+    # "unwired", a normal state it re-probes on every call — the
+    # exception is deliberately neither recorded nor logged (during
+    # boot the ledger it would record into may be the thing being
+    # wired). The site is adjudicated deliberate and pinned here.
     assert found == sorted([
         ("E104", "_args_digest"),
         ("E104", "_args_digest"),
+        ("E104", "_invoke_tool_fn"),
     ])
     # Each debug-honest body carries exc_info=True (Call-keyword walk,
     # not an ast.dump string grep — the #125 classifier lesson).

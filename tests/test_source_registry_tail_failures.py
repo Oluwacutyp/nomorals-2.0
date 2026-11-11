@@ -252,21 +252,19 @@ def test_scan_tail_remainder_is_exactly_four():
                 if isinstance(t, ast.Try):
                     for h in t.handlers:
                         owner_of.setdefault(h.lineno, (None, node.name))
-    # 16 (Pass #130 remainder) minus exactly the 8 Pass #131 conversions.
-    # Line-shift arithmetic: each conversion inserts one record line
-    # after its except line, shifting every later line by +1 each.
-    # Original lines -> shifted: 648 -> 648, 953 -> 955, 1036 -> 1038,
-    # 1108 -> 1110, 1713 -> 1715, 1845 -> 1847, 3038 -> 3044,
-    # 3059 -> 3066. Converted lines (714, 806, 2540, 2866, 2887, 3012,
-    # 3047, 3070) are gone.
-    # #140: minus exactly the 4 debug-honest sites the scanner now
-    # recognizes via exc_info=True (955, 1038, 1847, 3044).
-    expected = {648, 1110, 1715, 3066}
-    assert {f.line for f in report.findings} == expected
-    owners = {owner_of.get(line) for line in expected}
-    assert owners == {
-        (None, "_default_health_fetch"),  # #130 deliberate: status 0
-        ("SourceRegistry", "_host_of"),  # #121 deliberate: "" is the answer
-        ("SourceRegistry", "_verify_one"),  # #121 deliberate: root probe
-        ("ContentAddressedCache", "lookup_url"),  # inner skip: behaviour
+    # The remainder is pinned by (rule, owner) identity, not by line
+    # numbers. The four deliberate sites below are the survivors of
+    # the Pass #130 remainder after the Pass #131 conversions and the
+    # #140 exc_info=True recognition (the line arithmetic that used
+    # to pin them — {648, 1110, 1715, 3066} and its shifts — is in
+    # git history). Line numbers shift under every edit above them;
+    # the identity set only moves when a site is converted or a new
+    # one accepted.
+    expected = {
+        ("E104", (None, "_default_health_fetch")),  # #130 deliberate: status 0
+        ("E104", ("SourceRegistry", "_host_of")),  # #121 deliberate: "" is the answer
+        ("E104", ("SourceRegistry", "_verify_one")),  # #121 deliberate: root probe
+        ("E104", ("ContentAddressedCache", "lookup_url")),  # inner skip: behaviour
     }
+    assert {(f.rule, owner_of.get(f.line))
+            for f in report.findings} == expected

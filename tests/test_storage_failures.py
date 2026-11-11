@@ -346,6 +346,15 @@ def test_scan_storage_subsystem_clean():
     # (2026-10-24 EC2 startup refusal — see test_migrations_frozen.py): its
     # ~21 silent sites are a named, accepted remainder, not a regression,
     # so it is deliberately NOT in this list.
+    # Adjudicated deliberate sites (excluded via the scanner's own
+    # reviewed-catch marker, NOT silent): backup.py's two
+    # `except BaseException` handlers in SnapshotStore.create — both
+    # unlink the partial snapshot files and re-raise, so the failure
+    # propagates unchanged; the BaseException breadth is load-bearing
+    # (a create interrupted by KeyboardInterrupt/SystemExit must not
+    # leave a phantom snapshot either). Each carries a
+    # `# noqa: BLE001 — cleanup partials, then re-raise` marker; any
+    # NEW unmarked site in these files fails this pin.
     from nomorals.tools.error_scan import scan
 
     files = [

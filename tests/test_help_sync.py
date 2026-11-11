@@ -87,6 +87,10 @@ def _handled_kinds(body: str) -> set[str]:
     kinds = set(re.findall(r'if kind == "([^"]+)"', body))
     for m in re.finditer(r"if kind in \{([^}]+)\}", body):
         kinds.update(re.findall(r'"([^"]+)"', m.group(1)))
+    # Tuple-literal branches are the same dispatch idiom spelled with
+    # parentheses: `if kind in ("massreact", "pollvote", "chfollow"):`
+    for m in re.finditer(r"if kind in \(([^)]+)\)", body):
+        kinds.update(re.findall(r'"([^"]+)"', m.group(1)))
     return kinds
 
 

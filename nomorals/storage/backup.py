@@ -350,7 +350,7 @@ class BackupManager:
             try:
                 return self._create_documents_at(raw_path, base, label,
                                                  store)
-            except BaseException:
+            except BaseException:  # noqa: BLE001 — cleanup partials, then re-raise
                 raw_path.unlink(missing_ok=True)
                 raw_path.with_suffix(".jsonl.gz").unlink(missing_ok=True)
                 (self.directory / f"{base}-blobs.tar.gz").unlink(
@@ -359,7 +359,7 @@ class BackupManager:
         raw_path, base = self._reserve_snapshot(base)
         try:
             return self._create_at(raw_path, base, label)
-        except BaseException:
+        except BaseException:  # noqa: BLE001 — cleanup partials, then re-raise
             # A failed create must not leave a phantom snapshot behind:
             # the reservation and any partial payloads go with it.
             raw_path.unlink(missing_ok=True)
