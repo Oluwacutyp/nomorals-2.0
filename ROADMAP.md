@@ -3,23 +3,28 @@
 Status as of the current commit. Verified means covered by a test that runs
 offline in CI, or executed by hand with the result recorded here.
 
-## Verified live counts (2026-10-16, HEAD 7ba7b40)
+## Verified live counts (2026-11-10, HEAD 4b44e54)
 
 Correction: stale v7/52 claim corrected — the L2 section below previously
 said "7 migrations to 52 tables"; the live numbers are:
 
-packages: 75
-schema version: 87
+packages: 94
+schema version: 88
 tables: 125 real (152 incl. FTS shadow tables)
 
 How counted: `packages` = sub-directories of `nomorals/` excluding
-`__pycache__` (75) plus 14 top-level `.py` modules = 89 entries total;
+`__pycache__` (94) plus 16 top-level `.py` modules = 110 entries total;
 `schema version` = `max(version)` in `nomorals/storage/migrations.py`
-(`MIGRATIONS`, 86 entries) and the live `data/nomorals.db`
-`schema_migrations` table (86 rows, `integrity_check()` = ok);
-`tables` = live DB tables excluding FTS5 shadow tables
+(`MIGRATIONS`, 88 entries) and a freshly migrated database's
+`schema_migrations` table (88 rows, `integrity_check()` = ok);
+`tables` = tables of a database migrated from empty through the
+production migration path, excluding FTS5 shadow tables
 (`*_fts`, `*_fts_config`, `*_fts_content`, `*_fts_data`, `*_fts_docsize`,
-`*_fts_idx`), `sqlite_sequence`, and `schema_migrations*`.
+`*_fts_idx`), `sqlite_sequence`, and `schema_migrations*` — 125 real of
+152 total tables. A long-lived deployment database carries additional
+runtime-created tables beyond the migration set, so its raw count runs
+higher; the pinned number is the fresh-migration count, reproducible
+from this tree alone.
 `tests/test_ten_packages_expose.py` re-asserts all three against the live
 tree on every run — if the tree grows, this section must be re-verified,
 not hand-edited upward.
@@ -57,13 +62,13 @@ logging with secret redaction, ULID ids, monotonic clock, stdlib HTTP client wit
 resumable range downloads.
 
 ### L2 Storage — `nomorals/storage/` (86 tests)
-Thread-local pooled connections, 86 forward-only checksummed migrations to 125
+Thread-local pooled connections, 88 forward-only checksummed migrations to 125
 real tables (152 incl. FTS5 shadow tables), FTS5 full-text search with query building and snippets, vector store with
 pure-Python cosine and an IVF path above 512 rows, content-addressed blob store
 with dedup and refcounting, durable work queue with leases and dead-lettering,
 versioned gzip backups with git push and restore.
 
-Verified: schema version 86, `integrity_check()` clean, 13500 B blob → 159 B (ratio
+Verified: schema version 88, `integrity_check()` clean, 13500 B blob → 159 B (ratio
 0.012), backup gunzips to a valid `SQLite format 3` header and restores clean.
 
 ### L3 Cognition — `memory/`, `llm/` (57 tests)

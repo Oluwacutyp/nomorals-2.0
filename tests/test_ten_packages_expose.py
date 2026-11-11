@@ -258,17 +258,28 @@ class TestAudioExpose:
 # ── documents/expose ────────────────────────────────────────────────────────
 
 
+#: The curated document-format set the expose layer advertises. The
+#: production registry derives live from ``parsers._EXTENSIONS``, so the
+#: pins below assert RELATIONSHIPS against this set (registry == curated
+#: set; the capability card's count == the registry's size) instead of a
+#: frozen integer — growth means adding the new format HERE, in the open.
+EXPECTED_FORMATS = frozenset({
+    "epub", "odt", "ods", "pdf", "docx", "xlsx", "pptx", "rtf", "json",
+    "xml", "csv", "tsv", "txt", "html", "markdown", "xls",
+})
+
+
 class TestDocumentsExpose:
-    def test_sixteen_formats_including_epub_odt_ods(self):
+    def test_formats_exactly_the_curated_set_including_epub_odt_ods(self):
         from nomorals.documents.expose import SUPPORTED_FORMATS, list_formats
 
-        assert len(SUPPORTED_FORMATS) == 16
-        for fmt in ("epub", "odt", "ods", "pdf", "docx", "xlsx", "pptx",
-                    "rtf", "json", "xml", "csv", "tsv", "txt", "html",
-                    "markdown", "xls"):
-            assert fmt in SUPPORTED_FORMATS
-        assert len(list_formats()) == 16
-        assert all(f["stdlib_only"] for f in list_formats())
+        # Any addition to or removal from the live registry fails here
+        # with the drifting format named by the set diff.
+        assert set(SUPPORTED_FORMATS) == EXPECTED_FORMATS
+        listed = list_formats()
+        assert {f["format"] for f in listed} == set(SUPPORTED_FORMATS)
+        assert len(listed) == len(SUPPORTED_FORMATS)
+        assert all(f["stdlib_only"] for f in listed)
 
     def test_read_and_convert_markdown_round_trip(self):
         from nomorals.documents.expose import (
@@ -304,10 +315,10 @@ class TestDocumentsExpose:
             convert_document(doc, "csv")
 
     def test_document_capabilities_honest(self):
-        from nomorals.documents.expose import document_capabilities
+        from nomorals.documents.expose import SUPPORTED_FORMATS, document_capabilities
 
         caps = document_capabilities()
-        assert caps["format_count"] == 16
+        assert caps["format_count"] == len(SUPPORTED_FORMATS)
         assert caps["parse_stdlib_only"] is True
         assert caps["parse_offline"] is True
         assert "python-docx" in caps["optional_deps"]["docx_output"]
