@@ -3711,7 +3711,7 @@ class PartnerRuntime(
             from ..notifier import resolve_brain_gate
 
             gate = resolve_brain_gate(self.context)
-            if gate is not None and gate.degraded_now():
+            if gate is not None and gate.degraded_now:
                 facts["brain"] = (
                     "degraded",
                     "the brain's last observed outcome was a "
