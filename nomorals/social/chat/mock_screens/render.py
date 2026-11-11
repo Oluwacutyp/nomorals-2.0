@@ -122,11 +122,17 @@ def _participant_color(person: Participant, screen: Screen):
 
 class _Canvas:
     """Layout state for one render: the scratch measure
-    draw, fonts at device scale, and the drawn record."""
+    draw, fonts at device scale, and the drawn record.
+    ``DESIGNS`` is the registry the canvas reads its
+    design from — the chat engine's canvases read
+    CHAT_DESIGNS; the Phase 2b engines (render_screens)
+    subclass with their own class registries."""
+
+    DESIGNS = CHAT_DESIGNS
 
     def __init__(self, screen: Screen) -> None:
         self.screen = screen
-        self.design = CHAT_DESIGNS[screen.platform]
+        self.design = self.DESIGNS[screen.platform]
         self.pal = self.design["dark" if screen.dark else "light"]
         self.dev = DEVICES[screen.chrome.style]
         self.w = int(self.dev["width"])
@@ -136,7 +142,8 @@ class _Canvas:
         #: policy table carries one, else the generic screen
         #: row.  A design may also name a ``family`` outright.
         from ....media.typography import CONTEXT_POLICIES
-        wanted = "screen_" + str(screen.platform)
+        wanted = str(self.design.get("font_context")
+                     or "screen_" + str(screen.platform))
         self.font_context = wanted if wanted in \
             CONTEXT_POLICIES else "screen"
         self._measure = ImageDraw.Draw(Image.new("RGB", (8, 8)))

@@ -47,13 +47,35 @@ from __future__ import annotations
 import re
 
 from .render import MockScreensError
-from .schema import DeviceChrome, Message, Participant, Screen
+from .schema import (
+    CallHistoryEntry,
+    CallHistoryScreen,
+    CallScreen,
+    DeviceChrome,
+    FolderTab,
+    ListRow,
+    ListScreen,
+    Message,
+    Participant,
+    Screen,
+    StatusScreen,
+    StatusViewer,
+    StatusViewsScreen,
+    StoryItem,
+)
 
 USAGE = (
     "usage: /mock demo [whatsapp|group|instagram|telegram|"
     "telegram-group|messenger|messenger-group|snapchat|"
     "snapchat-group|imessage|imessage-sms|sms] "
-    "[iphone|android] — or build one: /mock whatsapp "
+    "[iphone|android] — screen demos: /mock demo "
+    "whatsapp-list · whatsapp-calls · whatsapp-status-list "
+    "· instagram-list · telegram-list · snapchat-list · "
+    "whatsapp-status · whatsapp-status-text · "
+    "whatsapp-status-views · call · call-incoming · "
+    "whatsapp-call · facebook-call · instagram-call · "
+    "hangouts-call · iphone-call-history — or build one: "
+    "/mock whatsapp "
     "[iphone|android] [with <Name>] me: hi ;; Adaeze: hello "
     ";; me: on my way [read] — families: whatsapp · "
     "telegram · messenger · snapchat · imessage · sms · "
@@ -519,6 +541,335 @@ def demo_screen(name: str = "whatsapp", style: str = "android",
         ])
 
 
+# ── Phase 2b demos: lists, status, calls ─────────────────
+#
+# One demo script per Phase 2b family, in the flagship
+# demos' idiom: real-shape data exercising the states the
+# census names for the family (the §26 exit proof: every
+# row state has a fixture).
+
+_LIST_DEMOS = (
+    "whatsapp-list", "whatsapp-calls", "whatsapp-status-list",
+    "instagram-list", "telegram-list", "snapchat-list")
+_STATUS_DEMOS = ("whatsapp-status", "whatsapp-status-text")
+_VIEWS_DEMOS = ("whatsapp-status-views",)
+_CALL_DEMOS = (
+    "call", "call-incoming", "whatsapp-call", "facebook-call",
+    "instagram-call", "hangouts-call")
+_HISTORY_DEMOS = ("iphone-call-history", "call-history")
+
+
+def _demo_people() -> list:
+    return [
+        Participant("me", "You"),
+        Participant("adaeze", "Adaeze Nwosu"),
+        Participant("bola", "Bola"),
+        Participant("chiamaka", "Chiamaka"),
+        Participant("mum", "Mum"),
+    ]
+
+
+def demo_list_screen(name: str, style: str = "android",
+                     *, dark: bool = False):
+    """One built-in demo per list family (census §4)."""
+    key = str(name or "").strip().lower()
+    chrome = DeviceChrome(style=style, clock="9:41", battery=84,
+                 network="4G",
+                 unread=3 if style == "iphone" else 0)
+    people = _demo_people()
+    if key == "whatsapp-calls":
+        return ListScreen(
+            platform="whatsapp", flavor="calls", dark=dark,
+            title="Calls", chrome=chrome, participants=people,
+            rows=[
+                ListRow("c1", "Adaeze Nwosu",
+                        participant_id="adaeze",
+                        preview_kind="call_in_voice",
+                        time="Today, 9:41 AM"),
+                ListRow("c2", "Bola", participant_id="bola",
+                        preview_kind="call_out_video",
+                        time="Today, 8:15 AM"),
+                ListRow("c3", "Mum", participant_id="mum",
+                        preview_kind="call_missed_voice",
+                        preview="(2)", time="Yesterday, 9:02 PM"),
+                ListRow("c4", "Chiamaka",
+                        participant_id="chiamaka",
+                        preview_kind="call_missed_video",
+                        time="Monday"),
+            ])
+    if key == "whatsapp-status-list":
+        return ListScreen(
+            platform="whatsapp", flavor="status", dark=dark,
+            title="Updates", chrome=chrome,
+            participants=people,
+            rows=[
+                ListRow("s0", "My Status",
+                        participant_id="me",
+                        preview="Tap to add status update",
+                        time="", row_type="person"),
+                ListRow("s1", "Adaeze Nwosu",
+                        participant_id="adaeze", ring="unseen",
+                        segments=3, section="Recent updates",
+                        time="Today, 9:12 AM"),
+                ListRow("s2", "Bola", participant_id="bola",
+                        ring="unseen", segments=2,
+                        section="Recent updates",
+                        time="Today, 8:47 AM"),
+                ListRow("s3", "Chiamaka",
+                        participant_id="chiamaka", ring="seen",
+                        section="Viewed updates",
+                        time="Today, 7:58 AM"),
+                ListRow("s4", "Mum", participant_id="mum",
+                        ring="seen", section="Muted updates",
+                        muted=True, time="Yesterday, 9:31 PM"),
+                ListRow("s5", "GoldenSwing Signals",
+                        preview="1,240 followers",
+                        section="Channels", row_type="channel",
+                        time="Today, 9:00 AM"),
+            ])
+    if key == "instagram-list":
+        return ListScreen(
+            platform="instagram", dark=dark,
+            title="peacethefirst", chrome=chrome,
+            participants=people,
+            stories=[
+                StoryItem("adaeze", note="studio day 🎬"),
+                StoryItem("bola", note="new drops friday"),
+                StoryItem("chiamaka"),
+            ],
+            rows=[
+                ListRow("i1", "Adaeze Nwosu",
+                        participant_id="adaeze",
+                        preview="Okay this is the one. Post it.",
+                        time="2m", unread=1, ring="unseen"),
+                ListRow("i2", "Bola", participant_id="bola",
+                        preview_kind="typing", time="now"),
+                ListRow("i3", "Chiamaka",
+                        participant_id="chiamaka",
+                        preview="Sent", status="sent",
+                        time="1h"),
+                ListRow("i4", "Mum", participant_id="mum",
+                        preview="Seen", status="seen",
+                        time="3h"),
+                ListRow("i5", "Studio Crew",
+                        preview_kind="story_reaction",
+                        preview="Bola reacted to your story",
+                        time="5h", row_type="group"),
+                ListRow("i6", "Adaeze Nwosu",
+                        participant_id="adaeze",
+                        preview_kind="call_missed_video",
+                        time="1d"),
+            ])
+    if key == "telegram-list":
+        return ListScreen(
+            platform="telegram", dark=dark, title="Chats",
+            chrome=chrome, participants=people,
+            tabs=[FolderTab("All Chats", 4), FolderTab("Work"),
+                  FolderTab("Channels", 2)],
+            stories=[StoryItem("adaeze", ring="unseen"),
+                     StoryItem("bola", ring="seen")]
+            if style == "iphone" else [],
+            archived=2,
+            rows=[
+                ListRow("t1", "Saved Messages",
+                        row_type="saved",
+                        preview="the packing list draft",
+                        time="9:40 AM"),
+                ListRow("t2", "GoldenSwing Signals",
+                        row_type="channel", verified=True,
+                        preview="XAUUSD holding above the zone",
+                        time="9:12 AM", unread=5, mention=True),
+                ListRow("t3", "Adaeze Nwosu",
+                        participant_id="adaeze", online=True,
+                        preview="the renders finished",
+                        time="8:58 AM", ticks="read"),
+                ListRow("t4", "Studio Crew", row_type="group",
+                        sender="Bola",
+                        preview="bringing the backdrops",
+                        time="8:31 AM", unread=2, pinned=True),
+                ListRow("t5", "Bola", participant_id="bola",
+                        preview="invoice for the backdrop",
+                        time="Yesterday", draft=True),
+                ListRow("t6", "Secret Chat",
+                        row_type="secret",
+                        preview_kind="typing", time="Tuesday"),
+                ListRow("t7", "Devon Bot", row_type="bot",
+                        preview="your morning briefing is ready",
+                        time="Monday", muted=True),
+            ])
+    if key == "snapchat-list":
+        return ListScreen(
+            platform="snapchat", dark=dark, title="Chats",
+            chrome=chrome, participants=people,
+            rows=[
+                ListRow("n1", "Adaeze",
+                        participant_id="adaeze",
+                        preview="morning!! did you see the "
+                                "snaps from last night",
+                        time="2m"),
+                ListRow("n2", "Bola", participant_id="bola",
+                        preview="the setup so far",
+                        time="1h"),
+                ListRow("n3", "Chiamaka",
+                        participant_id="chiamaka",
+                        preview="omw with the drinks",
+                        time="3h"),
+                ListRow("n4", "Mum", participant_id="mum",
+                        preview="call me when you land",
+                        time="Yesterday"),
+            ])
+    return ListScreen(
+        platform="whatsapp", dark=dark, title="WhatsApp",
+        chrome=chrome, participants=people, nav_badge=1,
+        rows=[
+            ListRow("w1", "Adaeze Nwosu",
+                    participant_id="adaeze", ring="unseen",
+                    preview="the flyer is ready 🔥",
+                    time="9:41 AM", unread=2),
+            ListRow("w2", "Studio Crew", row_type="group",
+                    preview_kind="photo", pinned=True,
+                    preview="Bola: the setup so far",
+                    time="9:15 AM"),
+            ListRow("w3", "Bola", participant_id="bola",
+                    preview="on my way", time="9:02 AM",
+                    ticks="read"),
+            ListRow("w4", "Mum", participant_id="mum",
+                    preview="half of the list, still typing",
+                    time="8:47 AM", draft=True),
+            ListRow("w5", "Chiamaka",
+                    participant_id="chiamaka",
+                    preview_kind="voice", time="8:30 AM",
+                    unread=1),
+            ListRow("w6", "GoldenSwing Signals",
+                    row_type="channel", muted=True,
+                    preview_kind="call_missed_voice",
+                    time="Yesterday"),
+            ListRow("w7", "Bola", participant_id="bola",
+                    preview_kind="typing", time="Yesterday"),
+        ])
+
+
+def demo_status_screen(name: str, style: str = "android",
+                       *, dark: bool = False):
+    """The WhatsApp Status demos (census §4.2): a photo
+    status (the no-media case wears the placeholder scene,
+    recorded as such) and a text status on a stocked
+    colour."""
+    key = str(name or "").strip().lower()
+    chrome = DeviceChrome(style=style, clock="9:41", battery=84,
+                 network="4G")
+    when = "9:12" if style == "iphone" else "21 minutes ago"
+    owner = Participant("adaeze", "Adaeze Nwosu")
+    if key == "whatsapp-status-text":
+        return StatusScreen(
+            owner=owner, kind="text", dark=dark,
+            text="Studio day. Doors open at 10 — "
+                 "bring your ideas.",
+            bg="#7656C9", text_size=30, when=when,
+            segments=2, index=0, played=0.3,
+            reactions=["❤️", "🔥", "😮"], chrome=chrome)
+    return StatusScreen(
+        owner=owner, kind="photo", dark=dark,
+        caption="the backdrop from last time",
+        when=when, label="Close friends", segments=4,
+        index=1, played=0.45, reshare=style == "iphone",
+        reply_style="glass" if style == "iphone" else "",
+        reactions=["❤️", "🔥", "😮"], liked=True,
+        chrome=chrome)
+
+
+def demo_status_views(style: str = "android"):
+    """The Status Views demo (census §4.1)."""
+    return StatusViewsScreen(
+        owner=Participant("me", "You"),
+        when="Today, 9:12 AM",
+        participants=_demo_people(),
+        viewers=[
+            StatusViewer("Adaeze Nwosu", "adaeze",
+                         "Today, 9:31 AM"),
+            StatusViewer("Bola", "bola", "Today, 9:40 AM"),
+            StatusViewer("Chiamaka", "chiamaka",
+                         "Today, 10:02 AM"),
+        ],
+        chrome=DeviceChrome(style=style, clock="9:41", battery=84,
+                   network="4G"))
+
+
+def demo_call_screen(name: str, style: str = "android",
+                     *, dark: bool = False):
+    """One demo per call family (census §6.1 + §6.2)."""
+    key = str(name or "").strip().lower()
+    chrome = DeviceChrome(style=style, clock="9:41", battery=84,
+                 network="4G")
+    adaeze = Participant("adaeze", "Adaeze Nwosu")
+    if key == "call-incoming":
+        return CallScreen(
+            platform="generic", dark=dark,
+            caller=Participant("caller", "",
+                               color="#E53935"),
+            number="+234 800 111 2222", state="incoming",
+            sim="SIM 1" if style == "iphone" else "",
+            chrome=chrome)
+    if key == "whatsapp-call":
+        return CallScreen(
+            platform="whatsapp", caller=adaeze,
+            number="+234 800 000 0000", state="ongoing",
+            status="04:32", video=True, chrome=chrome,
+            dark=dark)
+    if key == "facebook-call":
+        return CallScreen(
+            platform="facebook", caller=adaeze,
+            state="ongoing", status="12:08", chrome=chrome,
+            dark=dark)
+    if key == "instagram-call":
+        return CallScreen(
+            platform="instagram",
+            caller=Participant("adaeze", "adaeze.creates"),
+            state="incoming", video=True, chrome=chrome,
+            dark=dark)
+    if key == "hangouts-call":
+        return CallScreen(
+            platform="hangouts", caller=adaeze,
+            state="ongoing", status="01:47", chrome=chrome,
+            dark=dark)
+    return CallScreen(
+        platform="generic", caller=adaeze,
+        number="+234 800 000 0000", state="ongoing",
+        status="02:15", chrome=chrome, dark=dark)
+
+
+def demo_call_history(style: str = "iphone"):
+    """The iPhone Call History demo (census §6.3): every
+    entry type and avatar mode has a row."""
+    return CallHistoryScreen(
+        participants=_demo_people(),
+        entries=[
+            CallHistoryEntry(
+                "h1", "Adaeze Nwosu", "adaeze", type="missed",
+                avatar_mode="picture", label="mobile",
+                count=2, when="9:41 AM"),
+            CallHistoryEntry(
+                "h2", "+234 800 111 2222", type="outgoing",
+                avatar_mode="default", label="FaceTime Audio",
+                when="Yesterday"),
+            CallHistoryEntry(
+                "h3", "Bola", "bola", type="incoming",
+                avatar_mode="letter", sim="SIM 2",
+                label="home", when="Tuesday"),
+            CallHistoryEntry(
+                "h4", "Mum", "mum", type="incoming",
+                avatar_mode="picture", label="mobile",
+                when="12/05/2026"),
+            CallHistoryEntry(
+                "h5", "Chiamaka", "chiamaka", type="missed",
+                avatar_mode="letter", label="work",
+                when="Monday"),
+        ],
+        voicemail_count=2,
+        chrome=DeviceChrome(style="iphone", clock="9:41", battery=84,
+                   network="4G"))
+
+
 def _clock(minutes: int) -> str:
     total = 9 * 60 + 41 + minutes
     hh, mm = divmod(total, 60)
@@ -539,15 +890,36 @@ def parse_mock_tail(tail: str) -> tuple:
     if head == "demo":
         rest = words[1].split() if len(words) > 1 else []
         name = rest[0] if rest else "whatsapp"
+        style = "iphone" if "iphone" in rest else "android"
+        dark = "dark" in rest
+        if name in _LIST_DEMOS:
+            return demo_list_screen(name, style,
+                                    dark=dark), "demo-list"
+        if name in _STATUS_DEMOS:
+            return demo_status_screen(name, style,
+                                      dark=dark), "demo-status"
+        if name in _VIEWS_DEMOS:
+            return demo_status_views(style), "demo-views"
+        if name in _CALL_DEMOS:
+            return demo_call_screen(name, style,
+                                    dark=dark), "demo-call"
+        if name in _HISTORY_DEMOS:
+            return demo_call_history(style), "demo-history"
         if name not in _PLATFORMS and name not in _DEMO_VARIANTS:
             raise MockScreensError(
                 "demo families: whatsapp · group · instagram "
                 "· telegram · telegram-group · messenger · "
                 "messenger-group · snapchat · snapchat-group "
-                "· imessage · imessage-sms · sms")
-        style = "iphone" if "iphone" in rest else "android"
-        return demo_screen(name, style,
-                           dark="dark" in rest), "demo"
+                "· imessage · imessage-sms · sms — screen "
+                "demos: whatsapp-list · whatsapp-calls · "
+                "whatsapp-status-list · instagram-list · "
+                "telegram-list · snapchat-list · "
+                "whatsapp-status · whatsapp-status-text · "
+                "whatsapp-status-views · call · "
+                "call-incoming · whatsapp-call · "
+                "facebook-call · instagram-call · "
+                "hangouts-call · iphone-call-history")
+        return demo_screen(name, style, dark=dark), "demo"
     if head not in _PLATFORMS:
         raise MockScreensError(USAGE)
     platform, group = _PLATFORMS[head]

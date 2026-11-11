@@ -24,6 +24,12 @@ folder the image-generation seam writes (``data/media/
 generated``, resolved the same way it resolves it).  An
 unresolvable token is an honest text answer, never a
 screen with the media silently dropped.
+
+Phase 2b demos (``/mock demo whatsapp-list`` and its
+siblings) parse to the organ's list / status / call
+screen classes and dispatch to their own service doors
+below — the same delivery contract, the picture WAS the
+reply.
 """
 
 from __future__ import annotations
@@ -129,14 +135,50 @@ class RuntimeMockScreensMixin:
             return ("usage: /mock in a chat — the screen "
                     "needs somewhere to land.")
         try:
-            screen, _mode = parse_mock_tail(tail)
+            screen, mode = parse_mock_tail(tail)
         except MockScreensError as exc:
             return str(exc)
+        service = self._mock_screens_service()
+        audience = self._makers_audience(message)
+        if mode not in ("demo", "built"):
+            # Phase 2b screen classes (lists / status /
+            # calls): their own service doors, the same
+            # delivery contract — a picture WAS the reply
+            door = {
+                "demo-list": "render_list",
+                "demo-status": "render_status",
+                "demo-views": "render_status_views",
+                "demo-call": "render_call",
+                "demo-history": "render_call_history",
+            }[mode]
+            if mode == "demo-status":
+                title = screen.owner.name
+            elif mode == "demo-views":
+                title = "My Status"
+            elif mode == "demo-call":
+                title = screen.display_name()
+            elif mode == "demo-history":
+                title = screen.title_text
+            else:
+                title = screen.title
+            caption = ("🖼 " + screen.platform
+                       + " mock screen — " + title)
+            try:
+                out = getattr(service, door)(
+                    screen, audience=audience, caption=caption,
+                    send=lambda ref, cap: self._expression_send(
+                        message, ref, caption=cap))
+            except Exception as exc:  # noqa: BLE001 - honest
+                record_failure("mock_screens.render", exc)
+                return ("the mock screen render failed: "
+                        + str(exc)[:160])
+            if out.get("sent"):
+                return ""
+            return str(out.get("reason") or "no mock screen "
+                                            "right now")
         media_error = self._mock_resolve_media(screen, message)
         if media_error:
             return media_error
-        service = self._mock_screens_service()
-        audience = self._makers_audience(message)
         caption = ("🖼 " + screen.platform + " mock screen — "
                    + screen.title)
         try:
