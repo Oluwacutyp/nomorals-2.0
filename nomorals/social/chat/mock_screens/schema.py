@@ -158,11 +158,16 @@ class DeviceChrome:
 @dataclass
 class Screen:
     """One whole chat screen.  ``platform`` names a design
-    in the registry (``whatsapp`` / ``instagram``); ``group``
-    turns on the group choreography (member name colours,
-    admin rows) for designs that carry one; ``title`` /
-    ``subtitle`` are the header lines (contact name /
-    presence, group name / member list)."""
+    in the registry (``whatsapp`` / ``instagram`` /
+    ``telegram`` / ``messenger`` / ``snapchat`` /
+    ``imessage`` / ``sms``); ``group`` turns on the group
+    choreography (member name colours, admin rows) for
+    designs that carry one; ``title`` / ``subtitle`` are
+    the header lines (contact name / presence, group name
+    / member list).  ``variant`` names a design-level
+    layout variant (iMessage: ``"sms"`` — the green-bubble
+    Apple-to-Android form the census records); designs
+    that carry no variant ignore it."""
 
     platform: str
     title: str
@@ -172,6 +177,7 @@ class Screen:
     subtitle: str = ""
     group: bool = False
     dark: bool = False
+    variant: str = ""
 
     def participant(self, pid: str) -> Participant | None:
         for person in self.participants:
@@ -191,6 +197,7 @@ class Screen:
                 "subtitle": self.subtitle,
                 "group": self.group,
                 "dark": self.dark,
+                "variant": self.variant,
                 "participants": [p.to_dict()
                                   for p in self.participants],
                 "messages": [m.to_dict() for m in self.messages],
@@ -204,6 +211,7 @@ class Screen:
             subtitle=str(data.get("subtitle") or ""),
             group=bool(data.get("group")),
             dark=bool(data.get("dark")),
+            variant=str(data.get("variant") or ""),
             participants=[Participant.from_dict(p)
                           for p in data.get("participants") or []],
             messages=[Message.from_dict(m)

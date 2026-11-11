@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+from dataclasses import replace
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -108,6 +109,23 @@ class _Canvas:
         self.w = int(self.dev["width"])
         self.intent = self.design.get("intent", "text")
         self._measure = ImageDraw.Draw(Image.new("RGB", (8, 8)))
+
+    def dflag(self, name: str, default=None):
+        """A behaviour flag from the design entry (the
+        registry carries each platform's choreography as
+        data: where the time lives, whether bubbles tail,
+        which input bar the app wears…)."""
+        return self.design.get(name, default)
+
+    def run_avatar_applies(self) -> bool:
+        """Incoming runs end with the sender's avatar at
+        the left on this design (Telegram: groups only)."""
+        return bool(self.dflag("run_avatar", False)) and not (
+            self.dflag("run_avatar_group_only", False)
+            and not self.screen.group)
+
+    def run_avatar_size(self) -> float:
+        return float(self.dflag("run_avatar_size", 24))
 
     def s(self, value: float) -> int:
         return int(round(value * SCALE))
@@ -237,7 +255,52 @@ def _draw_avatar(canvas: Image.Image, draw, cv: _Canvas,
         shape="circle")
 
 
+def _draw_header_center(canvas, draw, cv: _Canvas,
+                        y0: float) -> float:
+    """The iMessage header: blue back arrow (+ unread
+    count) at the left, the contact's avatar over their
+    name centred, a video icon at the right — the iOS
+    Messages composition, not a left-aligned title row."""
+    pal, screen = cv.pal, cv.screen
+    h = float(cv.design["header_h"])
+    draw.rectangle([0, cv.s(y0), cv.s(cv.w), cv.s(y0 + h)],
+                   fill=pal["header_bg"])
+    accent = pal["accent"]
+    mid = y0 + h / 2
+    draw.line([(cv.s(19), cv.s(mid - 8)), (cv.s(12), cv.s(mid)),
+               (cv.s(19), cv.s(mid + 8))], fill=accent,
+              width=cv.s(2.4))
+    tx = 24
+    if screen.chrome.unread:
+        label = str(screen.chrome.unread)
+        draw.text((cv.s(tx), cv.s(mid - 9)), label,
+                  font=cv.font(15), fill=accent)
+    person = _header_person(screen)
+    if screen.group and (person is None or not person.avatar) \
+            and not getattr(cv, "avatars", {}).get(
+                person.id if person is not None else ""):
+        person = None
+    av = 32
+    _draw_avatar(canvas, draw, cv, (cv.w - av) / 2, y0 + 5, av,
+                 person, screen.title)
+    name = _fit_text(cv, screen.title, 11.5, cv.w - 140)
+    tw = cv.text_w(name, 11.5)
+    draw.text((cv.s((cv.w - tw) / 2), cv.s(y0 + 40)), name,
+              font=cv.font(11.5), fill=pal["header_fg"])
+    vx = cv.w - 52
+    draw.rounded_rectangle(
+        [cv.s(vx), cv.s(mid - 7), cv.s(vx + 17), cv.s(mid + 7)],
+        radius=cv.s(3), fill=accent)
+    draw.polygon([(cv.s(vx + 19), cv.s(mid - 3)),
+                  (cv.s(vx + 26), cv.s(mid - 8)),
+                  (cv.s(vx + 26), cv.s(mid + 8)),
+                  (cv.s(vx + 19), cv.s(mid + 3))], fill=accent)
+    return h
+
+
 def _draw_header(canvas, draw, cv: _Canvas, y0: float) -> float:
+    if cv.dflag("header_center"):
+        return _draw_header_center(canvas, draw, cv, y0)
     pal, screen = cv.pal, cv.screen
     h = float(cv.design["header_h"])
     draw.rectangle([0, cv.s(y0), cv.s(cv.w), cv.s(y0 + h)],
@@ -278,18 +341,22 @@ def _draw_header(canvas, draw, cv: _Canvas, y0: float) -> float:
                   _fit_text(cv, screen.subtitle, 12,
                             limit_x - tx),
                   font=cv.font(12), fill=pal["header_sub"])
-    # right icons: video (vector) + call (glyph)
+    # right icons: video (vector) + call (glyph) — in the
+    # accent on designs whose header actions are coloured
+    # (Messenger), in the header foreground elsewhere
+    icon_fg = pal["accent"] if cv.dflag(
+        "header_icons_accent") else fg
     ix = cv.w - 30
     draw.text((cv.s(ix), cv.s(mid - 10)), "☎",
-              font=cv.font(17), fill=fg)
+              font=cv.font(17), fill=icon_fg)
     vx = ix - 42
     draw.rounded_rectangle(
         [cv.s(vx), cv.s(mid - 7), cv.s(vx + 17), cv.s(mid + 7)],
-        radius=cv.s(3), fill=fg)
+        radius=cv.s(3), fill=icon_fg)
     draw.polygon([(cv.s(vx + 19), cv.s(mid - 3)),
                   (cv.s(vx + 26), cv.s(mid - 8)),
                   (cv.s(vx + 26), cv.s(mid + 8)),
-                  (cv.s(vx + 19), cv.s(mid + 3))], fill=fg)
+                  (cv.s(vx + 19), cv.s(mid + 3))], fill=icon_fg)
     if screen.platform == "instagram":
         draw.ellipse([cv.s(vx - 34), cv.s(mid - 10),
                       cv.s(vx - 14), cv.s(mid + 10)],
@@ -321,6 +388,114 @@ def _header_person(screen: Screen) -> Participant | None:
     return screen.participants[0] if screen.participants else None
 
 
+def _draw_mic(draw, cv: _Canvas, cx: float, cy: float,
+              color, *, r: float = 4.0) -> None:
+    """A microphone glyph as vectors (capsule + arc +
+    stem), centred at logical (cx, cy)."""
+    draw.rounded_rectangle(
+        [cv.s(cx - r), cv.s(cy - 8), cv.s(cx + r),
+         cv.s(cy + 4)], radius=cv.s(r), fill=color)
+    draw.arc([cv.s(cx - r - 5), cv.s(cy - 4), cv.s(cx + r + 5),
+              cv.s(cy + 12)], start=0, end=180, fill=color,
+             width=cv.s(1.8))
+    draw.line([cv.s(cx), cv.s(cy + 10), cv.s(cx), cv.s(cy + 15)],
+              fill=color, width=cv.s(1.8))
+
+
+def _draw_camera(draw, cv: _Canvas, cx: float, cy: float,
+                 color, *, w: float = 20.0) -> None:
+    """A camera glyph as vectors (body + lens), centred
+    at logical (cx, cy)."""
+    h = w * 0.72
+    draw.rounded_rectangle(
+        [cv.s(cx - w / 2), cv.s(cy - h / 2), cv.s(cx + w / 2),
+         cv.s(cy + h / 2)], radius=cv.s(3), outline=color,
+        width=cv.s(1.8))
+    draw.ellipse([cv.s(cx - 4), cv.s(cy - 4), cv.s(cx + 4),
+                  cv.s(cy + 4)], outline=color, width=cv.s(1.8))
+    draw.rectangle([cv.s(cx - 5), cv.s(cy - h / 2 - 2.5),
+                    cv.s(cx + 1), cv.s(cy - h / 2 + 1)],
+                   fill=color)
+
+
+def _draw_input_bar_styled(draw, cv: _Canvas, y0: float,
+                           style: str) -> float:
+    """The non-WhatsApp/Instagram input bars, one per
+    app's own language.  All return the shared 56 height."""
+    pal = cv.pal
+    h = 56.0
+    fy = y0 + 8
+    fh = 40
+    mid = fy + fh / 2
+    if style == "telegram":
+        draw.text((cv.s(16), cv.s(fy + 10)), "☺",
+                  font=cv.font(19), fill=pal["meta"])
+        draw.text((cv.s(46), cv.s(fy + 11)), "Message",
+                  font=cv.font(14.5), fill=pal["input_fg"])
+        _draw_mic(draw, cv, cv.w - 26, mid, pal["meta"])
+        return h
+    if style == "messenger":
+        draw.ellipse([cv.s(10), cv.s(fy + 8), cv.s(34),
+                      cv.s(fy + 32)], outline=pal["accent"],
+                     width=cv.s(1.8))
+        draw.text((cv.s(17.5), cv.s(fy + 9.5)), "+",
+                  font=cv.font(16, bold=True), fill=pal["accent"])
+        _draw_camera(draw, cv, 52, mid, pal["accent"], w=19)
+        draw.rounded_rectangle(
+            [cv.s(72), cv.s(fy + 3), cv.s(cv.w - 48),
+             cv.s(fy + fh - 3)], radius=cv.s((fh - 6) / 2),
+            fill=pal["input_field"])
+        draw.text((cv.s(84), cv.s(fy + 11)), "Aa",
+                  font=cv.font(14), fill=pal["input_fg"])
+        tile = _emoji_tile("👍", cv.s(22))
+        canvas = getattr(cv, "image", None)
+        if tile is not None and canvas is not None:
+            canvas.paste(tile, (cv.s(cv.w - 36),
+                                cv.s(fy + 9)), tile)
+        return h
+    if style == "snapchat":
+        draw.ellipse([cv.s(8), cv.s(fy + 2), cv.s(44),
+                      cv.s(fy + 38)], outline=pal["meta"],
+                     width=cv.s(1.6))
+        _draw_camera(draw, cv, 26, mid, pal["header_fg"], w=18)
+        draw.rounded_rectangle(
+            [cv.s(52), cv.s(fy + 3), cv.s(cv.w - 44),
+             cv.s(fy + fh - 3)], radius=cv.s((fh - 6) / 2),
+            outline=pal["meta"], width=cv.s(1.2))
+        draw.text((cv.s(64), cv.s(fy + 11)), "Send a chat",
+                  font=cv.font(14), fill=pal["input_fg"])
+        draw.text((cv.s(cv.w - 34), cv.s(fy + 10)), "☺",
+                  font=cv.font(18), fill=pal["meta"])
+        return h
+    if style == "imessage":
+        _draw_camera(draw, cv, 24, mid, pal["meta"], w=20)
+        label = "Text Message" if cv.screen.variant == "sms" \
+            else "iMessage"
+        draw.rounded_rectangle(
+            [cv.s(44), cv.s(fy + 3), cv.s(cv.w - 40),
+             cv.s(fy + fh - 3)], radius=cv.s((fh - 6) / 2),
+            outline=pal["meta"], width=cv.s(1.2))
+        draw.text((cv.s(56), cv.s(fy + 11)), label,
+                  font=cv.font(14), fill=pal["input_fg"])
+        _draw_mic(draw, cv, cv.w - 22, mid, pal["meta"],
+                  r=3.4)
+        return h
+    # sms — Google Messages: one filled pill, + inside at
+    # the left, an accent send/mic disc at the right
+    draw.rounded_rectangle(
+        [cv.s(8), cv.s(fy + 2), cv.s(cv.w - 56), cv.s(fy + fh - 2)],
+        radius=cv.s((fh - 4) / 2), fill=pal["input_field"])
+    draw.text((cv.s(18), cv.s(fy + 10)), "+",
+              font=cv.font(17, bold=True), fill=pal["accent"])
+    draw.text((cv.s(40), cv.s(fy + 11)), "Text message",
+              font=cv.font(14), fill=pal["input_fg"])
+    mx = cv.w - 28
+    draw.ellipse([cv.s(mx - 17), cv.s(fy + 3), cv.s(mx + 17),
+                  cv.s(fy + fh - 3)], fill=pal["accent"])
+    _draw_mic(draw, cv, mx, mid, (255, 255, 255), r=3.4)
+    return h
+
+
 def _draw_input_bar(draw, cv: _Canvas, y0: float) -> float:
     pal = cv.pal
     h = 56.0
@@ -328,7 +503,10 @@ def _draw_input_bar(draw, cv: _Canvas, y0: float) -> float:
                    fill=pal["input_bg"])
     fy = y0 + 8
     fh = 40
-    if cv.screen.platform == "instagram":
+    style = str(cv.dflag("input_style", "whatsapp"))
+    if style not in ("whatsapp", "instagram"):
+        return _draw_input_bar_styled(draw, cv, y0, style)
+    if style == "instagram":
         draw.rounded_rectangle(
             [cv.s(10), cv.s(fy), cv.s(cv.w - 10), cv.s(fy + fh)],
             radius=cv.s(fh / 2), outline=pal["meta"],
@@ -450,9 +628,10 @@ def _measure_bubble(cv: _Canvas, msg: Message) -> tuple:
             lines = cv.wrap(msg.caption, _TEXT_SIZE, media_w - 4)
             parts["caption_lines"] = lines
             h += len(lines) * _LINE_H + 2
-        # WhatsApp carries a time row under media; Instagram
-        # bubbles never show per-message times.
-        h += (15 if cv.screen.platform == "whatsapp" else 4) + _PAD_Y
+        # Designs whose time lives in the bubble (WhatsApp,
+        # Telegram, Android Messages) carry a time row under
+        # media; Instagram-style bubbles never show times.
+        h += (15 if cv.dflag("time_in_bubble") else 4) + _PAD_Y
         parts["media"] = (media_w, media_h)
         return w, h, parts
     if msg.kind == "voice":
@@ -480,9 +659,33 @@ def _measure_bubble(cv: _Canvas, msg: Message) -> tuple:
         widths.append(cv.text_w(quote[0], 11.5, bold=True) + 14)
         widths.extend(cv.text_w(q, 11) + 14 for q in parts["quote"][1])
     widths.append(_time_row_w(
-        cv, msg, with_ticks=cv.screen.platform == "whatsapp"))
+        cv, msg, with_ticks=bool(cv.dflag("ticks_in_bubble"))))
     w = max(widths + [40.0]) + 2 * _PAD_X
     return min(w, max_w), h, parts
+
+
+def _measure_flat(cv: _Canvas, msg: Message) -> tuple:
+    """(width, height, parts) for a Snapchat row: a caps
+    name line, then the content at full width — Snapchat
+    chat has no bubbles.  Reply quotes are not a Snapchat
+    chat idiom and are not drawn on rows."""
+    parts: dict = {"own": msg.sender == "me", "flat": True}
+    w = cv.w - 12.0
+    h = 17.0  # the caps name line
+    if msg.kind == "image":
+        parts["media"] = (168.0, 112.0)
+        h += 112 + 4
+        if msg.caption:
+            lines = cv.wrap(msg.caption, _TEXT_SIZE, cv.w - 38)
+            parts["caption_lines"] = lines
+            h += len(lines) * _LINE_H + 2
+        return w, h + 6, parts
+    if msg.kind == "voice":
+        return w, h + 46, parts
+    lines = cv.wrap(msg.text, _TEXT_SIZE, cv.w - 38)
+    parts["lines"] = lines
+    h += len(lines) * _LINE_H + 6
+    return w, h, parts
 
 
 def _draw_media_placeholder(canvas, draw, cv: _Canvas,
@@ -572,6 +775,11 @@ def _draw_bubble(canvas, draw, cv: _Canvas, msg: Message,
     own = parts["own"]
     radius = float(cv.design["bubble_radius"])
     fill = pal["bubble_out"] if own else pal["bubble_in"]
+    if own and cv.screen.variant == "sms" and cv.dflag(
+            "bubble_out_sms"):
+        # the iMessage Apple-to-Android variant: green
+        # bubbles, the census's green-SMS layout
+        fill = cv.design["bubble_out_sms"]
     fg = pal["text_out"] if own else pal["text_in"]
     if cv.screen.platform == "instagram" and own:
         _gradient_bubble(canvas, cv, x, y, w, h, radius)
@@ -579,7 +787,7 @@ def _draw_bubble(canvas, draw, cv: _Canvas, msg: Message,
         draw.rounded_rectangle(
             [cv.s(x), cv.s(y), cv.s(x + w), cv.s(y + h)],
             radius=cv.s(radius), fill=fill)
-    if tail and cv.screen.platform == "whatsapp":
+    if tail and cv.dflag("tail", "none") == "top":
         if own:
             draw.polygon([(cv.s(x + w - 8), cv.s(y + 1)),
                           (cv.s(x + w + 6), cv.s(y)),
@@ -590,18 +798,38 @@ def _draw_bubble(canvas, draw, cv: _Canvas, msg: Message,
                           (cv.s(x - 6), cv.s(y)),
                           (cv.s(x + 8), cv.s(y + 11))],
                          fill=fill)
+    elif tail and cv.dflag("tail", "none") == "bottom":
+        # the Telegram / iMessage tail: a small point at
+        # the bottom corner of a run's last bubble
+        if own:
+            draw.polygon([(cv.s(x + w - 13), cv.s(y + h - 2)),
+                          (cv.s(x + w + 3), cv.s(y + h + 2)),
+                          (cv.s(x + w - 3), cv.s(y + h - 9))],
+                         fill=fill)
+        else:
+            draw.polygon([(cv.s(x + 13), cv.s(y + h - 2)),
+                          (cv.s(x - 3), cv.s(y + h + 2)),
+                          (cv.s(x + 3), cv.s(y + h - 9))],
+                         fill=fill)
     cx = x + _PAD_X
     cy = y + _PAD_Y
     if msg.kind == "image":
         media_w, media_h = parts["media"]
-        _draw_media_placeholder(canvas, draw, cv, x + 4, y + 4,
-                                media_w, media_h, msg.id)
-        cy = y + 4 + media_h + 2
+        if cv.screen.platform == "messenger":
+            # a Messenger photo fills its bubble: no frame
+            _draw_media_flush(canvas, draw, cv, msg, x, y, w,
+                              media_h + 8, radius)
+            cy = y + media_h + 8 + 2
+        else:
+            _draw_media_placeholder(canvas, draw, cv, x + 4,
+                                    y + 4, media_w, media_h,
+                                    msg.id)
+            cy = y + 4 + media_h + 2
         for line in parts.get("caption_lines") or []:
             draw.text((cv.s(cx), cv.s(cy)), line,
                       font=cv.font(_TEXT_SIZE), fill=fg)
             cy += _LINE_H
-        if cv.screen.platform == "whatsapp":
+        if cv.dflag("time_in_bubble"):
             _draw_time_row(draw, cv, msg, x, y, w, h, fg)
         return
     if msg.kind == "voice":
@@ -630,8 +858,11 @@ def _draw_bubble(canvas, draw, cv: _Canvas, msg: Message,
         cy += qh + 4
     if "name_line" in parts:
         author = cv.screen.participant(msg.sender)
-        color = (_participant_color(author, cv.screen)
-                 if author is not None else pal["meta"])
+        if cv.dflag("group_name_colored", True) \
+                and author is not None:
+            color = _participant_color(author, cv.screen)
+        else:
+            color = pal["meta"]
         draw.text((cv.s(cx), cv.s(cy - 1)), parts["name_line"],
                   font=cv.font(12.5, bold=True), fill=color)
         cy += 15
@@ -639,8 +870,71 @@ def _draw_bubble(canvas, draw, cv: _Canvas, msg: Message,
         draw.text((cv.s(cx), cv.s(cy)), line,
                   font=cv.font(_TEXT_SIZE), fill=fg)
         cy += _LINE_H
-    if cv.screen.platform == "whatsapp":
+    if cv.dflag("time_in_bubble"):
         _draw_time_row(draw, cv, msg, x, y, w, h, fg)
+
+
+def _draw_media_flush(canvas, draw, cv: _Canvas, msg: Message,
+                      x: float, y: float, w: float, h: float,
+                      radius: float) -> None:
+    """A photo that fills its bubble edge-to-edge (the
+    Messenger idiom: no coloured frame around a picture).
+    The placeholder scene is drawn on a scratch canvas
+    and pasted through a rounded-corner mask."""
+    tmp = Image.new("RGB", (cv.s(w), cv.s(h)),
+                    cv.pal["wallpaper"])
+    tdraw = ImageDraw.Draw(tmp)
+    _draw_media_placeholder(tmp, tdraw, cv, 0, 0, w, h, msg.id)
+    mask = Image.new("L", (cv.s(w), cv.s(h)), 0)
+    mdraw = ImageDraw.Draw(mask)
+    mdraw.rounded_rectangle(
+        [0, 0, cv.s(w), cv.s(h)], radius=cv.s(radius), fill=255)
+    canvas.paste(tmp, (cv.s(x), cv.s(y)), mask)
+
+
+def _draw_flat_row(canvas, draw, cv: _Canvas, msg: Message,
+                   parts: dict, x: float, y: float, w: float,
+                   h: float) -> None:
+    """One Snapchat chat row: a coloured vertical bar
+    (blue for chat, red for a snap), the author's name in
+    caps, the content at full width, a hairline under it.
+    ``x`` is the row's left edge; content starts at 24."""
+    pal = cv.pal
+    own = parts["own"]
+    bar = pal.get("snap_red") or pal["accent"] \
+        if msg.kind == "image" else pal["accent"]
+    draw.rounded_rectangle(
+        [cv.s(12), cv.s(y + 2), cv.s(15.5), cv.s(y + h - 4)],
+        radius=cv.s(1.75), fill=bar)
+    author = cv.screen.participant(msg.sender)
+    name = "ME" if own else (
+        author.name if author is not None else msg.sender)
+    draw.text((cv.s(24), cv.s(y)), name.upper(),
+              font=cv.font(11.5, bold=True),
+              fill=pal["text_in"])
+    cy = y + 17
+    if msg.kind == "image":
+        media_w, media_h = parts["media"]
+        _draw_media_placeholder(canvas, draw, cv, 24, cy,
+                                media_w, media_h, msg.id)
+        cy += media_h + 4
+        for line in parts.get("caption_lines") or []:
+            draw.text((cv.s(24), cv.s(cy)), line,
+                      font=cv.font(_TEXT_SIZE),
+                      fill=pal["text_in"])
+            cy += _LINE_H
+    elif msg.kind == "voice":
+        _draw_voice(draw, cv, replace(msg, time="", ticks=""),
+                    24, cy, 250, 40, pal["text_in"])
+    else:
+        for line in parts["lines"]:
+            draw.text((cv.s(24), cv.s(cy)), line,
+                      font=cv.font(_TEXT_SIZE),
+                      fill=pal["text_in"])
+            cy += _LINE_H
+    draw.line([cv.s(24), cv.s(y + h - 1), cv.s(cv.w - 12),
+               cv.s(y + h - 1)], fill=pal["chip_fg"],
+              width=cv.s(0.75))
 
 
 def _draw_time_row(draw, cv: _Canvas, msg: Message, x: float,
@@ -648,7 +942,8 @@ def _draw_time_row(draw, cv: _Canvas, msg: Message, x: float,
     pal = cv.pal
     ty = y + h - 15
     tx = x + w - _PAD_X
-    if msg.sender == "me" and msg.ticks:
+    if msg.sender == "me" and msg.ticks and cv.dflag(
+            "ticks_in_bubble"):
         tw = _draw_ticks(draw, cv, tx - 15, ty + 1, msg.ticks)
         tx -= tw + 3
     if msg.time:
@@ -683,7 +978,7 @@ def _draw_voice(draw, cv: _Canvas, msg: Message, x: float,
     label = msg.duration or "0:00"
     draw.text((cv.s(bx), cv.s(cy + 6)), label,
               font=cv.font(10.5), fill=pal["meta"])
-    if own and msg.ticks:
+    if own and msg.ticks and cv.dflag("ticks_in_bubble"):
         _draw_ticks(draw, cv, x + w - 26, y + h - 14, msg.ticks)
     if msg.time:
         tw = cv.text_w(msg.time, 10.5)
@@ -738,24 +1033,59 @@ def render_screen(screen: Screen, *, avatars: dict | None = None):
     # ── measure ──────────────────────────────────────────
     items: list = []  # (msg, kind, w, h, parts, gap_before)
     prev_sender: str | None = None
-    for msg in screen.messages:
+    prev_time = ""
+    flat = bool(cv.dflag("flat_rows"))
+    status_mode = str(cv.dflag("status_line", "") or "")
+    # iMessage / Snapchat put their read state under ONE
+    # message: the last own message carrying ticks.
+    last_own_ticks = -1
+    for i, m in enumerate(screen.messages):
+        if m.sender == "me" and m.ticks:
+            last_own_ticks = i
+    for mi, msg in enumerate(screen.messages):
         if msg.kind in ("divider", "system"):
             w, h, _lines = _chip_size(
                 cv, msg.text, system=msg.kind == "system")
             items.append((msg, msg.kind, w, h, {}, 10.0))
             prev_sender = None
+            prev_time = ""
             continue
-        w, h, parts = _measure_bubble(cv, msg)
-        gap = 3.0 if prev_sender == msg.sender else 10.0
+        if (cv.dflag("time_centered") and msg.time
+                and msg.time != prev_time):
+            items.append((msg, "meta_time", 0.0, 15.0, {}, 8.0))
+        if flat:
+            w, h, parts = _measure_flat(cv, msg)
+            gap = 6.0
+        else:
+            w, h, parts = _measure_bubble(cv, msg)
+            gap = 3.0 if prev_sender == msg.sender else 10.0
         h_extra = 10.0 if msg.reactions else 0.0
         items.append((msg, "bubble", w, h, parts, gap))
         if h_extra:
             items[-1] = (msg, "bubble", w, h + h_extra, parts, gap)
         prev_sender = msg.sender
-        if (screen.platform == "instagram" and msg.sender == "me"
-                and msg.seen):
-            items.append((msg, "seen", 0.0, 15.0, {}, 1.0))
+        prev_time = msg.time
+        if (status_mode in ("seen", "seen_avatar")
+                and msg.sender == "me" and msg.seen):
+            h_seen = 15.0 if status_mode == "seen" else 17.0
+            items.append((msg, status_mode, 0.0, h_seen, {}, 1.0))
             prev_sender = None
+        elif (status_mode == "imessage" and mi == last_own_ticks
+                and msg.ticks in ("delivered", "read")):
+            label = "Delivered" if msg.ticks == "delivered" \
+                else "Read " + (msg.time or "")
+            parts_status = {"label": label}
+            items.append((msg, "status", 0.0, 14.0,
+                          parts_status, 1.0))
+            prev_sender = None
+        elif (flat and mi == last_own_ticks and msg.ticks):
+            label = {"sending": "Sending…", "sent": "Delivered",
+                     "delivered": "Delivered",
+                     "read": "Opened"}.get(msg.ticks, "")
+            if label:
+                items.append((msg, "status", 0.0, 14.0,
+                              {"label": label}, 1.0))
+                prev_sender = None
 
     content_h = sum(it[3] + it[5] for it in items) + 14
     status_h = float(cv.dev["status_h"])
@@ -768,6 +1098,7 @@ def render_screen(screen: Screen, *, avatars: dict | None = None):
     # ── draw ─────────────────────────────────────────────
     img = Image.new("RGB", (cv.s(cv.w), cv.s(total_h)),
                     cv.pal["wallpaper"])
+    cv.image = img
     draw = ImageDraw.Draw(img)
     drawn: dict = {
         "platform": screen.platform,
@@ -815,25 +1146,85 @@ def render_screen(screen: Screen, *, avatars: dict | None = None):
                         cv.s(tw), cv.s(13)]})
             cy += h
             continue
+        if kind == "meta_time":
+            # Messenger / iMessage carry the time centred
+            # above a run, not inside the bubble
+            tw = cv.text_w(msg.time, 11)
+            draw.text((cv.s((cv.w - tw) / 2), cv.s(cy)), msg.time,
+                      font=cv.font(11), fill=cv.pal["meta"])
+            drawn["elements"].append({
+                "id": msg.id, "kind": "meta_time",
+                "text": msg.time,
+                "box": [cv.s((cv.w - tw) / 2), cv.s(cy),
+                        cv.s(tw), cv.s(13)]})
+            cy += h
+            continue
+        if kind == "status":
+            # the one read-state line (iMessage Delivered /
+            # Read, Snapchat Delivered / Opened)
+            label = parts.get("label", "")
+            tw = cv.text_w(label, 10.5)
+            if flat:
+                lx, color = 24.0, cv.pal["accent"]
+            else:
+                lx, color = cv.w - 12 - tw, cv.pal["meta"]
+            draw.text((cv.s(lx), cv.s(cy)), label,
+                      font=cv.font(10.5), fill=color)
+            drawn["elements"].append({
+                "id": msg.id, "kind": "status", "text": label,
+                "box": [cv.s(lx), cv.s(cy), cv.s(tw), cv.s(13)]})
+            cy += h
+            continue
+        if kind == "seen_avatar":
+            # Messenger's read state: the reader's little
+            # avatar under the last seen message
+            reader = next((p for p in screen.participants
+                           if p.id != "me"), None)
+            _draw_avatar(img, draw, cv, cv.w - 8 - 16, cy, 16,
+                         reader, "seen")
+            drawn["elements"].append({
+                "id": msg.id, "kind": "seen_avatar",
+                "box": [cv.s(cv.w - 8 - 16), cv.s(cy),
+                        cv.s(16), cv.s(16)]})
+            cy += h
+            continue
         own = msg.sender == "me"
+        bubble_h = h - (10.0 if msg.reactions else 0.0)
+        if parts.get("flat"):
+            bx = 6.0
+            _draw_flat_row(img, draw, cv, msg, parts, bx, cy, w,
+                           bubble_h)
+            if msg.reactions:
+                _draw_reactions(img, draw, cv, msg, 18,
+                                cy + bubble_h, w)
+            drawn["elements"].append({
+                "id": msg.id, "kind": msg.kind,
+                "sender": msg.sender,
+                "box": [cv.s(bx), cv.s(cy), cv.s(w),
+                        cv.s(bubble_h)],
+                "ticks": msg.ticks, "seen": msg.seen,
+                "reactions": list(msg.reactions)})
+            cy += h
+            continue
         if own:
             bx = cv.w - 8 - w
-            if screen.platform == "whatsapp":
+            if cv.dflag("tail", "none") == "top":
                 bx -= 6  # the tail lives outside the bubble box
         else:
-            bx = 40 if screen.platform == "instagram" else 8
-            if screen.platform == "whatsapp":
+            bx = 16 + cv.run_avatar_size() \
+                if cv.run_avatar_applies() else 8
+            if cv.dflag("tail", "none") == "top":
                 bx += 6
-        bubble_h = h - (10.0 if msg.reactions else 0.0)
         nxt = items[idx + 1][0] if idx + 1 < len(items) else None
         tail = nxt is None or nxt.sender != msg.sender
         _draw_bubble(img, draw, cv, msg, parts, bx, cy, w,
                      bubble_h, tail=tail)
-        if (screen.platform == "instagram" and not own
+        if (not own and cv.run_avatar_applies()
                 and idx in own_run_end):
             author = screen.participant(msg.sender)
-            _draw_avatar(img, draw, cv, 8, cy + bubble_h - 24, 24,
-                         author, msg.sender)
+            size = cv.run_avatar_size()
+            _draw_avatar(img, draw, cv, 8, cy + bubble_h - size,
+                         size, author, msg.sender)
         if msg.reactions:
             _draw_reactions(img, draw, cv, msg, bx,
                             cy + bubble_h, w)

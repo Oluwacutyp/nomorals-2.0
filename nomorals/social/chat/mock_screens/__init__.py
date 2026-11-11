@@ -9,12 +9,20 @@ avatars through the makers mask/placeholder machinery, and a
 drawn-region record returned with the pixels so tests prove
 structure, not vibes.
 
-Phase 0+1 (this build): the schema, the design registry, the
-Pillow renderer foundation, and the flagship chats —
-WhatsApp 1:1, WhatsApp group and Instagram DM, each in
-iPhone and Android chrome.  Lists/status/calls, social
-profiles, animation, bulk data and NL authoring are later
-phases of the same organ.
+Phase 0+1: the schema, the design registry, the Pillow
+renderer foundation, and the flagship chats — WhatsApp 1:1,
+WhatsApp group and Instagram DM, each in iPhone and Android
+chrome.  Phase 2 (this build): the remaining chat families
+enter the same registry — Telegram, Messenger, Snapchat,
+iMessage (incl. the green-SMS Apple-to-Android variant)
+and Android Messages, 1:1 and group — each family's
+choreography carried as design data (where times and ticks
+live, bubble tails, run avatars, read-state lines, input
+bars).  Chat tools the census names but does not inspect
+to flagship depth stay named remainders (see the census
+§3.10 note in the tests) rather than guessed designs.
+Lists/status/calls, social profiles, animation, bulk data
+and NL authoring are later phases of the same organ.
 
 The organ never claims a render is a real captured
 screenshot: it is a mock screen, generated from data the

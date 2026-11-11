@@ -527,7 +527,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # owner alone.  The organ lives in
     # social/chat/mock_screens/, the handler in
     # agents/partner/runtime_mock_screens.py.
-    "mock": (0, None),        # /mock [demo|whatsapp|group|instagram] …
+    "mock": (0, None),        # /mock [demo|<family>] … (whatsapp/telegram/messenger/snapchat/imessage/sms/instagram)
     # chat & privacy (FEI gap wave F): OWNER-ONLY account ops
     # on his personal surfaces — deliberately NOT in
     # PUBLIC_COMMANDS, so caller_may_run admits the owner
@@ -2833,8 +2833,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/pp",
               "example": "/pp",
               "related": "/couplepp · /waifu"},
-    "mock": {"what": "a MOCK phone screen, rendered from data you author: a WhatsApp 1:1 chat, a WhatsApp group chat or an Instagram DM, in iPhone or Android chrome, with ticks, seen states, reactions, reply quotes and day dividers drawn in the platform's own visual language. It is a generated mockup of the conversation you describe — never a captured screenshot. Owner-only.",
-              "usage": "/mock demo [whatsapp|group|instagram] [iphone|android] · /mock whatsapp [iphone|android] [with <Name>] me: words ;; <Name>: words ;; … ([read] sets ticks, [react ❤️] a reaction, ^ replies, ! a system row, # a day divider)",
+    "mock": {"what": "a MOCK phone screen, rendered from data you author: a WhatsApp, Telegram, Messenger, Snapchat, iMessage, Android Messages or Instagram chat, 1:1 or group, in iPhone or Android chrome, with ticks, seen states, reactions, reply quotes and day dividers drawn in the platform's own visual language. It is a generated mockup of the conversation you describe — never a captured screenshot. Owner-only.",
+              "usage": "/mock demo [whatsapp|group|instagram|telegram|telegram-group|messenger|messenger-group|snapchat|snapchat-group|imessage|imessage-sms|sms] [iphone|android] · /mock <family> [iphone|android] [with <Name>] me: words ;; <Name>: words ;; … ([read] sets ticks, [react ❤️] a reaction, ^ replies, ! a system row, # a day divider)",
               "example": "/mock whatsapp Adaeze: we still on? ;; me: yes, by 11 [read]",
               "related": "/qcard · /fakemsg · /sticker"},
     "archive": {"what": "archive a chat on YOUR personal account (WhatsApp app-state / Telegram peer folders). The target is named the human way — a chat name, a number, or nothing for this chat; never a raw key.",
@@ -5015,7 +5015,7 @@ LIST_ONELINERS: dict[str, str] = {
     "bible": "look up a passage — /bible John 3:16 · /bible search love",
     "couplepp": "a matched pair of profile pictures from one artwork — /couplepp",
     "pp": "alias of /couplepp",
-    "mock": "render a mock WhatsApp / Instagram chat screen as a photo — /mock demo whatsapp",
+    "mock": "render a mock chat screen (WhatsApp · Telegram · Messenger · Snapchat · iMessage · SMS · Instagram) as a photo — /mock demo telegram",
     "archive": "archive a chat on your account — /archive [chat name]",
     "unarchive": "unarchive a chat — /unarchive [chat name]",
     "mutechat": "mute a whole chat — /mutechat [chat name]",

@@ -10,8 +10,12 @@ two structured ways:
 - **The compact form** the ``/mock`` command parses
   (:func:`parse_mock_tail`)::
 
-      /mock whatsapp [iphone|android] [dark] [with <Name>]
+      /mock <family> [iphone|android] [dark] [with <Name>]
             <segment> ;; <segment> ;; …
+
+  Families: whatsapp, telegram, messenger, snapchat,
+  imessage, sms, instagram — each with a ``-group``
+  spelling for the group form.
 
   Segments: ``me: words`` is outgoing; ``<Name>: words``
   is incoming from that participant; ``! words`` is a
@@ -32,10 +36,14 @@ from .render import MockScreensError
 from .schema import DeviceChrome, Message, Participant, Screen
 
 USAGE = (
-    "usage: /mock demo [whatsapp|group|instagram] "
+    "usage: /mock demo [whatsapp|group|instagram|telegram|"
+    "telegram-group|messenger|messenger-group|snapchat|"
+    "snapchat-group|imessage|imessage-sms|sms] "
     "[iphone|android] — or build one: /mock whatsapp "
     "[iphone|android] [with <Name>] me: hi ;; Adaeze: hello "
-    ";; me: on my way [read]")
+    ";; me: on my way [read] — families: whatsapp · "
+    "telegram · messenger · snapchat · imessage · sms · "
+    "instagram (add -group for the group form)")
 
 _PLATFORMS = {
     "whatsapp": ("whatsapp", False),
@@ -45,7 +53,32 @@ _PLATFORMS = {
     "wag": ("whatsapp", True),
     "instagram": ("instagram", False),
     "ig": ("instagram", False),
+    "instagram-group": ("instagram", True),
+    "igg": ("instagram", True),
+    "telegram": ("telegram", False),
+    "tg": ("telegram", False),
+    "telegram-group": ("telegram", True),
+    "tgg": ("telegram", True),
+    "messenger": ("messenger", False),
+    "msgr": ("messenger", False),
+    "messenger-group": ("messenger", True),
+    "msgg": ("messenger", True),
+    "facebook": ("messenger", True),
+    "snapchat": ("snapchat", False),
+    "snap": ("snapchat", False),
+    "snapchat-group": ("snapchat", True),
+    "snapg": ("snapchat", True),
+    "imessage": ("imessage", False),
+    "imsg": ("imessage", False),
+    "imessage-group": ("imessage", True),
+    "sms": ("sms", False),
+    "android-sms": ("sms", False),
+    "sms-group": ("sms", True),
 }
+
+#: demo-only names selecting a design variant (the
+#: green-bubble Apple-to-Android iMessage form)
+_DEMO_VARIANTS = {"imessage-sms": "sms", "imessage-green": "sms"}
 
 _TICK_SUFFIX = re.compile(r"\[(read|sent|delivered|sending)\]\s*$")
 _REACT_SUFFIX = re.compile(r"\[react\s+([^\]]*)\]\s*$")
@@ -129,6 +162,298 @@ def demo_screen(name: str = "whatsapp", style: str = "android",
                         text="Posting tonight at 7",
                         time="9:09 AM", seen=True),
             ])
+    if key in ("instagram-group", "igg"):
+        return Screen(
+            platform="instagram", group=True, dark=dark,
+            title="studio.crew",
+            subtitle="3 members",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze"),
+                Participant("bola", "Bola"),
+            ],
+            messages=[
+                Message("ig1", "adaeze",
+                        text="Studio is booked for Saturday",
+                        time="9:12 AM"),
+                Message("ig2", "bola",
+                        text="Bringing the backdrops",
+                        time="9:15 AM", reactions=["🔥"]),
+                Message("ig3", "me",
+                        text="Flyer drops at noon",
+                        time="9:20 AM", seen=True),
+            ])
+    if key in ("telegram-group", "tgg"):
+        return Screen(
+            platform="telegram", group=True, dark=dark,
+            title="Think Creativity Think Peace",
+            subtitle="24 members, 5 online",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze", admin=True),
+                Participant("bola", "Bola"),
+                Participant("chiamaka", "Chiamaka"),
+            ],
+            messages=[
+                Message("tg0", "system", kind="system",
+                        text="Adaeze created the group"),
+                Message("tgd", "system", kind="divider",
+                        text="Today"),
+                Message("tg1", "adaeze",
+                        text="Studio is booked for Saturday, "
+                             "10 AM sharp",
+                        time="9:12 AM"),
+                Message("tg2", "bola",
+                        text="Bringing the new backdrops and "
+                             "the ring light",
+                        time="9:15 AM", reactions=["👍"]),
+                Message("tg3", "me", reply_to="tg1",
+                        text="I will post the flyer here once "
+                             "it is ready",
+                        time="9:20 AM", ticks="read"),
+                Message("tg4", "chiamaka",
+                        text="Guest list and drinks are on me",
+                        time="9:21 AM"),
+                Message("tg5", "adaeze",
+                        text="Flyer goes out by noon. "
+                             "No extensions.",
+                        time="9:22 AM"),
+            ])
+    if key in ("telegram", "tg"):
+        return Screen(
+            platform="telegram", dark=dark,
+            title="Adaeze Nwosu",
+            subtitle="online",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze Nwosu"),
+            ],
+            messages=[
+                Message("td", "system", kind="divider",
+                        text="Today"),
+                Message("t1", "adaeze",
+                        text="Morning! Did the renders finish?",
+                        time="9:38 AM"),
+                Message("t2", "me",
+                        text="They did. Sending the export now",
+                        time="9:40 AM", ticks="read"),
+                Message("t3", "me", kind="image",
+                        caption="final_export.png",
+                        time="9:41 AM", ticks="read"),
+                Message("t4", "adaeze", reply_to="t2",
+                        text="This is exactly the look 🔥",
+                        time="9:42 AM", reactions=["❤️"]),
+                Message("t5", "me",
+                        text="Told you the teal would win",
+                        time="9:43 AM", ticks="delivered"),
+            ])
+    if key in ("messenger-group", "msgg", "facebook"):
+        return Screen(
+            platform="messenger", group=True, dark=dark,
+            title="Studio Crew",
+            subtitle="Active now",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze"),
+                Participant("bola", "Bola"),
+                Participant("chiamaka", "Chiamaka"),
+            ],
+            messages=[
+                Message("mg1", "adaeze",
+                        text="Studio is booked for Saturday",
+                        time="9:12 AM"),
+                Message("mg2", "bola",
+                        text="Bringing the backdrops",
+                        time="9:15 AM", reactions=["❤️"]),
+                Message("mg3", "me",
+                        text="Flyer drops at noon",
+                        time="9:20 AM", seen=True),
+                Message("mg4", "chiamaka",
+                        text="Guest list is on me",
+                        time="9:21 AM"),
+            ])
+    if key in ("messenger", "msgr"):
+        return Screen(
+            platform="messenger", dark=dark,
+            title="Adaeze Nwosu",
+            subtitle="Active now",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze Nwosu"),
+            ],
+            messages=[
+                Message("mm1", "adaeze",
+                        text="Your last post came out so clean 😍",
+                        time="9:02 AM"),
+                Message("mm2", "me",
+                        text="Just the phone and patience, "
+                             "honestly",
+                        time="9:05 AM"),
+                Message("mm3", "me", kind="image",
+                        caption="the final frame",
+                        time="9:06 AM"),
+                Message("mm4", "adaeze",
+                        text="Okay this is the one. Post it!",
+                        time="9:08 AM"),
+                Message("mm5", "me",
+                        text="Posting tonight at 7",
+                        time="9:09 AM", seen=True),
+            ])
+    if key in ("snapchat-group", "snapg"):
+        return Screen(
+            platform="snapchat", group=True, dark=dark,
+            title="Studio Crew 🎬",
+            subtitle="Adaeze, Bola, Chiamaka",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze"),
+                Participant("bola", "Bola"),
+                Participant("chiamaka", "Chiamaka"),
+            ],
+            messages=[
+                Message("scd", "system", kind="divider",
+                        text="Today"),
+                Message("sc1", "adaeze",
+                        text="studio day lets gooo"),
+                Message("sc2", "bola", kind="image",
+                        caption="the setup so far"),
+                Message("sc3", "chiamaka",
+                        text="omw with the drinks 🧃"),
+                Message("sc4", "me",
+                        text="flyer drops at noon, be ready",
+                        ticks="read"),
+            ])
+    if key in ("snapchat", "snap"):
+        return Screen(
+            platform="snapchat", dark=dark,
+            title="Adaeze",
+            subtitle="@adaeze.creates",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze"),
+            ],
+            messages=[
+                Message("snd", "system", kind="divider",
+                        text="Today"),
+                Message("sn1", "adaeze",
+                        text="morning!! did you see the snaps "
+                             "from last night"),
+                Message("sn2", "adaeze", kind="image"),
+                Message("sn3", "me",
+                        text="the rooftop ones?? unreal 😭",
+                        ticks="delivered"),
+                Message("sn4", "me",
+                        text="saving that one forever",
+                        ticks="read"),
+            ])
+    if key in ("imessage-group",):
+        return Screen(
+            platform="imessage", group=True, dark=dark,
+            title="Studio Crew",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze"),
+                Participant("bola", "Bola"),
+            ],
+            messages=[
+                Message("gi1", "adaeze",
+                        text="Studio is booked for Saturday",
+                        time="Today 9:12 AM"),
+                Message("gi2", "bola",
+                        text="Bringing the backdrops",
+                        time="Today 9:15 AM"),
+                Message("gi3", "me",
+                        text="Flyer drops at noon",
+                        time="Today 9:20 AM", ticks="read"),
+            ])
+    if key in _DEMO_VARIANTS or key in ("imessage", "imsg"):
+        return Screen(
+            platform="imessage", dark=dark,
+            variant=_DEMO_VARIANTS.get(key, ""),
+            title="Adaeze Nwosu",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze Nwosu"),
+            ],
+            messages=[
+                Message("im1", "adaeze",
+                        text="Morning! Are we still on for "
+                             "the shoot?",
+                        time="Today 9:41 AM"),
+                Message("im2", "me",
+                        text="Yes — studio by 11. Do not be "
+                             "late this time.",
+                        time="Today 9:41 AM", ticks="delivered"),
+                Message("im3", "adaeze",
+                        text="I was late ONCE 😂",
+                        time="Today 9:44 AM", reactions=["😂"]),
+                Message("im4", "me",
+                        text="And the client still tells "
+                             "that story",
+                        time="Today 9:44 AM", ticks="read"),
+                Message("im5", "adaeze",
+                        text="Fine. One story per meeting, "
+                             "that is the deal",
+                        time="Today 9:46 AM"),
+            ])
+    if key in ("sms-group",):
+        return Screen(
+            platform="sms", group=True, dark=dark,
+            title="Studio Crew",
+            subtitle="3 people",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze"),
+                Participant("bola", "Bola"),
+            ],
+            messages=[
+                Message("sg1", "adaeze",
+                        text="Studio Saturday, 10 AM",
+                        time="9:12 AM"),
+                Message("sg2", "bola",
+                        text="Backdrops on me",
+                        time="9:15 AM"),
+                Message("sg3", "me",
+                        text="Flyer at noon",
+                        time="9:20 AM"),
+            ])
+    if key in ("sms", "android-sms"):
+        return Screen(
+            platform="sms", dark=dark,
+            title="Adaeze Nwosu",
+            chrome=chrome,
+            participants=[
+                Participant("me", "You"),
+                Participant("adaeze", "Adaeze Nwosu"),
+            ],
+            messages=[
+                Message("sd", "system", kind="divider",
+                        text="Today"),
+                Message("s1", "adaeze",
+                        text="Good morning! Are we still on "
+                             "for the shoot today?",
+                        time="9:41 AM"),
+                Message("s2", "me",
+                        text="Yes — studio by 11, do not "
+                             "be late",
+                        time="9:43 AM"),
+                Message("s3", "adaeze", kind="image",
+                        caption="the backdrop from last time",
+                        time="9:47 AM"),
+                Message("s4", "me",
+                        text="Perfect. See you there!",
+                        time="9:49 AM"),
+            ])
     return Screen(
         platform="whatsapp", dark=dark,
         title="Adaeze Nwosu",
@@ -189,9 +514,12 @@ def parse_mock_tail(tail: str) -> tuple:
     if head == "demo":
         rest = words[1].split() if len(words) > 1 else []
         name = rest[0] if rest else "whatsapp"
-        if name not in _PLATFORMS and name != "whatsapp":
+        if name not in _PLATFORMS and name not in _DEMO_VARIANTS:
             raise MockScreensError(
-                "demo families: whatsapp · group · instagram")
+                "demo families: whatsapp · group · instagram "
+                "· telegram · telegram-group · messenger · "
+                "messenger-group · snapchat · snapchat-group "
+                "· imessage · imessage-sms · sms")
         style = "iphone" if "iphone" in rest else "android"
         return demo_screen(name, style,
                            dark="dark" in rest), "demo"
@@ -314,8 +642,12 @@ def parse_mock_tail(tail: str) -> tuple:
         subtitle = ", ".join(
             [p.name for p in participants.values()
              if p.id != "me"] + ["you"])
-    elif platform == "whatsapp":
+    elif platform in ("whatsapp", "telegram"):
         subtitle = "online"
+    elif platform == "snapchat":
+        subtitle = "🔥 21"
+    elif platform in ("imessage", "sms"):
+        subtitle = ""
     else:
         subtitle = "Active now"
     screen = Screen(
