@@ -55,6 +55,9 @@ P5 settles the stores that live BESIDE the central database:
   pattern below.
   The residue Batch 3 C5 port (household — record-then-audit
   composition preserved verbatim) follows the same pattern below.
+  The residue Batch 3 C8 port (planning-graph —
+  traversal parity: the walks are the module's own Python over
+  full-edge loads on both rungs) follows the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -271,7 +274,9 @@ class TestSidecarRegistry:
             # residue Batch 3, C4 lane:
             "people",
             # residue Batch 3, C5 lane:
-            "household"}
+            "household",
+            # residue Batch 3, C8 lane:
+            "planning-graph"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -6070,3 +6075,234 @@ class TestHouseholdPort:
         audit = rung.store.find("household__household_audit")[0]
         assert audit["action"] == "shared_commitment_add"
         assert audit["target"] == entry["id"]
+
+
+class TestPlanningGraphPort:
+    """planning/graph.py — the planning-graph port (residue Batch 3,
+    C8): the HOLD this store carried is discharged by evidence —
+    the module has no SQL traversals (no WITH RECURSIVE, no JOINs),
+    so nodes and edges are documents and every analysis
+    (dependents/_propagate BFS, critical_path DFS, find_cycles,
+    path_between, neighborhood, weak_links Brandes,
+    schedule_waves) runs its existing Python over seam-loaded
+    edges, identical on both rungs by construction. The composite
+    edge key lives only in the joined document id: the
+    single-node edges() form and remove_node scan restored rows
+    and filter in Python — never a find on key parts.
+    external_ref dedup is the code's find-first on both rungs.
+    Helpers live on the class."""
+
+    @staticmethod
+    def _build(graph) -> dict:
+        ids = {}
+        spec = [("schedule", "Flight"), ("commitment", "Meeting"),
+                ("commitment", "Dinner"), ("deadline", "Report"),
+                ("person", "Ada"), ("commitment", "Cycle A"),
+                ("commitment", "Cycle B"), ("asset", "Vault")]
+        for type_, label in spec:
+            node = graph.add_node(
+                type_, label,
+                {"due_ts": 100.0} if label == "Report" else None,
+                external_ref="ext:vault" if label == "Vault" else "")
+            assert node is not None
+            ids[label] = node.node_id
+        graph.add_edge(ids["Meeting"], ids["Flight"], "depends_on")
+        graph.add_edge(ids["Dinner"], ids["Meeting"], "depends_on")
+        graph.add_edge(ids["Report"], ids["Dinner"], "depends_on")
+        graph.add_edge(ids["Meeting"], ids["Ada"], "owned_by")
+        graph.add_edge(ids["Vault"], ids["Meeting"], "blocks")
+        graph.add_edge(ids["Cycle A"], ids["Cycle B"], "depends_on")
+        graph.add_edge(ids["Cycle B"], ids["Cycle A"], "depends_on")
+        return ids
+
+    def _scenario(self, graph) -> dict:
+        from types import SimpleNamespace
+
+        ids = self._build(graph)
+        by_id = {n.node_id: n.label for n in graph.list_nodes()}
+        out = {
+            "dependents": [n.label for n in graph.dependents(ids["Flight"])],
+            "dependencies": [n.label
+                             for n in graph.dependencies(ids["Dinner"])],
+            "breaks": graph.what_breaks_if(ids["Flight"])["count"],
+            "critical": [n.label for n in graph.critical_path()],
+            "cycles": sorted(
+                sorted(by_id[i] for i in cyc) for cyc in graph.find_cycles()),
+            "path": [n.label for n in graph.path_between(
+                ids["Flight"], ids["Report"])],
+            "hood": [n.label for n in graph.neighborhood(ids["Meeting"], 2)],
+            "waves": [[n.label for n in w] for w in graph.schedule_waves()],
+            "weak": [(w["label"], w["betweenness"])
+                     for w in graph.weak_links()],
+            "summary": graph.summary(),
+            "ext_dedup": graph.add_node(
+                "asset", "Vault Again",
+                external_ref="ext:vault").node_id == ids["Vault"],
+            "edges": len(graph.edges()),
+            "edges_of_meeting": len(graph.edges(ids["Meeting"])),
+            "nodes": len(graph.list_nodes()),
+        }
+        # projection compositions: counts equal on both rungs, and
+        # re-projection is idempotent via external_ref dedup
+        goal = SimpleNamespace(
+            id="g1", title="Ship it", status="active", progress=0.5,
+            deadline=0,
+            steps=[SimpleNamespace(id="s1", description="Step one",
+                                   status="open"),
+                   SimpleNamespace(id="s2", description="Step two",
+                                   status="open")])
+        out["goal_first"] = graph.project_goal(goal)
+        out["goal_second"] = graph.project_goal(goal)
+
+        class Rec:
+            def __init__(self, rid, text, kind, tags):
+                self.record_id = rid
+                self.text = text
+                self.kind = kind
+                self.tags = tags
+
+        class Result:
+            records = [Rec("r1", "Rent due Friday", "commitment",
+                           "deadline"),
+                       Rec("r2", "Flight to London", "plan", "flight")]
+
+        class FakeMemory:
+            def recall(self, query, limit=None):
+                return Result()
+
+        out["mem_first"] = graph.sync_from_memory(FakeMemory())
+        out["mem_second"] = graph.sync_from_memory(FakeMemory())
+        out["nodes_after_sync"] = len(graph.list_nodes())
+        # disruption: final-state equivalence (affected set, flags,
+        # the note, the summary), then a partial clear
+        graph.mark_disrupted(ids["Flight"], note="cancelled")
+        out["disrupted"] = sorted(n.label for n in graph.disrupted())
+        out["note"] = graph.get(ids["Meeting"]).attrs.get(
+            "disruption_note")
+        out["summary_disrupted"] = graph.summary()
+        graph.clear_disruption(ids["Flight"])
+        out["after_clear"] = sorted(n.label for n in graph.disrupted())
+        # removal: edges first, then the node — final state pinned
+        out["remove_cycle"] = graph.remove_node(ids["Cycle A"])
+        out["edges_after_remove"] = len(graph.edges())
+        out["cycles_after_remove"] = len(graph.find_cycles())
+        out["removed_gone"] = graph.get(ids["Cycle A"]) is None
+        out["remove_missing"] = graph.remove_node("wg_missing")
+        return out
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.planning.graph import WorldGraph
+
+        graph = WorldGraph(str(tmp_path / "world.db"), store=rung.store)
+        assert self._scenario(graph) == {
+            "dependents": ["Dinner", "Meeting", "Report"],
+            "dependencies": ["Meeting"],
+            "breaks": 3,
+            "critical": ["Report", "Dinner", "Meeting", "Flight"],
+            "cycles": [["Cycle A", "Cycle B"]],
+            "path": ["Flight", "Meeting", "Dinner", "Report"],
+            "hood": ["Dinner", "Flight", "Meeting", "Report", "Vault"],
+            "waves": [["Vault", "Ada", "Flight"], ["Meeting"],
+                      ["Dinner"], ["Report"], ["Cycle A", "Cycle B"]],
+            "weak": [("Meeting", 0.333), ("Dinner", 0.2),
+                     ("Vault", 0.0), ("Flight", 0.0), ("Cycle A", 0.0),
+                     ("Cycle B", 0.0), ("Report", 0.0)],
+            "summary": "🌐 world graph: 8 nodes, 7 edges",
+            "ext_dedup": True,
+            "edges": 7,
+            "edges_of_meeting": 4,
+            "nodes": 8,
+            "goal_first": 3,
+            "goal_second": 3,
+            "mem_first": 2,
+            "mem_second": 2,
+            "nodes_after_sync": 13,
+            "disrupted": ["Dinner", "Flight", "Meeting", "Report"],
+            "note": "cancelled",
+            "summary_disrupted":
+                "🌐 world graph: 13 nodes, 10 edges, ⚠️ 4 disrupted",
+            "after_clear": ["Dinner", "Meeting", "Report"],
+            "remove_cycle": True,
+            "edges_after_remove": 8,
+            "cycles_after_remove": 0,
+            "removed_gone": True,
+            "remove_missing": False,
+        }
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.planning.graph import WorldGraph
+
+        path = str(tmp_path / "world.db")
+        native = WorldGraph(path)
+        flight = native.add_node("schedule", "Flight")
+        meet = native.add_node("commitment", "Meeting")
+        vault = native.add_node("asset", "Vault",
+                                external_ref="ext:vault")
+        native.add_edge(meet.node_id, flight.node_id, "depends_on")
+        native.add_edge(vault.node_id, meet.node_id, "blocks")
+        native.mark_disrupted(flight.node_id, note="cancelled")
+
+        seam = WorldGraph(path, store=rung.store)
+        assert rung.store.count("planning-graph__graph_nodes") == 3
+        assert rung.store.count("planning-graph__graph_edges") == 2
+        marker = rung.store.get("planning-graph__meta", "import")
+        assert marker is not None and marker["done"] is True
+        assert marker["tables"] == {"graph_nodes": 3, "graph_edges": 2}
+        # the node key lives only in the document id
+        doc = rung.store.get("planning-graph__graph_nodes",
+                             flight.node_id)
+        assert doc is not None and doc["_id"] == flight.node_id
+        assert "node_id" not in doc
+        assert doc["disrupted"] == 1
+        # the edge key parts live only in the joined document id
+        joined = "\x1f".join((meet.node_id, flight.node_id,
+                              "depends_on"))
+        edoc = rung.store.get("planning-graph__graph_edges", joined)
+        assert edoc is not None and edoc["_id"] == joined
+        assert "from_id" not in edoc and "to_id" not in edoc
+        assert "type" not in edoc
+        # a traversal spot-check over the imported state
+        assert [n.label for n in seam.dependents(flight.node_id)] == \
+            ["Meeting"]
+        assert seam.get(meet.node_id).attrs["disruption_note"] == \
+            "cancelled"
+        assert seam.add_node("asset", "Vault Again",
+                             external_ref="ext:vault").node_id == \
+            vault.node_id
+        # seam writes continue; a second construction adopts
+        extra = seam.add_node("person", "Ada")
+        seam.add_edge(extra.node_id, meet.node_id, "owned_by")
+        assert rung.store.count("planning-graph__graph_nodes") == 4
+        assert rung.store.count("planning-graph__graph_edges") == 3
+        again = WorldGraph(path, store=rung.store)
+        assert [n.label for n in again.dependents(flight.node_id)] == \
+            ["Meeting"]
+        assert rung.store.count("planning-graph__graph_nodes") == 4
+
+    def test_large_graph_walks(self, rung, tmp_path):
+        """The dossier's volume case: a graph at the top of the
+        personal-world-model range (300 nodes) — the walks are the
+        module's own Python on both rungs, so their results (not
+        just the small fixture's) are identical."""
+        from nomorals.planning.graph import WorldGraph
+
+        graph = WorldGraph(str(tmp_path / "big.db"), store=rung.store)
+        chain = []
+        for i in range(150):
+            node = graph.add_node("commitment", f"N{i:03d}")
+            assert node is not None
+            chain.append(node.node_id)
+            if i:
+                graph.add_edge(node.node_id, chain[i - 1], "depends_on")
+        for j in range(150):
+            leaf = graph.add_node("commitment", f"L{j:03d}")
+            assert leaf is not None
+            graph.add_edge(leaf.node_id, chain[-1], "depends_on")
+        assert len(graph.list_nodes()) == 300
+        assert len(graph.edges()) == 299
+        assert len(graph.dependents(chain[0])) == 299
+        # leaf -> ... -> chain head: 150 chain nodes + the leaf
+        assert len(graph.critical_path()) == 151
+        assert graph.find_cycles() == []

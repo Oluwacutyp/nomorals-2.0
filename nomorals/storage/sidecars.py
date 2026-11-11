@@ -1652,6 +1652,50 @@ _register(_S(
         "default byte-for-byte."),
 ))
 
+_register(_S(
+    name="planning-graph", verdict="ported", kind="sqlite-file",
+    modules=("planning/graph.py",),
+    tables=("graph_nodes", "graph_edges"),
+    reason=(
+        "ported in the Mongo residue Batch 3 pass (C8): WorldGraph "
+        "routes through the seam behind its unchanged API — nodes "
+        "are documents in planning-graph__graph_nodes (RowTable by "
+        "node_id; attrs stays the JSON string the native path "
+        "stores, disrupted an INTEGER column), edges in "
+        "planning-graph__graph_edges (RowTable by the joined "
+        "composite (from_id, to_id, type) id, its key parts living "
+        "only in the document id). The HOLD this entry carried is "
+        "discharged by the Batch 3 design dossier: planning-graph "
+        "follows the document-fit pattern because there is no "
+        "graph-shaped storage problem — the module has no SQL "
+        "traversals (no WITH RECURSIVE, no JOINs); every analysis "
+        "(dependents/_propagate BFS, critical_path DFS, "
+        "find_cycles, path_between, neighborhood, weak_links "
+        "Brandes, schedule_waves/schedule_order) already loads all "
+        "edges through edges() and walks in Python, so the walks "
+        "run unchanged over seam-loaded edges and traversal parity "
+        "is pinned in test_mongo_p5. The kg tables (kg_nodes/"
+        "kg_edges, whose disposition sits in carry.PORT_RESIDUE) "
+        "are a different organ (agents/kg.py) on a different "
+        "mechanism; their disposition is unchanged and "
+        "unreferenced by this port. Recorded sub-decisions: "
+        "external_ref uniqueness on the seam is the code's "
+        "existing find-first (add_node returns the existing node) "
+        "— the seam has no unique indexes, and find-first is "
+        "already the observable contract, the native UNIQUE index "
+        "being a backstop; remove_node keeps its native "
+        "composition (edges deleted first, the node second — a "
+        "crash between leaves an edgeless node that re-removal "
+        "completes; final state pinned, intermediate not); "
+        "mark_disrupted computes the affected set with the "
+        "unchanged _propagate, then writes per-node updates — "
+        "the operation is idempotent, so final-state equivalence "
+        "is pinned and intermediate states explicitly are not. "
+        "The file's existing rows are imported once, through the "
+        "same mapping, at first construction. The native sqlite3 "
+        "path serves the SQLite default byte-for-byte."),
+))
+
 
 # ── residue: contained domain file stores, classified, port queued ────────
 #
@@ -1697,12 +1741,6 @@ _residue("planning-congestion", "planning/congestion.py",
          "congestion.db — holds are lease-shaped state; the port "
          "reviews hold expiry semantics against the seam's "
          "store-managed expiry.")
-_residue("planning-graph", "planning/graph.py",
-         ("graph_nodes", "graph_edges"),
-         "the world graph in world_graph.db — graph-shaped "
-         "nodes/edges; its port follows the graph story (the kg "
-         "tables' disposition in carry.PORT_RESIDUE), not the "
-         "document-fit pattern.")
 _residue("travel-groups", "travel/groups.py",
          ("group_trips", "legs", "expenses", "payments", "budgets",
           "proposals", "votes", "polls"),

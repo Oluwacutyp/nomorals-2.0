@@ -98,44 +98,79 @@ def _is_termux() -> bool:
         return False
 
 
-class WorldGraph:
-    """The live graph of the owner's world. Never raises."""
+_DDL = """
+CREATE TABLE IF NOT EXISTS graph_nodes (
+    node_id TEXT PRIMARY KEY, type TEXT, label TEXT,
+    attrs TEXT, disrupted INTEGER DEFAULT 0,
+    external_ref TEXT, created_at REAL, updated_at REAL);
+CREATE TABLE IF NOT EXISTS graph_edges (
+    from_id TEXT, to_id TEXT, type TEXT,
+    created_at REAL,
+    PRIMARY KEY (from_id, to_id, type));
+CREATE INDEX IF NOT EXISTS gn_type ON graph_nodes(type);
+CREATE INDEX IF NOT EXISTS ge_to ON graph_edges(to_id);
+CREATE UNIQUE INDEX IF NOT EXISTS gn_ext ON graph_nodes(external_ref);
+"""
 
-    def __init__(self, db_path: str = "", *, profile: str = "") -> None:
+_TABLES = ("graph_nodes", "graph_edges")
+
+
+def _port_writers(port: Any) -> dict[str, Any]:
+    """Lazy-import writers for the planning-graph port: both tables
+    are primary-keyed (edges by the composite (from_id, to_id,
+    type)), so rows port as-is."""
+    def _make(table):
+        def write(rows):
+            for row in rows:
+                table.put(row)
+            return len(rows)
+        return write
+
+    return {name: _make(port.tables[name]) for name in _TABLES}
+
+
+class WorldGraph:
+    """The live graph of the owner's world. Never raises.
+
+    When a document store is resolved (Mongo program P5 — an
+    explicit ``store`` or the boot ambient), the same API runs over
+    the seam instead (registered in storage.sidecars as
+    planning-graph): nodes and edges are documents in
+    ``planning-graph__graph_nodes`` / ``__graph_edges``. There is
+    no graph-shaped storage problem to solve — every traversal in
+    this module already loads all edges through :meth:`edges` and
+    walks in Python, so the walks are identical on both rungs by
+    construction. The file's existing rows are imported once,
+    through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, profile: str = "",
+                 store: Any = None) -> None:
         self._in_memory = (db_path == ":memory:") or (profile == "termux") or (
             not profile and _is_termux())
         path = ":memory:" if self._in_memory else (db_path or _default_db_path())
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             if not self._in_memory:
                 os.makedirs(os.path.dirname(path), exist_ok=True)
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port(
+                "planning-graph", _DDL, _TABLES,
+                None if self._in_memory else path, store=store)
+            if port is not None:
+                port.ensure_imported(_port_writers(port))
+                self._port = port
+                return
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS graph_nodes (
-                       node_id TEXT PRIMARY KEY, type TEXT, label TEXT,
-                       attrs TEXT, disrupted INTEGER DEFAULT 0,
-                       external_ref TEXT, created_at REAL, updated_at REAL)"""
-            )
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS graph_edges (
-                       from_id TEXT, to_id TEXT, type TEXT,
-                       created_at REAL,
-                       PRIMARY KEY (from_id, to_id, type))"""
-            )
-            self._db.execute(
-                "CREATE INDEX IF NOT EXISTS gn_type ON graph_nodes(type)"
-            )
-            self._db.execute(
-                "CREATE INDEX IF NOT EXISTS ge_to ON graph_edges(to_id)"
-            )
-            self._db.execute(
-                "CREATE UNIQUE INDEX IF NOT EXISTS gn_ext ON graph_nodes(external_ref)"
-            )
+            self._db.executescript(_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001 — a bad DB path is an empty graph
             _log.warning("world_graph: db unavailable, running empty", exc_info=True)
             self._db = None
+            self._port = None
 
     # ── nodes ─────────────────────────────────────────────────────────
 
@@ -148,6 +183,30 @@ class WorldGraph:
             label = (label or "").strip()[:200]
             if type not in NODE_TYPES or not label:
                 return None
+            if self._port is not None:
+                nodes = self._port.tables["graph_nodes"]
+                if external_ref:
+                    # find-first is the observable contract (the
+                    # seam has no unique indexes; the native UNIQUE
+                    # index on external_ref is only a backstop)
+                    found = nodes.find_one({"external_ref": external_ref})
+                    if found is not None:
+                        return self._doc_to_node(found)
+                node = GraphNode(
+                    node_id="wg_" + uuid.uuid4().hex[:10],
+                    type=type, label=label,
+                    attrs=dict(attrs or {}),
+                    external_ref=external_ref or "",
+                    created_at=time.time(), updated_at=time.time(),
+                )
+                nodes.put({
+                    "node_id": node.node_id, "type": node.type,
+                    "label": node.label, "attrs": json.dumps(node.attrs),
+                    "disrupted": 0,
+                    "external_ref": external_ref if external_ref else None,
+                    "created_at": node.created_at,
+                    "updated_at": node.updated_at})
+                return node
             if self._db is None:
                 return None
             if external_ref:
@@ -177,6 +236,9 @@ class WorldGraph:
 
     def get(self, node_id: str) -> GraphNode | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["graph_nodes"].get(node_id)
+                return self._doc_to_node(row) if row else None
             if self._db is None:
                 return None
             row = self._db.execute(
@@ -189,6 +251,16 @@ class WorldGraph:
 
     def list_nodes(self, type: str = "") -> list[GraphNode]:
         try:
+            if self._port is not None:
+                table = self._port.tables["graph_nodes"]
+                rows = table.find({"type": type}) if type else table.all()
+                nodes = [self._doc_to_node(r) for r in rows]
+                # the native ORDER BY, re-expressed as a Python sort
+                if type:
+                    nodes.sort(key=lambda n: n.label)
+                else:
+                    nodes.sort(key=lambda n: (n.type, n.label))
+                return nodes
             if self._db is None:
                 return []
             if type:
@@ -206,6 +278,16 @@ class WorldGraph:
     def remove_node(self, node_id: str) -> bool:
         """Remove a node and all its edges. Never raises."""
         try:
+            if self._port is not None:
+                # native order: the node's edges first, then the
+                # node. The edges are addressed by their joined
+                # composite id — their key parts live nowhere else.
+                edges = self._port.tables["graph_edges"]
+                for r in edges.all():
+                    if r["from_id"] == node_id or r["to_id"] == node_id:
+                        edges.delete("\x1f".join(
+                            (r["from_id"], r["to_id"], r["type"])))
+                return self._port.tables["graph_nodes"].delete(node_id)
             if self._db is None:
                 return False
             self._db.execute("DELETE FROM graph_edges WHERE from_id = ? OR to_id = ?",
@@ -229,10 +311,15 @@ class WorldGraph:
                 return False
             if from_id == to_id:
                 return False
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return False
             if self.get(from_id) is None or self.get(to_id) is None:
                 return False
+            if self._port is not None:
+                self._port.tables["graph_edges"].insert_ignore({
+                    "from_id": from_id, "to_id": to_id, "type": type,
+                    "created_at": time.time()})
+                return True
             self._db.execute(
                 "INSERT OR IGNORE INTO graph_edges VALUES (?,?,?,?)",
                 (from_id, to_id, type, time.time()))
@@ -244,6 +331,21 @@ class WorldGraph:
 
     def edges(self, node_id: str = "") -> list[GraphEdge]:
         try:
+            if self._port is not None:
+                table = self._port.tables["graph_edges"]
+                rows = table.all()
+                if node_id:
+                    # the composite key parts live only in the
+                    # joined document id, so a find on from_id/to_id
+                    # can never match — scan the restored rows and
+                    # filter in Python (the native OR form)
+                    rows = [r for r in rows
+                            if r["from_id"] == node_id
+                            or r["to_id"] == node_id]
+                return [GraphEdge(from_id=r["from_id"], to_id=r["to_id"],
+                                  type=r["type"],
+                                  created_at=r["created_at"] or 0.0)
+                        for r in rows]
             if self._db is None:
                 return []
             if node_id:
@@ -381,7 +483,7 @@ class WorldGraph:
         """
         try:
             node = self.get(node_id)
-            if node is None or self._db is None:
+            if node is None or (self._db is None and self._port is None):
                 return []
             affected_ids = self._propagate({node_id})
             now = time.time()
@@ -389,11 +491,20 @@ class WorldGraph:
                 attrs = dict(self.get(nid).attrs) if self.get(nid) else {}
                 if note:
                     attrs["disruption_note"] = (note or "")[:300]
-                self._db.execute(
-                    "UPDATE graph_nodes SET disrupted = 1, attrs = ?, updated_at = ? "
-                    "WHERE node_id = ?",
-                    (json.dumps(attrs), now, nid))
-            self._db.commit()
+                if self._port is not None:
+                    # per-node updates over the propagated set; the
+                    # operation is idempotent, so the final state is
+                    # the pin (a crash mid-set heals by re-marking)
+                    self._port.tables["graph_nodes"].update(nid, {
+                        "disrupted": 1, "attrs": json.dumps(attrs),
+                        "updated_at": now})
+                else:
+                    self._db.execute(
+                        "UPDATE graph_nodes SET disrupted = 1, attrs = ?, updated_at = ? "
+                        "WHERE node_id = ?",
+                        (json.dumps(attrs), now, nid))
+            if self._port is None:
+                self._db.commit()
             out = []
             for nid in affected_ids:
                 n = self.get(nid)
@@ -745,6 +856,9 @@ class WorldGraph:
     def clear_disruption(self, node_id: str) -> bool:
         """Clear the disrupted flag on one node. Never raises."""
         try:
+            if self._port is not None:
+                return self._port.tables["graph_nodes"].update(
+                    node_id, {"disrupted": 0, "updated_at": time.time()})
             if self._db is None:
                 return False
             cur = self._db.execute(
@@ -1065,6 +1179,20 @@ class WorldGraph:
             external_ref=row["external_ref"] or "",
             created_at=row["created_at"] or 0.0,
             updated_at=row["updated_at"] or 0.0)
+
+    def _doc_to_node(self, row: dict[str, Any]) -> GraphNode:
+        """A restored seam row → GraphNode (the _row_to_node twin)."""
+        try:
+            attrs = json.loads(row.get("attrs") or "{}")
+        except (TypeError, ValueError):
+            attrs = {}
+        return GraphNode(
+            node_id=row["node_id"], type=row.get("type") or "",
+            label=row.get("label") or "", attrs=attrs,
+            disrupted=bool(row.get("disrupted")),
+            external_ref=row.get("external_ref") or "",
+            created_at=row.get("created_at") or 0.0,
+            updated_at=row.get("updated_at") or 0.0)
 
     def summary(self) -> str:
         """One-line world status."""
