@@ -963,22 +963,44 @@ _register(_S(
 # ── Database-class hybrids (own Database instance on an own file) ─────────
 
 _register(_S(
-    name="books-library", verdict="residue", kind="database-file",
+    name="books-library", verdict="ported", kind="database-file",
     modules=("books/library.py",),
-    tables=("books", "annotations", "bookmarks", "book_tags",
-            "book_series", "collections", "collection_books",
-            "digest_flags"),
+    tables=("books", "reading_progress", "bookmarks", "annotations",
+            "collections", "collection_books", "book_tags", "ratings",
+            "reading_sessions", "book_series", "sources", "digests",
+            "digest_revisions", "digest_flags", "passages"),
     vector_sites=("books/library.py",),
     reason=(
-        "the library organ owns library.db through the Database "
-        "class (plus a raw connect for its FTS5 search lane and a "
-        "VectorStore on the same file). The catalog is "
-        "document-shaped, but its search lane is embedded FTS5: "
-        "the port waits on the search-parity story that also owns "
-        "the documents-index pin, so catalog and search do not "
-        "fork. Until then the file is its rung, and federated "
-        "search reads it there (sidecar-readers)."),
-    follows="fts",
+        "ported in the Mongo residue Batch 3 pass (C1): the library "
+        "organ routes its 15 catalog tables through the seam "
+        "(books-library__<table>) whenever a store is resolved, "
+        "behind its unchanged API. The file's existing catalog rows "
+        "import lazily, once, through the same mapping at first "
+        "construction; AUTOINCREMENT children (bookmarks, "
+        "annotations, reading_sessions, digest_revisions, "
+        "digest_flags) ride put_raw caller-shaped ids with "
+        "next_id() counters seeded from the import's max ids, so "
+        "id continuity holds across the lazy import; composite-PK "
+        "tables (collection_books, book_tags) ride the joined "
+        "document id. FTS5 stays native-rung-only by design (the "
+        "documents-index pin's story): on the seam search() runs "
+        "the module's own in-memory BM25 over the seam passage "
+        "documents, labelled bm25-memory exactly like the native "
+        "non-FTS5 fallback — never an emulated FTS5 — and the "
+        "digest keyword lane runs its Python token-overlap twin. "
+        "The same lane re-routed wisdom/corpus.py's three raw-file "
+        "fossil reads through seam-aware Library accessors "
+        "(iter_passages / passage_rows / book_titles), so the "
+        "corpus never opens the file. The embeddings + meta tables "
+        "stay in the file under the vector-engines pin (the "
+        "VectorStore's home, including the digest/passage vectors "
+        "and the vector_dims pin); the in-file ALTERs stay a "
+        "native-path concern and the seam DDL carries the final "
+        "shape. A passage chapter at/above the 15 MB seam ceiling "
+        "fails loudly (LibraryError naming slug + chapter + size), "
+        "never truncates — the native SQLite lane keeps no such "
+        "ceiling. The native sqlite3 path serves the SQLite "
+        "default byte-for-byte."),
 ))
 
 

@@ -956,47 +956,26 @@ class CanonCorpus:
         """All (passage_key, text) pairs in the library.
 
         Key is ``"<book_slug>#<chapter_number>"`` — stable across DB
-        rebuilds, unlike rowids. Works for both the FTS5 and the plain
-        passages table.
+        rebuilds, unlike rowids. Reads through the Library's
+        seam-aware accessor, never the file: on the seam the passages
+        live in the seam documents, and a raw file read here would
+        fork the corpus from the catalog.
         """
-        import sqlite3
-        con = sqlite3.connect(self.library.db_path())
-        try:
-            rows = con.execute(
-                "SELECT book_slug, number, text FROM passages").fetchall()
-        finally:
-            con.close()
-        return [(f"{slug}#{int(num)}", text or "")
-                for slug, num, text in rows]
+        return self.library.iter_passages()
 
     def _passage_rows(self, keys: list[str]) -> dict[str, Any]:
         """Fetch library rows for vector-hit keys → SearchHit-shaped rows."""
-        import sqlite3
         from types import SimpleNamespace
         if not keys:
             return {}
-        con = sqlite3.connect(self.library.db_path())
-        try:
-            out: dict[str, Any] = {}
-            for key in keys:
-                if "#" not in key:
-                    continue
-                slug, _, num = key.rpartition("#")
-                try:
-                    number = int(num)
-                except ValueError:
-                    continue
-                row = con.execute(
-                    "SELECT book_slug, book_title, chapter, number, text "
-                    "FROM passages WHERE book_slug = ? AND number = ?",
-                    (slug, number)).fetchone()
-                if row:
-                    out[key] = SimpleNamespace(
-                        book=row[0], title=row[1], chapter=row[2],
-                        chapter_number=row[3], passage=row[4], score=0.0)
-            return out
-        finally:
-            con.close()
+        out: dict[str, Any] = {}
+        for key, row in self.library.passage_rows(keys).items():
+            out[key] = SimpleNamespace(
+                book=row["book_slug"], title=row["book_title"],
+                chapter=row["chapter"],
+                chapter_number=row["number"], passage=row["text"],
+                score=0.0)
+        return out
 
     def _semantic_search(self, query: str, *, top: int,
                          tradition: str = "",
@@ -1061,15 +1040,9 @@ class CanonCorpus:
         the book title as a ``[slug]`` prefix, so resolve via the books
         table and the manifest.
         """
-        import sqlite3
         meta: dict[str, dict[str, str]] = {}
         try:
-            con = sqlite3.connect(self.library.db_path())
-            try:
-                books = con.execute(
-                    "SELECT slug, title FROM books").fetchall()
-            finally:
-                con.close()
+            books = self.library.book_titles()
         except Exception as exc:
             _log.debug("corpus._index_metadata failed", exc_info=True)
             return meta

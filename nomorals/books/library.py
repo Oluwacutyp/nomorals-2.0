@@ -26,6 +26,18 @@ Formats: ``.txt``/``.md`` read directly; ``.pdf``, ``.epub``, ``.docx``,
 Beyond holding books, the library is a reading companion: per-book
 reading progress (remember where you left off), bookmarks, annotations,
 collections/shelves, tags, and star ratings — all in the same SQLite db.
+
+Mongo residue Batch 3 (C1): the 15 catalog tables run over the
+DocumentStore seam whenever a store is resolved (an explicit
+``store=`` or the boot ambient) — ``books-library__<table>`` —
+behind this unchanged API, with the SQLite default byte-identical.
+The file's existing catalog rows import lazily, once, through the
+same mapping at first construction. The ``embeddings`` + ``meta``
+tables stay in the file under the vector-engines pin (the
+VectorStore's home), and FTS5 stays native-rung-only: on the seam
+``search()`` runs this module's own in-memory BM25 over the seam
+passage documents, labelled ``bm25-memory`` exactly like the native
+non-FTS5 fallback — never an emulated FTS5.
 """
 from __future__ import annotations
 
@@ -76,6 +88,12 @@ _FEED_SEEN_CAP = 1000
 # Vector lane: one owner_type in the shared embeddings table; owner_id
 # encodes the kind so passages and digests share one namespace.
 _VECTOR_OWNER = "library"
+# Seam passage ceiling: one chapter becomes one seam document, and
+# Mongo caps a document at 16 MiB — a chapter at/above this size
+# fails LOUDLY on the seam (LibraryError naming slug + chapter +
+# size), never truncates. 15 MB leaves headroom for the doc envelope;
+# the native SQLite lane has no such ceiling and keeps none.
+_MAX_PASSAGE_BYTES = 15_000_000
 # The embeddings table DDL is byte-identical to
 # nomorals/storage/migrations.py (the memory system's table) so the
 # real VectorStore works against library.db unchanged. This creates
@@ -484,15 +502,271 @@ def _extract_urls(text: str) -> list[str]:
 
 # ── the library ─────────────────────────────────────────────────────────
 
+#: The catalog DDL the seam port carries (final shape — the native
+#: path reaches the same columns via CREATE + the idempotent
+#: ``source_id`` ALTER in :meth:`Library._connect`). ``embeddings``
+#: + ``meta`` are deliberately absent: they stay in the file under
+#: the vector-engines pin.
+_LIBRARY_DDL = """
+CREATE TABLE IF NOT EXISTS books (
+    slug TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    author TEXT DEFAULT '',
+    source_file TEXT,
+    chapters INTEGER DEFAULT 0,
+    words INTEGER DEFAULT 0,
+    strategy TEXT DEFAULT '',
+    ingested_at REAL DEFAULT 0,
+    source_id TEXT
+);
+CREATE TABLE IF NOT EXISTS reading_progress (
+    slug TEXT PRIMARY KEY,
+    chapter INTEGER DEFAULT 1,
+    offset_chars INTEGER DEFAULT 0,
+    updated_at REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS bookmarks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL,
+    chapter INTEGER NOT NULL,
+    offset_chars INTEGER NOT NULL,
+    label TEXT,
+    created_at REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS annotations (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL,
+    chapter INTEGER NOT NULL,
+    offset_chars INTEGER NOT NULL,
+    quote TEXT,
+    note TEXT,
+    created_at REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS collections (
+    name TEXT PRIMARY KEY,
+    created_at REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS collection_books (
+    collection TEXT NOT NULL,
+    slug TEXT NOT NULL,
+    added_at REAL DEFAULT 0,
+    PRIMARY KEY (collection, slug)
+);
+CREATE TABLE IF NOT EXISTS book_tags (
+    slug TEXT NOT NULL,
+    tag TEXT NOT NULL,
+    PRIMARY KEY (slug, tag)
+);
+CREATE TABLE IF NOT EXISTS ratings (
+    slug TEXT PRIMARY KEY,
+    stars INTEGER NOT NULL,
+    rated_at REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS reading_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slug TEXT NOT NULL,
+    started_at REAL NOT NULL,
+    ended_at REAL DEFAULT 0,
+    seconds REAL DEFAULT 0,
+    chapters INTEGER DEFAULT 0,
+    words INTEGER DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS book_series (
+    slug TEXT PRIMARY KEY,
+    series TEXT NOT NULL,
+    series_index REAL
+);
+CREATE TABLE IF NOT EXISTS sources (
+    source_id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    origin TEXT NOT NULL,
+    title TEXT DEFAULT '',
+    status TEXT DEFAULT 'active',
+    health TEXT DEFAULT 'ok',
+    failures INTEGER DEFAULT 0,
+    fetched_at REAL,
+    last_checked REAL,
+    last_error TEXT,
+    created_at REAL DEFAULT 0,
+    meta TEXT DEFAULT '{}'
+);
+CREATE TABLE IF NOT EXISTS digests (
+    record_id TEXT PRIMARY KEY,
+    source_id TEXT,
+    claim TEXT NOT NULL,
+    confidence REAL DEFAULT 0.0,
+    scope TEXT DEFAULT '',
+    status TEXT DEFAULT 'active',
+    created_at REAL DEFAULT 0,
+    updated_at REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS digest_revisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id TEXT NOT NULL,
+    claim TEXT NOT NULL,
+    confidence REAL DEFAULT 0.0,
+    note TEXT,
+    revised_by TEXT,
+    revised_at REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS digest_flags (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_id TEXT NOT NULL,
+    other_id TEXT NOT NULL,
+    strategy TEXT NOT NULL,
+    confidence REAL DEFAULT 0.0,
+    note TEXT,
+    created_at REAL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS passages (
+    book_slug TEXT NOT NULL,
+    book_title TEXT NOT NULL,
+    chapter TEXT NOT NULL,
+    number INTEGER NOT NULL,
+    text TEXT NOT NULL
+);
+"""
+
+#: The catalog tables, in dependency-free order. PK tables ride
+#: RowTables; the AUTOINCREMENT children + the PK-less passages ride
+#: put_raw caller-shaped ids (``str(id)`` for the children,
+#: ``"<slug>\\x1f<number>"`` for a passage).
+_CATALOG_TABLES = (
+    "books", "reading_progress", "bookmarks", "annotations",
+    "collections", "collection_books", "book_tags", "ratings",
+    "reading_sessions", "book_series", "sources", "digests",
+    "digest_revisions", "digest_flags", "passages",
+)
+
+#: PK tables in the catalog (RowTable-backed on the seam).
+_PK_TABLES = (
+    "books", "reading_progress", "collections", "collection_books",
+    "book_tags", "ratings", "book_series", "sources", "digests",
+)
+
+#: AUTOINCREMENT child tables (put_raw, id-continuity via next_id).
+_CHILD_TABLES = (
+    "bookmarks", "annotations", "reading_sessions",
+    "digest_revisions", "digest_flags",
+)
+
+# Composite-PK catalog tables, with their PK parts in DDL order. A
+# composite PK's parts live ONLY in the joined doc ``_id`` (carry), so a
+# filtered ``find``/``delete_where`` on a PK part matches nothing — call
+# sites scan + filter in Python and delete by joined id instead.
+_COMPOSITE_PK = {
+    "collection_books": ("collection", "slug"),
+    "book_tags": ("slug", "tag"),
+}
+
+
 class Library:
     """Owns ``workspace/library/``: ingest, search, read, list, drop."""
 
-    def __init__(self, context: Any, embedder: Any = None) -> None:
+    def __init__(self, context: Any, embedder: Any = None, *,
+                 store: Any = None) -> None:
         self.context = context
         # Embedder is lazy: None means "build the hashing default on
         # first vector use" — no import-time I/O, no network, no cost.
         # Callers may inject a native/router Embedder instead.
         self.embedder = embedder
+        self._port = None
+        from ..storage.sidecars import sidecar_port
+
+        port = sidecar_port("books-library", _LIBRARY_DDL,
+                            _CATALOG_TABLES, self.db_path(), store=store)
+        if port is None:
+            return
+        max_ids: dict[str, int] = {}
+
+        def _put_row(table):
+            def write(rows):
+                tbl = port.tables[table]
+                for row in rows:
+                    # Legacy files predate the native ALTER that added
+                    # books.source_id — the column is simply absent from
+                    # the row, and _complete fills only DDL-defaulted
+                    # columns, so normalize it here (None = never linked).
+                    if table == "books":
+                        row.setdefault("source_id", None)
+                    tbl.put(row)
+                return len(rows)
+            return write
+
+        def _put_child(table):
+            def write(rows):
+                for row in rows:
+                    rid = int(row["id"])
+                    if rid > max_ids.get(table, 0):
+                        max_ids[table] = rid
+                    port.put_raw(table, str(rid), dict(row))
+                return len(rows)
+            return write
+
+        def _put_passages(rows):
+            for row in rows:
+                doc_id = f"{row['book_slug']}\x1f{int(row['number'])}"
+                port.put_raw("passages", doc_id, dict(row))
+            return len(rows)
+
+        writers = {t: _put_row(t) for t in _PK_TABLES}
+        for t in _CHILD_TABLES:
+            writers[t] = _put_child(t)
+        writers["passages"] = _put_passages
+
+        def seed_counters(_counts):
+            doc = port.store.get(port.meta_collection, "counters") or {}
+            merged = {**doc}
+            for table, top in max_ids.items():
+                if int(merged.get(table) or 0) < top:
+                    merged[table] = top
+            port.store.put(port.meta_collection, "counters", merged)
+
+        port.ensure_imported(writers, after_import=seed_counters)
+        self._port = port
+
+    # ── seam helpers ────────────────────────────────────────────────
+    def _t(self, table):
+        """The RowTable for a PK catalog table on the seam."""
+        return self._port.tables[table]
+
+    def _raw(self, table):
+        """The namespaced collection for a PK-less catalog table."""
+        return f"{self._port.store_name}__{table}"
+
+    @staticmethod
+    def _plain(doc):
+        """A raw seam document as a row dict (the ``_id`` never leaks)."""
+        return {k: v for k, v in doc.items() if k != "_id"}
+
+    def _del_composite(self, table, **parts):
+        """Delete every row of a composite-PK table matching the given PK
+        parts — scan + delete by joined id, since a filtered
+        ``delete_where`` on a PK part matches nothing (see
+        ``_COMPOSITE_PK``)."""
+        tbl = self._t(table)
+        order = _COMPOSITE_PK[table]
+        for row in tbl.all():
+            if all(row.get(k) == v for k, v in parts.items()):
+                tbl.delete("\x1f".join(str(row.get(c, "")) for c in order))
+
+    def _child_find(self, table, filter=None):
+        """PK-less child rows on the seam, as plain row dicts."""
+        return [self._plain(d)
+                for d in self._port.find_raw(table, filter)]
+
+    def _child_get(self, table, rid):
+        """One PK-less child row by integer id, or None."""
+        doc = self._port.store.get(self._raw(table), str(int(rid)))
+        return self._plain(doc) if doc else None
+
+    def _child_del(self, table, rid):
+        """Delete one PK-less child row by integer id; True if it existed."""
+        return self._port.store.delete(self._raw(table), str(int(rid)))
+
+    def _next(self, table):
+        """The next integer id for an AUTOINCREMENT-shaped child table."""
+        return self._port.next_id(table)
 
     # ── paths ─────────────────────────────────────────────────────────
     def root(self) -> Path:
@@ -645,6 +919,11 @@ class Library:
                      fts5: bool) -> None:
         """Rebuild the whole passages index from every book.json.
         Repair utility only — ingest/drop use `_index_book` now."""
+        if self._port is not None:
+            self._port.store.delete_many(self._raw("passages"))
+            for book_json in sorted(self.root().glob("*/book.json")):
+                self._index_book(con, fts5, book_json.parent.name)
+            return
         con.execute("DELETE FROM passages")
         rows: list[tuple[str, str, str, int, str]] = []
         for book_json in self.root().glob("*/book.json"):
@@ -675,6 +954,35 @@ class Library:
         this now — `_reindex_all`'s whole-index rebuild was a scaling
         wall the moment sources arrived as a stream. `_reindex_all`
         stays as a repair utility."""
+        if self._port is not None:
+            self._port.store.delete_many(
+                self._raw("passages"), {"book_slug": slug})
+            book_json = self.book_dir(slug) / "book.json"
+            try:
+                meta = json.loads(book_json.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return
+            title = meta.get("title", "")
+            for ch in meta.get("chapters", []):
+                num = int(ch.get("number", 0))
+                body_file = book_json.parent / "chapters" / f"{num:03d}.md"
+                try:
+                    body = body_file.read_text(encoding="utf-8")
+                except OSError:
+                    continue
+                size = len(body.encode("utf-8", errors="ignore"))
+                if size > _MAX_PASSAGE_BYTES:
+                    raise LibraryError(
+                        f"chapter {num} of {slug!r} is {size} bytes — "
+                        f"above the {_MAX_PASSAGE_BYTES}-byte seam "
+                        "passage ceiling; the chapter stays in its "
+                        "file and is not indexed on the seam")
+                self._port.put_raw(
+                    "passages", f"{slug}\x1f{num}",
+                    {"book_slug": slug, "book_title": title,
+                     "chapter": ch.get("title", ""), "number": num,
+                     "text": body})
+            return
         con.execute("DELETE FROM passages WHERE book_slug = ?", (slug,))
         book_json = self.book_dir(slug) / "book.json"
         try:
@@ -737,32 +1045,54 @@ class Library:
         (dest / "book.json").write_text(
             json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
-        con, fts5 = self._connect()
-        try:
-            self._index_book(con, fts5, slug)
-            con.execute(
-                "INSERT OR REPLACE INTO books(slug,title,author,"
-                "source_file,chapters,words,strategy,ingested_at,"
-                "source_id) VALUES (?,?,?,?,?,?,?,?,?)",
-                (slug, title, author, original_name, len(chapters),
-                 total_words, strategy, now, source["source_id"]))
-            con.execute(
-                "INSERT OR REPLACE INTO sources(source_id,kind,origin,"
-                "title,status,health,failures,fetched_at,last_checked,"
-                "last_error,created_at,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (source["source_id"], source.get("kind", "file"),
-                 source.get("origin", ""), source.get("title", title),
-                 source.get("status", "active"),
-                 source.get("health", "unknown"),
-                 int(source.get("failures", 0)),
-                 source.get("fetched_at", now),
-                 source.get("last_checked", 0.0),
-                 source.get("last_error", ""),
-                 source.get("created_at", now),
-                 json.dumps(source.get("meta") or {})))
-            con.commit()
-        finally:
-            con.close()
+        if self._port is not None:
+            self._index_book(None, False, slug)
+            self._t("books").put({
+                "slug": slug, "title": title, "author": author,
+                "source_file": original_name,
+                "chapters": len(chapters), "words": total_words,
+                "strategy": strategy, "ingested_at": now,
+                "source_id": source["source_id"]})
+            self._t("sources").put({
+                "source_id": source["source_id"],
+                "kind": source.get("kind", "file"),
+                "origin": source.get("origin", ""),
+                "title": source.get("title", title),
+                "status": source.get("status", "active"),
+                "health": source.get("health", "unknown"),
+                "failures": int(source.get("failures", 0)),
+                "fetched_at": source.get("fetched_at", now),
+                "last_checked": source.get("last_checked", 0.0),
+                "last_error": source.get("last_error", ""),
+                "created_at": source.get("created_at", now),
+                "meta": json.dumps(source.get("meta") or {})})
+        else:
+            con, fts5 = self._connect()
+            try:
+                self._index_book(con, fts5, slug)
+                con.execute(
+                    "INSERT OR REPLACE INTO books(slug,title,author,"
+                    "source_file,chapters,words,strategy,ingested_at,"
+                    "source_id) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (slug, title, author, original_name, len(chapters),
+                     total_words, strategy, now, source["source_id"]))
+                con.execute(
+                    "INSERT OR REPLACE INTO sources(source_id,kind,origin,"
+                    "title,status,health,failures,fetched_at,last_checked,"
+                    "last_error,created_at,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (source["source_id"], source.get("kind", "file"),
+                     source.get("origin", ""), source.get("title", title),
+                     source.get("status", "active"),
+                     source.get("health", "unknown"),
+                     int(source.get("failures", 0)),
+                     source.get("fetched_at", now),
+                     source.get("last_checked", 0.0),
+                     source.get("last_error", ""),
+                     source.get("created_at", now),
+                     json.dumps(source.get("meta") or {})))
+                con.commit()
+            finally:
+                con.close()
 
         note = ""
         vec_error = self._embed_book_vectors(slug, chapters)
@@ -885,6 +1215,19 @@ class Library:
         query = (query or "").strip()
         if not query:
             return []
+        if self._port is not None:
+            # FTS5 stays native-rung-only: the seam runs this module's
+            # own in-memory BM25 over the seam passage documents —
+            # same scorer, same labels, same result shape.
+            rows = [(d.get("book_slug", ""), d.get("book_title", ""),
+                     d.get("chapter", ""), int(d.get("number", 0)),
+                     d.get("text") or "")
+                    for d in self._child_find("passages")]
+            meta = {r.get("slug", ""): (r.get("author", "") or "",
+                                        float(r.get("ingested_at", 0) or 0))
+                    for r in self._t("books").all()}
+            return self._search_memory_rows(
+                rows, meta, query, top, context_chars, book)
         con, fts5 = self._connect()
         try:
             if fts5:
@@ -974,6 +1317,21 @@ class Library:
         rows = con.execute(
             "SELECT book_slug, book_title, chapter, number, text FROM passages"
         ).fetchall()
+        meta = {r[0]: (r[1] or "", r[2] or 0.0)
+                for r in con.execute(
+                    "SELECT slug, author, ingested_at FROM books")}
+        return self._search_memory_rows(
+            rows, meta, query, top, context_chars, book)
+
+    def _search_memory_rows(self, rows, meta, query, top, context_chars,
+                            book) -> list[SearchHit]:
+        """The in-memory BM25 scorer over passage rows + book meta.
+
+        ``rows`` are (book_slug, book_title, chapter, number, text)
+        tuples and ``meta`` maps slug → (author, ingested_at) — the
+        native path reads both from the file, the seam path from its
+        passage documents + books table, and the scorer never knows
+        which. Hits carry source ``bm25-memory`` on either rung."""
         if book:
             rows = [r for r in rows if r[0] == book]
         if not rows:
@@ -1004,9 +1362,6 @@ class Library:
                 s += idf * f * (len(toks) and 1.0)
             scored.append((s, slug, title, chapter, number, text))
         scored.sort(key=lambda x: -x[0])
-        meta = {r[0]: (r[1] or "", r[2] or 0.0)
-                for r in con.execute(
-                    "SELECT slug, author, ingested_at FROM books")}
         out = []
         for s, slug, title, ch, num, text in scored[:top]:
             author, ingested = meta.get(slug, ("", 0.0))
@@ -1016,6 +1371,92 @@ class Library:
                 source="bm25-memory", book_slug=slug, author=author,
                 chapter_number=int(num or 0), ingested_at=ingested))
         return out
+
+    # ── seam-aware passage/book accessors (wisdom/corpus.py) ──────────
+    # The corpus used to read the library file with raw sqlite3 at
+    # three sites — a fossil reader that forked the moment the
+    # catalog moved. These accessors are the seam-aware route: same
+    # shapes on either rung, so the corpus never opens the file.
+    def iter_passages(self) -> list[tuple[str, str]]:
+        """All (passage_key, text) pairs in the library.
+
+        Key is ``"<book_slug>#<chapter_number>"`` — stable across DB
+        rebuilds, unlike rowids. Works for both the FTS5 and the plain
+        passages table on the native rung."""
+        if self._port is not None:
+            docs = self._child_find("passages")
+            docs.sort(key=lambda d: (d.get("book_slug", ""),
+                                     int(d.get("number", 0))))
+            return [(f"{d.get('book_slug', '')}#{int(d.get('number', 0))}",
+                     d.get("text") or "") for d in docs]
+        con, _ = self._connect()
+        try:
+            rows = con.execute(
+                "SELECT book_slug, number, text FROM passages").fetchall()
+        finally:
+            con.close()
+        return [(f"{slug}#{int(num)}", text or "")
+                for slug, num, text in rows]
+
+    def passage_rows(self, keys: list[str]) -> dict[str, dict[str, Any]]:
+        """Passage rows for ``"<book_slug>#<chapter_number>"`` keys."""
+        out: dict[str, dict[str, Any]] = {}
+        if not keys:
+            return out
+        if self._port is not None:
+            for key in keys:
+                if "#" not in key:
+                    continue
+                slug, _, num = key.rpartition("#")
+                try:
+                    number = int(num)
+                except ValueError:
+                    continue
+                docs = self._child_find(
+                    "passages", {"book_slug": slug, "number": number})
+                if docs:
+                    d = docs[0]
+                    out[key] = {
+                        "book_slug": d.get("book_slug", ""),
+                        "book_title": d.get("book_title", ""),
+                        "chapter": d.get("chapter", ""),
+                        "number": int(d.get("number", 0)),
+                        "text": d.get("text") or ""}
+            return out
+        con, _ = self._connect()
+        try:
+            for key in keys:
+                if "#" not in key:
+                    continue
+                slug, _, num = key.rpartition("#")
+                try:
+                    number = int(num)
+                except ValueError:
+                    continue
+                row = con.execute(
+                    "SELECT book_slug, book_title, chapter, number, text "
+                    "FROM passages WHERE book_slug = ? AND number = ?",
+                    (slug, number)).fetchone()
+                if row:
+                    out[key] = {
+                        "book_slug": row[0], "book_title": row[1],
+                        "chapter": row[2], "number": row[3],
+                        "text": row[4]}
+        finally:
+            con.close()
+        return out
+
+    def book_titles(self) -> list[tuple[str, str]]:
+        """All (slug, title) pairs in the catalog."""
+        if self._port is not None:
+            return [(r.get("slug", ""), r.get("title", "") or "")
+                    for r in self._t("books").all()]
+        con, _ = self._connect()
+        try:
+            return [(r[0], r[1]) for r in con.execute(
+                "SELECT slug, title FROM books").fetchall()]
+        finally:
+            con.close()
 
     # ── read ──────────────────────────────────────────────────────────
     def read(self, slug: str, chapter: int = 0, limit: int = 4000) -> dict[str, Any]:
@@ -1069,16 +1510,26 @@ class Library:
                     "%Y-%m-%d", time.localtime(meta.get("ingested_at", 0))),
             })
         # enrich with curation state (ratings, tags, progress) — one query set
-        con, _ = self._connect()
-        try:
-            ratings = {r[0]: r[1] for r in con.execute(
-                "SELECT slug, stars FROM ratings")}
-            tag_rows = con.execute(
-                "SELECT slug, tag FROM book_tags ORDER BY tag").fetchall()
-            prog_rows = con.execute(
-                "SELECT slug, chapter FROM reading_progress").fetchall()
-        finally:
-            con.close()
+        if self._port is not None:
+            ratings = {r.get("slug", ""): r.get("stars")
+                       for r in self._t("ratings").all()}
+            tag_rows = sorted(
+                ((r.get("slug", ""), r.get("tag", ""))
+                 for r in self._t("book_tags").all()),
+                key=lambda pair: pair[1])
+            prog_rows = [(r.get("slug", ""), r.get("chapter", 1))
+                         for r in self._t("reading_progress").all()]
+        else:
+            con, _ = self._connect()
+            try:
+                ratings = {r[0]: r[1] for r in con.execute(
+                    "SELECT slug, stars FROM ratings")}
+                tag_rows = con.execute(
+                    "SELECT slug, tag FROM book_tags ORDER BY tag").fetchall()
+                prog_rows = con.execute(
+                    "SELECT slug, chapter FROM reading_progress").fetchall()
+            finally:
+                con.close()
         tags: dict[str, list[str]] = {}
         for slug, tag in tag_rows:
             tags.setdefault(slug, []).append(tag)
@@ -1118,15 +1569,31 @@ class Library:
             else:
                 f.unlink()
         dest.rmdir()
-        con, fts5 = self._connect()
-        con.execute("DELETE FROM passages WHERE book_slug = ?", (slug,))
-        con.execute("DELETE FROM books WHERE slug = ?", (slug,))
-        # drop the reading state too — no orphaned progress/bookmarks/notes
-        for table in ("reading_progress", "bookmarks", "annotations",
-                      "collection_books", "book_tags", "ratings"):
-            con.execute(f"DELETE FROM {table} WHERE slug = ?", (slug,))
-        con.commit()
-        con.close()
+        if self._port is not None:
+            self._port.store.delete_many(
+                self._raw("passages"), {"book_slug": slug})
+            self._t("books").delete(slug)
+            # drop the reading state too — no orphaned
+            # progress/bookmarks/notes (reading_sessions + book_series
+            # stay, exactly as the native path leaves them)
+            self._t("reading_progress").delete(slug)
+            self._port.store.delete_many(
+                self._raw("bookmarks"), {"slug": slug})
+            self._port.store.delete_many(
+                self._raw("annotations"), {"slug": slug})
+            self._del_composite("collection_books", slug=slug)
+            self._del_composite("book_tags", slug=slug)
+            self._t("ratings").delete(slug)
+        else:
+            con, fts5 = self._connect()
+            con.execute("DELETE FROM passages WHERE book_slug = ?", (slug,))
+            con.execute("DELETE FROM books WHERE slug = ?", (slug,))
+            # drop the reading state too — no orphaned progress/bookmarks/notes
+            for table in ("reading_progress", "bookmarks", "annotations",
+                          "collection_books", "book_tags", "ratings"):
+                con.execute(f"DELETE FROM {table} WHERE slug = ?", (slug,))
+            con.commit()
+            con.close()
         # Digests are knowledge, not the book: dropping a book never
         # deletes digests made from it (shed_dead archives them when
         # the SOURCE dies — a different, explicit act).
@@ -1157,6 +1624,56 @@ class Library:
         except ValueError:
             d["meta"] = {}
         return d
+
+    def _find_source(self, kind: str, origin: str) -> dict[str, Any] | None:
+        """The source row for (kind, origin), or None — either rung.
+
+        The returned dict is the ``_source_for_origin`` shape (meta
+        parsed), so URL/feed/learn callers share one lookup."""
+        if self._port is not None:
+            row = self._t("sources").find_one(
+                {"kind": kind, "origin": origin})
+            if row is None:
+                return None
+            out = dict(row)
+            try:
+                out["meta"] = json.loads(row.get("meta") or "{}")
+            except ValueError:
+                out["meta"] = {}
+            return out
+        con, _ = self._connect()
+        try:
+            return self._source_for_origin(con, kind, origin)
+        finally:
+            con.close()
+
+    def _upsert_source(self, source: dict[str, Any]) -> None:
+        """INSERT OR REPLACE a sources row from a ``_find_source``-shaped
+        dict (meta carried as the parsed dict, stored JSON-encoded)."""
+        if self._port is not None:
+            row = dict(source)
+            row["meta"] = json.dumps(source.get("meta") or {},
+                                     ensure_ascii=False)
+            self._t("sources").put(row)
+            return
+        con, _ = self._connect()
+        try:
+            con.execute(
+                "INSERT OR REPLACE INTO sources(source_id,kind,origin,"
+                "title,status,health,failures,fetched_at,last_checked,"
+                "last_error,created_at,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (source["source_id"], source.get("kind", ""),
+                 source.get("origin", ""), source.get("title", ""),
+                 source.get("status", "active"),
+                 source.get("health", "unknown"),
+                 int(source.get("failures", 0)),
+                 source.get("fetched_at"), source.get("last_checked"),
+                 source.get("last_error"), source.get("created_at", 0),
+                 json.dumps(source.get("meta") or {},
+                            ensure_ascii=False)))
+            con.commit()
+        finally:
+            con.close()
 
     def ingest_url(self, url: str, *, title: str = "", author: str = "",
                    fetcher: Any = None, max_chars: int = 4_000_000,
@@ -1199,11 +1716,7 @@ class Library:
                       "application/epub+zip": "source.epub",
                       "application/vnd.openxmlformats-officedocument."
                       "wordprocessingml.document": "source.docx"}.get(ctype, "source.txt")
-        con, _ = self._connect()
-        try:
-            existing = self._source_for_origin(con, "url", url)
-        finally:
-            con.close()
+        existing = self._find_source("url", url)
         now = time.time()
         source = {
             "source_id": existing["source_id"] if existing else new_id(),
@@ -1264,11 +1777,7 @@ class Library:
             raise LibraryError(f"fetch {url} failed: {exc}") from exc
         feed_title, items = _parse_feed(data)
         items = items[:max(1, max_items)]
-        con, _ = self._connect()
-        try:
-            existing = self._source_for_origin(con, "feed", url)
-        finally:
-            con.close()
+        existing = self._find_source("feed", url)
         now = time.time()
         book_title = title.strip() or feed_title.strip()
         slug = ""
@@ -1339,6 +1848,33 @@ class Library:
     # ── sources as seeds ──────────────────────────────────────────────
     def list_sources(self, status: str = "", kind: str = "",
                      ) -> list[dict[str, Any]]:
+        if self._port is not None:
+            rows = self._t("sources").all()
+            if status:
+                rows = [r for r in rows if r.get("status") == status]
+            if kind:
+                rows = [r for r in rows if r.get("kind") == kind]
+            rows.sort(key=lambda r: float(r.get("created_at", 0) or 0),
+                      reverse=True)
+            out = []
+            for row in rows:
+                try:
+                    meta = json.loads(row.get("meta") or "{}")
+                except ValueError:
+                    meta = {}
+                out.append({
+                    "source_id": row.get("source_id"),
+                    "kind": row.get("kind"), "origin": row.get("origin"),
+                    "title": row.get("title", ""),
+                    "status": row.get("status"),
+                    "health": row.get("health"),
+                    "failures": row.get("failures"),
+                    "fetched_at": row.get("fetched_at"),
+                    "last_checked": row.get("last_checked"),
+                    "last_error": row.get("last_error"),
+                    "created_at": row.get("created_at"), "meta": meta,
+                })
+            return out
         con, _ = self._connect()
         try:
             sql = ("SELECT source_id, kind, origin, title, status, health,"
@@ -1379,14 +1915,23 @@ class Library:
         and continued). File/learn sources have no URL to check and
         are skipped, never marked failing for it."""
         probe = fetcher or _default_probe
-        con, _ = self._connect()
-        try:
-            rows = con.execute(
-                "SELECT source_id, origin, failures FROM sources"
-                " WHERE status = 'active' AND kind IN ('url', 'feed')"
-                " ORDER BY origin").fetchall()
-        finally:
-            con.close()
+        if self._port is not None:
+            rows = sorted(
+                ((r.get("source_id"), r.get("origin", ""),
+                  r.get("failures", 0))
+                 for r in self._t("sources").all()
+                 if r.get("status") == "active"
+                 and r.get("kind") in ("url", "feed")),
+                key=lambda t: t[1])
+        else:
+            con, _ = self._connect()
+            try:
+                rows = con.execute(
+                    "SELECT source_id, origin, failures FROM sources"
+                    " WHERE status = 'active' AND kind IN ('url', 'feed')"
+                    " ORDER BY origin").fetchall()
+            finally:
+                con.close()
         ok = failing = dead = 0
         details: list[dict[str, Any]] = []
         for source_id, origin, failures in rows:
@@ -1406,15 +1951,24 @@ class Library:
                     dead += 1
                 else:
                     failing += 1
-            con, _ = self._connect()
-            try:
-                con.execute(
-                    "UPDATE sources SET health = ?, failures = ?,"
-                    " last_checked = ?, last_error = ? WHERE source_id = ?",
-                    (health, new_failures, now, err, source_id))
-                con.commit()
-            finally:
-                con.close()
+            if self._port is not None:
+                row = self._t("sources").get(source_id)
+                if row is not None:
+                    updated = dict(row)
+                    updated.update({"health": health,
+                                    "failures": new_failures,
+                                    "last_checked": now, "last_error": err})
+                    self._t("sources").put(updated)
+            else:
+                con, _ = self._connect()
+                try:
+                    con.execute(
+                        "UPDATE sources SET health = ?, failures = ?,"
+                        " last_checked = ?, last_error = ? WHERE source_id = ?",
+                        (health, new_failures, now, err, source_id))
+                    con.commit()
+                finally:
+                    con.close()
             details.append({"source_id": source_id, "origin": origin,
                             "health": health, "failures": new_failures,
                             "error": err})
@@ -1427,6 +1981,26 @@ class Library:
         includes them with include_archived=True), digests stay
         readable with status archived. Shedding is explicit — a dead
         health flag alone never archives anything."""
+        if self._port is not None:
+            dead = [r.get("source_id")
+                    for r in self._t("sources").all()
+                    if r.get("health") == "dead"
+                    and r.get("status") == "active"]
+            archived_digests = 0
+            for source_id in dead:
+                row = self._t("sources").get(source_id)
+                if row is not None:
+                    updated = dict(row)
+                    updated["status"] = "archived"
+                    self._t("sources").put(updated)
+                for d in self._t("digests").find(
+                        {"source_id": source_id, "status": "active"}):
+                    upd = dict(d)
+                    upd["status"] = "archived"
+                    self._t("digests").put(upd)
+                    archived_digests += 1
+            return {"archived_sources": dead,
+                    "archived_digests": archived_digests}
         con, _ = self._connect()
         try:
             dead = [r[0] for r in con.execute(
@@ -1456,50 +2030,71 @@ class Library:
         origin — discovery proposes, the owner (or a caller) disposes
         by ingesting the good ones. Honest limit: links lost by
         HTML→text extraction are not recoverable from chapter text."""
-        con, _ = self._connect()
-        try:
+        if self._port is not None:
             if source_id:
-                row = con.execute(
-                    "SELECT source_id FROM sources WHERE source_id = ?",
-                    (source_id,)).fetchone()
-                if row is None:
+                if self._t("sources").get(source_id) is None:
                     raise LibraryError(f"unknown source {source_id!r}")
-                slugs = [r[0] for r in con.execute(
-                    "SELECT slug FROM books WHERE source_id = ?",
-                    (source_id,)).fetchall()]
+                slugs = [r.get("slug", "")
+                         for r in self._t("books").find(
+                             {"source_id": source_id})]
             else:
-                slugs = [r[0] for r in con.execute(
-                    "SELECT slug FROM books").fetchall()]
-            known = {r[0] for r in con.execute(
-                "SELECT origin FROM sources").fetchall()}
-            out: list[dict[str, str]] = []
-            seen: set[str] = set()
-            for slug in slugs:
-                for (text,) in con.execute(
+                slugs = [r.get("slug", "")
+                         for r in self._t("books").all()]
+            known = {r.get("origin", "")
+                     for r in self._t("sources").all()}
+            texts_by_slug = {
+                slug: [d.get("text") or ""
+                       for d in self._child_find(
+                           "passages", {"book_slug": slug})]
+                for slug in slugs}
+        else:
+            con, _ = self._connect()
+            try:
+                if source_id:
+                    row = con.execute(
+                        "SELECT source_id FROM sources WHERE source_id = ?",
+                        (source_id,)).fetchone()
+                    if row is None:
+                        raise LibraryError(f"unknown source {source_id!r}")
+                    slugs = [r[0] for r in con.execute(
+                        "SELECT slug FROM books WHERE source_id = ?",
+                        (source_id,)).fetchall()]
+                else:
+                    slugs = [r[0] for r in con.execute(
+                        "SELECT slug FROM books").fetchall()]
+                known = {r[0] for r in con.execute(
+                    "SELECT origin FROM sources").fetchall()}
+                texts_by_slug = {
+                    slug: [t[0] for t in con.execute(
                         "SELECT text FROM passages WHERE book_slug = ?",
-                        (slug,)).fetchall():
-                    for url in _extract_urls(text):
-                        if url not in known and url not in seen:
-                            seen.add(url)
-                            out.append({"url": url, "found_in": slug})
-                            if len(out) >= limit:
-                                return out
-                try:
-                    meta = json.loads(
-                        (self.book_dir(slug) / "book.json").read_text(
-                            encoding="utf-8"))
-                except (OSError, ValueError):
-                    continue
-                for ch in meta.get("chapters", []):
-                    link = (ch.get("link") or "").strip()
-                    if link and link not in known and link not in seen:
-                        seen.add(link)
-                        out.append({"url": link, "found_in": slug})
+                        (slug,)).fetchall()]
+                    for slug in slugs}
+            finally:
+                con.close()
+        out: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for slug in slugs:
+            for text in texts_by_slug.get(slug, []):
+                for url in _extract_urls(text):
+                    if url not in known and url not in seen:
+                        seen.add(url)
+                        out.append({"url": url, "found_in": slug})
                         if len(out) >= limit:
                             return out
-            return out
-        finally:
-            con.close()
+            try:
+                meta = json.loads(
+                    (self.book_dir(slug) / "book.json").read_text(
+                        encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            for ch in meta.get("chapters", []):
+                link = (ch.get("link") or "").strip()
+                if link and link not in known and link not in seen:
+                    seen.add(link)
+                    out.append({"url": link, "found_in": slug})
+                    if len(out) >= limit:
+                        return out
+        return out
 
     # ── structured revisable records (digests) ────────────────────────
     def _contradiction_scan(self, con: sqlite3.Connection,
@@ -1545,6 +2140,39 @@ class Library:
                  c.note, now))
         return [c.to_dict() for c in found]
 
+    def _contradiction_scan_seam(self, record_id: str, claim: str,
+                                 scope: str) -> list[dict[str, Any]]:
+        """The seam twin of :meth:`_contradiction_scan`: the same
+        ``detect_against`` call and the same flag replacement, over
+        the seam digest rows. Flags stay derived state, never history."""
+        from types import SimpleNamespace
+
+        from ..memory.base import MemoryKind
+        from ..memory.contradictions import detect_against
+
+        rows = [r for r in self._t("digests").all()
+                if r.get("status") == "active"
+                and r.get("record_id") != record_id
+                and r.get("scope", "") in (scope, "")]
+        new = SimpleNamespace(id=record_id, content=claim,
+                              kind=MemoryKind.FACT, metadata={})
+        cands = [SimpleNamespace(id=r.get("record_id", ""),
+                                 content=r.get("claim", ""),
+                                 kind=MemoryKind.FACT, metadata={})
+                 for r in rows]
+        found = detect_against(new, cands)
+        for doc in self._child_find("digest_flags",
+                                    {"record_id": record_id}):
+            self._child_del("digest_flags", doc["id"])
+        now = time.time()
+        for c in found:
+            row = {"id": self._next("digest_flags"),
+                   "record_id": record_id, "other_id": c.older_id,
+                   "strategy": c.strategy, "confidence": c.confidence,
+                   "note": c.note, "created_at": now}
+            self._port.put_raw("digest_flags", str(row["id"]), row)
+        return [c.to_dict() for c in found]
+
     def create_digest(self, source_id: str, claim: str, *,
                       confidence: float = 0.5, scope: str = "",
                       check_contradictions: bool = True,
@@ -1565,6 +2193,28 @@ class Library:
         if not 0.0 <= conf <= 1.0:
             raise LibraryError("digest confidence must be in [0, 1]")
         scope = (scope or "").strip()
+        if self._port is not None:
+            if self._t("sources").get(source_id) is None:
+                raise LibraryError(f"unknown source {source_id!r}")
+            record_id = new_id()
+            now = time.time()
+            self._t("digests").put({
+                "record_id": record_id, "source_id": source_id,
+                "claim": claim, "confidence": conf, "scope": scope,
+                "status": "active", "created_at": now, "updated_at": now})
+            rev = {"id": self._next("digest_revisions"),
+                   "record_id": record_id, "claim": claim,
+                   "confidence": conf, "note": "created",
+                   "revised_by": "owner", "revised_at": now}
+            self._port.put_raw("digest_revisions", str(rev["id"]), rev)
+            flags = self._contradiction_scan_seam(record_id, claim, scope) \
+                if check_contradictions else []
+            vec_error = self._embed_items([(f"digest:{record_id}", claim)])
+            out = self.get_digest(record_id)
+            out["flags"] = flags
+            if vec_error:
+                out["vector_error"] = vec_error
+            return out
         con, _ = self._connect()
         try:
             row = con.execute(
@@ -1612,6 +2262,35 @@ class Library:
         never silently overwritten. No-arg revise is a LibraryError."""
         if claim is None and confidence is None:
             raise LibraryError("revise needs a new claim or confidence")
+        if self._port is not None:
+            row = self._t("digests").get(record_id)
+            if row is None:
+                raise LibraryError(f"unknown digest {record_id!r}")
+            new_claim = row.get("claim", "") if claim is None else claim.strip()
+            if not new_claim:
+                raise LibraryError("digest claim is required")
+            new_conf = float(row.get("confidence", 0.0)) \
+                if confidence is None else float(confidence)
+            if not 0.0 <= new_conf <= 1.0:
+                raise LibraryError("digest confidence must be in [0, 1]")
+            now = time.time()
+            rev = {"id": self._next("digest_revisions"),
+                   "record_id": record_id, "claim": new_claim,
+                   "confidence": new_conf, "note": note or "",
+                   "revised_by": revised_by or "owner", "revised_at": now}
+            self._port.put_raw("digest_revisions", str(rev["id"]), rev)
+            updated = dict(row)
+            updated.update({"claim": new_claim, "confidence": new_conf,
+                            "updated_at": now})
+            self._t("digests").put(updated)
+            flags = self._contradiction_scan_seam(
+                record_id, new_claim, row.get("scope", "") or "")
+            vec_error = self._replace_digest_vector(record_id, new_claim)
+            out = self.get_digest(record_id)
+            out["flags"] = flags
+            if vec_error:
+                out["vector_error"] = vec_error
+            return out
         con, _ = self._connect()
         try:
             row = con.execute(
@@ -1661,6 +2340,18 @@ class Library:
         return out
 
     def get_digest(self, record_id: str) -> dict[str, Any]:
+        if self._port is not None:
+            row = self._t("digests").get(record_id)
+            if row is None:
+                raise LibraryError(f"unknown digest {record_id!r}")
+            return {"record_id": row.get("record_id"),
+                    "source_id": row.get("source_id"),
+                    "claim": row.get("claim"),
+                    "confidence": row.get("confidence"),
+                    "scope": row.get("scope", ""),
+                    "status": row.get("status"),
+                    "created_at": row.get("created_at"),
+                    "updated_at": row.get("updated_at")}
         con, _ = self._connect()
         try:
             row = con.execute(
@@ -1677,6 +2368,26 @@ class Library:
 
     def list_digests(self, source_id: str = "", scope: str = "",
                      status: str = "active") -> list[dict[str, Any]]:
+        if self._port is not None:
+            rows = self._t("digests").all()
+            if source_id:
+                rows = [r for r in rows
+                        if r.get("source_id") == source_id]
+            if scope:
+                rows = [r for r in rows
+                        if r.get("scope", "") in (scope, "")]
+            if status:
+                rows = [r for r in rows if r.get("status") == status]
+            rows.sort(key=lambda r: float(r.get("updated_at", 0) or 0),
+                      reverse=True)
+            return [{
+                "record_id": r.get("record_id"),
+                "source_id": r.get("source_id"), "claim": r.get("claim"),
+                "confidence": r.get("confidence"),
+                "scope": r.get("scope", ""), "status": r.get("status"),
+                "created_at": r.get("created_at"),
+                "updated_at": r.get("updated_at"),
+            } for r in rows]
         con, _ = self._connect()
         try:
             sql = ("SELECT record_id, source_id, claim, confidence, scope,"
@@ -1705,6 +2416,16 @@ class Library:
 
     def digest_revisions(self, record_id: str) -> list[dict[str, Any]]:
         self.get_digest(record_id)  # fail fast on unknown ids
+        if self._port is not None:
+            docs = self._child_find("digest_revisions",
+                                    {"record_id": record_id})
+            docs.sort(key=lambda d: int(d.get("id", 0)))
+            return [{
+                "id": d.get("id"), "claim": d.get("claim"),
+                "confidence": d.get("confidence"), "note": d.get("note"),
+                "revised_by": d.get("revised_by"),
+                "revised_at": d.get("revised_at"),
+            } for d in docs]
         con, _ = self._connect()
         try:
             return [{
@@ -1719,6 +2440,17 @@ class Library:
 
     def digest_flags(self, record_id: str) -> list[dict[str, Any]]:
         self.get_digest(record_id)  # fail fast on unknown ids
+        if self._port is not None:
+            docs = self._child_find("digest_flags",
+                                    {"record_id": record_id})
+            docs.sort(key=lambda d: (-float(d.get("confidence", 0) or 0),
+                                     int(d.get("id", 0))))
+            return [{
+                "id": d.get("id"), "other_id": d.get("other_id"),
+                "strategy": d.get("strategy"),
+                "confidence": d.get("confidence"), "note": d.get("note"),
+                "created_at": d.get("created_at"),
+            } for d in docs]
         con, _ = self._connect()
         try:
             return [{
@@ -1747,11 +2479,7 @@ class Library:
         store = LearnStore(data_dir)
         rows = store.export_training_data(char_id)
         origin = f"character:{char_id}"
-        con, _ = self._connect()
-        try:
-            existing = self._source_for_origin(con, "learn", origin)
-        finally:
-            con.close()
+        existing = self._find_source("learn", origin)
         now = time.time()
         source = {
             "source_id": existing["source_id"] if existing else new_id(),
@@ -1767,19 +2495,7 @@ class Library:
         # The source row must exist BEFORE the first digest: create_digest
         # validates its source, and the meta update at the end only
         # refreshes the seen set.
-        con, _ = self._connect()
-        try:
-            con.execute(
-                "INSERT OR REPLACE INTO sources(source_id,kind,origin,"
-                "title,status,health,failures,fetched_at,last_checked,"
-                "last_error,created_at,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (source["source_id"], "learn", origin, source["title"],
-                 "active", "unknown", 0, now,
-                 source["last_checked"], "", source["created_at"],
-                 json.dumps(source["meta"])))
-            con.commit()
-        finally:
-            con.close()
+        self._upsert_source(source)
         ingested = skipped = 0
         for row in rows:
             entry_id = row.get("entry_id", "")
@@ -1799,19 +2515,7 @@ class Library:
             seen.add(entry_id)
             ingested += 1
         source["meta"]["entries"] = sorted(seen)[-5000:]
-        con, _ = self._connect()
-        try:
-            con.execute(
-                "INSERT OR REPLACE INTO sources(source_id,kind,origin,"
-                "title,status,health,failures,fetched_at,last_checked,"
-                "last_error,created_at,meta) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
-                (source["source_id"], "learn", origin, source["title"],
-                 "active", "unknown", 0, now,
-                 source["last_checked"], "", source["created_at"],
-                 json.dumps(source["meta"])))
-            con.commit()
-        finally:
-            con.close()
+        self._upsert_source(source)
         return {"ingested": ingested, "skipped": skipped,
                 "source_id": source["source_id"],
                 "scope": f"character:{char_id}"}
@@ -2003,13 +2707,17 @@ class Library:
         except Exception as exc:  # noqa: BLE001 — status never raises
             record_failure("library.Library.vector_status.vectored", exc)
             vectored = set()
-        con, _ = self._connect()
-        try:
-            active = [r[0] for r in con.execute(
-                "SELECT record_id FROM digests"
-                " WHERE status = 'active'").fetchall()]
-        finally:
-            con.close()
+        if self._port is not None:
+            active = [r.get("record_id", "")
+                      for r in self._t("digests").find({"status": "active"})]
+        else:
+            con, _ = self._connect()
+            try:
+                active = [r[0] for r in con.execute(
+                    "SELECT record_id FROM digests"
+                    " WHERE status = 'active'").fetchall()]
+            finally:
+                con.close()
         out["unvectorized_digests"] = len(
             [d for d in active if f"digest:{d}" not in vectored])
         return out
@@ -2095,6 +2803,39 @@ class Library:
         """Keyword lane over digests: FTS5 MATCH when available, else
         Python token overlap. Scope rule: a scoped query sees its
         scope PLUS global records, never another scope's."""
+        if self._port is not None:
+            # No FTS5 on the seam — the Python token-overlap lane,
+            # over the seam digest rows, with the same scope/status
+            # filters the native lane applies after its MATCH.
+            qtok = {w.lower() for w in _WORD.findall(query) if len(w) >= 2}
+            if not qtok:
+                return []
+            scored: list[tuple[int, dict[str, Any]]] = []
+            for row in self._t("digests").all():
+                claim = row.get("claim") or ""
+                ov = len(qtok & {w.lower()
+                                 for w in _WORD.findall(claim)})
+                if ov:
+                    scored.append((ov, row))
+            scored.sort(key=lambda item: (-item[0],
+                                          str(item[1].get("record_id", ""))))
+            out: list[dict[str, Any]] = []
+            for _ov, row in scored[:limit * 4]:
+                if not include_archived and row.get("status") != "active":
+                    continue
+                if scope and row.get("scope", "") not in (scope, ""):
+                    continue
+                out.append({
+                    "record_id": row.get("record_id"),
+                    "source_id": row.get("source_id"),
+                    "claim": row.get("claim"),
+                    "confidence": row.get("confidence"),
+                    "scope": row.get("scope", ""),
+                    "status": row.get("status"),
+                })
+                if len(out) >= limit:
+                    break
+            return out
         con, fts5 = self._connect()
         try:
             ids: list[str] = []
@@ -2184,16 +2925,24 @@ class Library:
                                           "keyword_digests": 0,
                                           "vector": 0, "degraded": []}}
         # Source health map for exclusion + weighting.
-        con, _ = self._connect()
-        try:
-            books_map = {r[0]: r[1] for r in con.execute(
-                "SELECT slug, source_id FROM books").fetchall()}
-            sources_map = {r[0]: {"status": r[1], "health": r[2]}
-                           for r in con.execute(
-                               "SELECT source_id, status, health"
-                               " FROM sources").fetchall()}
-        finally:
-            con.close()
+        if self._port is not None:
+            books_map = {r.get("slug", ""): r.get("source_id")
+                         for r in self._t("books").all()}
+            sources_map = {r.get("source_id"): {
+                "status": r.get("status", ""),
+                "health": r.get("health", "")}
+                for r in self._t("sources").all()}
+        else:
+            con, _ = self._connect()
+            try:
+                books_map = {r[0]: r[1] for r in con.execute(
+                    "SELECT slug, source_id FROM books").fetchall()}
+                sources_map = {r[0]: {"status": r[1], "health": r[2]}
+                               for r in con.execute(
+                                   "SELECT source_id, status, health"
+                                   " FROM sources").fetchall()}
+            finally:
+                con.close()
 
         def health_of(source_id: str | None) -> tuple[str, float, bool]:
             """(health label, factor, excluded-by-default)."""
@@ -2352,6 +3101,11 @@ class Library:
         total = max(1, len(b["chapters"]))
         chapter = max(1, min(int(chapter), total))
         offset_chars = max(0, int(offset_chars))
+        if self._port is not None:
+            self._t("reading_progress").put({
+                "slug": slug, "chapter": chapter,
+                "offset_chars": offset_chars, "updated_at": time.time()})
+            return self.get_progress(slug)
         con, _ = self._connect()
         try:
             con.execute(
@@ -2366,6 +3120,21 @@ class Library:
     def get_progress(self, slug: str) -> dict[str, Any]:
         b = self.load(slug)
         total = len(b["chapters"])
+        if self._port is not None:
+            row = self._t("reading_progress").get(slug)
+            if row is None:
+                return {"slug": slug, "title": b["title"], "started": False,
+                        "chapter": 0, "chapter_title": "", "offset_chars": 0,
+                        "percent": 0.0, "chapters": total, "updated_at": 0.0}
+            ch_no = max(1, min(int(row.get("chapter", 1)), max(1, total)))
+            title = b["chapters"][ch_no - 1]["title"] \
+                if 1 <= ch_no <= total else ""
+            return {"slug": slug, "title": b["title"], "started": True,
+                    "chapter": ch_no, "chapter_title": title,
+                    "offset_chars": int(row.get("offset_chars", 0)),
+                    "percent": round(100.0 * ch_no / max(1, total), 1),
+                    "chapters": total,
+                    "updated_at": row.get("updated_at", 0.0)}
         con, _ = self._connect()
         try:
             row = con.execute(
@@ -2419,6 +3188,14 @@ class Library:
                      label: str = "") -> dict[str, Any]:
         self._check_chapter(slug, chapter)
         offset_chars = max(0, int(offset_chars))
+        if self._port is not None:
+            bid = self._next("bookmarks")
+            self._port.put_raw("bookmarks", str(bid), {
+                "id": bid, "slug": slug, "chapter": int(chapter),
+                "offset_chars": offset_chars, "label": label.strip()[:200],
+                "created_at": time.time()})
+            return {"id": bid, "slug": slug, "chapter": int(chapter),
+                    "offset_chars": offset_chars, "label": label.strip()}
         con, _ = self._connect()
         try:
             cur = con.execute(
@@ -2434,6 +3211,19 @@ class Library:
                 "offset_chars": offset_chars, "label": label.strip()}
 
     def list_bookmarks(self, slug: str = "") -> list[dict[str, Any]]:
+        if self._port is not None:
+            docs = self._child_find(
+                "bookmarks", {"slug": slug} if slug else None)
+            if slug:
+                docs.sort(key=lambda d: (int(d.get("chapter", 0)),
+                                         int(d.get("offset_chars", 0))))
+            else:
+                docs.sort(key=lambda d: -float(d.get("created_at", 0) or 0))
+            return [{"id": d.get("id"), "slug": d.get("slug"),
+                     "chapter": d.get("chapter"),
+                     "offset_chars": d.get("offset_chars"),
+                     "label": d.get("label"),
+                     "created_at": d.get("created_at")} for d in docs]
         con, _ = self._connect()
         try:
             if slug:
@@ -2452,6 +3242,10 @@ class Library:
                 for r in rows]
 
     def remove_bookmark(self, bookmark_id: int) -> dict[str, Any]:
+        if self._port is not None:
+            if not self._child_del("bookmarks", int(bookmark_id)):
+                raise LibraryError(f"no bookmark {bookmark_id}")
+            return {"removed": int(bookmark_id)}
         con, _ = self._connect()
         try:
             cur = con.execute("DELETE FROM bookmarks WHERE id = ?",
@@ -2470,6 +3264,16 @@ class Library:
         note = (note or "").strip()
         if not note:
             raise LibraryError("note text is required")
+        if self._port is not None:
+            nid = self._next("annotations")
+            self._port.put_raw("annotations", str(nid), {
+                "id": nid, "slug": slug, "chapter": int(chapter),
+                "offset_chars": max(0, int(offset_chars)),
+                "quote": (quote or "").strip()[:2000], "note": note[:4000],
+                "created_at": time.time()})
+            return {"id": nid, "slug": slug, "chapter": int(chapter),
+                    "offset_chars": max(0, int(offset_chars)),
+                    "quote": (quote or "").strip()[:2000], "note": note}
         con, _ = self._connect()
         try:
             cur = con.execute(
@@ -2486,6 +3290,19 @@ class Library:
                 "quote": (quote or "").strip()[:2000], "note": note}
 
     def list_notes(self, slug: str = "") -> list[dict[str, Any]]:
+        if self._port is not None:
+            docs = self._child_find(
+                "annotations", {"slug": slug} if slug else None)
+            if slug:
+                docs.sort(key=lambda d: (int(d.get("chapter", 0)),
+                                         int(d.get("offset_chars", 0))))
+            else:
+                docs.sort(key=lambda d: -float(d.get("created_at", 0) or 0))
+            return [{"id": d.get("id"), "slug": d.get("slug"),
+                     "chapter": d.get("chapter"),
+                     "offset_chars": d.get("offset_chars"),
+                     "quote": d.get("quote"), "note": d.get("note"),
+                     "created_at": d.get("created_at")} for d in docs]
         con, _ = self._connect()
         try:
             if slug:
@@ -2504,6 +3321,10 @@ class Library:
                  "created_at": r[6]} for r in rows]
 
     def remove_note(self, note_id: int) -> dict[str, Any]:
+        if self._port is not None:
+            if not self._child_del("annotations", int(note_id)):
+                raise LibraryError(f"no note {note_id}")
+            return {"removed": int(note_id)}
         con, _ = self._connect()
         try:
             cur = con.execute("DELETE FROM annotations WHERE id = ?",
@@ -2525,6 +3346,12 @@ class Library:
 
     def create_collection(self, name: str) -> dict[str, Any]:
         name = self._clean_collection(name)
+        if self._port is not None:
+            if self._t("collections").get(name) is not None:
+                return {"collection": name, "created": False}
+            self._t("collections").put(
+                {"name": name, "created_at": time.time()})
+            return {"collection": name, "created": True}
         con, _ = self._connect()
         try:
             cur = con.execute(
@@ -2538,6 +3365,11 @@ class Library:
 
     def delete_collection(self, name: str) -> dict[str, Any]:
         name = self._clean_collection(name)
+        if self._port is not None:
+            if not self._t("collections").delete(name):
+                raise LibraryError(f"no collection {name!r}")
+            self._del_composite("collection_books", collection=name)
+            return {"deleted": name}
         con, _ = self._connect()
         try:
             cur = con.execute("DELETE FROM collections WHERE name = ?", (name,))
@@ -2552,6 +3384,15 @@ class Library:
     def add_to_collection(self, name: str, slug: str) -> dict[str, Any]:
         name = self._clean_collection(name)
         self.load(slug)  # fail fast on unknown books
+        if self._port is not None:
+            if self._t("collections").get(name) is None:
+                raise LibraryError(
+                    f"no collection {name!r} — create it first")
+            if self._t("collection_books").get(f"{name}\x1f{slug}") is None:
+                self._t("collection_books").put({
+                    "collection": name, "slug": slug,
+                    "added_at": time.time()})
+            return {"collection": name, "added": slug}
         con, _ = self._connect()
         try:
             row = con.execute("SELECT 1 FROM collections WHERE name = ?",
@@ -2569,6 +3410,11 @@ class Library:
 
     def remove_from_collection(self, name: str, slug: str) -> dict[str, Any]:
         name = self._clean_collection(name)
+        if self._port is not None:
+            if not self._t("collection_books").delete(f"{name}\x1f{slug}"):
+                raise LibraryError(
+                    f"{slug!r} is not in collection {name!r}")
+            return {"collection": name, "removed": slug}
         con, _ = self._connect()
         try:
             cur = con.execute(
@@ -2583,6 +3429,16 @@ class Library:
         return {"collection": name, "removed": slug}
 
     def list_collections(self) -> list[dict[str, Any]]:
+        if self._port is not None:
+            counts: dict[str, int] = {}
+            for r in self._t("collection_books").all():
+                counts[r.get("collection", "")] = \
+                    counts.get(r.get("collection", ""), 0) + 1
+            rows = sorted(self._t("collections").all(),
+                          key=lambda r: r.get("name", ""))
+            return [{"name": r.get("name"),
+                     "books": counts.get(r.get("name", ""), 0),
+                     "created_at": r.get("created_at")} for r in rows]
         con, _ = self._connect()
         try:
             rows = con.execute(
@@ -2597,16 +3453,25 @@ class Library:
     def shelf(self, name: str) -> dict[str, Any]:
         """Every book on a collection shelf, with progress + rating."""
         name = self._clean_collection(name)
-        con, _ = self._connect()
-        try:
-            if con.execute("SELECT 1 FROM collections WHERE name = ?",
-                           (name,)).fetchone() is None:
+        if self._port is not None:
+            if self._t("collections").get(name) is None:
                 raise LibraryError(f"no collection {name!r}")
-            slugs = [r[0] for r in con.execute(
-                "SELECT slug FROM collection_books WHERE collection = ?"
-                " ORDER BY added_at", (name,)).fetchall()]
-        finally:
-            con.close()
+            rows = sorted(
+                (r for r in self._t("collection_books").all()
+                 if r.get("collection") == name),
+                key=lambda r: float(r.get("added_at", 0) or 0))
+            slugs = [r.get("slug", "") for r in rows]
+        else:
+            con, _ = self._connect()
+            try:
+                if con.execute("SELECT 1 FROM collections WHERE name = ?",
+                               (name,)).fetchone() is None:
+                    raise LibraryError(f"no collection {name!r}")
+                slugs = [r[0] for r in con.execute(
+                    "SELECT slug FROM collection_books WHERE collection = ?"
+                    " ORDER BY added_at", (name,)).fetchall()]
+            finally:
+                con.close()
         books = []
         for slug in slugs:
             try:
@@ -2638,6 +3503,11 @@ class Library:
         """Replace the book's tags (empty list clears them)."""
         self.load(slug)
         tags = self._clean_tags(tags)
+        if self._port is not None:
+            self._del_composite("book_tags", slug=slug)
+            for t in tags:
+                self._t("book_tags").put({"slug": slug, "tag": t})
+            return {"slug": slug, "tags": tags}
         con, _ = self._connect()
         try:
             con.execute("DELETE FROM book_tags WHERE slug = ?", (slug,))
@@ -2650,6 +3520,10 @@ class Library:
 
     def get_tags(self, slug: str) -> list[str]:
         self.load(slug)
+        if self._port is not None:
+            return sorted(r.get("tag", "")
+                          for r in self._t("book_tags").all()
+                          if r.get("slug") == slug)
         con, _ = self._connect()
         try:
             rows = con.execute(
@@ -2660,6 +3534,14 @@ class Library:
         return [r[0] for r in rows]
 
     def list_tags(self) -> list[dict[str, Any]]:
+        if self._port is not None:
+            counts: dict[str, int] = {}
+            for r in self._t("book_tags").all():
+                counts[r.get("tag", "")] = \
+                    counts.get(r.get("tag", ""), 0) + 1
+            return [{"tag": tag, "books": n}
+                    for tag, n in sorted(counts.items(),
+                                         key=lambda kv: (-kv[1], kv[0]))]
         con, _ = self._connect()
         try:
             rows = con.execute(
@@ -2673,12 +3555,17 @@ class Library:
         tag = (tag or "").strip().lower()
         if not tag:
             raise LibraryError("tag is required")
-        con, _ = self._connect()
-        try:
-            slugs = [r[0] for r in con.execute(
-                "SELECT slug FROM book_tags WHERE tag = ?", (tag,)).fetchall()]
-        finally:
-            con.close()
+        if self._port is not None:
+            slugs = [r.get("slug", "")
+                     for r in self._t("book_tags").all()
+                     if r.get("tag") == tag]
+        else:
+            con, _ = self._connect()
+            try:
+                slugs = [r[0] for r in con.execute(
+                    "SELECT slug FROM book_tags WHERE tag = ?", (tag,)).fetchall()]
+            finally:
+                con.close()
         out = []
         for slug in slugs:
             try:
@@ -2695,6 +3582,10 @@ class Library:
         stars = int(stars)
         if not 1 <= stars <= 5:
             raise LibraryError(f"rating must be 1–5 stars, got {stars}")
+        if self._port is not None:
+            self._t("ratings").put(
+                {"slug": slug, "stars": stars, "rated_at": time.time()})
+            return {"slug": slug, "stars": stars}
         con, _ = self._connect()
         try:
             con.execute(
@@ -2707,6 +3598,9 @@ class Library:
 
     def get_rating(self, slug: str) -> int:
         self.load(slug)
+        if self._port is not None:
+            row = self._t("ratings").get(slug)
+            return int(row.get("stars")) if row else 0
         con, _ = self._connect()
         try:
             row = con.execute(
@@ -2724,6 +3618,12 @@ class Library:
     def start_session(self, slug: str) -> dict[str, Any]:
         """Open a reading session. Returns the session id."""
         self.load(slug)
+        if self._port is not None:
+            sid = self._next("reading_sessions")
+            self._port.put_raw("reading_sessions", str(sid), {
+                "id": sid, "slug": slug, "started_at": time.time(),
+                "ended_at": 0, "seconds": 0, "chapters": 0, "words": 0})
+            return {"session_id": sid, "slug": slug}
         con, _ = self._connect()
         try:
             cur = con.execute(
@@ -2738,6 +3638,22 @@ class Library:
     def end_session(self, session_id: int, *, chapters: int = 0,
                     words: int = 0) -> dict[str, Any]:
         """Close a reading session, recording duration + throughput."""
+        if self._port is not None:
+            row = self._child_get("reading_sessions", session_id)
+            if row is None:
+                raise LibraryError(f"no session {session_id}")
+            now = time.time()
+            seconds = max(0.0, now - float(row.get("started_at", 0) or 0))
+            updated = dict(row)
+            updated.update({"ended_at": now, "seconds": seconds,
+                            "chapters": int(chapters), "words": int(words)})
+            self._port.put_raw("reading_sessions", str(int(session_id)),
+                               updated)
+            wpm = round(words / (seconds / 60), 1) \
+                if seconds > 5 and words else 0
+            return {"session_id": session_id, "slug": row.get("slug"),
+                    "seconds": round(seconds, 1), "chapters": chapters,
+                    "words": words, "wpm": wpm}
         con, _ = self._connect()
         try:
             row = con.execute(
@@ -2761,6 +3677,41 @@ class Library:
 
     def stats(self, slug: str = "") -> dict[str, Any]:
         """Reading stats: sessions, minutes, WPM, streak, per-book table."""
+        if self._port is not None:
+            if slug:
+                self.load(slug)
+            all_docs = self._child_find("reading_sessions")
+            docs = [d for d in all_docs
+                    if not slug or d.get("slug") == slug]
+            sessions = len(docs)
+            seconds = sum(float(d.get("seconds", 0) or 0) for d in docs)
+            words = sum(int(d.get("words", 0) or 0) for d in docs)
+            chapters = sum(int(d.get("chapters", 0) or 0) for d in docs)
+            # per_book is over ALL sessions, never the slug filter —
+            # exactly as the native query's unfiltered GROUP BY.
+            per: dict[str, tuple[int, float, int]] = {}
+            for d in all_docs:
+                s = d.get("slug", "")
+                n, sec, w = per.get(s, (0, 0.0, 0))
+                per[s] = (n + 1, sec + float(d.get("seconds", 0) or 0),
+                          w + int(d.get("words", 0) or 0))
+            per_book = sorted(per.items(),
+                              key=lambda kv: (-kv[1][1], kv[0]))[:20]
+            minutes = round(seconds / 60, 1)
+            wpm = round(words / minutes, 1) if minutes > 0 else 0
+            return {
+                "slug": slug or "all",
+                "sessions": sessions,
+                "minutes": minutes,
+                "words_read": words,
+                "chapters_read": chapters,
+                "wpm": wpm,
+                "streak_days": self.reading_streak(),
+                "per_book": [
+                    {"slug": s, "sessions": n,
+                     "minutes": round(sec / 60, 1), "words": w}
+                    for s, (n, sec, w) in per_book],
+            }
         con, _ = self._connect()
         try:
             filt = "WHERE slug = ?" if slug else ""
@@ -2796,14 +3747,23 @@ class Library:
 
     def reading_streak(self) -> int:
         """Consecutive days (ending today/yesterday) with a session."""
-        con, _ = self._connect()
-        try:
-            rows = con.execute(
-                "SELECT DISTINCT date(started_at, 'unixepoch', 'localtime') "
-                "FROM reading_sessions ORDER BY 1 DESC").fetchall()
-        finally:
-            con.close()
-        days = [r[0] for r in rows]
+        if self._port is not None:
+            import datetime as _dt
+
+            days = sorted({
+                _dt.datetime.fromtimestamp(
+                    float(d.get("started_at", 0) or 0)).date().isoformat()
+                for d in self._child_find("reading_sessions")
+                if d.get("started_at")}, reverse=True)
+        else:
+            con, _ = self._connect()
+            try:
+                rows = con.execute(
+                    "SELECT DISTINCT date(started_at, 'unixepoch', 'localtime') "
+                    "FROM reading_sessions ORDER BY 1 DESC").fetchall()
+            finally:
+                con.close()
+            days = [r[0] for r in rows]
         if not days:
             return 0
         import datetime as _dt
@@ -2826,17 +3786,27 @@ class Library:
     def currently_reading(self, days: int = 7) -> list[dict[str, Any]]:
         """Books with a session (or progress update) in the last ``days``."""
         cutoff = time.time() - days * 86400
-        con, _ = self._connect()
-        try:
-            rows = con.execute(
-                "SELECT DISTINCT slug FROM reading_sessions "
-                "WHERE started_at > ? "
-                "UNION SELECT DISTINCT slug FROM reading_progress "
-                "WHERE updated_at > ?", (cutoff, cutoff)).fetchall()
-        finally:
-            con.close()
+        if self._port is not None:
+            slugs = sorted({
+                d.get("slug", "")
+                for d in self._child_find("reading_sessions")
+                if float(d.get("started_at", 0) or 0) > cutoff}
+                | {r.get("slug", "")
+                   for r in self._t("reading_progress").all()
+                   if float(r.get("updated_at", 0) or 0) > cutoff})
+        else:
+            con, _ = self._connect()
+            try:
+                rows = con.execute(
+                    "SELECT DISTINCT slug FROM reading_sessions "
+                    "WHERE started_at > ? "
+                    "UNION SELECT DISTINCT slug FROM reading_progress "
+                    "WHERE updated_at > ?", (cutoff, cutoff)).fetchall()
+            finally:
+                con.close()
+            slugs = [r[0] for r in rows]
         out = []
-        for (slug,) in rows:
+        for slug in slugs:
             try:
                 meta = self.load(slug)
                 prog = self.get_progress(slug)
@@ -2851,6 +3821,12 @@ class Library:
     def set_series(self, slug: str, series: str,
                    index: float = 0) -> dict[str, Any]:
         self.load(slug)
+        if self._port is not None:
+            self._t("book_series").put({
+                "slug": slug, "series": series.strip(),
+                "series_index": float(index)})
+            return {"slug": slug, "series": series.strip(),
+                    "index": float(index)}
         con, _ = self._connect()
         try:
             con.execute(
@@ -2862,6 +3838,12 @@ class Library:
         return {"slug": slug, "series": series.strip(), "index": float(index)}
 
     def get_series(self, slug: str) -> dict[str, Any]:
+        if self._port is not None:
+            row = self._t("book_series").get(slug)
+            if not row:
+                return {"slug": slug, "series": "", "index": 0}
+            return {"slug": slug, "series": row.get("series", ""),
+                    "index": row.get("series_index")}
         con, _ = self._connect()
         try:
             row = con.execute(
@@ -2874,6 +3856,19 @@ class Library:
         return {"slug": slug, "series": row[0], "index": row[1]}
 
     def list_series(self) -> list[dict[str, Any]]:
+        if self._port is not None:
+            rows = sorted(
+                self._t("book_series").all(),
+                key=lambda r: (r.get("series", ""),
+                               r.get("series_index") is not None,
+                               r.get("series_index") or 0))
+            series: dict[str, list[dict[str, Any]]] = {}
+            for r in rows:
+                series.setdefault(r.get("series", ""), []).append(
+                    {"slug": r.get("slug", ""),
+                     "index": r.get("series_index")})
+            return [{"series": name, "books": books}
+                    for name, books in series.items()]
         con, _ = self._connect()
         try:
             rows = con.execute(
@@ -2894,20 +3889,39 @@ class Library:
         fmt = (format or "markdown").lower()
         if fmt not in ("markdown", "json", "text"):
             raise LibraryError(f"format must be markdown|json|text, got {format!r}")
-        con, _ = self._connect()
-        try:
-            filt = "WHERE b.slug = ?" if slug else ""
-            args: tuple = (slug,) if slug else ()
-            marks = con.execute(
-                f"SELECT b.slug, b.chapter, b.offset_chars, b.label, b.created_at "
-                f"FROM bookmarks b {filt} ORDER BY b.slug, b.chapter",
-                args).fetchall()
-            notes = con.execute(
-                f"SELECT slug, chapter, offset_chars, quote, note, created_at "
-                f"FROM annotations {('WHERE slug = ?') if slug else ''} "
-                f"ORDER BY slug, chapter", args).fetchall()
-        finally:
-            con.close()
+        if self._port is not None:
+            marks = [(d.get("slug", ""), d.get("chapter"),
+                      d.get("offset_chars"), d.get("label"),
+                      d.get("created_at"))
+                     for d in sorted(
+                         self._child_find("bookmarks"),
+                         key=lambda d: (d.get("slug", ""),
+                                        int(d.get("chapter", 0))))]
+            notes = [(d.get("slug", ""), d.get("chapter"),
+                      d.get("offset_chars"), d.get("quote"), d.get("note"),
+                      d.get("created_at"))
+                     for d in sorted(
+                         self._child_find("annotations"),
+                         key=lambda d: (d.get("slug", ""),
+                                        int(d.get("chapter", 0))))]
+            if slug:
+                marks = [m for m in marks if m[0] == slug]
+                notes = [n for n in notes if n[0] == slug]
+        else:
+            con, _ = self._connect()
+            try:
+                filt = "WHERE b.slug = ?" if slug else ""
+                args: tuple = (slug,) if slug else ()
+                marks = con.execute(
+                    f"SELECT b.slug, b.chapter, b.offset_chars, b.label, b.created_at "
+                    f"FROM bookmarks b {filt} ORDER BY b.slug, b.chapter",
+                    args).fetchall()
+                notes = con.execute(
+                    f"SELECT slug, chapter, offset_chars, quote, note, created_at "
+                    f"FROM annotations {('WHERE slug = ?') if slug else ''} "
+                    f"ORDER BY slug, chapter", args).fetchall()
+            finally:
+                con.close()
         if fmt == "json":
             import json as _json
             payload = {

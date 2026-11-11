@@ -68,6 +68,14 @@ P5 settles the stores that live BESIDE the central database:
   The residue Batch 3 C2 port (marketing-send — the claim as
   seam-only fields fenced by one cas_row, two-engine exactly-once)
   follows the same pattern below.
+  The residue Batch 3 C1 port (books-library — 15 catalog tables;
+  FTS5 stays native-rung-only, the seam search is the module's own
+  in-memory BM25 over seam passage documents labelled bm25-memory;
+  the digest keyword lane is its Python token-overlap twin;
+  wisdom/corpus.py's three raw-file fossil reads re-routed through
+  seam-aware Library accessors; AUTOINCREMENT children ride
+  next_id() counters seeded from the import) follows the same
+  pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -292,7 +300,9 @@ class TestSidecarRegistry:
             # residue Batch 3, C6 lane:
             "travel-groups",
             # residue Batch 3, C2 lane:
-            "marketing-send"}
+            "marketing-send",
+            # residue Batch 3, C1 lane:
+            "books-library"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -7415,3 +7425,556 @@ class TestMarketingSendPort:
             "PRAGMA table_info(send_queue)")]
         assert len(cols) == 14
         assert "claim_token" not in cols and "claim_until" not in cols
+
+
+class TestBooksLibraryPort:
+    """books/library.py — the books-library port (residue Batch 3,
+    C1): the 15 catalog tables ride the seam
+    (``books-library__<table>``) behind the unchanged Library API.
+    FTS5 stays native-rung-only by design: on the seam ``search()``
+    runs this module's own in-memory BM25 over the seam passage
+    documents, labelled ``bm25-memory`` exactly like the native
+    non-FTS5 fallback, and the digest keyword lane runs its Python
+    token-overlap twin — so search parity is pinned as the same
+    ranked-passage SET on both rungs, never the engine's raw
+    scores. AUTOINCREMENT children ride ``next_id()`` counters
+    seeded from the lazy import's max ids, so id continuity holds
+    across the import. The same lane re-routed wisdom/corpus.py's
+    three raw-file fossil reads through the seam-aware Library
+    accessors (``iter_passages`` / ``passage_rows`` /
+    ``book_titles``)."""
+
+    BOOK_A = """# The Dragon Codex
+
+by Ember Wright
+
+# Chapter One — Awakening
+
+Dragons fly over the valley at dawn. The wizard watched them from the tower,
+counting seven bright wings against the rising sun.
+
+# Chapter Two — The Bargain
+
+The wizard made a bargain with the eldest dragon. Fire for wisdom, scale for
+spell — an old trade, older than the mountains themselves.
+
+# Chapter Three — Departure
+
+At dusk the dragons left the valley. The wizard kept the ember they gave,
+a small sun in a glass jar, and the valley grew quiet.
+"""
+
+    BOOK_B = """# The Tide Codex
+
+by Marina Sol
+
+# Chapter One — Low Water
+
+Tides pull the boats home at dusk. The harbor master counts the ropes.
+
+# Chapter Two — The Quixotic Light
+
+A quixotic lamp burns on the far pier. Sailors swear it answers questions no one asked.
+"""
+
+    @staticmethod
+    def _lib(path, rung):
+        from nomorals.books.library import Library
+
+        ctx = SimpleNamespace(
+            db=None, settings=SimpleNamespace(workspace_dir=str(path)))
+        if rung.store is None:
+            return Library(ctx)
+        return Library(ctx, store=rung.store)
+
+    def _ingest_fixture(self, ws, rung):
+        srcdir = Path(ws) / "src"
+        srcdir.mkdir(parents=True, exist_ok=True)
+        pa = srcdir / "codex-a.md"
+        pa.write_text(self.BOOK_A, encoding="utf-8")
+        pb = srcdir / "codex-b.md"
+        pb.write_text(self.BOOK_B, encoding="utf-8")
+        lib = self._lib(ws, rung)
+        ra = lib.ingest(pa, title="The Dragon Codex",
+                        author="Ember Wright")
+        rb = lib.ingest(pb, title="The Tide Codex", author="Marina Sol")
+        return lib, ra.slug, rb.slug
+
+    def _scenario(self, ws, rung) -> dict:
+        from nomorals.books.library import LibraryError
+
+        lib, slug_a, slug_b = self._ingest_fixture(ws, rung)
+        out: dict = {}
+        # ── catalog rows the ingests wrote ──
+        out["sources"] = sorted(
+            (s["kind"], s["title"], s["status"], s["health"])
+            for s in lib.list_sources())
+        # ── search parity: same ranked-passage SET on both rungs ──
+        out["search_dragons"] = sorted(
+            (h.book_slug, h.chapter_number)
+            for h in lib.search("dragons"))
+        out["search_dragon_a"] = sorted(
+            (h.book_slug, h.chapter_number)
+            for h in lib.search("dragon", book=slug_a))
+        out["search_wizard"] = sorted(
+            (h.book_slug, h.chapter_number)
+            for h in lib.search("wizard"))
+        out["search_quixotic"] = sorted(
+            (h.book_slug, h.chapter_number)
+            for h in lib.search("quixotic"))
+        out["search_tides"] = sorted(
+            (h.book_slug, h.chapter_number)
+            for h in lib.search("tides"))
+        out["search_none"] = lib.search("zxqvnomatch")
+        # ── corpus accessors (the re-routed fossil reads) ──
+        pairs = lib.iter_passages()
+        out["passage_keys"] = sorted(k for k, _ in pairs)
+        out["passage_count"] = len(pairs)
+        rows = lib.passage_rows([f"{slug_a}#2", f"{slug_b}#3"])
+        out["passage_rows"] = {
+            k: (v["book_slug"], v["chapter"], v["number"])
+            for k, v in sorted(rows.items())}
+        out["book_titles"] = sorted(lib.book_titles())
+        # ── reading progress ──
+        prog = lib.set_progress(slug_a, 2, 120)
+        out["progress"] = (prog["started"], prog["chapter"],
+                           prog["offset_chars"], prog["percent"],
+                           prog["chapters"])
+        # ── bookmarks + notes + export ──
+        b1 = lib.add_bookmark(slug_a, 1, 10, "start")
+        b2 = lib.add_bookmark(slug_a, 3, 5, "ember")
+        out["bookmark_ids"] = (b1["id"], b2["id"])
+        out["bookmarks"] = [(b["id"], b["chapter"], b["offset_chars"],
+                             b["label"])
+                            for b in lib.list_bookmarks(slug_a)]
+        n1 = lib.add_note(slug_a, 2, 0, quote="Fire for wisdom",
+                          note="the bargain")
+        out["note_id"] = n1["id"]
+        out["notes"] = [(n["id"], n["chapter"], n["quote"], n["note"])
+                        for n in lib.list_notes(slug_a)]
+        import json as _json
+
+        exported = _json.loads(
+            lib.export_annotations(slug_a, format="json")["text"])
+        out["export"] = exported
+        out["removed_bookmark"] = lib.remove_bookmark(b1["id"])
+        out["removed_note"] = lib.remove_note(n1["id"])
+        out["bookmarks_after"] = [
+            (b["id"], b["chapter"], b["offset_chars"], b["label"])
+            for b in lib.list_bookmarks(slug_a)]
+        out["notes_after"] = lib.list_notes(slug_a)
+        # ── collections ──
+        out["create_collection"] = lib.create_collection("favorites")
+        out["create_collection_again"] = lib.create_collection("favorites")
+        lib.add_to_collection("favorites", slug_a)
+        lib.add_to_collection("favorites", slug_b)
+        shelf = lib.shelf("favorites")
+        out["shelf"] = [(b["slug"], b["rating"], b["tags"],
+                         b["progress_percent"]) for b in shelf["books"]]
+        out["collections"] = [(c["name"], c["books"])
+                              for c in lib.list_collections()]
+        out["remove_from_collection"] = lib.remove_from_collection(
+            "favorites", slug_b)
+        out["delete_collection"] = lib.delete_collection("favorites")
+        out["collections_after"] = lib.list_collections()
+        # ── tags ──
+        out["set_tags"] = lib.set_tags(slug_a, "dragons, fantasy")
+        out["get_tags"] = lib.get_tags(slug_a)
+        out["list_tags"] = [(t["tag"], t["books"])
+                            for t in lib.list_tags()]
+        out["books_with_tag"] = [b["slug"]
+                                 for b in lib.books_with_tag("dragons")]
+        out["clear_tags"] = lib.set_tags(slug_a, [])
+        # ── ratings ──
+        out["rate_a"] = lib.rate(slug_a, 5)
+        out["rate_b"] = lib.rate(slug_b, 3)
+        out["rating_a"] = lib.get_rating(slug_a)
+        out["rating_b"] = lib.get_rating(slug_b)
+        # ── enriched list (progress + rating + tags all set) ──
+        lib.set_tags(slug_a, "dragons, fantasy")
+        out["list_books"] = [(b["slug"], b["title"], b["author"],
+                              b["chapters"], b["words"], b["strategy"],
+                              b["rating"], b["tags"],
+                              b["progress_percent"])
+                             for b in lib.list_books()]
+        # ── reading sessions + stats ──
+        s1 = lib.start_session(slug_a)
+        e1 = lib.end_session(s1["session_id"], chapters=1, words=1200)
+        out["session_1"] = (e1["slug"], e1["chapters"], e1["words"],
+                            e1["wpm"])
+        s2 = lib.start_session(slug_a)
+        lib.end_session(s2["session_id"], chapters=1, words=600)
+        st = lib.stats()
+        out["stats"] = (st["sessions"], st["minutes"], st["words_read"],
+                        st["chapters_read"], st["wpm"], st["streak_days"],
+                        [(p["slug"], p["sessions"], p["minutes"],
+                          p["words"]) for p in st["per_book"]])
+        out["streak"] = lib.reading_streak()
+        out["currently_reading"] = [b["slug"]
+                                    for b in lib.currently_reading()]
+        # ── series ──
+        out["set_series_a"] = lib.set_series(slug_a, "Codex", 1)
+        out["set_series_b"] = lib.set_series(slug_b, "Codex", 2)
+        out["get_series"] = lib.get_series(slug_a)
+        out["list_series"] = lib.list_series()
+        # ── digests ──
+        src_a = next(s["source_id"] for s in lib.list_sources()
+                     if s["title"] == "The Dragon Codex")
+        d1 = lib.create_digest(
+            src_a, "Dragons hoard gold in mountain caves",
+            confidence=0.9)
+        out["d1"] = (d1["claim"], d1["confidence"], d1["scope"],
+                     d1["status"], d1["flags"])
+        d2 = lib.create_digest(
+            src_a, "Dragons do not hoard gold in mountain caves",
+            confidence=0.8)
+        out["d2_create_flags"] = [(f["strategy"], f["confidence"])
+                                  for f in d2["flags"]]
+        d2r = lib.revise_digest(
+            d2["record_id"],
+            claim="Dragons hoard gold and silver in mountain caves",
+            confidence=0.7)
+        out["d2_revised"] = (d2r["claim"], d2r["confidence"],
+                             d2r["scope"], d2r["status"], d2r["flags"])
+        out["d2_revisions"] = [
+            (r["claim"], r["confidence"], r["note"], r["revised_by"])
+            for r in lib.digest_revisions(d2["record_id"])]
+        out["d2_flags"] = [(f["strategy"], f["confidence"])
+                           for f in lib.digest_flags(d2["record_id"])]
+        out["digests"] = [(d["claim"], d["confidence"], d["scope"],
+                           d["status"]) for d in lib.list_digests()]
+        out["digest_keyword_gold"] = sorted(
+            d["claim"] for d in lib._search_digests_keyword(
+                "gold", scope="", include_archived=False, limit=10))
+        out["digest_keyword_none"] = lib._search_digests_keyword(
+            "zxqvnomatch", scope="", include_archived=False, limit=10)
+        # ── hybrid + vector lane ──
+        hyb = lib.search_hybrid("quixotic")
+        out["hybrid_kinds"] = sorted(h["kind"] for h in hyb["hits"])
+        out["hybrid_passage_slugs"] = sorted(
+            {h.get("slug", "") for h in hyb["hits"]
+             if h["kind"] == "passage"})
+        out["hybrid_digest_count"] = len(
+            [h for h in hyb["hits"] if h["kind"] == "digest"])
+        out["hybrid_lanes"] = (hyb["lanes"]["keyword_passages"],
+                               hyb["lanes"]["keyword_digests"],
+                               hyb["lanes"]["degraded"])
+        vs = lib.vector_status()
+        out["vector_status"] = (vs["embedder_provider"],
+                                vs["embedder_dims"], vs["pinned_dims"],
+                                vs["unvectorized_digests"])
+        # ── discovery / health / shed ──
+        out["discover"] = lib.discover()
+        out["check_sources"] = lib.check_sources()
+        out["shed_dead"] = lib.shed_dead()
+        # ── errors are honest LibraryErrors, never silent ──
+        for fn in (lambda: lib.get_progress("nope"),
+                   lambda: lib.drop("nope"),
+                   lambda: lib.rate(slug_a, 6),
+                   lambda: lib.create_digest("no-such-source", "x"),
+                   lambda: lib.create_digest(src_a, "   ")):
+            try:
+                fn()
+            except LibraryError:
+                pass
+            else:
+                raise AssertionError(f"{fn} did not raise LibraryError")
+        out["errors_honest"] = True
+        # ── drop one book: catalog rows go, the other book stays ──
+        out["drop_b"] = lib.drop(slug_b)
+        out["list_books_after_drop"] = [b["slug"]
+                                        for b in lib.list_books()]
+        out["search_tides_after_drop"] = lib.search("tides")
+        out["search_quixotic_after_drop"] = lib.search("quixotic")
+        return out
+
+    def test_conformance(self, rung, tmp_path):
+        out = self._scenario(tmp_path / "ws", rung)
+        assert out == {
+            "sources": [("file", "The Dragon Codex", "active", "unknown"),
+                        ("file", "The Tide Codex", "active", "unknown")],
+            "search_dragons": [("the-dragon-codex", 2),
+                               ("the-dragon-codex", 4)],
+            "search_dragon_a": [("the-dragon-codex", 1),
+                              ("the-dragon-codex", 3)],
+            "search_wizard": [("the-dragon-codex", 2),
+                              ("the-dragon-codex", 3),
+                              ("the-dragon-codex", 4)],
+            "search_quixotic": [("the-tide-codex", 3)],
+            "search_tides": [("the-tide-codex", 2)],
+            "search_none": [],
+            "passage_keys": ["the-dragon-codex#1", "the-dragon-codex#2",
+                             "the-dragon-codex#3", "the-dragon-codex#4",
+                             "the-tide-codex#1", "the-tide-codex#2",
+                             "the-tide-codex#3"],
+            "passage_count": 7,
+            "passage_rows": {
+                "the-dragon-codex#2": ("the-dragon-codex",
+                                       "Chapter One — Awakening", 2),
+                "the-tide-codex#3": ("the-tide-codex",
+                                     "Chapter Two — The Quixotic Light", 3)},
+            "book_titles": [("the-dragon-codex", "The Dragon Codex"),
+                            ("the-tide-codex", "The Tide Codex")],
+            "progress": (True, 2, 120, 50.0, 4),
+            "bookmark_ids": (1, 2),
+            "bookmarks": [(1, 1, 10, "start"), (2, 3, 5, "ember")],
+            "note_id": 1,
+            "notes": [(1, 2, "Fire for wisdom", "the bargain")],
+            "export": {
+                "bookmarks": [
+                    {"slug": "the-dragon-codex", "chapter": 1,
+                     "offset": 10, "label": "start"},
+                    {"slug": "the-dragon-codex", "chapter": 3,
+                     "offset": 5, "label": "ember"}],
+                "notes": [
+                    {"slug": "the-dragon-codex", "chapter": 2,
+                     "offset": 0, "quote": "Fire for wisdom",
+                     "note": "the bargain"}]},
+            "removed_bookmark": {"removed": 1},
+            "removed_note": {"removed": 1},
+            "bookmarks_after": [(2, 3, 5, "ember")],
+            "notes_after": [],
+            "create_collection": {"collection": "favorites",
+                                  "created": True},
+            "create_collection_again": {"collection": "favorites",
+                                        "created": False},
+            "shelf": [("the-dragon-codex", 0, [], 50.0),
+                      ("the-tide-codex", 0, [], 0.0)],
+            "collections": [("favorites", 2)],
+            "remove_from_collection": {"collection": "favorites",
+                                       "removed": "the-tide-codex"},
+            "delete_collection": {"deleted": "favorites"},
+            "collections_after": [],
+            "set_tags": {"slug": "the-dragon-codex",
+                         "tags": ["dragons", "fantasy"]},
+            "get_tags": ["dragons", "fantasy"],
+            "list_tags": [("dragons", 1), ("fantasy", 1)],
+            "books_with_tag": ["the-dragon-codex"],
+            "clear_tags": {"slug": "the-dragon-codex", "tags": []},
+            "rate_a": {"slug": "the-dragon-codex", "stars": 5},
+            "rate_b": {"slug": "the-tide-codex", "stars": 3},
+            "rating_a": 5,
+            "rating_b": 3,
+            "list_books": [
+                ("the-dragon-codex", "The Dragon Codex", "Ember Wright",
+                 4, 75, "markdown", 5, ["dragons", "fantasy"], 50.0),
+                ("the-tide-codex", "The Tide Codex", "Marina Sol",
+                 3, 32, "markdown", 3, [], 0.0)],
+            "session_1": ("the-dragon-codex", 1, 1200, 0),
+            "stats": (2, 0.0, 1800, 2, 0, 1,
+                      [("the-dragon-codex", 2, 0.0, 1800)]),
+            "streak": 1,
+            "currently_reading": ["the-dragon-codex"],
+            "set_series_a": {"slug": "the-dragon-codex",
+                             "series": "Codex", "index": 1.0},
+            "set_series_b": {"slug": "the-tide-codex",
+                             "series": "Codex", "index": 2.0},
+            "get_series": {"slug": "the-dragon-codex",
+                           "series": "Codex", "index": 1.0},
+            "list_series": [{"series": "Codex", "books": [
+                {"slug": "the-dragon-codex", "index": 1.0},
+                {"slug": "the-tide-codex", "index": 2.0}]}],
+            "d1": ("Dragons hoard gold in mountain caves", 0.9, "", "active",
+                   []),
+            "d2_create_flags": [("negation_flip", 0.65)],
+            "d2_revised": ("Dragons hoard gold and silver in mountain caves",
+                           0.7, "", "active", []),
+            "d2_revisions": [
+                ("Dragons do not hoard gold in mountain caves", 0.8,
+                 "created", "owner"),
+                ("Dragons hoard gold and silver in mountain caves", 0.7,
+                 "", "owner")],
+            "d2_flags": [],
+            "digests": [
+                ("Dragons hoard gold and silver in mountain caves", 0.7,
+                 "", "active"),
+                ("Dragons hoard gold in mountain caves", 0.9, "", "active")],
+            "digest_keyword_gold": [
+                "Dragons hoard gold and silver in mountain caves",
+                "Dragons hoard gold in mountain caves"],
+            "digest_keyword_none": [],
+            "hybrid_kinds": ["digest", "passage", "passage", "passage",
+                             "passage", "passage", "passage", "passage"],
+            "hybrid_passage_slugs": ["the-dragon-codex",
+                                     "the-tide-codex"],
+            "hybrid_digest_count": 1,
+            "hybrid_lanes": (1, 0, []),
+            "vector_status": ("hashing", 512, 512, 0),
+            "discover": [],
+            "check_sources": {"checked": 0, "ok": 0, "failing": 0,
+                              "dead": 0, "details": []},
+            "shed_dead": {"archived_sources": [], "archived_digests": 0},
+            "errors_honest": True,
+            "drop_b": {"dropped": "the-tide-codex"},
+            "list_books_after_drop": ["the-dragon-codex"],
+            "search_tides_after_drop": [],
+            "search_quixotic_after_drop": [],
+        }
+
+    def test_search_source_labels(self, rung, tmp_path):
+        lib, _a, _b = self._ingest_fixture(tmp_path / "ws", rung)
+        hits = lib.search("dragons")
+        assert hits
+        labels = {h.source for h in hits}
+        if rung.store is None:
+            # native: FTS5 when the runtime has it, else the module's
+            # own BM25 — the runtime decides, never the test.
+            assert labels <= {"fts5", "bm25-memory"}
+        else:
+            # seam: FTS5 is never emulated — always bm25-memory.
+            assert labels == {"bm25-memory"}
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        import sqlite3
+
+        from nomorals.books.library import Library
+
+        # ── a NATIVE library first: file ingest + curation + digests ──
+        ws2 = tmp_path / "ws2"
+        ctx = SimpleNamespace(
+            db=None, settings=SimpleNamespace(workspace_dir=str(ws2)))
+        native = Library(ctx)
+        srcdir = Path(ws2) / "src"
+        srcdir.mkdir(parents=True, exist_ok=True)
+        pa = srcdir / "codex-a.md"
+        pa.write_text(self.BOOK_A, encoding="utf-8")
+        ra = native.ingest(pa, title="The Dragon Codex",
+                           author="Ember Wright")
+        slug_a = ra.slug
+        assert native.add_bookmark(slug_a, 1, 10, "start")["id"] == 1
+        assert native.add_bookmark(slug_a, 3, 5, "ember")["id"] == 2
+        assert native.add_note(slug_a, 2, 0, quote="Fire for wisdom",
+                               note="the bargain")["id"] == 1
+        s1 = native.start_session(slug_a)
+        assert s1["session_id"] == 1
+        native.end_session(1, chapters=1, words=1200)
+        src_a = next(s["source_id"] for s in native.list_sources()
+                     if s["title"] == "The Dragon Codex")
+        d1 = native.create_digest(
+            src_a, "Dragons hoard gold in mountain caves", confidence=0.9)
+        native.revise_digest(
+            d1["record_id"],
+            claim="Dragons hoard gold and silver in mountain caves",
+            confidence=0.7)
+        # ── legacy shape: an old file without the books.source_id
+        # column — the import must take it from the seam DDL defaults,
+        # exactly as the native ALTER does. ──
+        db_path = Path(ws2) / "library" / "library.db"
+        con = sqlite3.connect(str(db_path))
+        con.execute("ALTER TABLE books DROP COLUMN source_id")
+        con.commit()
+        con.close()
+        # ── the seam construction imports once ──
+        seam = Library(ctx, store=rung.store)
+        assert seam.list_books()[0]["slug"] == slug_a
+        assert sorted(h.chapter_number for h in seam.search("dragons")) \
+            == [2, 4]
+        assert seam.get_rating(slug_a) == 0
+        assert [b["id"] for b in seam.list_bookmarks(slug_a)] == [1, 2]
+        assert [n["id"] for n in seam.list_notes(slug_a)] == [1]
+        assert [r["claim"] for r in
+                seam.digest_revisions(d1["record_id"])] == [
+            "Dragons hoard gold in mountain caves",
+            "Dragons hoard gold and silver in mountain caves"]
+        marker = rung.store.get("books-library__meta", "import")
+        assert marker is not None and marker["done"] is True
+        assert rung.store.count("books-library__books") == 1
+        assert rung.store.count("books-library__passages") == 4
+        assert rung.store.count("books-library__bookmarks") == 2
+        assert rung.store.count("books-library__annotations") == 1
+        assert rung.store.count("books-library__reading_sessions") == 1
+        assert rung.store.count("books-library__digests") == 1
+        assert rung.store.count("books-library__digest_revisions") == 2
+        # the imported books row carries the final shape
+        doc = rung.store.get("books-library__books", slug_a)
+        assert doc["source_id"] is None
+        # ── id continuity: the next ids follow the imported max ──
+        assert seam.add_bookmark(slug_a, 2, 0, "third")["id"] == 3
+        assert seam.add_note(slug_a, 2, 0, quote="q",
+                             note="second")["id"] == 2
+        assert seam.start_session(slug_a)["session_id"] == 2
+        d2 = seam.create_digest(
+            src_a, "Dragons hoard silver in deep caves", confidence=0.5)
+        revs = seam.digest_revisions(d2["record_id"])
+        assert len(revs) == 1 and revs[0]["id"] == 3
+        # ── a second construction adopts — never re-imports ──
+        again = Library(ctx, store=rung.store)
+        assert rung.store.count("books-library__books") == 1
+        assert rung.store.count("books-library__bookmarks") == 3
+        assert len(again.list_books()) == 1
+        assert sorted(h.chapter_number
+                      for h in again.search("dragons")) == [2, 4]
+
+    def test_large_passage_roundtrip(self, rung, tmp_path):
+        lib = self._lib(tmp_path / "ws", rung)
+        body = "Dragons fly over the valley. " * 35000
+        text = ("# The Big Codex\n\nby Big Author\n\n"
+                "# Chapter One — Long\n\n" + body)
+        src = tmp_path / "big.md"
+        src.write_text(text, encoding="utf-8")
+        res = lib.ingest(src, title="The Big Codex", author="Big Author")
+        assert res.chapters == 2
+        pairs = lib.iter_passages()
+        assert len(pairs) == 2
+        big = next(t for k, t in pairs if k.endswith("#2"))
+        assert len(big) > 1_000_000
+        assert "Dragons fly over the valley" in big
+        hits = lib.search("dragons")
+        assert {(h.book_slug, h.chapter_number) for h in hits} == {
+            (res.slug, 2)}
+
+    def test_oversize_passage_fails_loudly_on_seam(
+            self, rung, tmp_path, monkeypatch):
+        import nomorals.books.library as libmod
+        from nomorals.books.library import LibraryError
+
+        monkeypatch.setattr(libmod, "_MAX_PASSAGE_BYTES", 100)
+        lib = self._lib(tmp_path / "ws", rung)
+        src = tmp_path / "small.md"
+        src.write_text(self.BOOK_A, encoding="utf-8")
+        if rung.store is None:
+            # the native SQLite lane keeps no ceiling
+            res = lib.ingest(src, title="The Dragon Codex",
+                             author="Ember Wright")
+            assert res.slug == "the-dragon-codex"
+        else:
+            with pytest.raises(LibraryError,
+                               match="seam passage ceiling"):
+                lib.ingest(src, title="The Dragon Codex",
+                           author="Ember Wright")
+            assert lib.search("dragons") == []
+            assert lib._t("books").get("the-dragon-codex") is None
+
+    def test_corpus_reads_through_seam(self, rung, tmp_path):
+        from nomorals.storage.docstore import set_ambient_document_store
+        from nomorals.wisdom.corpus import CanonCorpus
+
+        ws = tmp_path / "ws"
+        _lib, slug_a, slug_b = self._ingest_fixture(ws, rung)
+        if rung.store is not None:
+            set_ambient_document_store(rung.store)
+        try:
+            corpus = CanonCorpus(SimpleNamespace(
+                db=None,
+                settings=SimpleNamespace(workspace_dir=str(ws))))
+        finally:
+            set_ambient_document_store(None)
+        pairs = corpus._iter_passages()
+        assert len(pairs) == 7
+        assert {k for k, _ in pairs} == {
+            f"{slug_a}#1", f"{slug_a}#2", f"{slug_a}#3", f"{slug_a}#4",
+            f"{slug_b}#1", f"{slug_b}#2", f"{slug_b}#3"}
+        rows = corpus._passage_rows([f"{slug_a}#2"])
+        assert rows[f"{slug_a}#2"].chapter_number == 2
+        assert rows[f"{slug_a}#2"].book == slug_a
+        assert corpus._index_metadata() == {}
+
+    def test_corpus_fossil_reads_gone(self):
+        src = (PACKAGE_ROOT / "wisdom" / "corpus.py").read_text(
+            encoding="utf-8")
+        assert "library.db_path" not in src
+        assert "self.library.iter_passages()" in src
+        assert "self.library.passage_rows(" in src
+        assert "self.library.book_titles()" in src
