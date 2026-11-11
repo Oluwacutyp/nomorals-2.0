@@ -44,8 +44,16 @@ the TikTok comment sheet and the YouTube video page —
 each a typed model in ``schema``, designs as data in
 ``designs`` (``SOCIAL_DESIGNS``), and its own layout
 engine in ``render_social`` under the same media
-hand-off contract.  Animation, bulk data and NL
-authoring are later phases of the same organ.
+hand-off contract.  Phase 5 (this build): bulk test
+data — a seeded generator of obviously synthetic
+personal / identity test data (``demo_data``) that
+populates whole screens from one seed + count
+(``bulk_list_screen`` / ``bulk_call_history`` /
+``bulk_chat_screen`` / ``bulk_status_views``) and
+exports records as text / JSON / CSV / XML; the
+``/mock demo bulk-*`` and ``/mock data`` forms ride it.
+Animation and NL authoring are later phases of the
+same organ.
 
 The organ never claims a render is a real captured
 screenshot: it is a mock screen, generated from data the
@@ -54,6 +62,21 @@ caller supplied.
 
 from __future__ import annotations
 
+from .demo_data import (
+    COUNTRIES,
+    CREATIVE_FAMILIES,
+    MAIL_PROVIDERS,
+    MAX_BULK_DATA,
+    MAX_BULK_SCREEN_ROWS,
+    REFERENCE_DATE,
+    BulkGenerator,
+    DemoDataError,
+    bulk_call_history,
+    bulk_chat_screen,
+    bulk_list_screen,
+    bulk_status_views,
+    export_records,
+)
 from .designs import (
     CALL_DESIGNS,
     CHAT_DESIGNS,
@@ -116,21 +139,29 @@ from .service import MockScreensError, MockScreenService
 MOCK_COMMANDS: tuple[str, ...] = ("mock",)
 
 __all__ = [
+    "BulkGenerator",
     "CALL_CONTROLS",
     "CALL_DESIGNS",
     "CALL_STATES",
     "CHAT_DESIGNS",
+    "COUNTRIES",
     "COUNT_STYLES",
+    "CREATIVE_FAMILIES",
     "DEVICE_STYLES",
+    "DemoDataError",
     "LIST_DESIGNS",
     "LIST_FLAVORS",
     "LIST_PREVIEW_KINDS",
     "LIST_ROW_STATES",
     "LIST_ROW_TYPES",
+    "MAIL_PROVIDERS",
+    "MAX_BULK_DATA",
+    "MAX_BULK_SCREEN_ROWS",
     "MESSAGE_KINDS",
     "MOCK_COMMANDS",
     "POST_VISIBILITIES",
     "PROFILE_ITEM_KINDS",
+    "REFERENCE_DATE",
     "RING_STATES",
     "SOCIAL_DESIGNS",
     "STATUS_BG_COLORS",
@@ -168,5 +199,10 @@ __all__ = [
     "StorySticker",
     "UpNextItem",
     "VideoScreen",
+    "bulk_call_history",
+    "bulk_chat_screen",
+    "bulk_list_screen",
+    "bulk_status_views",
+    "export_records",
     "shorten_count",
 ]

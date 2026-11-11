@@ -30,7 +30,10 @@ siblings) parse to the organ's list / status / call
 screen classes and dispatch to their own service doors
 below — the same delivery contract, the picture WAS the
 reply.  Phase 3 demos (posts / profiles / stories /
-comments / video pages) ride the same dispatch.
+comments / video pages) ride the same dispatch.  Phase 5
+(``/mock demo bulk-*``) populates whole screens from one
+seed + count through the same doors, and ``/mock data``
+answers in chat text with the generated records.
 """
 
 from __future__ import annotations
@@ -141,6 +144,10 @@ class RuntimeMockScreensMixin:
             return str(exc)
         service = self._mock_screens_service()
         audience = self._makers_audience(message)
+        if mode == "data":
+            # Phase 5: /mock data answers in chat text —
+            # the export IS the reply (no picture to send).
+            return str(screen)
         if mode not in ("demo", "built"):
             # Phase 2b/3 screen classes (lists / status /
             # calls, then posts / profiles / stories /

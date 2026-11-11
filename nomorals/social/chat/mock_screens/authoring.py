@@ -46,6 +46,18 @@ from __future__ import annotations
 
 import re
 
+from .demo_data import (
+    COUNTRIES,
+    CREATIVE_FAMILIES,
+    MAIL_PROVIDERS,
+    BulkGenerator,
+    DemoDataError,
+    bulk_call_history,
+    bulk_chat_screen,
+    bulk_list_screen,
+    bulk_status_views,
+    export_records,
+)
 from .render import MockScreensError
 from .schema import (
     CallHistoryEntry,
@@ -91,7 +103,16 @@ USAGE = (
     "tiktok-profile · youtube-channel · instagram-story · "
     "instagram-story-text · tiktok-comment · youtube-video "
     "· youtube-video-comments · youtube-video-description "
-    "— or build one: "
+    "— bulk: /mock demo bulk-list [whatsapp|instagram|"
+    "telegram|snapchat] [count] [seed N] [flavor chats|"
+    "calls|status] [iphone|android] [dark] · bulk-calls · "
+    "bulk-status-list · bulk-history [count] [seed N] · "
+    "bulk-chat [platform] [count] [seed N] [group] · "
+    "bulk-views [count] [seed N] — data: /mock data "
+    "[identity|name|username|password|email|phone|"
+    "address|company|imei|creative <family>] [count] "
+    "[seed N] [json|csv|xml|text]"
+    " — or build one: "
     "/mock whatsapp "
     "[iphone|android] [with <Name>] me: hi ;; Adaeze: hello "
     ";; me: on my way [read] — families: whatsapp · "
@@ -587,6 +608,208 @@ _COMMENT_DEMOS = ("tiktok-comment",)
 _VIDEO_DEMOS = (
     "youtube-video", "youtube-video-comments",
     "youtube-video-description")
+
+#: Phase 5 bulk demo names (census §29): one seed +
+#: count populates a whole screen.
+_BULK_DEMOS = (
+    "bulk-list", "bulk-calls", "bulk-status-list",
+    "bulk-history", "bulk-chat", "bulk-views")
+
+#: Which service door each bulk demo rides (the same
+#: doors as the Phase 2b/3 screen classes).
+_BULK_MODES = {
+    "bulk-list": "demo-list",
+    "bulk-calls": "demo-list",
+    "bulk-status-list": "demo-list",
+    "bulk-history": "demo-history",
+    "bulk-chat": "demo",
+    "bulk-views": "demo-views",
+}
+
+#: /mock data kinds (census §7 + §29).
+_DATA_KINDS = (
+    "identity", "name", "username", "password", "email",
+    "phone", "address", "company", "imei", "creative")
+
+#: The /mock data form answers in chat text, so its
+#: count stays readable — volume belongs to the bulk
+#: screen forms (and to export_records for code callers).
+MAX_DATA_TEXT = 50
+
+
+def _bulk_opts(tokens: list) -> dict:
+    """Parse a bulk demo's option tokens: a bare integer
+    is the count, ``seed N`` the seed, ``flavor F`` the
+    list flavour, a platform name the platform, and
+    iphone / android / dark / group the usual switches.
+    Anything else is the usage error."""
+    opts = {"platform": "whatsapp", "count": 25, "seed": 0,
+            "flavor": "chats", "style": "android",
+            "dark": False, "group": False}
+    idx = 0
+    while idx < len(tokens):
+        tok = str(tokens[idx]).strip().lower()
+        if tok == "iphone" or tok == "android":
+            opts["style"] = tok
+        elif tok == "dark":
+            opts["dark"] = True
+        elif tok == "group":
+            opts["group"] = True
+        elif tok == "seed":
+            if idx + 1 >= len(tokens):
+                raise MockScreensError(
+                    "seed needs a number — " + USAGE)
+            try:
+                opts["seed"] = int(tokens[idx + 1])
+            except ValueError:
+                raise MockScreensError(
+                    "seed needs a whole number, got "
+                    + repr(tokens[idx + 1])) from None
+            idx += 1
+        elif tok == "flavor":
+            if idx + 1 >= len(tokens):
+                raise MockScreensError(
+                    "flavor needs chats · calls · status — "
+                    + USAGE)
+            flavor = str(tokens[idx + 1]).strip().lower()
+            if flavor not in ("chats", "calls", "status"):
+                raise MockScreensError(
+                    "flavor " + repr(flavor) + " is not one "
+                    "of chats · calls · status")
+            opts["flavor"] = flavor
+            idx += 1
+        elif tok in ("whatsapp", "instagram", "telegram",
+                     "messenger", "snapchat", "imessage",
+                     "sms"):
+            opts["platform"] = tok
+        elif tok.isdigit():
+            opts["count"] = int(tok)
+        else:
+            raise MockScreensError(USAGE)
+        idx += 1
+    return opts
+
+
+def _parse_bulk_demo(name: str, tokens: list):
+    """One bulk demo name + its option tokens -> the
+    populated screen (the renderer's own doors draw it).
+    DemoDataError becomes the organ's usage error."""
+    opts = _bulk_opts(tokens)
+    try:
+        if name == "bulk-history":
+            return bulk_call_history(
+                count=opts["count"], seed=opts["seed"])
+        if name == "bulk-views":
+            return bulk_status_views(
+                count=opts["count"], seed=opts["seed"],
+                style=opts["style"])
+        if name == "bulk-chat":
+            return bulk_chat_screen(
+                opts["platform"], count=opts["count"],
+                seed=opts["seed"], style=opts["style"],
+                dark=opts["dark"], group=opts["group"])
+        flavor = {"bulk-list": opts["flavor"],
+                  "bulk-calls": "calls",
+                  "bulk-status-list": "status"}[name]
+        return bulk_list_screen(
+            opts["platform"], count=opts["count"],
+            seed=opts["seed"], flavor=flavor,
+            style=opts["style"], dark=opts["dark"])
+    except DemoDataError as exc:
+        raise MockScreensError(str(exc)) from exc
+
+
+def _parse_data_tail(text: str) -> str:
+    """``/mock data <kind> [count] [seed N] [json|csv|
+    xml|text] [country]`` -> the export text.  The chat
+    form caps at 50 records (a reply must stay
+    readable); volume is the bulk screens' job."""
+    tokens = str(text or "").split()
+    if not tokens:
+        raise MockScreensError(USAGE)
+    kind = tokens[0].strip().lower()
+    if kind not in _DATA_KINDS:
+        raise MockScreensError(
+            "data kinds: identity · name · username · "
+            "password · email · phone · address · company "
+            "· imei · creative <family> — " + USAGE)
+    count = 5
+    seed = 0
+    fmt = "json"
+    country = "ng"
+    provider = "gmail"
+    family = ""
+    idx = 1
+    while idx < len(tokens):
+        tok = str(tokens[idx]).strip().lower()
+        if tok == "seed":
+            if idx + 1 >= len(tokens):
+                raise MockScreensError(
+                    "seed needs a number — " + USAGE)
+            try:
+                seed = int(tokens[idx + 1])
+            except ValueError:
+                raise MockScreensError(
+                    "seed needs a whole number, got "
+                    + repr(tokens[idx + 1])) from None
+            idx += 1
+        elif tok in ("json", "csv", "xml", "text"):
+            fmt = tok
+        elif tok in COUNTRIES:
+            country = tok
+        elif tok in MAIL_PROVIDERS:
+            provider = tok
+        elif tok in CREATIVE_FAMILIES:
+            family = tok
+        elif tok.isdigit():
+            count = int(tok)
+        else:
+            raise MockScreensError(USAGE)
+        idx += 1
+    if count < 1 or count > MAX_DATA_TEXT:
+        raise MockScreensError(
+            "the /mock data form carries 1–"
+            + str(MAX_DATA_TEXT) + " records (a chat reply "
+            "has to stay readable) — got " + str(count)
+            + "; volume is the bulk screen demos' job")
+    if kind == "creative" and not family:
+        raise MockScreensError(
+            "creative needs a family: "
+            + ", ".join(CREATIVE_FAMILIES) + " — " + USAGE)
+    gen = BulkGenerator(seed)
+    try:
+        if kind == "identity":
+            records = gen.identities(count, country=country)
+        elif kind == "name":
+            records = [{"name": gen.name()}
+                       for _ in range(count)]
+        elif kind == "username":
+            records = [{"username": gen.username()}
+                       for _ in range(count)]
+        elif kind == "password":
+            records = [{"password": gen.password()}
+                       for _ in range(count)]
+        elif kind == "email":
+            records = [gen.email(provider)
+                       for _ in range(count)]
+        elif kind == "phone":
+            records = [gen.phone(country)
+                       for _ in range(count)]
+        elif kind == "address":
+            records = [gen.address(country)
+                       for _ in range(count)]
+        elif kind == "company":
+            records = [{"company": gen.company(country)}
+                       for _ in range(count)]
+        elif kind == "imei":
+            records = [gen.imei() for _ in range(count)]
+        else:  # creative
+            records = [{"family": family,
+                        "name": gen.creative_name(family)}
+                       for _ in range(count)]
+        return export_records(records, fmt)
+    except DemoDataError as exc:
+        raise MockScreensError(str(exc)) from exc
 
 
 def _demo_social_author() -> SocialProfile:
@@ -1229,11 +1452,17 @@ def parse_mock_tail(tail: str) -> tuple:
         raise MockScreensError(USAGE)
     words = text.split(None, 1)
     head = words[0].lower()
+    if head == "data":
+        return _parse_data_tail(
+            words[1] if len(words) > 1 else ""), "data"
     if head == "demo":
         rest = words[1].split() if len(words) > 1 else []
         name = rest[0] if rest else "whatsapp"
         style = "iphone" if "iphone" in rest else "android"
         dark = "dark" in rest
+        if name in _BULK_DEMOS:
+            return _parse_bulk_demo(name, rest[1:]), \
+                _BULK_MODES[name]
         if name in _LIST_DEMOS:
             return demo_list_screen(name, style,
                                     dark=dark), "demo-list"
@@ -1283,7 +1512,9 @@ def parse_mock_tail(tail: str) -> tuple:
                 "youtube-channel · instagram-story · "
                 "instagram-story-text · tiktok-comment · "
                 "youtube-video · youtube-video-comments · "
-                "youtube-video-description")
+                "youtube-video-description · bulk-list · "
+                "bulk-calls · bulk-status-list · bulk-history "
+                "· bulk-chat · bulk-views")
         return demo_screen(name, style, dark=dark), "demo"
     if head not in _PLATFORMS:
         raise MockScreensError(USAGE)
