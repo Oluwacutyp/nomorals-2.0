@@ -990,7 +990,8 @@ _CORPUS_STORES: dict[str, CorpusStore] = {}
 _CORPUS_STORES_LOCK = threading.Lock()
 
 
-def shared_corpus_store(path: Any = None) -> CorpusStore:
+def shared_corpus_store(path: Any = None, *,
+                        port: Any = None) -> CorpusStore:
     """The process-wide self-corpus store for a path (one per path).
 
     The :func:`shared_antibody_store` pattern, for the same
@@ -999,13 +1000,20 @@ def shared_corpus_store(path: Any = None) -> CorpusStore:
     counts on every surface, and the corpus's version history
     accumulates organism-wide across restarts through the
     store's own atomic persistence.
+
+    ``port`` is the composition layer's injected document-store
+    seam port (Mongo residue B10): forwarded to
+    :class:`CorpusStore` when the shared store is first created
+    for the path (the :func:`shared_monitor` kwargs rule). This
+    module stays Layer 0 — the port is an opaque object here,
+    built by a layer that may import storage.
     """
     resolved = Path(path) if path is not None else default_corpus_path()
     key = str(resolved)
     with _CORPUS_STORES_LOCK:
         store = _CORPUS_STORES.get(key)
         if store is None:
-            store = CorpusStore(resolved)
+            store = CorpusStore(resolved, port=port)
             _CORPUS_STORES[key] = store
         return store
 

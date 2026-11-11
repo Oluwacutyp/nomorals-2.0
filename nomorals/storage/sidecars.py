@@ -1466,6 +1466,44 @@ _register(_S(
         "native SQL path serves the SQLite default byte-for-byte."),
 ))
 
+_register(_S(
+    name="immune-corpus", verdict="ported", kind="json-file",
+    modules=("immune/corpus.py",),
+    tables=("exemplars",),
+    reason=(
+        "ported in the Mongo residue Batch 2 pass (B10, its own "
+        "lane): the self-corpus's harvested exemplars route "
+        "through the seam as raw documents "
+        "(immune-corpus__exemplars, keyed by exemplar id, the "
+        "exemplar dict verbatim — provenance fields and tool_call "
+        "are never re-shaped by a column mapping) behind "
+        "CorpusStore's unchanged API; the seeds stay code, never "
+        "documents. Corpus version allocation is the design "
+        "point: natively the version is an in-process counter "
+        "loaded from the file and bumped once per admitting "
+        "harvest — sound for the one shared instance wiring "
+        "keeps, but two stores over one file would collide on "
+        "it — so on the seam the next version is allocated by "
+        "one atomic inc on the immune-corpus__meta counters "
+        "document (port.next_id, the challenge-memory "
+        "precedent), and two harvests can never admit at the "
+        "same version. The one-time lazy import reads the JSON "
+        "file with the native parse rules (a corrupt file "
+        "degrades to seed-only with the reason recorded, as "
+        "natively), writes its exemplars adopted-not-overwritten, "
+        "and seeds the counter at the file's version, so the "
+        "first seam allocation is the file version + 1, never a "
+        "reuse. Pickup is by INJECTED port, not the ambient: "
+        "immune/corpus.py is layer L0 (stdlib only), so it "
+        "cannot import storage — the composition layer builds "
+        "the port with sidecar_port() (the exemplar shape "
+        "declared in the module) and passes it as port=; "
+        "wiring's shared_corpus_store forwards it. Its only "
+        "sqlite touch stays a read-only harvest of the pinned "
+        "incident journal — reads follow the pin, unchanged. "
+        "The native JSON path serves the default."),
+))
+
 
 # ── residue: contained domain file stores, classified, port queued ────────
 #
@@ -1513,15 +1551,6 @@ _residue("identity-documents", "identity/documents.py",
          ("identity_documents",),
          "identity document registry — sensitive records; its port "
          "pass carries the vault/encryption review with it.")
-_residue("immune-corpus", "immune/corpus.py", (),
-         "the self-corpus: Devon's harvested self-evidence "
-         "(verified-fix and owner-directed-receipt exemplars, "
-         "each with provenance and the corpus version that "
-         "admitted it) as one versioned JSON file in the settings "
-         "home's data/ dir, written atomically (tmp+replace) by "
-         "CorpusStore. Its only sqlite touch is a read-only "
-         "harvest of the pinned incident journal's verified "
-         "fixes.", kind="json-file")
 _residue("marketing-send", "marketing/send.py",
          ("send_queue", "send_log", "send_providers", "send_templates",
           "send_variants", "send_suppressions", "send_blocklist",

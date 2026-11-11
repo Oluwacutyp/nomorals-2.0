@@ -43,6 +43,21 @@ whose source cannot be cited is never admitted):
   itself classified as owner work. The exemplar text is the
   receipt's recorded target (falling back to its reason).
 
+The Mongo seam (Mongo residue Batch 2, B10): :class:`CorpusStore`
+also runs over the document-store seam when the composition layer
+injects a ``port=`` — this package is Layer 0 and never imports
+storage, so the port arrives injected and is used duck-typed
+(``immune/wiring.shared_corpus_store`` forwards it). Harvested
+exemplars become raw documents in ``immune-corpus__exemplars`` —
+the exemplar dict verbatim, keyed by exemplar id, never re-shaped
+by a column mapping — and the corpus version is allocated by one
+atomic ``inc`` on the ``immune-corpus__meta`` counters document,
+so two stores over one backend can never admit at the same
+version. The JSON file a native store wrote is imported once,
+lazily, under the native parse rules (adopted, never overwritten)
+and seeds the version counter at the file's version. With no port
+injected the store is the native JSON path, byte-for-byte.
+
 Deliberately NOT harvested: active antibodies' patterns (those are
 non-self detectors — the opposite direction), the command catalog
 and repo file shapes (code, not records of the owner's operations),
@@ -92,6 +107,19 @@ _log = logging.getLogger(__name__)
 
 #: On-disk corpus format version.
 CORPUS_FORMAT = "immune.selfcorpus.v1"
+
+#: The exemplar document shape, declared as DDL so the composition
+#: layer can build this store's port with
+#: ``storage.sidecars.sidecar_port``. The factory derives no
+#: mapping from it here: the seam serves exemplars as RAW documents
+#: (``put_raw`` / ``find_raw``), so no field — ``tool_call``
+#: included — is ever re-shaped by a column mapping, and the
+#: native path is the JSON file, which executes no DDL. The fields
+#: are exactly the dict :func:`_exemplar_to_dict` writes.
+_EXEMPLAR_SHAPE_DDL = """CREATE TABLE IF NOT EXISTS exemplars (
+       id TEXT PRIMARY KEY, text TEXT, tool_call TEXT,
+       capability TEXT, provenance TEXT, source_ref TEXT,
+       harvested_ts REAL, corpus_version INTEGER)"""
 
 #: Provenance kinds. Every exemplar in the corpus carries one.
 PROVENANCE_SEED = "seed"
@@ -272,9 +300,21 @@ class CorpusStore:
     corpus. ``path=None`` is an in-memory store (seeds + session
     harvests, nothing persisted) — the chat surface's fallback when
     the shared store cannot load, and the shape tests use.
+
+    With a ``port`` injected by the composition layer (Mongo
+    residue B10 — a SidecarPort built by
+    ``storage.sidecars.sidecar_port`` from
+    :data:`_EXEMPLAR_SHAPE_DDL`), the same API runs over the
+    document-store seam instead: harvested exemplars are raw
+    documents in ``immune-corpus__exemplars`` and corpus versions
+    are allocated atomically on the meta counters document.
+    ``path`` then names the native JSON file the one-time lazy
+    import reads (``None``: no file, nothing to import). This
+    module is Layer 0: the port is used duck-typed and storage is
+    never imported here.
     """
 
-    def __init__(self, path: Any = None) -> None:
+    def __init__(self, path: Any = None, *, port: Any = None) -> None:
         self.path: Path | None = Path(path) if path is not None else None
         self._lock = threading.RLock()
         self._version = 0
@@ -285,6 +325,11 @@ class CorpusStore:
         #: and never a silent thinning of "self".
         self.degraded_reason = ""
         self._corpus = SelfCorpus(seed_exemplars())
+        self._port: Any = None
+        if port is not None:
+            self._port = port
+            self._seam_load()
+            return
         if self.path is not None and self.path.exists():
             self._load()
 
@@ -369,11 +414,111 @@ class CorpusStore:
         self._harvested = harvested
         self._refresh()
 
+    # ── the Mongo seam (injected port) ─────────────────────────
+
+    def _seam_load(self) -> None:
+        """Adopt / import the seam state at construction.
+
+        The one-time lazy import, JSON-shaped (the factory's
+        ``ensure_imported`` reads SQLite files; this store's file
+        is JSON, so the import runs here over the port's
+        primitives, under the same contract): when the seam holds
+        no exemplars and no import marker, the native file at
+        ``self.path`` is read with :meth:`_load`'s parse rules —
+        a corrupt file degrades to seed-only with the reason
+        recorded, exactly as natively — and its exemplars are
+        written verbatim. A seam that is already live is adopted,
+        never overwritten. The import marker is recorded either
+        way, so the fossil is read at most once.
+        """
+        port = self._port
+        store = port.store
+        file_version = 0
+        marker = store.get(port.meta_collection, "import")
+        if not (marker and marker.get("done")):
+            if store.count(f"{port.store_name}__exemplars"):
+                store.put(port.meta_collection, "import", {
+                    "done": True, "tables": {}, "at": time.time()})
+            elif self.path is not None and self.path.exists():
+                imported = 0
+                try:
+                    data = json.loads(
+                        self.path.read_text(encoding="utf-8"))
+                    if not isinstance(data, dict) \
+                            or data.get("format") != CORPUS_FORMAT:
+                        raise ValueError("not a self-corpus file")
+                    file_version = int(data.get("version") or 0)
+                    entries = [
+                        _exemplar_from_dict(entry)
+                        for entry in (data.get("exemplars") or [])
+                        if isinstance(entry, dict)
+                    ]
+                except Exception as exc:  # noqa: BLE001 - degrade, never crash
+                    self.degraded_reason = (
+                        f"corpus file unreadable ({exc}) — seed-only "
+                        "corpus in use")
+                    _log.warning(
+                        "immune self-corpus %s unreadable — degrading "
+                        "to seed-only: %s", self.path, exc)
+                    entries = []
+                    file_version = 0
+                for exemplar in entries:
+                    port.put_raw("exemplars", exemplar.id,
+                                 _exemplar_to_dict(exemplar))
+                    imported += 1
+                store.put(port.meta_collection, "import", {
+                    "done": True, "tables": {"exemplars": imported},
+                    "at": time.time()})
+            else:
+                store.put(port.meta_collection, "import", {
+                    "done": True, "tables": {}, "at": time.time()})
+        self._seam_reload(file_version)
+
+    def _seam_reload(self, floor_version: int = 0) -> None:
+        """Refresh the in-memory mirror from the seam.
+
+        Harvested exemplars are read back as documents and put in
+        admission order — (corpus_version, harvested_ts,
+        source_ref, id): the seam has no rowid, so a reloaded
+        mirror orders by the fields admission stamped. The meta
+        version counter is raised to the highest version in
+        evidence (the counter itself, an imported file's recorded
+        version, the exemplars' admission versions) and never
+        lowered — the challenge-memory seed rule — so the next
+        ``next_id`` allocation continues from the true maximum.
+        """
+        port = self._port
+        store = port.store
+        harvested = [
+            _exemplar_from_dict(doc)
+            for doc in port.find_raw("exemplars")
+        ]
+        harvested.sort(key=lambda e: (
+            e.corpus_version, e.harvested_ts or 0.0, e.source_ref, e.id))
+        self._harvested = harvested
+        counters = store.get(port.meta_collection, "counters") or {}
+        try:
+            current = int(counters.get("corpus_version") or 0)
+        except (TypeError, ValueError):
+            current = 0
+        observed = max([current, floor_version]
+                       + [e.corpus_version for e in harvested])
+        if observed > current:
+            store.put(port.meta_collection, "counters", {
+                **counters, "corpus_version": observed})
+        self._version = observed
+        self._refresh()
+
     def save(self) -> None:
         """Persist the harvested population + version, atomically
         (same-dir tmp + ``os.replace``, the baseline store's
         discipline). Seeds are code, not data — they are never
-        written; the file carries only what harvest admitted."""
+        written; the file carries only what harvest admitted.
+
+        On the seam there is no file to write: every admission is
+        already a durable document write, so this is a no-op."""
+        if self._port is not None:
+            return
         if self.path is None:
             return
         with self._lock:
@@ -420,6 +565,14 @@ class CorpusStore:
         """
         now = time.time() if now is None else now
         with self._lock:
+            if self._port is not None:
+                # Another store instance over the same backend may
+                # have admitted since this one was built (or last
+                # harvested): the dedupe sets and the version base
+                # are computed against the seam's current state,
+                # not a stale mirror. Allocation itself stays
+                # atomic — see the admit step below.
+                self._seam_reload()
             version_before = self._version
             known_refs = {
                 e.source_ref for e in self._harvested if e.source_ref}
@@ -458,10 +611,32 @@ class CorpusStore:
                     "found": found, "added": added, "note": note}
 
             if pending:
-                self._version = version_before + 1
-                self._harvested.extend(pending)
-                self._refresh()
-                self.save()
+                if self._port is not None:
+                    # The B10 design point: the next corpus version
+                    # is allocated by one atomic inc on the meta
+                    # counters document — two harvests, even from
+                    # two store instances over one backend, can
+                    # never admit at the same version. The pending
+                    # exemplars were stamped with the provisional
+                    # version_before + 1 while candidates were
+                    # gathered; the allocated version is
+                    # authoritative and restamps them before any
+                    # document is written.
+                    allocated = self._port.next_id("corpus_version")
+                    for exemplar in pending:
+                        exemplar.corpus_version = allocated
+                    for exemplar in pending:
+                        self._port.put_raw(
+                            "exemplars", exemplar.id,
+                            _exemplar_to_dict(exemplar))
+                    self._version = allocated
+                    self._harvested.extend(pending)
+                    self._refresh()
+                else:
+                    self._version = version_before + 1
+                    self._harvested.extend(pending)
+                    self._refresh()
+                    self.save()
             return {
                 "version_before": version_before,
                 "version_after": self._version,

@@ -44,6 +44,8 @@ P5 settles the stores that live BESIDE the central database:
   the same pattern below.
   The health-timeline lane follows the same pattern below
   (attached_rows hybrid).
+  The B10 lane (immune-corpus, injected port) follows the same
+  pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -250,7 +252,9 @@ class TestSidecarRegistry:
             "matching-questionnaire", "property-passport",
             "social-profiles", "triggers-saved-search",
             # residue Batch 2, health-timeline lane:
-            "health-timeline"}
+            "health-timeline",
+            # residue Batch 2, B10 lane:
+            "immune-corpus"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -5041,3 +5045,212 @@ class TestHealthTimelinePort:
         # the extra payload rides as the same JSON string the
         # native INSERT writes — no data re-shaping on the seam
         assert doc["extra"] == '{"pharmacy": "green cross"}'
+
+
+class TestImmuneCorpusPort:
+    """immune/corpus.py — CorpusStore port (residue Batch 2, B10):
+    the self-corpus's harvested exemplars as raw documents
+    (immune-corpus__exemplars, the exemplar dict verbatim) behind
+    the unchanged API, with corpus versions allocated by one
+    atomic inc on the meta counters document — the lane's design
+    point. corpus.py is L0: the composition layer (this test)
+    builds the port and injects it — the module never imports
+    storage. Intra-version admission order is source order
+    natively and (harvested_ts, source_ref) order on seam
+    reloads, so the scenario compares per-version sorted views.
+    """
+
+    @staticmethod
+    def _port_for(path, rung):
+        from nomorals.immune.corpus import _EXEMPLAR_SHAPE_DDL
+        from nomorals.storage.sidecars import sidecar_port
+
+        return sidecar_port("immune-corpus", _EXEMPLAR_SHAPE_DDL, (),
+                            None if path is None else str(path),
+                            store=rung.store)
+
+    @staticmethod
+    def _plant_fix(journal_path, *, detail, subsystem="tools/web"):
+        """One verified fix in a real IncidentJournal (the doc-20
+        P4 suite's planting shape); returns the fix's signature —
+        the citation harvest must carry."""
+        from nomorals.core.incidents import IncidentJournal, RecoveryRecord
+
+        journal = IncidentJournal(path=str(journal_path))
+        try:
+            incident = journal.record_incident(
+                ConnectionError("flaky fetch refused"), subsystem=subsystem)
+            journal.record_recovery(RecoveryRecord(
+                incident_id=incident.id, signature=incident.signature,
+                strategy="retry", detail=detail, verified=True,
+                verify_note="re-ran the recovered call: passed"))
+            return incident.signature
+        finally:
+            journal.close()
+
+    @staticmethod
+    def _receipt(receipt_id, target):
+        return {"id": receipt_id, "action": "report_only",
+                "target": target, "reason": "",
+                "details": {"owner_directed": True}}
+
+    @staticmethod
+    def _harvested_view(store) -> list:
+        """The harvested population as comparable tuples, sorted
+        within each admission version (seeds excluded)."""
+        rows = [
+            (e.corpus_version, e.provenance, e.source_ref, e.text)
+            for e in store.exemplars() if e.provenance != "seed"]
+        return sorted(rows)
+
+    def _scenario(self, store, journal_path) -> dict:
+        sig1 = self._plant_fix(
+            journal_path, detail="retry recovered the flaky web fetch")
+        receipt = self._receipt("rcpt-1", "owner-laptop-tunnel")
+        first = store.harvest(journal_path=journal_path,
+                              receipts=[receipt])
+        second = store.harvest(journal_path=journal_path,
+                               receipts=[receipt])
+        sig2 = self._plant_fix(
+            journal_path, detail="patched the mail sync stall",
+            subsystem="tools/mail")
+        third = store.harvest(journal_path=journal_path, receipts=[])
+        return {
+            "first": (first["added"], first["version_before"],
+                      first["version_after"],
+                      first["sources"]["verified_fix"]["added"],
+                      first["sources"]["owner_receipt"]["added"]),
+            "second_added": second["added"],
+            "third": (third["added"], third["version_after"]),
+            "version": store.version,
+            "harvested": self._harvested_view(store),
+            "expect": sorted([
+                (1, "verified_fix", f"verified_fix:{sig1}",
+                 "retry recovered the flaky web fetch"),
+                (1, "owner_receipt", "police_receipt:rcpt-1",
+                 "owner-laptop-tunnel"),
+                (2, "verified_fix", f"verified_fix:{sig2}",
+                 "patched the mail sync stall")]),
+            "counts": store.counts_by_provenance(),
+            "at": (len(store.corpus_at(0).exemplars),
+                   len(store.corpus_at(1).exemplars),
+                   len(store.corpus_at(2).exemplars)),
+            "degraded": store.degraded_reason,
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.immune.corpus import CorpusStore
+
+        journal_path = tmp_path / "error_journal.db"
+        corpus_path = tmp_path / "corpus.json"
+        store = CorpusStore(corpus_path,
+                            port=self._port_for(corpus_path, rung))
+        observed = self._scenario(store, journal_path)
+        assert observed["first"] == (2, 0, 1, 1, 1)
+        assert observed["second_added"] == 0
+        assert observed["third"] == (1, 2)
+        assert observed["version"] == 2
+        assert observed["harvested"] == observed["expect"]
+        assert observed["counts"] == {
+            "seed": 8, "verified_fix": 2, "owner_receipt": 1}
+        assert observed["at"] == (8, 10, 11)
+        assert observed["degraded"] == ""
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.immune.corpus import CorpusStore
+
+        path = tmp_path / "corpus.json"
+        journal_path = tmp_path / "error_journal.db"
+        sig1 = self._plant_fix(
+            journal_path, detail="first verified recovery")
+        native = CorpusStore(path)
+        native.harvest(journal_path=journal_path, receipts=[])
+        self._plant_fix(journal_path, detail="second verified recovery",
+                        subsystem="tools/mail")
+        native.harvest(journal_path=journal_path, receipts=[])
+        assert native.version == 2
+
+        seam = CorpusStore(path, port=self._port_for(path, rung))
+        assert seam.version == 2
+        assert rung.store.count("immune-corpus__exemplars") == 2
+        marker = rung.store.get("immune-corpus__meta", "import")
+        assert marker is not None and marker["done"] is True
+        assert marker["tables"] == {"exemplars": 2}
+        counters = rung.store.get("immune-corpus__meta", "counters")
+        assert counters is not None and counters["corpus_version"] == 2
+        by_ref = {e.source_ref: e for e in seam.exemplars()}
+        doc = rung.store.get(
+            "immune-corpus__exemplars", by_ref[f"verified_fix:{sig1}"].id)
+        assert doc is not None and doc["corpus_version"] == 1
+        assert doc["provenance"] == "verified_fix"
+        assert doc["source_ref"] == f"verified_fix:{sig1}"
+        # the counter was seeded at the file's version: the next
+        # allocation is 3 — the imported max + 1, never a reuse
+        self._plant_fix(journal_path, detail="third verified recovery",
+                        subsystem="tools/calendar")
+        report = seam.harvest(journal_path=journal_path, receipts=[])
+        assert (report["version_before"], report["version_after"]) == (2, 3)
+        assert rung.store.count("immune-corpus__exemplars") == 3
+        # second construction adopts: no re-import, no duplicates
+        again = CorpusStore(path, port=self._port_for(path, rung))
+        assert again.version == 3
+        assert len(again.exemplars()) == 11
+        assert rung.store.count("immune-corpus__exemplars") == 3
+        # a path-less seam store imports nothing of its own — it
+        # adopts the live seam state and still works
+        mem = CorpusStore(port=self._port_for(None, rung))
+        assert mem.version == 3
+        assert len(mem.exemplars()) == 11
+
+    def test_atomic_version_allocation(self, rung, tmp_path):
+        """The B10 design point: two CorpusStore instances over
+        one backend, interleaved harvests — versions are distinct
+        and monotone, an exemplar admitted by one instance is
+        never re-admitted by the other, and a fresh instance
+        reads the shared truth."""
+        if rung.store is None:
+            pytest.skip("native rung has no seam to allocate on")
+        from nomorals.immune.corpus import CorpusStore
+
+        journal_path = tmp_path / "error_journal.db"
+        path = tmp_path / "corpus.json"
+        alpha = CorpusStore(path, port=self._port_for(path, rung))
+        beta = CorpusStore(path, port=self._port_for(path, rung))
+        self._plant_fix(journal_path, detail="alpha's verified recovery")
+        ra = alpha.harvest(journal_path=journal_path, receipts=[])
+        self._plant_fix(journal_path, detail="beta's verified recovery",
+                        subsystem="tools/mail")
+        rb = beta.harvest(journal_path=journal_path, receipts=[])
+        self._plant_fix(journal_path, detail="alpha again, third recovery",
+                        subsystem="tools/calendar")
+        ra2 = alpha.harvest(journal_path=journal_path, receipts=[])
+        assert [ra["version_after"], rb["version_after"],
+                ra2["version_after"]] == [1, 2, 3]
+        # beta's harvest deduped against alpha's admission (the
+        # reload at harvest start): each fix admitted exactly once
+        assert (ra["added"], rb["added"], ra2["added"]) == (1, 1, 1)
+        assert rung.store.count("immune-corpus__exemplars") == 3
+        admitted = sorted(
+            doc["corpus_version"]
+            for doc in rung.store.find("immune-corpus__exemplars"))
+        assert admitted == [1, 2, 3]
+        fresh = CorpusStore(path, port=self._port_for(path, rung))
+        assert fresh.version == 3
+        assert len(fresh.corpus_at(1).exemplars) == 9
+        assert len(fresh.corpus_at(2).exemplars) == 10
+        assert len(fresh.exemplars()) == 11
+
+    def test_seam_import_of_corrupt_file_degrades(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.immune.corpus import CorpusStore
+
+        path = tmp_path / "corpus.json"
+        path.write_text("{ not json at all", encoding="utf-8")
+        seam = CorpusStore(path, port=self._port_for(path, rung))
+        assert seam.version == 0
+        assert len(seam.exemplars()) == 8
+        assert "seed-only" in seam.degraded_reason
+        assert rung.store.count("immune-corpus__exemplars") == 0
