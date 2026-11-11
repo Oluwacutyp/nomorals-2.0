@@ -144,6 +144,13 @@ def render_class_board(
     (what the class is + how a goal joins it) — never a bare blank.
     ``only_class`` renders just that class's section (validated —
     an unknown class raises GoalClassError listing the classes).
+
+    Presentation Phase 3: the board is a leaderboard-class Card —
+    one untitled block per class, every line byte-identical to the
+    old hand-joined text (the class heads carry their own
+    ``**Title** (`id`)`` markers as prose, so the pinned copy
+    survives), framed by the card title and stamp.  Rendered
+    canonical; the gateway converts per platform at send.
     """
     now = time.time() if now is None else now
     stats = run_sync(tracker.stats(user_id))
@@ -157,43 +164,52 @@ def render_class_board(
     descriptors = ([get_class(only_class)] if only_class is not None
                    else list_classes())
 
-    lines: list[str] = []
+    from ..social.chat.typography import Card, card_text
+
+    card = Card("leaderboard", title="Goals")
     if only_class is None:
         focus = run_sync(tracker.today_focus(user_id, limit=3, now=now))
         if focus:
-            lines.append("🎯 **Focus now:**")
+            focus_lines = ["🎯 **Focus now:**"]
             for entry in focus:
                 goal = entry["goal"]
                 reading = tracker.class_progress(goal, now=now)
-                lines.append(
+                focus_lines.append(
                     f"  • {goal.title} — {progress_label(reading)}")
-            lines.append("")
+            card.block_lines(focus_lines, title="")
         total = stats.get("total", 0)
-        lines.append(f"🧭 **Goal classes** — {total} goal(s) on file")
-        lines.append("")
+        card.block_lines(
+            [f"🧭 **Goal classes** — {total} goal(s) on file"], title="")
 
     for descriptor in descriptors:
         rollup = by_class.get(descriptor.id)
-        lines.append(f"**{descriptor.title}** (`{descriptor.id}`)")
+        section = [f"**{descriptor.title}** (`{descriptor.id}`)"]
         if not rollup:
-            lines.append(f"  🗒 nothing here yet — {descriptor.description}")
-            lines.append(
+            section.append(
+                f"  🗒 nothing here yet — {descriptor.description}")
+            section.append(
                 f"  file one: /goals add <title> in {descriptor.id}")
-            lines.append("")
+            card.block_lines(section, title="")
             continue
         overdue = rollup.get("overdue", 0)
-        lines.append(
+        section.append(
             f"  {rollup.get('total', 0)} goal(s) · avg "
             f"{rollup.get('avg_progress', 0.0):.0f}%"
             + (f" · ⛔ {overdue} overdue" if overdue else ""))
         for goal in active_by_class.get(descriptor.id, []):
-            lines.append(_goal_line(tracker, goal, now=now))
-        lines.append("")
-    return "\n".join(lines).rstrip()
+            section.append(_goal_line(tracker, goal, now=now))
+        card.block_lines(section, title="")
+    return card_text(card)
 
 
 def render_classes() -> str:
-    """The class picker as text: every class, what it is, how to file."""
+    """The class picker as text: every class, what it is, how to file.
+
+    Presentation Phase 3: a menu-class Card, the picker lines
+    verbatim inside it."""
+    from ..social.chat.typography import Card, card_text
+
+    card = Card("menu", title="Goal classes")
     lines = ["🧭 **Goal classes:**"]
     for descriptor in list_classes():
         lines.append(
@@ -202,7 +218,8 @@ def render_classes() -> str:
     lines.append("")
     lines.append("file a goal: /goals add <title> in <class>")
     lines.append("move a goal: /goals class <goal> <class>")
-    return "\n".join(lines)
+    card.block_lines(lines, title="")
+    return card_text(card)
 
 
 # ── the dead methods, wired ───────────────────────────────────────────
@@ -222,10 +239,17 @@ def render_review(tracker: GoalTracker, user_id: str, *,
 
 def render_focus(tracker: GoalTracker, user_id: str, *,
                  now: float | None = None) -> str:
-    """today_focus as a chat board: ranked goals with their scores."""
+    """today_focus as a chat board: ranked goals with their scores.
+
+    Presentation Phase 3: a leaderboard-class Card, the ranked
+    lines verbatim inside it.  The empty answer stays a plain
+    honest line — no board exists to frame."""
     focus = run_sync(tracker.today_focus(user_id, limit=5, now=now))
     if not focus:
         return "no active goals to focus on yet — /goals add one first."
+    from ..social.chat.typography import Card, card_text
+
+    card = Card("leaderboard", title="Focus")
     lines = ["🎯 **Focus now** (ranked by urgency, deadlines, momentum):"]
     for i, entry in enumerate(focus, 1):
         goal = entry["goal"]
@@ -234,12 +258,17 @@ def render_focus(tracker: GoalTracker, user_id: str, *,
         lines.append(
             f"  {i}. {goal.title} — {progress_label(reading)}"
             f" · {descriptor.title} · score {entry['score']:.1f}")
-    return "\n".join(lines)
+    card.block_lines(lines, title="")
+    return card_text(card)
 
 
 def render_goal_progress(tracker: GoalTracker, user_id: str, ref: str, *,
                          now: float | None = None) -> str:
-    """One goal's progress: class reading + pace verdict (pace_report)."""
+    """One goal's progress: class reading + pace verdict (pace_report).
+
+    Presentation Phase 3: a briefing-class Card, every line
+    verbatim inside it.  The unknown-goal answer stays a plain
+    honest line — no record exists to frame."""
     goal, candidates = resolve_goal(tracker, user_id, ref)
     if goal is None:
         return _unknown_goal_text(ref, candidates)
@@ -269,7 +298,11 @@ def render_goal_progress(tracker: GoalTracker, user_id: str, ref: str, *,
         done = sum(1 for s in subgoals if s.is_completed)
         lines.append(f"  subgoals: {done}/{len(subgoals)} completed")
     lines.append(f"  goal id: {goal.goal_id}")
-    return "\n".join(lines)
+    from ..social.chat.typography import Card, card_text
+
+    card = Card("briefing", title="Goal progress")
+    card.block_lines(lines, title="")
+    return card_text(card)
 
 
 # ── goal resolution / filing ──────────────────────────────────────────

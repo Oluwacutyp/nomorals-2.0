@@ -4713,40 +4713,44 @@ def _wrap_commands(kinds: list[str], width: int = 64) -> list[str]:
 
 
 def _detailed_overview(*, public_only: bool = False) -> str:
+    """Bare /help on non-session paths — the catalog overview as a
+    menu-class Card (presentation Phase 3): one titled section per
+    help group, the wrapped command names verbatim, the "everything
+    else" name dump as its own section, the how-she-works tail as
+    closing prose.  Rendered canonical; the gateway converts per
+    platform at send."""
+    from .typography import Card, card_text
+
+    card = Card("menu", title="Devon — help")
     if public_only:
         # The gated public surface's catalog: the PUBLIC command list
         # only. Owner-only commands (platform control, money, trial
         # tooling, …) are not advertised there — groups left empty by
         # the filter drop out entirely, and the owner-system tail
         # (topic pages, console) is not public copy.
-        lines = [
-            "the public catalog — detail for any command: /help <command>",
-            "",
-        ]
+        card.line("the public catalog — detail for any command: "
+                  "/help <command>")
         groups = [(group, [k for k in kinds if k in PUBLIC_COMMANDS])
                   for group, kinds in _HELP_GROUPS]
         groups = [(group, kinds) for group, kinds in groups if kinds]
     else:
-        lines = [
-            "the full catalog — detail for any command: /help <command>",
-            "topic pages: /help budget|goals|builds|skills|missions|modes|stack",
-            "",
-        ]
+        card.line("the full catalog — detail for any command: "
+                  "/help <command>")
+        card.line("topic pages: /help "
+                  "budget|goals|builds|skills|missions|modes|stack")
         groups = _HELP_GROUPS
     for group, kinds in groups:
-        lines.append(f"  — {group} —")
-        lines.extend(_wrap_commands(kinds))
-        lines.append("")
+        card.block_lines(_wrap_commands(kinds), title=group)
     shown = {k for _, kinds in groups for k in kinds}
     rest = [k for k in CONTROL_COMMANDS if k not in shown]
     if public_only:
         rest = [k for k in rest if k in PUBLIC_COMMANDS]
     if rest:
-        lines.append("  — everything else —")
-        lines.append("  " + "  ".join(f"/{k}" for k in rest))
-        lines.append("")
+        card.block_lines(
+            ["  " + "  ".join(f"/{k}" for k in rest)],
+            title="everything else")
     if not public_only:
-        lines += [
+        card.block_lines([
             "how she works:  goals → projects → real execution.  Builds run "
             "in a sandbox until the real acceptance command passes; every "
             "fixed failure becomes a skill; the portfolio is ranked by "
@@ -4754,8 +4758,8 @@ def _detailed_overview(*, public_only: bool = False) -> str:
             "cap it (nm autonomy budget).",
             "console:  the whole system is also `nm <command>` — "
             "`nm help <topic>` shows these same pages.",
-        ]
-    return "\n".join(lines)
+        ])
+    return card_text(card)
 
 
 def _public_no_help_page(t: str) -> str:
@@ -5469,8 +5473,18 @@ def list_catalog(topic: str = "", *, public_only: bool = False) -> str:
         groups = [(g, ks) for g, ks in LIST_GROUPS
                   if t in g.lower().replace(" — ", " ") or g.lower() == want
                   or any(t == k for k in ks)]
-    from .style import section, cmd, cta, escape
-    lines = [f"🥷 <b>Devon</b> — commands (tap any {cmd('/command')} to run it):"]
+    from .style import cmd, cta, escape
+    from .typography import Card, card_text
+
+    # Presentation Phase 3: the catalog is a menu-class Card —
+    # one titled section per group, command rows byte-identical
+    # to the old wall (``  <code>/cmd</code> — one-liner``), the
+    # count and footer lines verbatim.  Rendered canonical; the
+    # gateway converts per platform at send.  The "no group"
+    # answer below stays a plain honest line — an error, not a
+    # catalog, so it has no card shape.
+    card = Card("menu", title="Devon — commands", icon="🥷")
+    card.line(f"tap any {cmd('/command')} to run it")
     shown = 0
     for group, kinds in groups:
         renderable = [k for k in kinds if k in CONTROL_COMMANDS]
@@ -5479,12 +5493,13 @@ def list_catalog(topic: str = "", *, public_only: bool = False) -> str:
             if not renderable:
                 continue
         emoji = _GROUP_EMOJI.get(group, "•")
-        lines.append("")
-        lines.append(section(emoji, group))
+        rows = []
         for k in renderable:
             one = LIST_ONELINERS.get(k, COMMAND_DETAILS.get(k, {}).get('what', ''))
-            lines.append(f"  {cmd('/' + k)} — {escape(one)}")
+            rows.append(f"  {cmd('/' + k)} — {escape(one)}")
             shown += 1
+        if rows:
+            card.block_lines(rows, title=f"{emoji} {group}")
     if not shown:
         if public_only:
             avail = " | ".join(
@@ -5495,13 +5510,12 @@ def list_catalog(topic: str = "", *, public_only: bool = False) -> str:
         groups_now = [g for g, _ in groups]
         all_groups = " | ".join(dict.fromkeys(_LIST_GROUP_ALIASES.values()))
         return (f"no group '{t}' — available: {escape(all_groups)}")
-    lines += [
-        "",
+    card.block_lines([
         f"📦 <b>{shown} commands</b>",
         f"  {cmd('/help')} &lt;command&gt; — full page  ·  {cmd('/help')} topics — subject guides",
         cta("try /game arena or /search to start"),
-    ]
-    return "\n".join(lines)
+    ])
+    return card_text(card)
 
 
 def detailed_help(topic: str = "", *, public_only: bool = False) -> str:

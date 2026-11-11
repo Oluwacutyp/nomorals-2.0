@@ -1006,11 +1006,20 @@ class PagedHelpMarkupTests(unittest.TestCase):
 
         text = apply_stamp(_detailed_overview())
         self.assertIn("<command>", text)   # the offending prose
-        self.assertIn("<i>Powered by peacethefirst</i>", text)
+        # Presentation Phase 3: the overview is a menu-class Card
+        # and stamps itself in the canonical dialect — apply_stamp
+        # is a no-op on it by design (never double-stamps).  The
+        # input is house dialect now, not authored HTML, so no
+        # parse mode is declared here — the gateway converts it,
+        # the same path _send_control_reply takes for this text
+        # (no <b>/<code>/<i> in it → parse_mode "").  The HTML
+        # form of the stamp appears only after that conversion,
+        # asserted on the joined pages below.
+        self.assertIn("_Powered by peacethefirst_", text)
         chat = ChatRef(platform="telegram-bot", chat_id="42",
                        kind=ChatKind.DM)
         result = self.gateway.send("telegram-bot", chat, text,
-                                   parse_mode="HTML", fresh=True)
+                                   fresh=True)
         self.assertTrue(result.ok)
         calls = self.adapter.calls
         self.assertGreaterEqual(len(calls), 2,

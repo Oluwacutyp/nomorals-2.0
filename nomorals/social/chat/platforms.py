@@ -36,6 +36,7 @@ import html as _html
 import re
 from typing import Any
 
+from ...core.branding import BRAND_TEXT
 from .platform_limits import for_platform as _for_platform
 from .failures import record_failure
 
@@ -138,6 +139,17 @@ _MD_STRIKE = re.compile(r"~~(?=\S)([^~\n]+?)(?<=\S)~~")
 _MD_UNDER = re.compile(
     r"(?<![A-Za-z0-9_])__(?=\S)([^_\n]+?)(?<=\S)__(?![A-Za-z0-9_])")
 _MD_ITALIC = re.compile(r"(?<!\*)\*(?=\S)([^*\n]+?)(?<=\S)\*(?!\*)")
+#: The canonical stamp line (typography.card_text's dialect form —
+#: ``_<BRAND_TEXT>_``).  Telegram HTML has no underscore-italic,
+#: so without this the stamp on every card_text render would
+#: print raw on Telegram (the owner screenshot 2026-11-06 bug:
+#: the stamp printed literally on help page 2).  Only the exact
+#: trailing footer line converts — every other underscore pair
+#: in the body stays literal prose.  (typography cannot be
+#: imported here — present.py imports this module — so the text
+#: comes from core.branding, the same string.)
+_CANONICAL_STAMP = re.compile(
+    r"_" + re.escape(BRAND_TEXT) + r"_(\s*)$")
 
 
 def strip_html(text: str) -> str:
@@ -265,6 +277,14 @@ def to_telegram(text: str) -> str:
             lambda m: _keep(f"<u>{_html.escape(m.group(1))}</u>"), out)
         out = _MD_ITALIC.sub(
             lambda m: _keep(f"<i>{_html.escape(m.group(1))}</i>"), out)
+        # 4c. The canonical stamp line, trailing footer only: the
+        #     card_text dialect's ``_…_`` form is not a house
+        #     italic span (single-``*`` is), so it would otherwise
+        #     survive step 5 as literal underscores on Telegram.
+        out = _CANONICAL_STAMP.sub(
+            lambda m: _keep(
+                f"<i>{_html.escape(BRAND_TEXT)}</i>") + m.group(1),
+            out)
         # 5. Everything left is literal text: escape it.
         out = _html.escape(out)
         # 6. Restore the stashed markup, outermost first: a span

@@ -113,6 +113,14 @@ class RuntimeMetaMixin:
         return error[:60]
 
     def _control_status(self) -> str:
+        """The /status reply as a designed Card (presentation
+        Phase 3): the same facts the old eight-line dump carried,
+        composed as titled State + Traffic stat blocks, with the
+        degradation and failure-ledger lines surfacing ONLY when
+        real — as verbatim prose, so their copy ("degradation:",
+        "partner failures (N total") reads identically.  Rendered
+        in the canonical house dialect; the gateway converts per
+        platform at send, exactly like any producer string."""
         mood = self.brain.mood.current()
         rel = self.brain.relationship
         aut = self._autonomy.status() if self._autonomy else {"mode": "off"}
@@ -125,18 +133,29 @@ class RuntimeMetaMixin:
             and info.get("running_in_session")
         ) or "none"
         stats = self._stats_snapshot()
-        lines = [
-            f"mood: {mood.label} (affection {mood.values.get('affection', 0):.0f}, "
-            f"energy {mood.values.get('energy', 0):.0f}, frustration {mood.values.get('frustration', 0):.0f})",
-            f"relationship: {rel.stage}, trust {rel.trust:.0f}, "
-            f"{len(rel.milestones)} milestones, {len(rel.fights)} fights logged",
-            f"autonomy: {aut.get('mode', 'off')}, {aut.get('pending_proposals', 0)} pending",
-            f"model: {self._model_status_line()}",
-            f"platforms running: {platforms}",
-            f"power mode: {power_state}",
-            f"stats: {stats['messages']} msgs, {stats['replies']} replies, "
-            f"{stats['errors']} errors, {stats.get('controls', 0)} commands",
-        ]
+        from ...social.chat.typography import Card, card_text
+
+        card = Card("settings", title="Devon — status")
+        card.stats([
+            ("mood", f"{mood.label} (affection "
+                     f"{mood.values.get('affection', 0):.0f}, "
+                     f"energy {mood.values.get('energy', 0):.0f}, "
+                     f"frustration {mood.values.get('frustration', 0):.0f})"),
+            ("relationship", f"{rel.stage}, trust {rel.trust:.0f}, "
+                             f"{len(rel.milestones)} milestones, "
+                             f"{len(rel.fights)} fights logged"),
+            ("autonomy", f"{aut.get('mode', 'off')}, "
+                         f"{aut.get('pending_proposals', 0)} pending"),
+            ("model", self._model_status_line()),
+            ("platforms running", platforms),
+            ("power mode", power_state),
+        ], title="State")
+        card.stats([
+            ("messages", stats["messages"]),
+            ("replies", stats["replies"]),
+            ("errors", stats["errors"]),
+            ("commands", stats.get("controls", 0)),
+        ], title="Traffic")
         # Degradation ladders: surfaced ONLY when a subsystem is
         # actually serving from a fallback rung — silence when healthy.
         degradation = self._degradation_status()
@@ -145,13 +164,13 @@ class RuntimeMetaMixin:
                 f"{name} on rung {degradation['ladders'][name]['rung']} "
                 f"({degradation['ladders'][name]['rung_name']})"
                 for name in degradation["degraded"])
-            lines.append(f"degradation: {rungs}")
+            card.block_lines([f"degradation: {rungs}"])
         # Partner failure ledger: surfaced ONLY when best-effort
         # fallbacks have actually fired — silence when healthy.
         from .failures import failure_count, format_failures
         if failure_count():
-            lines.append(format_failures(limit=5))
-        return "\n".join(lines)
+            card.block_lines(format_failures(limit=5).splitlines())
+        return card_text(card)
 
     def _control_ping(self, message: Any = None) -> str:
         """The life of the /ping message itself, stage by stage.
