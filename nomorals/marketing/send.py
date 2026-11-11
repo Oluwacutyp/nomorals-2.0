@@ -37,6 +37,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 from ..core.logging_setup import get_logger
 from .failures import record_failure
@@ -443,6 +444,36 @@ CREATE TABLE IF NOT EXISTS send_warmup (
 );
 """
 
+#: The seam DDL: the native DDL plus the final-shape columns the
+#: in-file ALTER sweep adds on the native path (campaign_id,
+#: variant) and the two seam-only claim columns (claim_token,
+#: claim_until). The native path NEVER executes this string — it
+#: runs _CREATE_SQL + the guarded ALTER sweep — so native rows never
+#: carry claim fields and the native path stays byte-for-byte. The
+#: seam mapping is derived from this string, so the claim fields ride
+#: in the send_queue document exactly like the queue.py lease fields
+#: ride in the job document (the extra-columns precedent).
+_SEAM_DDL = (
+    _CREATE_SQL
+    + "ALTER TABLE send_queue ADD COLUMN campaign_id TEXT DEFAULT '';\n"
+    + "ALTER TABLE send_queue ADD COLUMN variant TEXT DEFAULT '';\n"
+    + "ALTER TABLE send_queue ADD COLUMN claim_token TEXT DEFAULT '';\n"
+    + "ALTER TABLE send_queue ADD COLUMN claim_until REAL DEFAULT 0;\n"
+)
+
+#: Every live table, in the order the port imports them.
+_TABLES = ("send_queue", "send_log", "send_providers", "send_templates",
+           "send_variants", "send_suppressions", "send_blocklist",
+           "send_costs", "send_warmup")
+
+#: How long one engine's claim on a queued row lives (seconds). The
+#: residual double-send window — a claim expiring under a
+#: still-running attempt — is bounded by this, a strictly smaller
+#: window than the native design's unbounded one (the native code
+#: has no claim at all). >= the longest provider call the engine
+#: tolerates; recorded beside the registry entry.
+CLAIM_TTL = 300.0
+
 
 #: Spam-trigger patterns (Mail-Tester pattern, offline heuristic).
 _SPAM_TRIGGERS = (
@@ -652,19 +683,80 @@ class SendEngine:
     """Self-hosted bulk send engine: queue, throttle, retry, bounce.
 
     Profile-gated batch sizes; every method never raises.
+
+    When a document store is resolved (Mongo program P5 — an explicit
+    ``store`` or the boot ambient), the same API runs over the seam
+    instead (registered in storage.sidecars as marketing-send): the
+    nine tables are documents in ``marketing-send__<table>``, the
+    AUTOINCREMENT log/cost rows ride allocated ids via put_raw with
+    the counters seeded by the one-time lazy import, and the file's
+    existing rows are imported once, through the same mapping, at
+    first construction. The queue itself is a coordination port: on
+    the seam, ``process()`` claims each due row with ONE cas_row
+    fenced on {status, attempts, next_attempt_at, claim_token
+    as-read}, writing {claim_token, claim_until}; every outcome
+    write is fenced on the claim token this attempt holds, and a
+    lost fence fails closed — the write is refused and journaled,
+    the row is left for its claim to expire. The claim fields are
+    seam-only document fields (the _SEAM_DDL columns): native rows
+    never carry them and the native path stays byte-for-byte. A
+    mixed fleet — one native engine and one seam engine over the
+    same logical queue — is NOT a supported composition: backends
+    flip per install, per the whole programme.
     """
 
-    def __init__(self, db_path: str = "", *, profile: str = "") -> None:
+    #: Seam port, None on the native path. A class attribute (not
+    #: only an __init__ assignment) so engines built via __new__
+    #: — the failure-injection suites' construction — read None
+    #: instead of raising AttributeError on the seam guards.
+    _port: Any = None
+
+    def __init__(self, db_path: str = "", *, profile: str = "",
+                 store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             path = db_path or _default_db()
-            self._db = sqlite3.connect(path)
-            self._db.row_factory = sqlite3.Row
-            self._db.executescript(_CREATE_SQL)
-            self._db.commit()
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("marketing-send", _SEAM_DDL, _TABLES,
+                                path, store=store)
+            if port is not None:
+                self._import_into(port)
+                self._port = port
+            else:
+                self._db = sqlite3.connect(path)
+                self._db.row_factory = sqlite3.Row
+                self._db.executescript(_CREATE_SQL)
+                self._db.commit()
+                # sweep migration: campaign tracking columns on older
+                # queue tables (native-path concern only — the seam
+                # DDL already carries the final shape)
+                try:
+                    for _col, _ddl in (("campaign_id", "TEXT DEFAULT ''"),
+                                       ("variant", "TEXT DEFAULT ''")):
+                        try:
+                            self._db.execute(
+                                f"ALTER TABLE send_queue ADD COLUMN {_col} {_ddl}")
+                        except Exception as e:  # noqa: BLE001
+                            # Duplicate column is the probe answer
+                            # (column already migrated); any other
+                            # ALTER failure is a real failure and
+                            # records.
+                            if "duplicate column" not in str(e):
+                                record_failure(
+                                    "send.SendEngine.__init__.sweep_column", e)
+                    self._db.commit()
+                except Exception as e:  # noqa: BLE001
+                    record_failure("send.SendEngine.__init__.sweep", e)
         except Exception:  # noqa: BLE001
+            # THE debug-honest DB handler: a dead database (native
+            # connect, sidecar resolution, or the one-time import)
+            # degrades the engine silently — debug-logged, never
+            # recorded — exactly as the native path always did.
             _log.debug("send engine DB unavailable", exc_info=True)
             self._db = None
+            self._port = None
         kind = _profile_kind(profile)
         self.profile = kind
         self.batch_size = PROFILE_BATCH.get(kind, PROFILE_BATCH["pc"])
@@ -676,24 +768,57 @@ class SendEngine:
         except Exception as e:  # noqa: BLE001
             record_failure("send.SendEngine.__init__.tracker", e)
             self._tracker = None
-        # sweep migration: campaign tracking columns on older queue tables
-        try:
-            if self._db is not None:
-                for _col, _ddl in (("campaign_id", "TEXT DEFAULT ''"),
-                                   ("variant", "TEXT DEFAULT ''")):
-                    try:
-                        self._db.execute(
-                            f"ALTER TABLE send_queue ADD COLUMN {_col} {_ddl}")
-                    except Exception as e:  # noqa: BLE001
-                        # Duplicate column is the probe answer (column
-                        # already migrated); any other ALTER failure
-                        # is a real failure and records.
-                        if "duplicate column" not in str(e):
-                            record_failure(
-                                "send.SendEngine.__init__.sweep_column", e)
-                self._db.commit()
-        except Exception as e:  # noqa: BLE001
-            record_failure("send.SendEngine.__init__.sweep", e)
+
+    def _import_into(self, port: Any) -> None:
+        """One-time lazy import of send_queue.db into the seam.
+
+        The seven TEXT-PK tables port as-is through their RowTables
+        (a file row that predates the ALTER sweep takes campaign_id /
+        variant / claim_token / claim_until from the seam DDL
+        defaults); the AUTOINCREMENT log/cost rows keep their file
+        ids via put_raw, and the id counters are seeded from the
+        imported maxima so seam-allocated ids continue the file's
+        sequences instead of colliding with them. Runs through
+        ensure_imported: one-time, idempotent — a live store is
+        adopted, never overwritten."""
+        max_ids = {"send_log": 0, "send_costs": 0}
+
+        def _make(table: Any) -> Any:
+            def write(rows: list[dict[str, Any]]) -> int:
+                for row in rows:
+                    table.put(row)
+                return len(rows)
+            return write
+
+        def _write_ids(table_name: str) -> Any:
+            def write(rows: list[dict[str, Any]]) -> int:
+                for row in rows:
+                    eid = int(row["id"])
+                    max_ids[table_name] = max(max_ids[table_name], eid)
+                    port.put_raw(table_name, str(eid), dict(row))
+                return len(rows)
+            return write
+
+        def seed_counters(_counts: dict[str, int]) -> None:
+            doc = port.store.get(port.meta_collection, "counters") or {}
+            merged = dict(doc)
+            for name, top in max_ids.items():
+                if int(merged.get(name) or 0) < top:
+                    merged[name] = top
+            if merged != doc:
+                port.store.put(port.meta_collection, "counters", merged)
+
+        writers = {name: _make(port.tables[name]) for name in
+                   ("send_queue", "send_providers", "send_templates",
+                    "send_variants", "send_suppressions", "send_blocklist",
+                    "send_warmup")}
+        writers["send_log"] = _write_ids("send_log")
+        writers["send_costs"] = _write_ids("send_costs")
+        port.ensure_imported(writers, after_import=seed_counters)
+
+    def _qt(self, table: str) -> Any:
+        """The seam RowTable for ``table`` (port is not None here)."""
+        return self._port.tables[table]
 
     # ── templates ──
 
@@ -701,8 +826,13 @@ class SendEngine:
         """Save/update a template. Never raises."""
         try:
             name = (name or "").strip()
-            if not name or self._db is None:
+            if not name or (self._db is None and self._port is None):
                 return False
+            if self._port is not None:
+                self._qt("send_templates").put({
+                    "name": name, "body": body or "",
+                    "subject": subject or "", "updated_at": time.time()})
+                return True
             self._db.execute(
                 "INSERT INTO send_templates (name, body, subject, updated_at)"
                 " VALUES (?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET"
@@ -717,8 +847,13 @@ class SendEngine:
 
     def list_templates(self) -> list[dict]:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            if self._port is not None:
+                rows = sorted(self._qt("send_templates").all(),
+                              key=lambda r: r["name"])
+                return [{"name": r["name"], "subject": r["subject"],
+                         "updated_at": r["updated_at"]} for r in rows]
             return [dict(r) for r in self._db.execute(
                 "SELECT name, subject, updated_at FROM send_templates ORDER BY name")]
         except Exception as e:  # noqa: BLE001
@@ -727,8 +862,11 @@ class SendEngine:
 
     def get_template(self, name: str) -> dict | None:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return None
+            if self._port is not None:
+                row = self._qt("send_templates").get((name or "").strip())
+                return dict(row) if row else None
             row = self._db.execute(
                 "SELECT * FROM send_templates WHERE name = ?",
                 ((name or "").strip(),)).fetchone()
@@ -749,18 +887,24 @@ class SendEngine:
         try:
             name = (name or "").strip()
             kind = (kind or "smtp").lower()
-            if not name or self._db is None:
+            if not name or (self._db is None and self._port is None):
                 return False
             cost = COST_PER_MSG_KOBO.get(kind, 0)
-            self._db.execute(
-                "INSERT INTO send_providers (name, kind, rate_per_minute,"
-                " cost_kobo, enabled) VALUES (?, ?, ?, ?, ?)"
-                " ON CONFLICT(name) DO UPDATE SET kind=excluded.kind,"
-                " rate_per_minute=excluded.rate_per_minute,"
-                " cost_kobo=excluded.cost_kobo, enabled=excluded.enabled",
-                (name, kind, max(1, int(rate_per_minute or 30)),
-                 cost, 1 if enabled else 0))
-            self._db.commit()
+            if self._port is not None:
+                self._qt("send_providers").put({
+                    "name": name, "kind": kind,
+                    "rate_per_minute": max(1, int(rate_per_minute or 30)),
+                    "cost_kobo": cost, "enabled": 1 if enabled else 0})
+            else:
+                self._db.execute(
+                    "INSERT INTO send_providers (name, kind, rate_per_minute,"
+                    " cost_kobo, enabled) VALUES (?, ?, ?, ?, ?)"
+                    " ON CONFLICT(name) DO UPDATE SET kind=excluded.kind,"
+                    " rate_per_minute=excluded.rate_per_minute,"
+                    " cost_kobo=excluded.cost_kobo, enabled=excluded.enabled",
+                    (name, kind, max(1, int(rate_per_minute or 30)),
+                     cost, 1 if enabled else 0))
+                self._db.commit()
             if sender is not None:
                 self._callables[name] = sender
             elif kind in BUILTIN_PROVIDERS:
@@ -772,8 +916,12 @@ class SendEngine:
 
     def list_providers(self) -> list[dict]:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            if self._port is not None:
+                return sorted((dict(r) for r in
+                               self._qt("send_providers").all()),
+                              key=lambda r: r["name"])
             return [dict(r) for r in self._db.execute(
                 "SELECT * FROM send_providers ORDER BY name")]
         except Exception as e:  # noqa: BLE001
@@ -796,7 +944,8 @@ class SendEngine:
             to = (to or "").strip()
             template = (template or "").strip()
             provider = (provider or "").strip()
-            if not to or not template or not provider or self._db is None:
+            if not to or not template or not provider \
+                    or (self._db is None and self._port is None):
                 return ""
             if self.is_blocklisted(to):
                 self._log("", provider, "blocked", f"blocklisted: {to}")
@@ -807,6 +956,18 @@ class SendEngine:
                 return ""
             import json
             send_id = "snd_" + uuid.uuid4().hex[:10]
+            if self._port is not None:
+                self._qt("send_queue").put({
+                    "send_id": send_id, "recipient": to,
+                    "template": template, "vars": json.dumps(vars_ or {}),
+                    "provider": provider, "subject": subject or "",
+                    "status": "queued", "attempts": 0,
+                    "next_attempt_at": float(send_at or 0.0),
+                    "last_error": "", "created_at": time.time(),
+                    "sent_at": 0, "campaign_id": campaign_id or "",
+                    "variant": variant or "", "claim_token": "",
+                    "claim_until": 0})
+                return send_id
             self._db.execute(
                 "INSERT INTO send_queue (send_id, recipient, template, vars,"
                 " provider, subject, status, created_at, campaign_id, variant,"
@@ -824,8 +985,10 @@ class SendEngine:
 
     def queue_depth(self, status: str = "queued") -> int:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return 0
+            if self._port is not None:
+                return self._qt("send_queue").count({"status": status})
             row = self._db.execute(
                 "SELECT COUNT(*) c FROM send_queue WHERE status = ?",
                 (status,)).fetchone()
@@ -839,9 +1002,15 @@ class SendEngine:
     def _rate_ok(self, provider: str, limit: int) -> bool:
         """Sliding-window: < limit sends in the last 60s for this provider."""
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return True
             cutoff = time.time() - 60.0
+            if self._port is not None:
+                sent = sum(
+                    1 for r in self._qt("send_log").find(
+                        {"provider": provider, "event": "sent"})
+                    if float(r["at"]) >= cutoff)
+                return sent < max(1, limit)
             row = self._db.execute(
                 "SELECT COUNT(*) c FROM send_log"
                 " WHERE provider = ? AND event = 'sent' AND at >= ?",
@@ -858,6 +1027,8 @@ class SendEngine:
 
         Returns ``{sent, failed, deferred, blocked}``. Never raises.
         """
+        if self._port is not None:
+            return self._process_seam(limit)
         stats = {"sent": 0, "failed": 0, "deferred": 0, "blocked": 0}
         try:
             if self._db is None:
@@ -875,6 +1046,207 @@ class SendEngine:
         except Exception:  # noqa: BLE001
             _log.debug("send process failed", exc_info=True)
             return stats
+
+    def _process_seam(self, limit: int = 0) -> dict:
+        """The seam drain: claim, then attempt, per row.
+
+        Selection mirrors the native query (queued + due, created_at
+        order, equal created_at ties fall back to send_id order) with
+        one addition: a row is a candidate only while it is
+        unclaimed or its claim has expired. Each candidate is claimed
+        with ONE cas_row fenced on {status, attempts,
+        next_attempt_at, claim_token as-read}; a lost cas skips the
+        row — another engine owns it. Never raises."""
+        stats = {"sent": 0, "failed": 0, "deferred": 0, "blocked": 0}
+        try:
+            n = max(1, int(limit or self.batch_size))
+            now = time.time()
+            queue = self._qt("send_queue")
+            rows = [r for r in queue.find({"status": "queued"})
+                    if float(r["next_attempt_at"]) <= now
+                    and (not (r.get("claim_token") or "")
+                         or float(r.get("claim_until") or 0) <= now)]
+            rows.sort(key=lambda r: (float(r["created_at"]), r["send_id"]))
+            for row in rows[:n]:
+                token = "clm_" + uuid.uuid4().hex[:16]
+                new_row = {**row, "claim_token": token,
+                           "claim_until": time.time() + CLAIM_TTL}
+                expected = {"status": "queued",
+                            "attempts": row["attempts"],
+                            "next_attempt_at": row["next_attempt_at"],
+                            "claim_token": row.get("claim_token") or ""}
+                if not queue.cas_row(row["send_id"], expected, new_row):
+                    continue  # another engine claimed it first
+                outcome = self._attempt_seam(new_row, token)
+                stats[outcome] = stats.get(outcome, 0) + 1
+            return stats
+        except Exception:  # noqa: BLE001
+            _log.debug("send process failed", exc_info=True)
+            return stats
+
+    def _attempt_seam(self, row: dict, token: str) -> str:
+        """One claimed send attempt → 'sent' | 'failed' | 'deferred'
+        | 'blocked'. The seam mirror of :meth:`_attempt`: every
+        outcome write is fenced on the claim token this attempt
+        holds, and a lost fence fails closed (the write is refused
+        and journaled; the row is left for its claim to expire).
+        Deferrals release the claim, so the row stays immediately
+        re-attemptable exactly as on the native path."""
+        send_id = row["send_id"]
+        try:
+            prov = self._qt("send_providers").get(row["provider"])
+            if prov is None or not prov["enabled"]:
+                self._set_status_seam(row, token, "failed",
+                                      "unknown/disabled provider")
+                return "failed"
+            if self.is_blocklisted(row["recipient"]):
+                self._set_status_seam(row, token, "blocked",
+                                      "recipient blocklisted")
+                return "blocked"
+            if self.is_suppressed(row["recipient"]):
+                self._set_status_seam(row, token, "blocked",
+                                      "recipient suppressed (unsub/complaint)")
+                return "blocked"
+            if not self._rate_ok(row["provider"], int(prov["rate_per_minute"])):
+                self._release_claim_seam(row, token)
+                return "deferred"  # leave queued; window will clear
+            if not self._warmup_ok(row["provider"]):
+                self._release_claim_seam(row, token)
+                return "deferred"  # warmup cap for today reached
+            # Cost gate (#68): budget check before spend.
+            if not self._cost_ok(prov):
+                self._release_claim_seam(row, token)
+                return "deferred"
+            tpl = self.get_template(row["template"])
+            variant = (row.get("variant") or "").strip()
+            if variant:
+                # A/B: variant body overrides the base template.
+                var = self.get_variant(row["template"], variant)
+                if var is not None:
+                    tpl = {"body": var.get("body", ""),
+                           "subject": var.get("subject", "")}
+            if tpl is None:
+                self._set_status_seam(row, token, "failed",
+                                      "template not found")
+                return "failed"
+            import json
+            vars_ = {}
+            try:
+                vars_ = json.loads(row["vars"] or "{}")
+            except Exception as e:  # noqa: BLE001
+                record_failure("send.SendEngine._attempt.vars", e)
+                vars_ = {}
+            body = render_template(tpl["body"], vars_)
+            subject = row["subject"] or render_template(tpl["subject"], vars_)
+            sender = self._callables.get(row["provider"])
+            if sender is None:
+                self._set_status_seam(row, token, "failed",
+                                      "no sender for provider")
+                return "failed"
+            try:
+                ok = bool(sender(row["recipient"], subject, body))
+            except Exception as exc:  # provider raised → retry path
+                return self._retry_or_dead_seam(row, token, str(exc))
+            if ok:
+                if self._set_status_seam(row, token, "sent"):
+                    self._log(send_id, row["provider"], "sent")
+                    self._record_cost(prov)
+                    return "sent"
+                # The send happened but its record was refused: the
+                # stat says failed (the delivery was not recorded)
+                # and the fence loss is journaled; the row is left
+                # for its claim to expire.
+                return "failed"
+            return self._retry_or_dead_seam(row, token,
+                                            "provider returned False")
+        except Exception as exc:  # noqa: BLE001
+            return self._retry_or_dead_seam(row, token,
+                                            f"attempt error: {exc}")
+
+    def _set_status_seam(self, row: dict, token: str, status: str,
+                         error: str = "",
+                         attempts: int | None = None) -> bool:
+        """A terminal outcome write, fenced on this attempt's claim.
+
+        The cas expects the row still queued under this claim token;
+        a lost fence returns False and journals — the write is
+        refused, never force-written. A landed write clears the
+        claim (the row is no longer queued). Never raises."""
+        try:
+            new_row = dict(row)
+            new_row["status"] = status
+            new_row["last_error"] = error[:300]
+            if status == "sent":
+                new_row["sent_at"] = time.time()
+            if attempts is not None:
+                new_row["attempts"] = attempts
+            new_row["claim_token"] = ""
+            new_row["claim_until"] = 0
+            ok = self._qt("send_queue").cas_row(
+                row["send_id"],
+                {"status": "queued", "claim_token": token}, new_row)
+            if not ok:
+                record_failure(
+                    "send.SendEngine._set_status.fence",
+                    f"claim fence lost for {row['send_id']}")
+            return ok
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine._set_status", e)
+            return False
+
+    def _release_claim_seam(self, row: dict, token: str) -> bool:
+        """Give a claimed row back unattempted (deferral path).
+
+        Fenced on the claim token, exactly like an outcome write:
+        a lost fence journals and the row is left for its claim to
+        expire. Never raises."""
+        try:
+            ok = self._qt("send_queue").cas_row(
+                row["send_id"],
+                {"status": "queued", "claim_token": token},
+                {**row, "claim_token": "", "claim_until": 0})
+            if not ok:
+                record_failure(
+                    "send.SendEngine._release_claim.fence",
+                    f"claim fence lost for {row['send_id']}")
+            return ok
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine._release_claim", e)
+            return False
+
+    def _retry_or_dead_seam(self, row: dict, token: str,
+                            error: str) -> str:
+        """Exponential backoff; dead after MAX_ATTEMPTS. The seam
+        mirror of :meth:`_retry_or_dead`: the retry write and the
+        dead write are both fenced on this attempt's claim, and a
+        lost fence fails closed (returns 'failed', journaled).
+        Returns a stat key."""
+        try:
+            attempts = int(row.get("attempts", 0)) + 1
+            if attempts >= MAX_ATTEMPTS:
+                if self._set_status_seam(row, token, "dead", error[:300],
+                                         attempts=attempts):
+                    self._log(row["send_id"], row["provider"], "dead",
+                              error[:200])
+                return "failed"
+            backoff = BACKOFF_BASE_S * (2 ** (attempts - 1))
+            new_row = {**row, "attempts": attempts,
+                       "next_attempt_at": time.time() + backoff,
+                       "last_error": error[:300]}
+            ok = self._qt("send_queue").cas_row(
+                row["send_id"],
+                {"status": "queued", "claim_token": token}, new_row)
+            if not ok:
+                record_failure(
+                    "send.SendEngine._retry_or_dead.fence",
+                    f"claim fence lost for {row['send_id']}")
+                return "failed"
+            self._log(row["send_id"], row["provider"], "retry",
+                      f"attempt {attempts}: {error[:120]}")
+            return "deferred"
+        except Exception as e:  # noqa: BLE001
+            record_failure("send.SendEngine._retry_or_dead", e)
+            return "deferred"
 
     def _attempt(self, row: dict) -> str:
         """One send attempt → 'sent' | 'failed' | 'deferred' | 'blocked'."""
@@ -980,6 +1352,13 @@ class SendEngine:
     def _log(self, send_id: str, provider: str, event: str,
              detail: str = "") -> None:
         try:
+            if self._port is not None:
+                eid = self._port.next_id("send_log")
+                self._port.put_raw("send_log", str(eid), {
+                    "id": eid, "send_id": send_id, "provider": provider,
+                    "event": event, "detail": detail[:300],
+                    "at": time.time()})
+                return
             self._db.execute(
                 "INSERT INTO send_log (send_id, provider, event, detail, at)"
                 " VALUES (?, ?, ?, ?, ?)",
@@ -991,7 +1370,7 @@ class SendEngine:
 
     # ── cost routing (#68) ──
 
-    def _cost_ok(self, prov: sqlite3.Row) -> bool:
+    def _cost_ok(self, prov) -> bool:
         """Budget gate: True when we may spend this provider's per-msg cost."""
         try:
             if self._tracker is None:
@@ -1005,14 +1384,20 @@ class SendEngine:
             record_failure("send.SendEngine._cost_ok", e)
             return True
 
-    def _record_cost(self, prov: sqlite3.Row) -> None:
+    def _record_cost(self, prov) -> None:
         try:
             cost = int(prov["cost_kobo"] or 0)
-            self._db.execute(
-                "INSERT INTO send_costs (provider, cost_kobo, at)"
-                " VALUES (?, ?, ?)",
-                (prov["name"], cost, time.time()))
-            self._db.commit()
+            if self._port is not None:
+                cid = self._port.next_id("send_costs")
+                self._port.put_raw("send_costs", str(cid), {
+                    "id": cid, "provider": prov["name"],
+                    "cost_kobo": cost, "at": time.time()})
+            else:
+                self._db.execute(
+                    "INSERT INTO send_costs (provider, cost_kobo, at)"
+                    " VALUES (?, ?, ?)",
+                    (prov["name"], cost, time.time()))
+                self._db.commit()
             # #68 cost-awareness: also log into the WhatsApp cost tracker
             # (mapped to the closest valid category) when available.
             if self._tracker is not None and cost > 0:
@@ -1032,10 +1417,13 @@ class SendEngine:
         try:
             count = max(0, int(count or 0))
             per = 0
-            if provider and self._db is not None:
-                row = self._db.execute(
-                    "SELECT cost_kobo FROM send_providers WHERE name = ?",
-                    (provider,)).fetchone()
+            if provider and (self._db is not None or self._port is not None):
+                if self._port is not None:
+                    row = self._qt("send_providers").get(provider)
+                else:
+                    row = self._db.execute(
+                        "SELECT cost_kobo FROM send_providers WHERE name = ?",
+                        (provider,)).fetchone()
                 per = int(row["cost_kobo"]) if row else 0
             if per <= 0:
                 per = COST_PER_MSG_KOBO.get("smtp", 40)
@@ -1056,9 +1444,16 @@ class SendEngine:
         try:
             template = (template or "").strip()
             variant_name = (variant_name or "").strip()
-            if not template or not variant_name or self._db is None:
+            if not template or not variant_name \
+                    or (self._db is None and self._port is None):
                 return False
             vid = f"var_{template}_{variant_name}".replace(" ", "_")[:80]
+            if self._port is not None:
+                self._qt("send_variants").put({
+                    "variant_id": vid, "template": template,
+                    "variant_name": variant_name, "body": body or "",
+                    "subject": subject or "", "created_at": time.time()})
+                return True
             self._db.execute(
                 "INSERT OR REPLACE INTO send_variants "
                 "(variant_id, template, variant_name, body, subject, created_at)"
@@ -1073,8 +1468,21 @@ class SendEngine:
 
     def list_variants(self, template: str = "") -> list[dict]:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            if self._port is not None:
+                rows = self._qt("send_variants").all()
+                if (template or "").strip():
+                    rows = [r for r in rows
+                            if r["template"] == template.strip()]
+                    rows.sort(key=lambda r: r["variant_name"])
+                else:
+                    rows.sort(key=lambda r: (r["template"],
+                                             r["variant_name"]))
+                return [{"template": r["template"],
+                         "variant_name": r["variant_name"],
+                         "subject": r["subject"],
+                         "created_at": r["created_at"]} for r in rows]
             if (template or "").strip():
                 rows = self._db.execute(
                     "SELECT template, variant_name, subject, created_at"
@@ -1091,8 +1499,13 @@ class SendEngine:
 
     def get_variant(self, template: str, variant_name: str) -> dict | None:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return None
+            if self._port is not None:
+                rows = self._qt("send_variants").find({
+                    "template": (template or "").strip(),
+                    "variant_name": (variant_name or "").strip()})
+                return dict(rows[0]) if rows else None
             row = self._db.execute(
                 "SELECT * FROM send_variants WHERE template = ? AND variant_name = ?",
                 ((template or "").strip(), (variant_name or "").strip())).fetchone()
@@ -1132,18 +1545,28 @@ class SendEngine:
         """Per-variant funnel for an A/B campaign. Never raises."""
         out: dict = {"campaign_id": campaign_id or "", "variants": {}}
         try:
-            if self._db is None or not campaign_id:
+            if (self._db is None and self._port is None) or not campaign_id:
                 return out
-            rows = self._db.execute(
-                "SELECT variant, status, COUNT(*) c FROM send_queue"
-                " WHERE campaign_id = ? GROUP BY variant, status",
-                (campaign_id,)).fetchall()
+            if self._port is not None:
+                rows = self._qt("send_queue").find(
+                    {"campaign_id": campaign_id})
+            else:
+                rows = self._db.execute(
+                    "SELECT variant, status, COUNT(*) c FROM send_queue"
+                    " WHERE campaign_id = ? GROUP BY variant, status",
+                    (campaign_id,)).fetchall()
             for r in rows:
-                v = out["variants"].setdefault(r["variant"] or "control",
+                if self._port is not None:
+                    variant, status, count = (r.get("variant") or "",
+                                              r["status"], 1)
+                else:
+                    variant, status, count = (r["variant"], r["status"],
+                                              int(r["c"]))
+                v = out["variants"].setdefault(variant or "control",
                                                {"sent": 0, "failed": 0,
                                                 "dead": 0, "queued": 0,
                                                 "blocked": 0})
-                v[r["status"]] = v.get(r["status"], 0) + int(r["c"])
+                v[status] = v.get(status, 0) + count
             for v, stats in out["variants"].items():
                 done = stats.get("sent", 0) + stats.get("failed", 0) + stats.get("dead", 0)
                 stats["fail_rate"] = round(
@@ -1167,14 +1590,26 @@ class SendEngine:
                 return {"winner": "", "reason": "no data"}
             # Prefer engagement when the signal exists.
             eng: dict[str, int] = {}
-            if self._db is not None:
+            if self._db is not None or self._port is not None:
                 try:
-                    for r in self._db.execute(
-                            "SELECT q.variant, COUNT(*) c FROM send_log l"
-                            " JOIN send_queue q ON q.send_id = l.send_id"
-                            " WHERE q.campaign_id = ? AND l.event = 'engaged'"
-                            " GROUP BY q.variant", (campaign_id,)):
-                        eng[r["variant"] or "control"] = int(r["c"])
+                    if self._port is not None:
+                        # the log⋈queue JOIN, re-expressed over finds
+                        by_id = {r["send_id"]: r for r in
+                                 self._qt("send_queue").find(
+                                     {"campaign_id": campaign_id})}
+                        for lr in self._qt("send_log").find(
+                                {"event": "engaged"}):
+                            q = by_id.get(lr["send_id"])
+                            if q is not None:
+                                key = q.get("variant") or "control"
+                                eng[key] = eng.get(key, 0) + 1
+                    else:
+                        for r in self._db.execute(
+                                "SELECT q.variant, COUNT(*) c FROM send_log l"
+                                " JOIN send_queue q ON q.send_id = l.send_id"
+                                " WHERE q.campaign_id = ? AND l.event = 'engaged'"
+                                " GROUP BY q.variant", (campaign_id,)):
+                            eng[r["variant"] or "control"] = int(r["c"])
                 except Exception as e:  # noqa: BLE001
                     record_failure("send.SendEngine.ab_winner.engagement", e)
             if eng:
@@ -1233,28 +1668,39 @@ class SendEngine:
         out: dict = {"campaign_id": campaign_id or "", "total": 0,
                      "by_status": {}, "by_provider": {}, "spent_kobo": 0}
         try:
-            if self._db is None or not campaign_id:
+            if (self._db is None and self._port is None) or not campaign_id:
                 return out
-            rows = self._db.execute(
-                "SELECT status, provider, COUNT(*) c FROM send_queue"
-                " WHERE campaign_id = ? GROUP BY status, provider",
-                (campaign_id,)).fetchall()
+            if self._port is not None:
+                rows = self._qt("send_queue").find(
+                    {"campaign_id": campaign_id})
+                costs = {r["name"]: int(r["cost_kobo"] or 0) for r in
+                         self._qt("send_providers").all()}
+            else:
+                rows = self._db.execute(
+                    "SELECT status, provider, COUNT(*) c FROM send_queue"
+                    " WHERE campaign_id = ? GROUP BY status, provider",
+                    (campaign_id,)).fetchall()
             for r in rows:
-                c = int(r["c"])
+                if self._port is not None:
+                    status, provider, c = r["status"], r["provider"], 1
+                else:
+                    status, provider, c = r["status"], r["provider"], int(r["c"])
                 out["total"] += c
-                out["by_status"][r["status"]] = out["by_status"].get(r["status"], 0) + c
-                p = out["by_provider"].setdefault(r["provider"], {})
-                p[r["status"]] = p.get(r["status"], 0) + c
+                out["by_status"][status] = out["by_status"].get(status, 0) + c
+                p = out["by_provider"].setdefault(provider, {})
+                p[status] = p.get(status, 0) + c
             # Spend: this campaign's SENT rows priced at each provider's
             # cost_kobo — the same basis _record_cost charges the daily
             # budget on. (send_costs rows carry no campaign_id, so the
             # per-provider rate is the honest source.)
-            costs = {r["name"]: int(r["cost_kobo"] or 0) for r in
-                     self._db.execute(
-                         "SELECT name, cost_kobo FROM send_providers"
-                     ).fetchall()}
+            if self._port is None:
+                costs = {r["name"]: int(r["cost_kobo"] or 0) for r in
+                         self._db.execute(
+                             "SELECT name, cost_kobo FROM send_providers"
+                         ).fetchall()}
             out["spent_kobo"] = sum(
-                int(r["c"]) * costs.get(r["provider"], 0)
+                (1 if self._port is not None else int(r["c"]))
+                * costs.get(r["provider"], 0)
                 for r in rows if r["status"] == "sent")
             return out
         except Exception as e:  # noqa: BLE001
@@ -1281,10 +1727,16 @@ class SendEngine:
         try:
             address = (address or "").strip().lower()
             reason = (reason or "unsubscribe").strip().lower()
-            if not address or "@" not in address or self._db is None:
+            if not address or "@" not in address \
+                    or (self._db is None and self._port is None):
                 return False
             if reason not in ("unsubscribe", "complaint", "manual"):
                 reason = "unsubscribe"
+            if self._port is not None:
+                self._qt("send_suppressions").put({
+                    "address": address, "reason": reason,
+                    "detail": (detail or "")[:200], "at": time.time()})
+                return True
             self._db.execute(
                 "INSERT OR REPLACE INTO send_suppressions"
                 " (address, reason, detail, at) VALUES (?, ?, ?, ?)",
@@ -1297,8 +1749,11 @@ class SendEngine:
 
     def is_suppressed(self, address: str) -> bool:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return False
+            if self._port is not None:
+                return self._qt("send_suppressions").get(
+                    (address or "").strip().lower()) is not None
             row = self._db.execute(
                 "SELECT 1 FROM send_suppressions WHERE address = ?",
                 ((address or "").strip().lower(),)).fetchone()
@@ -1309,8 +1764,10 @@ class SendEngine:
 
     def suppression_count(self) -> int:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return 0
+            if self._port is not None:
+                return self._qt("send_suppressions").count()
             row = self._db.execute("SELECT COUNT(*) c FROM send_suppressions").fetchone()
             return int(row["c"]) if row else 0
         except Exception as e:  # noqa: BLE001
@@ -1323,8 +1780,13 @@ class SendEngine:
         """Start/restart a warmup ramp for a provider. Never raises."""
         try:
             provider = (provider or "").strip()
-            if not provider or self._db is None:
+            if not provider or (self._db is None and self._port is None):
                 return False
+            if self._port is not None:
+                self._qt("send_warmup").put({
+                    "provider": provider, "day0": time.time(),
+                    "daily_target": max(10, int(daily_target or 100))})
+                return True
             self._db.execute(
                 "INSERT OR REPLACE INTO send_warmup (provider, day0, daily_target)"
                 " VALUES (?, ?, ?)",
@@ -1338,21 +1800,30 @@ class SendEngine:
     def warmup_status(self, provider: str) -> dict:
         """Today's warmup cap for a provider ({} = no warmup). Never raises."""
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return {}
-            row = self._db.execute(
-                "SELECT * FROM send_warmup WHERE provider = ?",
-                ((provider or "").strip(),)).fetchone()
+            if self._port is not None:
+                row = self._qt("send_warmup").get((provider or "").strip())
+            else:
+                row = self._db.execute(
+                    "SELECT * FROM send_warmup WHERE provider = ?",
+                    ((provider or "").strip(),)).fetchone()
             if not row:
                 return {}
             day = int((time.time() - float(row["day0"])) / 86400.0) + 1
             plan = warmup_plan(int(row["daily_target"]), 21)
             cap = plan[min(day, len(plan)) - 1]["cap"] if plan else int(row["daily_target"])
-            sent_today = self._db.execute(
-                "SELECT COUNT(*) c FROM send_log WHERE provider = ?"
-                " AND event = 'sent' AND at >= ?",
-                (row["provider"], time.time() - 86400.0)).fetchone()
-            used = int(sent_today["c"]) if sent_today else 0
+            if self._port is not None:
+                used = sum(
+                    1 for r in self._qt("send_log").find(
+                        {"provider": row["provider"], "event": "sent"})
+                    if float(r["at"]) >= time.time() - 86400.0)
+            else:
+                sent_today = self._db.execute(
+                    "SELECT COUNT(*) c FROM send_log WHERE provider = ?"
+                    " AND event = 'sent' AND at >= ?",
+                    (row["provider"], time.time() - 86400.0)).fetchone()
+                used = int(sent_today["c"]) if sent_today else 0
             return {"provider": row["provider"], "day": day, "cap": cap,
                     "used": used, "remaining": max(0, cap - used)}
         except Exception as e:  # noqa: BLE001
@@ -1389,8 +1860,13 @@ class SendEngine:
     def blocklist(self, address: str, reason: str = "") -> bool:
         try:
             address = (address or "").strip().lower()
-            if not address or self._db is None:
+            if not address or (self._db is None and self._port is None):
                 return False
+            if self._port is not None:
+                self._qt("send_blocklist").insert_ignore({
+                    "address": address, "reason": (reason or "")[:200],
+                    "at": time.time()})
+                return True
             self._db.execute(
                 "INSERT OR IGNORE INTO send_blocklist (address, reason, at)"
                 " VALUES (?, ?, ?)",
@@ -1403,8 +1879,12 @@ class SendEngine:
 
     def unblocklist(self, address: str) -> bool:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return False
+            if self._port is not None:
+                self._qt("send_blocklist").delete(
+                    (address or "").strip().lower())
+                return True
             self._db.execute("DELETE FROM send_blocklist WHERE address = ?",
                              ((address or "").strip().lower(),))
             self._db.commit()
@@ -1415,8 +1895,11 @@ class SendEngine:
 
     def is_blocklisted(self, address: str) -> bool:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return False
+            if self._port is not None:
+                return self._qt("send_blocklist").get(
+                    (address or "").strip().lower()) is not None
             row = self._db.execute(
                 "SELECT 1 FROM send_blocklist WHERE address = ?",
                 ((address or "").strip().lower(),)).fetchone()
@@ -1433,23 +1916,34 @@ class SendEngine:
                      "blocklisted": 0, "suppressed": 0, "spent_24h_kobo": 0,
                      "providers": []}
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return out
             day = time.time() - 86400.0
             for s in ("queued", "failed", "dead"):
                 out[s] = self.queue_depth(s)
-            row = self._db.execute(
-                "SELECT COUNT(*) c FROM send_log WHERE event = 'sent'"
-                " AND at >= ?", (day,)).fetchone()
-            out["sent_24h"] = int(row["c"]) if row else 0
-            row = self._db.execute(
-                "SELECT COUNT(*) c FROM send_blocklist").fetchone()
-            out["blocklisted"] = int(row["c"]) if row else 0
-            out["suppressed"] = self.suppression_count()
-            row = self._db.execute(
-                "SELECT COALESCE(SUM(cost_kobo), 0) s FROM send_costs"
-                " WHERE at >= ?", (day,)).fetchone()
-            out["spent_24h_kobo"] = int(row["s"] or 0) if row else 0
+            if self._port is not None:
+                out["sent_24h"] = sum(
+                    1 for r in self._qt("send_log").find({"event": "sent"})
+                    if float(r["at"]) >= day)
+                out["blocklisted"] = self._qt("send_blocklist").count()
+                out["suppressed"] = self.suppression_count()
+                out["spent_24h_kobo"] = sum(
+                    int(r["cost_kobo"] or 0)
+                    for r in self._qt("send_costs").all()
+                    if float(r["at"]) >= day)
+            else:
+                row = self._db.execute(
+                    "SELECT COUNT(*) c FROM send_log WHERE event = 'sent'"
+                    " AND at >= ?", (day,)).fetchone()
+                out["sent_24h"] = int(row["c"]) if row else 0
+                row = self._db.execute(
+                    "SELECT COUNT(*) c FROM send_blocklist").fetchone()
+                out["blocklisted"] = int(row["c"]) if row else 0
+                out["suppressed"] = self.suppression_count()
+                row = self._db.execute(
+                    "SELECT COALESCE(SUM(cost_kobo), 0) s FROM send_costs"
+                    " WHERE at >= ?", (day,)).fetchone()
+                out["spent_24h_kobo"] = int(row["s"] or 0) if row else 0
             out["providers"] = self.list_providers()
             return out
         except Exception as e:  # noqa: BLE001

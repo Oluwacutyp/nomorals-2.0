@@ -1763,6 +1763,43 @@ _register(_S(
         "SQLite default."),
 ))
 
+_register(_S(
+    name="marketing-send", verdict="ported", kind="sqlite-file",
+    modules=("marketing/send.py",),
+    tables=("send_queue", "send_log", "send_providers", "send_templates",
+            "send_variants", "send_suppressions", "send_blocklist",
+            "send_costs", "send_warmup"),
+    reason=(
+        "ported in the Mongo residue Batch 3 pass (C2): the "
+        "coordination port. SendEngine routes through the seam "
+        "(marketing-send__send_queue / __send_templates / "
+        "__send_providers / __send_variants / __send_suppressions / "
+        "__send_blocklist / __send_warmup by TEXT PK; __send_log / "
+        "__send_costs by allocated id via put_raw, the counters "
+        "seeded by the one-time lazy import from the file's maxima) "
+        "whenever a store is resolved, behind its unchanged "
+        "never-raises API. The queue's claim lives in two seam-only "
+        "document fields, claim_token and claim_until (CLAIM_TTL "
+        "300s, recorded here): process() claims each due row with "
+        "ONE cas_row fenced on {status, attempts, next_attempt_at, "
+        "claim_token as-read}; every outcome write (sent / failed / "
+        "blocked / retry-backoff / dead) is a cas_row fenced on the "
+        "claim token the attempt holds, and a lost fence fails "
+        "closed — refused and journaled via record_failure, the row "
+        "left for its claim to expire, never force-written; "
+        "deferrals (rate / warmup / cost) release the claim so the "
+        "row stays immediately re-attemptable. Native rows never "
+        "carry claim fields and the native path serves the SQLite "
+        "default byte-for-byte; a mixed fleet (one native engine, "
+        "one seam engine over the same logical queue) is NOT a "
+        "supported composition — backends flip per install. "
+        "Aggregates (queue_depth, rate window, warmup cap, "
+        "campaign/ab reports, status spend) are finds + Python "
+        "rollups; the file's existing rows are imported once, "
+        "through the same mapping, at first construction. The "
+        "native sqlite3 path serves the SQLite default."),
+))
+
 
 # ── residue: contained domain file stores, classified, port queued ────────
 #
@@ -1793,14 +1830,6 @@ _residue("audio-fingerprints", "audio/fingerprint.py", ("hashes", "tracks"),
          "audio fingerprint hashes per track in fingerprints.db; "
          "hash rows are lookup-keyed blobs, document-shaped but "
          "bulk-binary in character.")
-_residue("marketing-send", "marketing/send.py",
-         ("send_queue", "send_log", "send_providers", "send_templates",
-          "send_variants", "send_suppressions", "send_blocklist",
-          "send_costs"),
-         "the send pipeline's store in send_queue.db — it "
-         "contains a QUEUE (send_queue) whose claim semantics need "
-         "the P4 fencing treatment, so this port is a coordination "
-         "port, not a plain CRUD port.")
 _register(_S(
     name="travel-groups", verdict="ported", kind="sqlite-file",
     modules=("travel/groups.py",),

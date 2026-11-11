@@ -65,6 +65,9 @@ P5 settles the stores that live BESIDE the central database:
   namespace per group key via the sidecar_port namespace_suffix
   extension; money splits are single-row writes, balances are
   recomputed reads) follows the same pattern below.
+  The residue Batch 3 C2 port (marketing-send — the claim as
+  seam-only fields fenced by one cas_row, two-engine exactly-once)
+  follows the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -287,7 +290,9 @@ class TestSidecarRegistry:
             # residue Batch 3, C3 lane:
             "planning-congestion",
             # residue Batch 3, C6 lane:
-            "travel-groups"}
+            "travel-groups",
+            # residue Batch 3, C2 lane:
+            "marketing-send"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -6897,8 +6902,12 @@ class TestTravelGroupsNamespace:
         from nomorals.storage.sidecars import sidecar_port
         from nomorals.travel.groups import _DDL, _TABLES
 
+        # NOTE (parent re-pin, C2 ship): this test used to pin
+        # "marketing-send" as the residue example; C2 ports it, so
+        # the residue example is now "audio-fingerprints" (the last
+        # Batch 3 residue until C7 lands).
         with pytest.raises(ValueError, match="classified 'residue'"):
-            sidecar_port("marketing-send", _DDL, _TABLES,
+            sidecar_port("audio-fingerprints", _DDL, _TABLES,
                          str(tmp_path / "y.db"), store=rung.store,
                          namespace_suffix="telegram_999")
 
@@ -6930,3 +6939,479 @@ class TestTravelGroupsNamespace:
             store=rung.store)
         assert port.store_name == "planning-congestion"
         assert port.meta_collection == "planning-congestion__meta"
+
+
+class TestMarketingSendPort:
+    """marketing/send.py — the marketing-send port (residue Batch 3,
+    C2): the coordination port. The nine tables are documents in
+    ``marketing-send__<table>``; the AUTOINCREMENT log/cost rows
+    ride allocated ids via put_raw, the counters seeded by the
+    one-time lazy import. THE claim pin (design dossier §C2): the
+    queue's claim lives in two seam-only document fields,
+    claim_token and claim_until (CLAIM_TTL 300s) — process() claims
+    each due row with ONE cas_row fenced on {status, attempts,
+    next_attempt_at, claim_token as-read}, every outcome write is
+    fenced on the claim token the attempt holds, and a lost fence
+    fails closed (refused + journaled, the row left for its claim
+    to expire); deferrals release the claim so the row stays
+    immediately re-attemptable. Native rows never carry claim
+    fields and the native path serves the SQLite default
+    byte-for-byte; a mixed fleet is NOT a supported composition."""
+
+    @staticmethod
+    def _engine(path, rung, **kw):
+        from nomorals.marketing.send import SendEngine
+
+        if rung.store is None:
+            return SendEngine(str(path), **kw)
+        return SendEngine(str(path), store=rung.store, **kw)
+
+    @staticmethod
+    def _fast_forward(engine, rung, path, send_id):
+        """Make a queued row due again on every rung.
+
+        Native: SQL UPDATE of next_attempt_at. Seam: the RowTable
+        update clears the claim too — the claim is live until
+        CLAIM_TTL, and this simulates its expiry."""
+        if rung.store is None:
+            import sqlite3
+
+            conn = sqlite3.connect(str(path))
+            try:
+                conn.execute(
+                    "UPDATE send_queue SET next_attempt_at = 0 "
+                    "WHERE send_id = ?", (send_id,))
+                conn.commit()
+            finally:
+                conn.close()
+        else:
+            engine._port.tables["send_queue"].update(send_id, {
+                "next_attempt_at": 0.0, "claim_token": "",
+                "claim_until": 0.0})
+
+    @staticmethod
+    def _queue_rows(engine, rung, path, campaign_id):
+        """Queue rows for a campaign, as plain dicts, on every rung."""
+        if rung.store is None:
+            import sqlite3
+
+            conn = sqlite3.connect(str(path))
+            try:
+                cur = conn.execute(
+                    "SELECT * FROM send_queue WHERE campaign_id = ?",
+                    (campaign_id,))
+                cols = [d[0] for d in cur.description]
+                return [dict(zip(cols, r, strict=True))
+                        for r in cur.fetchall()]
+            finally:
+                conn.close()
+        return engine._port.tables["send_queue"].find(
+            {"campaign_id": campaign_id})
+
+    def _scenario(self, path, rung) -> dict:
+        e = self._engine(path, rung)
+        out: dict = {}
+        e.register_provider("mock", kind="mock", rate_per_minute=1000,
+                            sender=lambda to, s, b: True)
+        e.register_provider("flaky", kind="mock", rate_per_minute=1000,
+                            sender=lambda to, s, b: False)
+        e.register_provider("raiser", kind="mock", rate_per_minute=1000,
+                            sender=lambda to, s, b: (_ for _ in ()).throw(
+                                RuntimeError("boom")))
+        e.register_provider("slow", kind="mock", rate_per_minute=1,
+                            sender=lambda to, s, b: True)
+        e.register_provider("warm", kind="mock", rate_per_minute=1000,
+                            sender=lambda to, s, b: True)
+        out["templates_saved"] = (
+            e.save_template("launch", "Hi {{ name }}!", "Launch day"),
+            e.save_template("other", "Other {{ name }}", "Other"))
+        out["template_names"] = [t["name"] for t in e.list_templates()]
+        out["template_body"] = e.get_template("launch")["body"]
+        out["provider_names"] = [p["name"] for p in e.list_providers()]
+        out["variants_saved"] = (
+            e.save_variant("launch", "A", "A {{ name }}", "Sub A"),
+            e.save_variant("launch", "B", "B {{ name }}", "Sub B"))
+        out["variant_names"] = [v["variant_name"]
+                                for v in e.list_variants("launch")]
+        out["variant_body"] = e.get_variant("launch", "A")["body"]
+        out["estimate"] = e.estimate_campaign(10, "mock")
+        out["warmup_none"] = e.warmup_status("mock")
+        # blocklist / suppression refusals at enqueue time
+        out["blocklisted"] = e.blocklist("bad@x.com", "test")
+        out["is_blocklisted"] = e.is_blocklisted("bad@x.com")
+        out["unsubscribed"] = e.unsubscribe("gone@x.com")
+        out["is_suppressed"] = e.is_suppressed("gone@x.com")
+        out["enqueue_blocked"] = e.enqueue("bad@x.com", "launch", {}, "mock")
+        out["enqueue_suppressed"] = e.enqueue("gone@x.com", "launch",
+                                              {}, "mock")
+        out["suppression_count"] = e.suppression_count()
+        e.enqueue("a@x.com", "launch", {"name": "Ada"}, "mock")
+        out["queued_after_enqueue"] = e.queue_depth()
+        out["process_basic"] = e.process()
+        out["depth_sent"] = e.queue_depth("sent")
+        out["depth_queued"] = e.queue_depth()
+        st = e.status()
+        out["status_basic"] = (st["queued"], st["sent_24h"], st["failed"],
+                               st["dead"], st["blocklisted"],
+                               st["suppressed"], st["spent_24h_kobo"])
+        # provider-false → backoff → dead at MAX_ATTEMPTS (5)
+        sid_f = e.enqueue("f@x.com", "launch", {}, "flaky")
+        out["retry_stats"] = []
+        for _ in range(5):
+            out["retry_stats"].append(e.process())
+            self._fast_forward(e, rung, path, sid_f)
+        out["depth_dead"] = e.queue_depth("dead")
+        # raising sender → the same retry/dead shape
+        sid_r = e.enqueue("r@x.com", "launch", {}, "raiser")
+        out["raise_stats"] = []
+        for _ in range(5):
+            out["raise_stats"].append(e.process())
+            self._fast_forward(e, rung, path, sid_r)
+        out["depth_dead_2"] = e.queue_depth("dead")
+        # rate deferral: 1/min, two rows → one sent, one deferred,
+        # and the deferred row is re-attemptable at once
+        e.enqueue("s1@x.com", "launch", {}, "slow")
+        e.enqueue("s2@x.com", "launch", {}, "slow")
+        out["process_rate"] = e.process()
+        out["process_rate_again"] = e.process()
+        out["queued_after_rate"] = e.queue_depth()
+        # warmup deferral: target 10 → day-1 cap 2. The slow row
+        # from the rate step rides every later drain as a second
+        # deferral (its rate window is still full).
+        out["warmup_started"] = e.set_warmup("warm", 10)
+        e.enqueue("w1@x.com", "launch", {}, "warm")
+        e.enqueue("w2@x.com", "launch", {}, "warm")
+        e.enqueue("w3@x.com", "launch", {}, "warm")
+        out["process_warmup"] = e.process()
+        out["process_warmup_again"] = e.process()
+        out["warmup_status"] = e.warmup_status("warm")
+        # blocklist after enqueue → blocked at attempt time (the two
+        # deferred rows above are attempted again in this drain)
+        e.enqueue("late@x.com", "launch", {}, "mock")
+        e.blocklist("late@x.com", "late")
+        out["process_blocked"] = e.process()
+        out["depth_blocked"] = e.queue_depth("blocked")
+        # A/B campaign: A gets 3, B gets 1 — the winner is
+        # deterministic on every rung (lowest fail rate, most sent)
+        res = e.create_ab_campaign("ab1", "launch", ["A", "A", "B"],
+                                   ["c1@x.com", "c2@x.com", "c3@x.com",
+                                    "c4@x.com"], "mock")
+        out["ab_campaign"] = (bool(res["campaign_id"]),
+                              res["per_variant"])
+        out["process_ab"] = e.process()
+        cid = res["campaign_id"]
+        out["ab_report"] = e.ab_report(cid)
+        out["ab_winner"] = e.ab_winner(cid)
+        out["campaign_report"] = e.campaign_report(cid)
+        # engagement signal prefers the most-engaged variant
+        rows = self._queue_rows(e, rung, path, cid)
+        a_rows = [r for r in rows if r["variant"] == "A"]
+        for r in a_rows[:2]:
+            e._log(r["send_id"], "mock", "engaged")
+        out["ab_winner_engaged"] = e.ab_winner(cid)
+        st = e.status()
+        out["status_final"] = (
+            st["queued"], st["sent_24h"], st["failed"], st["dead"],
+            st["blocklisted"], st["suppressed"], st["spent_24h_kobo"],
+            [(p["name"], p["kind"], p["rate_per_minute"],
+              p["cost_kobo"], p["enabled"]) for p in st["providers"]])
+        return out
+
+    def test_conformance(self, rung, tmp_path):
+        out = self._scenario(tmp_path / "send.db", rung)
+        assert out == {
+            "templates_saved": (True, True),
+            "template_names": ["launch", "other"],
+            "template_body": "Hi {{ name }}!",
+            "provider_names": ["flaky", "mock", "raiser", "slow", "warm"],
+            "variants_saved": (True, True),
+            "variant_names": ["A", "B"],
+            "variant_body": "A {{ name }}",
+            "estimate": {
+                "count": 10, "per_kobo": 40, "total_kobo": 400,
+                "text": "this campaign will cost ₦4 for 10 recipients "
+                        "(mock, ₦0.40 each)"},
+            "warmup_none": {},
+            "blocklisted": True,
+            "is_blocklisted": True,
+            "unsubscribed": True,
+            "is_suppressed": True,
+            "enqueue_blocked": "",
+            "enqueue_suppressed": "",
+            "suppression_count": 1,
+            "queued_after_enqueue": 1,
+            "process_basic": {"sent": 1, "failed": 0, "deferred": 0,
+                              "blocked": 0},
+            "depth_sent": 1,
+            "depth_queued": 0,
+            "status_basic": (0, 1, 0, 0, 1, 1, 0),
+            "retry_stats": [
+                {"sent": 0, "failed": 0, "deferred": 1, "blocked": 0},
+                {"sent": 0, "failed": 0, "deferred": 1, "blocked": 0},
+                {"sent": 0, "failed": 0, "deferred": 1, "blocked": 0},
+                {"sent": 0, "failed": 0, "deferred": 1, "blocked": 0},
+                {"sent": 0, "failed": 1, "deferred": 0, "blocked": 0}],
+            "depth_dead": 1,
+            "raise_stats": [
+                {"sent": 0, "failed": 0, "deferred": 1, "blocked": 0},
+                {"sent": 0, "failed": 0, "deferred": 1, "blocked": 0},
+                {"sent": 0, "failed": 0, "deferred": 1, "blocked": 0},
+                {"sent": 0, "failed": 0, "deferred": 1, "blocked": 0},
+                {"sent": 0, "failed": 1, "deferred": 0, "blocked": 0}],
+            "depth_dead_2": 2,
+            "process_rate": {"sent": 1, "failed": 0, "deferred": 1,
+                             "blocked": 0},
+            "process_rate_again": {"sent": 0, "failed": 0, "deferred": 1,
+                                   "blocked": 0},
+            "queued_after_rate": 1,
+            "warmup_started": True,
+            "process_warmup": {"sent": 2, "failed": 0, "deferred": 2,
+                               "blocked": 0},
+            "process_warmup_again": {"sent": 0, "failed": 0, "deferred": 2,
+                                     "blocked": 0},
+            "warmup_status": {"provider": "warm", "day": 1, "cap": 2,
+                              "used": 2, "remaining": 0},
+            "process_blocked": {"sent": 0, "failed": 0, "deferred": 2,
+                                "blocked": 1},
+            "depth_blocked": 1,
+            "ab_campaign": (True, {"A": 3, "B": 1}),
+            "process_ab": {"sent": 4, "failed": 0, "deferred": 2,
+                           "blocked": 0},
+            "ab_report": {
+                "campaign_id": out["ab_report"]["campaign_id"],
+                "variants": {
+                    "A": {"sent": 3, "failed": 0, "dead": 0, "queued": 0,
+                          "blocked": 0, "fail_rate": 0.0},
+                    "B": {"sent": 1, "failed": 0, "dead": 0, "queued": 0,
+                          "blocked": 0, "fail_rate": 0.0}}},
+            "ab_winner": {"winner": "A",
+                          "reason": "lowest fail rate (0.0%)",
+                          "by": "fail_rate"},
+            "campaign_report": {
+                "campaign_id": out["campaign_report"]["campaign_id"],
+                "total": 4, "by_status": {"sent": 4},
+                "by_provider": {"mock": {"sent": 4}}, "spent_kobo": 0},
+            "ab_winner_engaged": {"winner": "A",
+                                  "reason": "most engagement (2)",
+                                  "by": "engagement"},
+            "status_final": (
+                2, 8, 0, 2, 2, 1, 0,
+                [("flaky", "mock", 1000, 0, 1),
+                 ("mock", "mock", 1000, 0, 1),
+                 ("raiser", "mock", 1000, 0, 1),
+                 ("slow", "mock", 1, 0, 1),
+                 ("warm", "mock", 1000, 0, 1)]),
+        }
+
+    def test_two_engine_exactly_once(self, rung, tmp_path):
+        """THE coordination pin: two engines over one seam store
+        process() concurrently — every send_id is attempted by
+        exactly one engine, total sends == queue size."""
+        if rung.store is None:
+            pytest.skip("the claim race is a seam property; "
+                        "native has no claim")
+        import threading
+        from types import SimpleNamespace
+
+        from nomorals.storage.db import Database
+        from nomorals.storage.docstore import SQLiteDocumentStore
+
+        # the fixture's sqlite_doc store is an in-memory Database
+        # whose connections are thread-local: a worker thread would
+        # see an EMPTY database, not the shared queue. The race
+        # needs a store both threads actually share, so the
+        # sqlite_doc rung runs on a file-backed Database (same file,
+        # same rows, per-thread connections); the mongo rung is a
+        # real server and is shared as-is.
+        if rung.kind == "sqlite_doc":
+            shared = SimpleNamespace(
+                kind="sqlite_doc",
+                store=SQLiteDocumentStore(
+                    Database(str(tmp_path / "store.db"))))
+        else:
+            shared = rung
+
+        path = tmp_path / "send.db"
+        calls: list[str] = []
+        lock = threading.Lock()
+
+        def sender(to, subj, body):
+            with lock:
+                calls.append(to)
+            return True
+
+        a = self._engine(path, shared)
+        b = self._engine(path, shared)
+        for eng in (a, b):
+            eng.register_provider("mock", kind="mock", rate_per_minute=1000,
+                                  sender=sender)
+            eng.save_template("t", "Hi {{ name }}!", "Hey")
+        sids = [a.enqueue(f"u{i}@x.com", "t", {}, "mock") for i in range(6)]
+        assert all(sids) and a.queue_depth() == 6
+        results: dict[str, dict] = {}
+
+        def run(name, eng):
+            results[name] = eng.process()
+
+        ta = threading.Thread(target=run, args=("a", a))
+        tb = threading.Thread(target=run, args=("b", b))
+        ta.start()
+        tb.start()
+        ta.join()
+        tb.join()
+        total_sent = results["a"]["sent"] + results["b"]["sent"]
+        assert total_sent == 6, results
+        assert len(calls) == 6 and len(set(calls)) == 6, calls
+        assert a.queue_depth("sent") == 6
+        assert b.queue_depth("sent") == 6
+
+    def test_stale_claim_reclaimed(self, rung, tmp_path):
+        """A row hand-claimed with a past claim_until — a crashed
+        engine's row — is reclaimed and sent."""
+        if rung.store is None:
+            pytest.skip("the claim is a seam property; native has "
+                        "no claim")
+        import time
+
+        e = self._engine(tmp_path / "send.db", rung)
+        e.register_provider("mock", kind="mock", rate_per_minute=1000,
+                            sender=lambda to, s, b: True)
+        e.save_template("t", "Hi", "Hey")
+        sid = e.enqueue("s@x.com", "t", {}, "mock")
+        e._port.tables["send_queue"].update(sid, {
+            "claim_token": "clm_dead", "claim_until": time.time() - 10})
+        assert e.process() == {"sent": 1, "failed": 0, "deferred": 0,
+                               "blocked": 0}
+        assert e.queue_depth("sent") == 1
+
+    def test_fence_loss_refuses_outcome(self, rung, tmp_path):
+        """Mutating the claim token between claim and outcome makes
+        the outcome write refuse: the row stays queued and the loss
+        is journaled."""
+        if rung.store is None:
+            pytest.skip("the claim fence is a seam property")
+        from nomorals.marketing.failures import failure_count, recent_failures
+
+        e = self._engine(tmp_path / "send.db", rung)
+        e.register_provider("mock", kind="mock", rate_per_minute=1000,
+                            sender=lambda to, s, b: True)
+        e.save_template("t", "Hi", "Hey")
+        sid = e.enqueue("f@x.com", "t", {}, "mock")
+        row = e._port.tables["send_queue"].get(sid)
+        before = failure_count()
+        assert e._set_status_seam(row, "clm_stale_token", "sent") is False
+        assert e.queue_depth("queued") == 1
+        assert e.queue_depth("sent") == 0
+        assert failure_count() > before
+        assert any(f.site == "send.SendEngine._set_status.fence"
+                   for f in recent_failures())
+        before = failure_count()
+        assert e._retry_or_dead_seam(row, "clm_stale_token", "boom") \
+            == "failed"
+        assert e.queue_depth("queued") == 1
+        assert failure_count() > before
+        assert any(f.site == "send.SendEngine._retry_or_dead.fence"
+                   for f in recent_failures())
+
+    def test_cost_deferral_leaves_row_queued(self, rung, tmp_path):
+        """A budget block defers (and releases the claim, so the row
+        is re-attemptable at once) on every rung."""
+        from types import SimpleNamespace
+
+        e = self._engine(tmp_path / "send.db", rung)
+        # kind=smtp costs 40 kobo: a zero-cost provider never
+        # reaches the budget check (_cost_ok returns early).
+        e.register_provider("mock", kind="smtp", rate_per_minute=1000,
+                            sender=lambda to, s, b: True)
+        e.save_template("t", "Hi", "Hey")
+        e._tracker = SimpleNamespace(
+            check_budget=lambda client: (False, 0, 0))
+        e.enqueue("c@x.com", "t", {}, "mock")
+        assert e.process() == {"sent": 0, "failed": 0, "deferred": 1,
+                               "blocked": 0}
+        assert e.queue_depth("queued") == 1
+        assert e.process() == {"sent": 0, "failed": 0, "deferred": 1,
+                               "blocked": 0}
+
+    def test_schedule_and_seed(self, rung, tmp_path):
+        """Scheduled sends wait for their time; seeds go at once."""
+        import time
+
+        e = self._engine(tmp_path / "send.db", rung)
+        e.register_provider("mock", kind="mock", rate_per_minute=1000,
+                            sender=lambda to, s, b: True)
+        e.save_template("t", "Hi", "Hey")
+        res = e.schedule_campaign("t", ["s1@x.com", "s2@x.com"], "mock",
+                                  time.time() + 3600)
+        assert res["queued"] == 2 and res["campaign_id"]
+        assert e.process() == {"sent": 0, "failed": 0, "deferred": 0,
+                               "blocked": 0}
+        assert e.queue_depth() == 2
+        assert e.send_seed("t", ["seed@x.com"], "mock") == {"seeded": 1,
+                                                            "of": 1}
+        assert e.process()["sent"] == 1
+        assert e.queue_depth() == 2
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.marketing.send import SendEngine
+
+        path = tmp_path / "send.db"
+        native = SendEngine(str(path))
+        native.save_template("imp", "Hello {{ name }}", "Hi")
+        native.register_provider("mock", kind="mock", rate_per_minute=100,
+                                 sender=lambda to, s, b: True)
+        sid = native.enqueue("imp@x.com", "imp", {"name": "I"}, "mock")
+        assert native.process()["sent"] == 1
+        native.blocklist("b@x.com", "test")
+        native.unsubscribe("u@x.com")
+        native.set_warmup("mock", 50)
+        native.save_variant("imp", "V", "Variant body", "VS")
+
+        e = self._engine(path, rung)
+        assert rung.store.count("marketing-send__send_templates") == 1
+        assert rung.store.count("marketing-send__send_queue") == 1
+        assert rung.store.count("marketing-send__send_log") == 1
+        assert rung.store.count("marketing-send__send_costs") == 1
+        assert rung.store.count("marketing-send__send_providers") == 1
+        assert rung.store.count("marketing-send__send_blocklist") == 1
+        assert rung.store.count("marketing-send__send_suppressions") == 1
+        assert rung.store.count("marketing-send__send_warmup") == 1
+        assert rung.store.count("marketing-send__send_variants") == 1
+        marker = rung.store.get("marketing-send__meta", "import")
+        assert marker is not None and marker["done"] is True
+        # THE seam-shape pin: the claim fields are document data;
+        # the managed TTL field is present and None
+        doc = rung.store.get("marketing-send__send_queue", sid,
+                             include_expired=True)
+        assert doc is not None
+        assert doc["claim_token"] == "" and doc["claim_until"] == 0
+        assert doc.get("expires_at") is None
+        # log ids continue the file's sequence (import max = 1)
+        assert rung.store.get("marketing-send__send_log", "1")["event"] \
+            == "sent"
+        e.register_provider("mock", kind="mock", rate_per_minute=100,
+                            sender=lambda to, s, b: True)
+        e.enqueue("second@x.com", "imp", {}, "mock")
+        assert e.process()["sent"] == 1
+        assert rung.store.get("marketing-send__send_log", "2")["event"] \
+            == "sent"
+        # a second construction adopts — never re-imports
+        again = self._engine(path, rung)
+        assert again.queue_depth("sent") == 2
+        assert rung.store.count("marketing-send__send_log") == 2
+
+    def test_native_file_has_no_claim_columns(self, tmp_path):
+        """Native rows never carry claim fields: the file's
+        send_queue is the final 14-col shape, nothing more."""
+        import sqlite3
+
+        from nomorals.marketing.send import SendEngine
+
+        path = tmp_path / "send.db"
+        SendEngine(str(path))
+        cols = [r[1] for r in sqlite3.connect(str(path)).execute(
+            "PRAGMA table_info(send_queue)")]
+        assert len(cols) == 14
+        assert "claim_token" not in cols and "claim_until" not in cols
