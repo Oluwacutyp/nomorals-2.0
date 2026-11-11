@@ -9,7 +9,6 @@ a read-check-save sequence (two connections can both win), and
 from __future__ import annotations
 
 import os
-import tempfile
 import threading
 import time
 
@@ -106,9 +105,8 @@ def test_unleased_mutations_keep_working(tmp_path):
     assert done.verification["receipt"] == "r-1"
 
 
-def test_executor_claims_the_trigger_initiative_it_works():
-    tmp = tempfile.mkdtemp(dir="/home/hatch/workspace/batchb-verify/tmp")
-    db = Database(os.path.join(tmp, "t.db"))
+def test_executor_claims_the_trigger_initiative_it_works(tmp_path):
+    db = Database(os.path.join(str(tmp_path), "t.db"))
     store = InitiativeStore(db)
     systems = ActiveSystems(db=db, store=store)
     it = store.create(Initiative(

@@ -21,6 +21,11 @@ report_failure — one contract per dispatch attempt, since the
 supervisor's retry re-dispatches and each attempt's record stands
 on its own; (h) the seam functions are reusable off the orchestrator
 (duck-typed step mappings in, outcomes out).
+
+Isolation: OrchestratorSeamTests runs the core failure ledger
+against a per-test tmp home (NM_HOME override + ring clears) —
+the fail-open pin counts ledger entries, and the ring caps at
+200, so a saturated live home could never let the count grow.
 """
 
 from __future__ import annotations
@@ -149,6 +154,39 @@ class OrchestratorSeamTests(unittest.TestCase):
         self.db = _file_db(self)
         self.orch = _orch(self.db)
         self.store = DelegationStore(self.db)
+        # Core-ledger isolation (Batch A extension adjudication,
+        # row 6): the fail-open pin counts ledger entries before /
+        # after, and the ledger ring caps at 200 — against a
+        # saturated live home the count can never grow. Redirect
+        # the store with the app's own NM_HOME override (per-test
+        # tmp home; the store resolves it fresh on every operation)
+        # and clear the ring: the property-failure suites' idiom,
+        # in setUp form so it also holds under unittest.main(),
+        # where pytest fixtures never run.
+        self._nm_home_tmp = tempfile.TemporaryDirectory(
+            dir=os.environ.get("NM_TEST_TMPDIR") or None)
+        self.addCleanup(self._nm_home_tmp.cleanup)
+        self._nm_home_before = os.environ.get("NM_HOME")
+        self.addCleanup(self._restore_nm_home)
+        os.environ["NM_HOME"] = os.path.join(self._nm_home_tmp.name,
+                                             "home")
+        core_failures.clear_failures()
+        self.addCleanup(self._clear_tmp_ledger)
+
+    def _clear_tmp_ledger(self):
+        # Re-pin before the teardown clear: if a test changed or
+        # deleted NM_HOME mid-test, clear_failures() resolves the
+        # store path at call time — it must still land on the tmp
+        # home, never unlink the live home's ledger.
+        os.environ["NM_HOME"] = os.path.join(self._nm_home_tmp.name,
+                                             "home")
+        core_failures.clear_failures()
+
+    def _restore_nm_home(self):
+        if self._nm_home_before is None:
+            os.environ.pop("NM_HOME", None)
+        else:
+            os.environ["NM_HOME"] = self._nm_home_before
 
     def _run(self, plan, handler):
         return self.orch.run("goal", plan=plan, default_handler=handler,
