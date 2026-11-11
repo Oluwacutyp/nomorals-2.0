@@ -1034,3 +1034,152 @@ CALL_DESIGNS: dict[str, dict] = {
         },
     },
 }
+
+
+# ── Phase 3 registry: social posts, profiles, stories,
+# comments and video pages (census §27) ─────────────────
+#
+# One registry for all five Phase 3 classes: the
+# platforms' brand colours and their layout furniture
+# (grid columns, count style) are data, and the social
+# engines (render_social) read them.  Palette key sets
+# are uniform across the six designs so a design can
+# never half-exist.  The palettes are the platforms'
+# public brand colours and their light/dark surfaces —
+# no app chrome is guessed: a profile grid, a story
+# frame and a watch page are drawn from the census's
+# verified elements, not from a captured screenshot.
+
+#: The Instagram Story text-slide colours (the design's
+#: stocked backgrounds; a screen's ``bg`` may name any
+#: #rrggbb, the StatusScreen idiom).
+STORY_BG_COLORS: tuple[tuple[int, int, int], ...] = (
+    (0x76, 0x56, 0xC9), (0xD8, 0x1B, 0x60), (0xE5, 0x39, 0x35),
+    (0xFB, 0x8C, 0x00), (0x43, 0xA0, 0x47), (0x00, 0x89, 0x7B),
+    (0x1E, 0x88, 0xE5),
+)
+
+
+def _social_palette(**kw):
+    return kw
+
+
+def _social_design(label, *, accent, accent2, verified,
+                   grid_cols=0, count_style="intl",
+                   cover_h=0.0, light_bg=(0xFF, 0xFF, 0xFF),
+                   light_fg=(0x1B, 0x1B, 0x1B),
+                   light_sub=(0x65, 0x65, 0x65),
+                   dark_bg=(0x12, 0x12, 0x12),
+                   dark_fg=(0xFF, 0xFF, 0xFF),
+                   dark_sub=(0xA8, 0xA8, 0xA8)):
+    """One social design: the platform's brand accent,
+    its surfaces in light and dark, the grid its profile
+    wears (0 = rows, not a grid) and the count style its
+    counts shorten in.  ``cover_h`` is the banner band
+    a profile with a cover wears (Facebook cover,
+    YouTube banner); 0 = no cover band."""
+    entry = {
+        "label": label,
+        "intent": "text",
+        "accent": accent,
+        "accent2": accent2,
+        "verified": verified,
+        "grid_cols": grid_cols,
+        "count_style": count_style,
+        "cover_h": cover_h,
+        "light": _social_palette(
+            status_bg=light_bg,
+            status_fg=light_fg,
+            bg=light_bg,
+            fg=light_fg,
+            sub=light_sub,
+            accent=accent,
+            accent2=accent2,
+            verified=verified,
+            divider=(0xE5, 0xE5, 0xE5),
+            button_bg=(0xEF, 0xEF, 0xEF),
+            button_fg=light_fg,
+            primary_bg=accent,
+            primary_fg=(0xFF, 0xFF, 0xFF),
+            badge_bg=(0xED, 0x49, 0x5E),
+            badge_fg=(0xFF, 0xFF, 0xFF),
+            media_bg=(0xEF, 0xEF, 0xEF),
+            card_bg=light_bg,
+            nav_bg=light_bg,
+            nav_fg=light_fg,
+            tab_fg=light_sub,
+            tab_sel=light_fg,
+            scrim=(0x00, 0x00, 0x00),
+            meta=light_sub,
+        ),
+        "dark": _social_palette(
+            status_bg=dark_bg,
+            status_fg=dark_fg,
+            bg=dark_bg,
+            fg=dark_fg,
+            sub=dark_sub,
+            accent=accent,
+            accent2=accent2,
+            verified=verified,
+            divider=(0x2C, 0x2C, 0x2E),
+            button_bg=(0x2C, 0x2C, 0x2E),
+            button_fg=dark_fg,
+            primary_bg=accent,
+            primary_fg=(0xFF, 0xFF, 0xFF),
+            badge_bg=(0xED, 0x49, 0x5E),
+            badge_fg=(0xFF, 0xFF, 0xFF),
+            media_bg=(0x2C, 0x2C, 0x2E),
+            card_bg=dark_bg,
+            nav_bg=dark_bg,
+            nav_fg=dark_fg,
+            tab_fg=dark_sub,
+            tab_sel=dark_fg,
+            scrim=(0x00, 0x00, 0x00),
+            meta=dark_sub,
+        ),
+    }
+    return entry
+
+
+SOCIAL_DESIGNS: dict[str, dict] = {
+    # Facebook (census §5.2–§5.3): blue accent, a cover
+    # band on the profile, post rows under it.
+    "facebook": _social_design(
+        "Facebook", accent=(0x18, 0x77, 0xF2),
+        accent2=(0x42, 0xB7, 0x2F), verified=(0x18, 0x77, 0xF2),
+        grid_cols=0, cover_h=120.0),
+    # Instagram (census §5.4 + §5.10): the gradient
+    # brand wears its pink as the accent; three-column
+    # grid on the profile.
+    "instagram": _social_design(
+        "Instagram", accent=(0xE1, 0x30, 0x8C),
+        accent2=(0xF5, 0x60, 0x40), verified=(0x00, 0x95, 0xF6),
+        grid_cols=3),
+    # Threads (census §5.10): monochrome — black accent
+    # on light, white on dark is the surface, so the
+    # accent stays the brand black and the verified tick
+    # the platform blue.
+    "threads": _social_design(
+        "Threads", accent=(0x00, 0x00, 0x00),
+        accent2=(0x00, 0x00, 0x00), verified=(0x1D, 0x9B, 0xF0),
+        grid_cols=0),
+    # X (census §5.10): black surfaces; the verified
+    # tick is the platform blue.
+    "x": _social_design(
+        "X", accent=(0x00, 0x00, 0x00),
+        accent2=(0x1D, 0x9B, 0xF0), verified=(0x1D, 0x9B, 0xF0),
+        grid_cols=0),
+    # TikTok (census §5.5–§5.7): red accent, cyan second;
+    # three-column video grid, pinned first (data order).
+    "tiktok": _social_design(
+        "TikTok", accent=(0xFE, 0x2C, 0x55),
+        accent2=(0x25, 0xF4, 0xEE), verified=(0x20, 0xD5, 0xD2),
+        grid_cols=3),
+    # YouTube (census §5.8–§5.9): red accent, a banner
+    # band on the channel, video rows; counts shorten
+    # Indian-style unless the screen says otherwise.
+    "youtube": _social_design(
+        "YouTube", accent=(0xFF, 0x00, 0x00),
+        accent2=(0xFF, 0x00, 0x00), verified=(0x60, 0x60, 0x60),
+        grid_cols=0, count_style="indian", cover_h=100.0),
+}

@@ -938,3 +938,671 @@ class CallHistoryScreen:
             platform=str(data.get("platform") or "iphone_history"),
             chrome=DeviceChrome.from_dict(
                 data.get("chrome") or {}))
+
+
+# ── Phase 3: social posts, profiles, stories, comments
+# and video pages (census §27) ─────────────────────────
+#
+# The chat engine's post card is not a profile page and
+# not a watch page (census §27 approach), so Phase 3 is
+# five screen classes of its own: a post (one card), a
+# profile (identity + counts + tabs + grid/rows), a story
+# (full-screen medium + segments + positional stickers),
+# a comment sheet (comments as data, creator marks
+# included) and a video page (player + channel + up-next).
+# They share Participant / DeviceChrome and the designs-
+# as-data doctrine, never the chat renderer.  Count
+# shortening is a data function, tested at the K/M and
+# lakh/crore boundaries the census's exit proof names.
+
+#: Count-shortening styles (census §5.8: YouTube offers
+#: both; the other platforms shorten international-style).
+COUNT_STYLES: tuple[str, ...] = ("intl", "indian")
+
+
+def shorten_count(value: int, style: str = "intl") -> str:
+    """Shorten a count the way the apps print it:
+    1,240 → "1.2K", 25,400 → "25.4K", 1,200,000 →
+    "1.2M".  ``indian`` shortens the YouTube way:
+    100,000 → "1 Lakh", 10,000,000 → "1 Crore" (below a
+    lakh it still prints K).  One decimal, trimmed
+    ("1.0K" is "1K")."""
+    if style not in COUNT_STYLES:
+        raise ValueError(
+            "count style " + repr(style)
+            + " not in " + repr(COUNT_STYLES))
+    n = max(0, int(value))
+
+    def _one(amount: float) -> str:
+        text = format(amount, ".1f")
+        if text.endswith(".0"):
+            text = text[:-2]
+        return text
+
+    if style == "indian":
+        if n >= 10_000_000:
+            return _one(n / 10_000_000) + " Crore"
+        if n >= 100_000:
+            return _one(n / 100_000) + " Lakh"
+    if n >= 1_000_000_000:
+        return _one(n / 1_000_000_000) + "B"
+    if n >= 1_000_000:
+        return _one(n / 1_000_000) + "M"
+    if n >= 1_000:
+        return _one(n / 1_000) + "K"
+    return str(n)
+
+
+#: A post's visibility (census §5.2: Facebook's Public /
+#: Friends; empty = the platform prints none).
+POST_VISIBILITIES: tuple[str, ...] = ("", "public", "friends")
+
+#: A story's medium (census §5.4: photos and multiple
+#: segments; a text story is the coloured slide).
+STORY_KINDS: tuple[str, ...] = ("photo", "text")
+
+#: Story sticker kinds (census §5.4's tray list).
+STORY_STICKER_KINDS: tuple[str, ...] = (
+    "mention", "hashtag", "location", "poll", "quiz", "music")
+
+#: A video page's layout (census §5.9: the watch page,
+#: the comments/up-next page, the description panel).
+VIDEO_LAYOUTS: tuple[str, ...] = (
+    "watch", "comments", "description")
+
+#: A profile grid item's kind: a photo cell, a video
+#: cover (views + duration), a 2:3 Short, or a text post
+#: row (the Facebook / X profile's own posts).
+PROFILE_ITEM_KINDS: tuple[str, ...] = (
+    "photo", "video", "short", "post")
+
+
+@dataclass
+class SocialProfile:
+    """One identity on a social screen: the author of a
+    post, a profile's owner, a commenter, a channel.
+    ``handle`` is the @name the app prints (empty = the
+    platform prints none); ``avatar`` is a reference —
+    a local path the renderer loads when it exists, else
+    the initials placeholder stands in."""
+
+    id: str
+    name: str
+    handle: str = ""
+    verified: bool = False
+    avatar: str = ""
+    color: str = ""
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "name": self.name,
+                "handle": self.handle,
+                "verified": self.verified,
+                "avatar": self.avatar, "color": self.color}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> SocialProfile:
+        return cls(
+            id=str(data.get("id") or ""),
+            name=str(data.get("name") or ""),
+            handle=str(data.get("handle") or ""),
+            verified=bool(data.get("verified")),
+            avatar=str(data.get("avatar") or ""),
+            color=str(data.get("color") or ""))
+
+
+@dataclass
+class ProfileCount:
+    """One count on a profile header (census §5.3–§5.8:
+    friends/posts, posts/followers/following, following/
+    followers/likes, subscribers/videos).  ``style`` is
+    the shortening the count wears ("" = the design's)."""
+
+    label: str
+    value: int = 0
+    style: str = ""
+
+    def __post_init__(self) -> None:
+        if self.style and self.style not in COUNT_STYLES:
+            raise ValueError(
+                "count style " + repr(self.style)
+                + " not in " + repr(COUNT_STYLES))
+        self.value = max(0, int(self.value))
+
+    def to_dict(self) -> dict:
+        return {"label": self.label, "value": self.value,
+                "style": self.style}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ProfileCount:
+        return cls(label=str(data.get("label") or ""),
+                   value=int(data.get("value") or 0),
+                   style=str(data.get("style") or ""))
+
+
+@dataclass
+class ProfileItem:
+    """One cell of a profile's grid / rows.  ``media``
+    is the cover picture hand-off (a grid cell with no
+    media wears the placeholder scene); ``title`` is the
+    video title on a YouTube row or the post text on a
+    Facebook/X post row; ``caption`` is a cover caption;
+    ``views`` -1 = the platform prints no count;
+    ``pinned`` marks a TikTok pinned video (the data
+    carries pinned-first order — the renderer draws the
+    list as supplied, never re-sorts)."""
+
+    id: str
+    kind: str = "photo"
+    media: str = ""
+    title: str = ""
+    caption: str = ""
+    views: int = -1
+    duration: str = ""
+    pinned: bool = False
+
+    def __post_init__(self) -> None:
+        if self.kind not in PROFILE_ITEM_KINDS:
+            raise ValueError(
+                "profile item kind " + repr(self.kind)
+                + " not in " + repr(PROFILE_ITEM_KINDS))
+        self.views = int(self.views)
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "kind": self.kind,
+                "media": self.media, "title": self.title,
+                "caption": self.caption, "views": self.views,
+                "duration": self.duration,
+                "pinned": self.pinned}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ProfileItem:
+        return cls(
+            id=str(data.get("id") or ""),
+            kind=str(data.get("kind") or "photo"),
+            media=str(data.get("media") or ""),
+            title=str(data.get("title") or ""),
+            caption=str(data.get("caption") or ""),
+            views=int(data.get("views", -1)
+                      if data.get("views") is not None
+                      else -1),
+            duration=str(data.get("duration") or ""),
+            pinned=bool(data.get("pinned")))
+
+
+@dataclass
+class PostScreen:
+    """One social post (census §5.2 Facebook Post, §5.10
+    Instagram Post / Threads Post / X Tweet, §5.7 TikTok
+    Post): the author row, the text, an optional photo
+    (``media`` is the real-picture hand-off) or a
+    video-style post (``video`` wears the preview image
+    with a play button), and the engagement counts.
+    ``platform`` names a design in SOCIAL_DESIGNS."""
+
+    platform: str
+    author: SocialProfile
+    text: str = ""
+    media: str = ""
+    video: bool = False
+    time: str = ""
+    visibility: str = ""
+    likes: int = 0
+    comments: int = 0
+    shares: int = 0
+    dark: bool = False
+    chrome: DeviceChrome = field(default_factory=DeviceChrome)
+
+    def __post_init__(self) -> None:
+        if self.visibility not in POST_VISIBILITIES:
+            raise ValueError(
+                "post visibility " + repr(self.visibility)
+                + " not in " + repr(POST_VISIBILITIES))
+        self.likes = max(0, int(self.likes))
+        self.comments = max(0, int(self.comments))
+        self.shares = max(0, int(self.shares))
+
+    def to_dict(self) -> dict:
+        return {"platform": self.platform,
+                "author": self.author.to_dict(),
+                "text": self.text, "media": self.media,
+                "video": self.video, "time": self.time,
+                "visibility": self.visibility,
+                "likes": self.likes,
+                "comments": self.comments,
+                "shares": self.shares, "dark": self.dark,
+                "chrome": self.chrome.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PostScreen:
+        return cls(
+            platform=str(data.get("platform") or ""),
+            author=SocialProfile.from_dict(
+                data.get("author") or {}),
+            text=str(data.get("text") or ""),
+            media=str(data.get("media") or ""),
+            video=bool(data.get("video")),
+            time=str(data.get("time") or ""),
+            visibility=str(data.get("visibility") or ""),
+            likes=int(data.get("likes") or 0),
+            comments=int(data.get("comments") or 0),
+            shares=int(data.get("shares") or 0),
+            dark=bool(data.get("dark")),
+            chrome=DeviceChrome.from_dict(
+                data.get("chrome") or {}))
+
+
+@dataclass
+class ProfileScreen:
+    """One profile page (census §5.3 Facebook Profile,
+    §5.10 Instagram Profile / X Profile, §5.6 TikTok
+    Profile, §5.8 YouTube Channel): the cover band
+    (``cover_media`` is the banner/cover hand-off —
+    Facebook cover, YouTube banner; empty = the
+    platform prints no cover), the identity, the bio and
+    link, the counts in the platform's own order, the
+    action buttons and tabs as data, and the grid / rows.
+    ``count_style`` is the shortening the counts wear
+    ("" = the design's).  Instagram and TikTok wear a
+    three-column grid; YouTube wears video rows plus a
+    Shorts strip; Facebook and X wear post rows."""
+
+    platform: str
+    identity: SocialProfile
+    cover_media: str = ""
+    bio: str = ""
+    link: str = ""
+    counts: list = field(default_factory=list)
+    buttons: list = field(default_factory=list)
+    tabs: list = field(default_factory=list)
+    items: list = field(default_factory=list)
+    count_style: str = ""
+    dark: bool = False
+    chrome: DeviceChrome = field(default_factory=DeviceChrome)
+
+    def __post_init__(self) -> None:
+        if self.count_style \
+                and self.count_style not in COUNT_STYLES:
+            raise ValueError(
+                "count style " + repr(self.count_style)
+                + " not in " + repr(COUNT_STYLES))
+        self.counts = list(self.counts or [])
+        self.buttons = [str(b) for b in (self.buttons or [])]
+        self.tabs = [str(t) for t in (self.tabs or [])]
+        self.items = list(self.items or [])
+
+    def to_dict(self) -> dict:
+        return {"platform": self.platform,
+                "identity": self.identity.to_dict(),
+                "cover_media": self.cover_media,
+                "bio": self.bio, "link": self.link,
+                "counts": [c.to_dict() for c in self.counts],
+                "buttons": list(self.buttons),
+                "tabs": list(self.tabs),
+                "items": [i.to_dict() for i in self.items],
+                "count_style": self.count_style,
+                "dark": self.dark,
+                "chrome": self.chrome.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> ProfileScreen:
+        return cls(
+            platform=str(data.get("platform") or ""),
+            identity=SocialProfile.from_dict(
+                data.get("identity") or {}),
+            cover_media=str(data.get("cover_media") or ""),
+            bio=str(data.get("bio") or ""),
+            link=str(data.get("link") or ""),
+            counts=[ProfileCount.from_dict(c)
+                    for c in data.get("counts") or []],
+            buttons=list(data.get("buttons") or []),
+            tabs=list(data.get("tabs") or []),
+            items=[ProfileItem.from_dict(i)
+                   for i in data.get("items") or []],
+            count_style=str(data.get("count_style") or ""),
+            dark=bool(data.get("dark")),
+            chrome=DeviceChrome.from_dict(
+                data.get("chrome") or {}))
+
+
+@dataclass
+class StorySticker:
+    """One sticker on an Instagram Story (census §5.4):
+    the kind from the story tray and where it sits, as
+    fractions of the screen (draggable text and stickers
+    are positional — the record carries the fractions,
+    census §27 exit proof).  ``text`` is the mention /
+    hashtag / location / track; ``options`` are a poll's
+    or quiz's choices."""
+
+    kind: str
+    text: str = ""
+    x: float = 0.5
+    y: float = 0.5
+    options: list = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.kind not in STORY_STICKER_KINDS:
+            raise ValueError(
+                "story sticker kind " + repr(self.kind)
+                + " not in " + repr(STORY_STICKER_KINDS))
+        self.x = max(0.0, min(1.0, float(self.x)))
+        self.y = max(0.0, min(1.0, float(self.y)))
+        self.options = [str(o) for o in (self.options or [])]
+
+    def to_dict(self) -> dict:
+        return {"kind": self.kind, "text": self.text,
+                "x": self.x, "y": self.y,
+                "options": list(self.options)}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> StorySticker:
+        return cls(
+            kind=str(data.get("kind") or ""),
+            text=str(data.get("text") or ""),
+            x=float(data.get("x") or 0.5),
+            y=float(data.get("y") or 0.5),
+            options=list(data.get("options") or []))
+
+
+@dataclass
+class StoryScreen:
+    """One Instagram Story (census §5.4): the full-screen
+    medium — a photo (``media`` is the real-picture
+    hand-off) or a text slide on a colour (``bg`` one of
+    the design's stocked colours or a custom ``#rrggbb``)
+    — with the progress model (``segments`` stories,
+    ``index`` playing, ``played`` the fraction of it
+    shown), the viewer header (owner, ``when``), the
+    positional stickers, and the Send message bar.
+    The five text styles the census names are NOT
+    enumerated there, so no style vocabulary is invented
+    here: story text wears the design's default style
+    (a named remainder).  Story recording is Phase 4."""
+
+    platform: str = "instagram"
+    owner: SocialProfile = field(
+        default_factory=lambda: SocialProfile("", ""))
+    kind: str = "photo"
+    media: str = ""
+    text: str = ""
+    bg: str = ""
+    segments: int = 1
+    index: int = 0
+    played: float = 0.0
+    when: str = ""
+    stickers: list = field(default_factory=list)
+    reply_bar: bool = True
+    dark: bool = False
+    chrome: DeviceChrome = field(default_factory=DeviceChrome)
+
+    def __post_init__(self) -> None:
+        if self.kind not in STORY_KINDS:
+            raise ValueError(
+                "story kind " + repr(self.kind)
+                + " not in " + repr(STORY_KINDS))
+        self.bg = _hex_color(self.bg, "story bg")
+        self.segments = max(1, int(self.segments))
+        self.index = max(0, min(self.segments - 1,
+                                int(self.index)))
+        self.played = max(0.0, min(1.0, float(self.played)))
+        self.stickers = list(self.stickers or [])
+
+    def to_dict(self) -> dict:
+        return {"platform": self.platform,
+                "owner": self.owner.to_dict(),
+                "kind": self.kind, "media": self.media,
+                "text": self.text, "bg": self.bg,
+                "segments": self.segments,
+                "index": self.index, "played": self.played,
+                "when": self.when,
+                "stickers": [s.to_dict()
+                             for s in self.stickers],
+                "reply_bar": self.reply_bar,
+                "dark": self.dark,
+                "chrome": self.chrome.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> StoryScreen:
+        return cls(
+            platform=str(data.get("platform") or "instagram"),
+            owner=SocialProfile.from_dict(
+                data.get("owner") or {}),
+            kind=str(data.get("kind") or "photo"),
+            media=str(data.get("media") or ""),
+            text=str(data.get("text") or ""),
+            bg=str(data.get("bg") or ""),
+            segments=int(data.get("segments") or 1),
+            index=int(data.get("index") or 0),
+            played=float(data.get("played") or 0.0),
+            when=str(data.get("when") or ""),
+            stickers=[StorySticker.from_dict(s)
+                      for s in data.get("stickers") or []],
+            reply_bar=bool(data.get("reply_bar", True)),
+            dark=bool(data.get("dark")),
+            chrome=DeviceChrome.from_dict(
+                data.get("chrome") or {}))
+
+
+@dataclass
+class SocialComment:
+    """One comment on a comment sheet (census §5.5):
+    the author, the text, the time, the Reply affordance
+    and the heart with its like count.  ``replies`` are
+    the indented replies (the sheet shows at most ten —
+    the record carries the shown count and the
+    ``view_more`` remainder); ``creator`` is the
+    "Creator" label; ``liked_by_creator`` is the "Liked
+    by Creator" mark with the creator's picture."""
+
+    id: str
+    author: SocialProfile = field(
+        default_factory=lambda: SocialProfile("", ""))
+    text: str = ""
+    time: str = ""
+    likes: int = 0
+    replies: list = field(default_factory=list)
+    creator: bool = False
+    liked_by_creator: bool = False
+
+    def __post_init__(self) -> None:
+        self.likes = max(0, int(self.likes))
+        self.replies = list(self.replies or [])
+
+    def to_dict(self) -> dict:
+        return {"id": self.id,
+                "author": self.author.to_dict(),
+                "text": self.text, "time": self.time,
+                "likes": self.likes,
+                "replies": [r.to_dict() for r in self.replies],
+                "creator": self.creator,
+                "liked_by_creator": self.liked_by_creator}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> SocialComment:
+        return cls(
+            id=str(data.get("id") or ""),
+            author=SocialProfile.from_dict(
+                data.get("author") or {}),
+            text=str(data.get("text") or ""),
+            time=str(data.get("time") or ""),
+            likes=int(data.get("likes") or 0),
+            replies=[SocialComment.from_dict(r)
+                     for r in data.get("replies") or []],
+            creator=bool(data.get("creator")),
+            liked_by_creator=bool(
+                data.get("liked_by_creator")))
+
+
+@dataclass
+class CommentScreen:
+    """The TikTok comment sheet (census §5.5): the
+    comment count at the top, up to 30 comments over the
+    dimmed video (``backdrop_media`` is the video frame
+    hand-off — empty = a plain dimmed sheet), each with
+    its replies and creator marks.  The sheet is a
+    screen of its own, not a chat bubble."""
+
+    platform: str = "tiktok"
+    total: int = 0
+    comments: list = field(default_factory=list)
+    backdrop_media: str = ""
+    dark: bool = False
+    chrome: DeviceChrome = field(default_factory=DeviceChrome)
+
+    def __post_init__(self) -> None:
+        self.total = max(0, int(self.total))
+        self.comments = list(self.comments or [])
+
+    def to_dict(self) -> dict:
+        return {"platform": self.platform,
+                "total": self.total,
+                "comments": [c.to_dict()
+                             for c in self.comments],
+                "backdrop_media": self.backdrop_media,
+                "dark": self.dark,
+                "chrome": self.chrome.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> CommentScreen:
+        return cls(
+            platform=str(data.get("platform") or "tiktok"),
+            total=int(data.get("total") or 0),
+            comments=[SocialComment.from_dict(c)
+                      for c in data.get("comments") or []],
+            backdrop_media=str(
+                data.get("backdrop_media") or ""),
+            dark=bool(data.get("dark")),
+            chrome=DeviceChrome.from_dict(
+                data.get("chrome") or {}))
+
+
+@dataclass
+class UpNextItem:
+    """One up-next video on a YouTube watch page
+    (census §5.9): the thumbnail hand-off, the title,
+    the channel and the duration; ``views`` -1 = the
+    platform prints no count."""
+
+    id: str
+    media: str = ""
+    title: str = ""
+    channel: str = ""
+    duration: str = ""
+    views: int = -1
+
+    def __post_init__(self) -> None:
+        self.views = int(self.views)
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "media": self.media,
+                "title": self.title,
+                "channel": self.channel,
+                "duration": self.duration,
+                "views": self.views}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> UpNextItem:
+        return cls(
+            id=str(data.get("id") or ""),
+            media=str(data.get("media") or ""),
+            title=str(data.get("title") or ""),
+            channel=str(data.get("channel") or ""),
+            duration=str(data.get("duration") or ""),
+            views=int(data.get("views", -1)
+                      if data.get("views") is not None
+                      else -1))
+
+
+@dataclass
+class VideoScreen:
+    """The YouTube video page (census §5.9): the player
+    with the user thumbnail (``thumbnail`` is the
+    hand-off), the title, views and likes, the upload
+    date, the hashtags and the description (shortened
+    with "…more" except on the ``description`` layout),
+    the channel row with its Subscribe state, and —
+    by layout — the up-next videos (``watch``), the
+    comments card with its top comment (``comments``),
+    or the description panel (``description``).  The
+    live-chat / Ask / community / Hype cards are named
+    in the census without detail, so they are not drawn
+    here (a named remainder)."""
+
+    platform: str = "youtube"
+    thumbnail: str = ""
+    title: str = ""
+    views: int = 0
+    likes: int = 0
+    date: str = ""
+    hashtags: list = field(default_factory=list)
+    description: str = ""
+    channel: SocialProfile = field(
+        default_factory=lambda: SocialProfile("", ""))
+    subscribers: int = 0
+    subscribed: bool = False
+    layout: str = "watch"
+    up_next: list = field(default_factory=list)
+    top_comment: SocialComment | None = None
+    count_style: str = ""
+    dark: bool = False
+    chrome: DeviceChrome = field(default_factory=DeviceChrome)
+
+    def __post_init__(self) -> None:
+        if self.layout not in VIDEO_LAYOUTS:
+            raise ValueError(
+                "video layout " + repr(self.layout)
+                + " not in " + repr(VIDEO_LAYOUTS))
+        if self.count_style \
+                and self.count_style not in COUNT_STYLES:
+            raise ValueError(
+                "count style " + repr(self.count_style)
+                + " not in " + repr(COUNT_STYLES))
+        self.views = max(0, int(self.views))
+        self.likes = max(0, int(self.likes))
+        self.subscribers = max(0, int(self.subscribers))
+        self.hashtags = [str(h) for h in (self.hashtags or [])]
+        self.up_next = list(self.up_next or [])
+
+    def to_dict(self) -> dict:
+        return {"platform": self.platform,
+                "thumbnail": self.thumbnail,
+                "title": self.title, "views": self.views,
+                "likes": self.likes, "date": self.date,
+                "hashtags": list(self.hashtags),
+                "description": self.description,
+                "channel": self.channel.to_dict(),
+                "subscribers": self.subscribers,
+                "subscribed": self.subscribed,
+                "layout": self.layout,
+                "up_next": [u.to_dict() for u in self.up_next],
+                "top_comment": (self.top_comment.to_dict()
+                                if self.top_comment else None),
+                "count_style": self.count_style,
+                "dark": self.dark,
+                "chrome": self.chrome.to_dict()}
+
+    @classmethod
+    def from_dict(cls, data: dict) -> VideoScreen:
+        top = data.get("top_comment")
+        return cls(
+            platform=str(data.get("platform") or "youtube"),
+            thumbnail=str(data.get("thumbnail") or ""),
+            title=str(data.get("title") or ""),
+            views=int(data.get("views") or 0),
+            likes=int(data.get("likes") or 0),
+            date=str(data.get("date") or ""),
+            hashtags=list(data.get("hashtags") or []),
+            description=str(data.get("description") or ""),
+            channel=SocialProfile.from_dict(
+                data.get("channel") or {}),
+            subscribers=int(data.get("subscribers") or 0),
+            subscribed=bool(data.get("subscribed")),
+            layout=str(data.get("layout") or "watch"),
+            up_next=[UpNextItem.from_dict(u)
+                     for u in data.get("up_next") or []],
+            top_comment=(SocialComment.from_dict(top)
+                         if top else None),
+            count_style=str(data.get("count_style") or ""),
+            dark=bool(data.get("dark")),
+            chrome=DeviceChrome.from_dict(
+                data.get("chrome") or {}))

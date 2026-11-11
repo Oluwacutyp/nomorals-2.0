@@ -27,18 +27,25 @@ into the photo frame, a real voice note is drawn with
 its measured waveform and true duration (``media``
 probes in :mod:`.media`) — and the placeholder scene /
 synthetic waveform remain only for messages carrying no
-media.  Phase 2b (this build): the lists / status / calls
-classes — WhatsApp, Instagram, Telegram and Snapchat
-chat lists, the WhatsApp call list and status (Updates)
-list, the WhatsApp Status screen and its Views sheet,
-the generic + named-platform call screens, and the
-iPhone Call History — each a typed model in ``schema``,
-designs as data in ``designs`` (``LIST_DESIGNS`` /
+media.  Phase 2b: the lists / status / calls classes —
+WhatsApp, Instagram, Telegram and Snapchat chat lists,
+the WhatsApp call list and status (Updates) list, the
+WhatsApp Status screen and its Views sheet, the generic
++ named-platform call screens, and the iPhone Call
+History — each a typed model in ``schema``, designs as
+data in ``designs`` (``LIST_DESIGNS`` /
 ``STATUS_DESIGNS`` / ``CALL_DESIGNS``), and its own
 layout engine in ``render_screens`` under the same
-media hand-off contract.  Social profiles, animation,
-bulk data and NL authoring are later phases of the same
-organ.
+media hand-off contract.  Phase 3 (this build): the
+social classes — Facebook / Instagram / Threads / X /
+TikTok posts, Facebook / Instagram / X / TikTok
+profiles and the YouTube channel, the Instagram Story,
+the TikTok comment sheet and the YouTube video page —
+each a typed model in ``schema``, designs as data in
+``designs`` (``SOCIAL_DESIGNS``), and its own layout
+engine in ``render_social`` under the same media
+hand-off contract.  Animation, bulk data and NL
+authoring are later phases of the same organ.
 
 The organ never claims a render is a real captured
 screenshot: it is a mock screen, generated from data the
@@ -51,35 +58,55 @@ from .designs import (
     CALL_DESIGNS,
     CHAT_DESIGNS,
     LIST_DESIGNS,
+    SOCIAL_DESIGNS,
     STATUS_BG_COLORS,
     STATUS_DESIGNS,
+    STORY_BG_COLORS,
 )
 from .schema import (
     CALL_CONTROLS,
     CALL_STATES,
+    COUNT_STYLES,
     DEVICE_STYLES,
     LIST_FLAVORS,
     LIST_PREVIEW_KINDS,
     LIST_ROW_STATES,
     LIST_ROW_TYPES,
     MESSAGE_KINDS,
+    POST_VISIBILITIES,
+    PROFILE_ITEM_KINDS,
     RING_STATES,
     STATUS_KINDS,
+    STORY_KINDS,
+    STORY_STICKER_KINDS,
     TICK_STATES,
+    VIDEO_LAYOUTS,
     CallHistoryEntry,
     CallHistoryScreen,
     CallScreen,
+    CommentScreen,
     DeviceChrome,
     FolderTab,
     ListRow,
     ListScreen,
     Message,
     Participant,
+    PostScreen,
+    ProfileCount,
+    ProfileItem,
+    ProfileScreen,
     Screen,
+    SocialComment,
+    SocialProfile,
     StatusScreen,
     StatusViewer,
     StatusViewsScreen,
     StoryItem,
+    StoryScreen,
+    StorySticker,
+    UpNextItem,
+    VideoScreen,
+    shorten_count,
 )
 from .service import MockScreensError, MockScreenService
 
@@ -93,6 +120,7 @@ __all__ = [
     "CALL_DESIGNS",
     "CALL_STATES",
     "CHAT_DESIGNS",
+    "COUNT_STYLES",
     "DEVICE_STYLES",
     "LIST_DESIGNS",
     "LIST_FLAVORS",
@@ -101,14 +129,22 @@ __all__ = [
     "LIST_ROW_TYPES",
     "MESSAGE_KINDS",
     "MOCK_COMMANDS",
+    "POST_VISIBILITIES",
+    "PROFILE_ITEM_KINDS",
     "RING_STATES",
+    "SOCIAL_DESIGNS",
     "STATUS_BG_COLORS",
     "STATUS_DESIGNS",
     "STATUS_KINDS",
+    "STORY_BG_COLORS",
+    "STORY_KINDS",
+    "STORY_STICKER_KINDS",
     "TICK_STATES",
+    "VIDEO_LAYOUTS",
     "CallHistoryEntry",
     "CallHistoryScreen",
     "CallScreen",
+    "CommentScreen",
     "DeviceChrome",
     "FolderTab",
     "ListRow",
@@ -117,9 +153,20 @@ __all__ = [
     "MockScreenService",
     "MockScreensError",
     "Participant",
+    "PostScreen",
+    "ProfileCount",
+    "ProfileItem",
+    "ProfileScreen",
     "Screen",
+    "SocialComment",
+    "SocialProfile",
     "StatusScreen",
     "StatusViewer",
     "StatusViewsScreen",
     "StoryItem",
+    "StoryScreen",
+    "StorySticker",
+    "UpNextItem",
+    "VideoScreen",
+    "shorten_count",
 ]

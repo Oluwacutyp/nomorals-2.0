@@ -24,13 +24,25 @@ from .render_screens import (
     render_status_screen,
     render_status_views,
 )
+from .render_social import (
+    render_comment_screen,
+    render_post_screen,
+    render_profile_screen,
+    render_story_screen,
+    render_video_screen,
+)
 from .schema import (
     CallHistoryScreen,
     CallScreen,
+    CommentScreen,
     ListScreen,
+    PostScreen,
+    ProfileScreen,
     Screen,
     StatusScreen,
     StatusViewsScreen,
+    StoryScreen,
+    VideoScreen,
 )
 
 __all__ = ["MockScreenService", "MockScreensError"]
@@ -132,6 +144,48 @@ class MockScreenService:
             render_call_history, screen,
             label="iphone call history",
             title=screen.title_text, **kw)
+
+    # ── Phase 3 screen classes ───────────────────────────
+
+    def render_post(self, screen: PostScreen, **kw
+                    ) -> dict[str, Any]:
+        """Render a social post."""
+        return self._render_with(
+            render_post_screen, screen,
+            label=screen.platform + " post",
+            title=screen.author.name, **kw)
+
+    def render_profile(self, screen: ProfileScreen, **kw
+                       ) -> dict[str, Any]:
+        """Render a profile page."""
+        return self._render_with(
+            render_profile_screen, screen,
+            label=screen.platform + " profile",
+            title=screen.identity.name, **kw)
+
+    def render_story(self, screen: StoryScreen, **kw
+                     ) -> dict[str, Any]:
+        """Render an Instagram Story."""
+        return self._render_with(
+            render_story_screen, screen,
+            label="instagram story",
+            title=screen.owner.name, **kw)
+
+    def render_comment(self, screen: CommentScreen, **kw
+                       ) -> dict[str, Any]:
+        """Render a TikTok comment sheet."""
+        return self._render_with(
+            render_comment_screen, screen,
+            label="tiktok comments",
+            title=str(screen.total) + " comments", **kw)
+
+    def render_video(self, screen: VideoScreen, **kw
+                     ) -> dict[str, Any]:
+        """Render a YouTube video page."""
+        return self._render_with(
+            render_video_screen, screen,
+            label="youtube video",
+            title=screen.title, **kw)
 
     # ── the shared delivery tail ─────────────────────────
 

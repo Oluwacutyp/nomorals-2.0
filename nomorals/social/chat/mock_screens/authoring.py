@@ -51,17 +51,28 @@ from .schema import (
     CallHistoryEntry,
     CallHistoryScreen,
     CallScreen,
+    CommentScreen,
     DeviceChrome,
     FolderTab,
     ListRow,
     ListScreen,
     Message,
     Participant,
+    PostScreen,
+    ProfileCount,
+    ProfileItem,
+    ProfileScreen,
     Screen,
+    SocialComment,
+    SocialProfile,
     StatusScreen,
     StatusViewer,
     StatusViewsScreen,
     StoryItem,
+    StoryScreen,
+    StorySticker,
+    UpNextItem,
+    VideoScreen,
 )
 
 USAGE = (
@@ -74,7 +85,13 @@ USAGE = (
     "whatsapp-status · whatsapp-status-text · "
     "whatsapp-status-views · call · call-incoming · "
     "whatsapp-call · facebook-call · instagram-call · "
-    "hangouts-call · iphone-call-history — or build one: "
+    "hangouts-call · iphone-call-history · facebook-post · "
+    "instagram-post · threads-post · x-tweet · tiktok-post "
+    "· facebook-profile · instagram-profile · x-profile · "
+    "tiktok-profile · youtube-channel · instagram-story · "
+    "instagram-story-text · tiktok-comment · youtube-video "
+    "· youtube-video-comments · youtube-video-description "
+    "— or build one: "
     "/mock whatsapp "
     "[iphone|android] [with <Name>] me: hi ;; Adaeze: hello "
     ";; me: on my way [read] — families: whatsapp · "
@@ -558,6 +575,331 @@ _CALL_DEMOS = (
     "instagram-call", "hangouts-call")
 _HISTORY_DEMOS = ("iphone-call-history", "call-history")
 
+#: Phase 3 demo names (census §27 build list).
+_POST_DEMOS = (
+    "facebook-post", "instagram-post", "threads-post",
+    "x-tweet", "tiktok-post")
+_PROFILE_DEMOS = (
+    "facebook-profile", "instagram-profile", "x-profile",
+    "tiktok-profile", "youtube-channel")
+_STORY_DEMOS = ("instagram-story", "instagram-story-text")
+_COMMENT_DEMOS = ("tiktok-comment",)
+_VIDEO_DEMOS = (
+    "youtube-video", "youtube-video-comments",
+    "youtube-video-description")
+
+
+def _demo_social_author() -> SocialProfile:
+    return SocialProfile(
+        "adaeze", "Adaeze Nwosu", handle="adaeze.creates",
+        verified=True)
+
+
+def demo_post_screen(name: str, style: str = "android",
+                     *, dark: bool = False):
+    """One built-in demo per post family (census §5.2,
+    §5.7, §5.10)."""
+    key = str(name or "").strip().lower()
+    chrome = DeviceChrome(style=style, clock="9:41", battery=84,
+                 network="4G")
+    author = _demo_social_author()
+    if key == "instagram-post":
+        return PostScreen(
+            platform="instagram", author=author, dark=dark,
+            text="The studio, finally finished. Doors open "
+                 "Saturday at 10 — bring your ideas.",
+            time="2h", likes=2540, comments=128, shares=64,
+            chrome=chrome)
+    if key == "threads-post":
+        return PostScreen(
+            platform="threads", author=author, dark=dark,
+            text="Building in public is the whole point. "
+                 "Watch this space.",
+            time="41m", likes=312, comments=27, shares=9,
+            chrome=chrome)
+    if key == "x-tweet":
+        return PostScreen(
+            platform="x", author=author, dark=dark,
+            text="Gold holding above the zone. The setup "
+                 "is the setup — no chasing.",
+            time="9:41 AM", likes=12400, comments=342,
+            shares=1200, chrome=chrome)
+    if key == "tiktok-post":
+        return PostScreen(
+            platform="tiktok", author=author, dark=dark,
+            text="POV: the render finally finishes 🎬",
+            time="1h", likes=45200, comments=1204,
+            shares=3300, video=True, chrome=chrome)
+    return PostScreen(
+        platform="facebook", author=author, dark=dark,
+        text="Studio day! Doors open at 10 — bring your "
+             "ideas, we bring the backdrops.",
+        time="9:12 AM", visibility="public", likes=1240,
+        comments=87, shares=32, chrome=chrome)
+
+
+def demo_profile_screen(name: str, style: str = "android",
+                        *, dark: bool = False):
+    """One built-in demo per profile family (census §5.3,
+    §5.6, §5.8, §5.10)."""
+    key = str(name or "").strip().lower()
+    chrome = DeviceChrome(style=style, clock="9:41", battery=84,
+                 network="4G")
+    ident = _demo_social_author()
+    if key == "instagram-profile":
+        return ProfileScreen(
+            platform="instagram", identity=ident, dark=dark,
+            bio="Studio · Lagos · building in public",
+            link="peacethefirst.studio",
+            counts=[ProfileCount("posts", 128),
+                    ProfileCount("followers", 25400),
+                    ProfileCount("following", 312)],
+            buttons=["Follow", "Message"],
+            tabs=["Posts", "Reels", "Tagged"],
+            items=[ProfileItem("ig" + str(i), "photo",
+                               caption="studio " + str(i))
+                   for i in range(1, 7)],
+            chrome=chrome)
+    if key == "x-profile":
+        return ProfileScreen(
+            platform="x", identity=ident, dark=dark,
+            bio="Building Devon and GoldenSwing. "
+                 "No consumers, only builders.",
+            link="nomorals.ai",
+            counts=[ProfileCount("following", 412),
+                    ProfileCount("followers", 25400)],
+            buttons=["Follow", "Message"],
+            tabs=["Posts", "Replies", "Media", "Likes"],
+            items=[
+                ProfileItem(
+                    "xp1", "post",
+                    title="Gold holding above the zone. "
+                          "The setup is the setup."),
+                ProfileItem(
+                    "xp2", "post",
+                    title="The render finally finished. "
+                          "Studio opens Saturday."),
+            ],
+            chrome=chrome)
+    if key == "tiktok-profile":
+        return ProfileScreen(
+            platform="tiktok", identity=ident, dark=dark,
+            bio="Studio days 🎬 · Lagos",
+            link="peacethefirst.studio",
+            counts=[ProfileCount("following", 89),
+                    ProfileCount("followers", 1200000),
+                    ProfileCount("likes", 4500000)],
+            buttons=["Follow", "Message"],
+            tabs=["Videos", "Liked"],
+            items=[
+                ProfileItem("tk1", "video", views=45200,
+                            duration="0:24",
+                            caption="the render",
+                            pinned=True),
+                ProfileItem("tk2", "video", views=38100,
+                            duration="0:31",
+                            caption="studio tour",
+                            pinned=True),
+                ProfileItem("tk3", "video", views=12900,
+                            duration="0:18",
+                            caption="backdrops"),
+                ProfileItem("tk4", "video", views=8400,
+                            duration="0:27",
+                            caption="guest list"),
+                ProfileItem("tk5", "video", views=5200,
+                            duration="0:15",
+                            caption="drinks"),
+                ProfileItem("tk6", "video", views=3100,
+                            duration="0:22",
+                            caption="doors"),
+            ],
+            chrome=chrome)
+    if key == "youtube-channel":
+        return ProfileScreen(
+            platform="youtube",
+            identity=SocialProfile(
+                "gs", "GoldenSwing Signals",
+                handle="@GoldenSwingSignals", verified=True),
+            dark=dark,
+            bio="XAUUSD reads, setups and the journal — "
+                 "demo only, no real-money routing.",
+            counts=[ProfileCount("subscribers", 1200000),
+                    ProfileCount("videos", 342)],
+            buttons=["Subscribe", "Join"],
+            tabs=["Videos", "Shorts", "Live", "Playlists"],
+            items=[
+                ProfileItem("yt1", "video",
+                            title="Gold above the zone — "
+                                  "the morning read",
+                            views=124000, duration="12:04"),
+                ProfileItem("yt2", "video",
+                            title="Why the setup is the setup",
+                            views=45200, duration="8:31"),
+                ProfileItem("yt3", "video",
+                            title="Journal: the week in R",
+                            views=18900, duration="15:47"),
+                ProfileItem("ys1", "short",
+                            title="60 seconds on friction",
+                            views=98000),
+                ProfileItem("ys2", "short",
+                            title="The magnet room",
+                            views=41000),
+            ],
+            chrome=chrome)
+    return ProfileScreen(
+        platform="facebook", identity=ident, dark=dark,
+        bio="Studio · Lagos",
+        counts=[ProfileCount("friends", 1240),
+                ProfileCount("posts", 86)],
+        buttons=["Friends", "Message"],
+        tabs=["Posts", "About", "Photos", "Friends"],
+        items=[
+            ProfileItem(
+                "fb1", "post",
+                title="Studio day! Doors open at 10 — "
+                      "bring your ideas."),
+            ProfileItem(
+                "fb2", "post",
+                title="The flyer goes out by noon, "
+                      "no extensions."),
+        ],
+        chrome=chrome)
+
+
+def demo_story_screen(name: str, style: str = "android",
+                      *, dark: bool = False):
+    """The Instagram Story demos (census §5.4): a photo
+    story with tray stickers at their positions, and a
+    text slide."""
+    key = str(name or "").strip().lower()
+    chrome = DeviceChrome(style=style, clock="9:41", battery=84,
+                 network="4G")
+    owner = _demo_social_author()
+    if key == "instagram-story-text":
+        return StoryScreen(
+            owner=owner, kind="text", dark=dark,
+            text="Doors open at 10 — bring your ideas.",
+            bg="#7656C9", segments=2, index=0, played=0.3,
+            when="2h", chrome=chrome)
+    return StoryScreen(
+        owner=owner, kind="photo", dark=dark,
+        segments=3, index=1, played=0.4, when="41m",
+        stickers=[
+            StorySticker("mention", "adaeze.creates",
+                         x=0.5, y=0.32),
+            StorySticker("poll", "Studio Saturday?",
+                         x=0.5, y=0.58,
+                         options=["Yes", "No"]),
+            StorySticker("music", "Midnight City",
+                         x=0.5, y=0.82),
+        ],
+        chrome=chrome)
+
+
+def demo_comment_screen(style: str = "android",
+                        *, dark: bool = False):
+    """The TikTok comment sheet demo (census §5.5): a
+    creator comment with its replies and a Liked-by-
+    Creator mark, plus a comment with more replies than
+    the sheet shows."""
+    chrome = DeviceChrome(style=style, clock="9:41", battery=84,
+                 network="4G")
+    creator = _demo_social_author()
+    replies = [SocialComment(
+        "r" + str(i),
+        author=SocialProfile("u" + str(i), "Viewer " + str(i)),
+        text="This is the one.", time="2h", likes=12 + i)
+        for i in range(1, 13)]
+    return CommentScreen(
+        total=128, dark=dark,
+        comments=[
+            SocialComment(
+                "c1", author=creator,
+                text="Full breakdown is on the channel — "
+                     "link in bio.",
+                time="3h", likes=452, creator=True,
+                liked_by_creator=False,
+                replies=[
+                    SocialComment(
+                        "c1r1",
+                        author=SocialProfile(
+                            "bola", "Bola"),
+                        text="Watching it now 🔥", time="2h",
+                        likes=89),
+                ]),
+            SocialComment(
+                "c2",
+                author=SocialProfile("chiamaka", "Chiamaka"),
+                text="The render finally finished 😭",
+                time="2h", likes=318, liked_by_creator=True,
+                replies=replies),
+            SocialComment(
+                "c3",
+                author=SocialProfile("mum", "Mum"),
+                text="So proud of you.", time="1h", likes=96),
+        ],
+        chrome=chrome)
+
+
+def demo_video_screen(name: str, style: str = "android",
+                      *, dark: bool = False):
+    """The YouTube video page demos (census §5.9): the
+    watch page with up-next, the comments layout with
+    its top comment, and the description panel."""
+    key = str(name or "").strip().lower()
+    chrome = DeviceChrome(style=style, clock="9:41", battery=84,
+                 network="4G")
+    channel = SocialProfile(
+        "gs", "GoldenSwing Signals",
+        handle="@GoldenSwingSignals", verified=True)
+    description = (
+        "The morning read on gold: structure first, "
+        "then the trigger. The zone held, the setup "
+        "printed, and the journal carries the rest. "
+        "Demo only — no real-money routing.")
+    if key == "youtube-video-comments":
+        return VideoScreen(
+            title="Gold above the zone — the morning read",
+            views=1240000, likes=45000, date="12 Nov 2026",
+            hashtags=["#xauusd", "#gold"],
+            description=description, channel=channel,
+            subscribers=1200000, layout="comments",
+            top_comment=SocialComment(
+                "vc1",
+                author=SocialProfile("bola", "Bola"),
+                text="The zone held exactly as drawn.",
+                time="2h", likes=1204),
+            dark=dark, chrome=chrome)
+    if key == "youtube-video-description":
+        return VideoScreen(
+            title="Gold above the zone — the morning read",
+            views=1240000, likes=45000, date="12 Nov 2026",
+            hashtags=["#xauusd", "#gold"],
+            description=description, channel=channel,
+            subscribers=1200000, layout="description",
+            dark=dark, chrome=chrome)
+    return VideoScreen(
+        title="Gold above the zone — the morning read",
+        views=1240000, likes=45000, date="12 Nov 2026",
+        hashtags=["#xauusd", "#gold"],
+        description=description, channel=channel,
+        subscribers=1200000, layout="watch",
+        up_next=[
+            UpNextItem("un1", title="Why the setup is "
+                                    "the setup",
+                       channel="GoldenSwing Signals",
+                       duration="8:31", views=45200),
+            UpNextItem("un2", title="Journal: the week "
+                                    "in R",
+                       channel="GoldenSwing Signals",
+                       duration="15:47", views=18900),
+            UpNextItem("un3", title="Friction: the gate "
+                                    "that saves accounts",
+                       channel="GoldenSwing Signals",
+                       duration="6:12", views=9800),
+        ],
+        dark=dark, chrome=chrome)
+
 
 def _demo_people() -> list:
     return [
@@ -905,6 +1247,21 @@ def parse_mock_tail(tail: str) -> tuple:
                                     dark=dark), "demo-call"
         if name in _HISTORY_DEMOS:
             return demo_call_history(style), "demo-history"
+        if name in _POST_DEMOS:
+            return demo_post_screen(name, style,
+                                    dark=dark), "demo-post"
+        if name in _PROFILE_DEMOS:
+            return demo_profile_screen(name, style,
+                                       dark=dark), "demo-profile"
+        if name in _STORY_DEMOS:
+            return demo_story_screen(name, style,
+                                     dark=dark), "demo-story"
+        if name in _COMMENT_DEMOS:
+            return demo_comment_screen(style,
+                                       dark=dark), "demo-comment"
+        if name in _VIDEO_DEMOS:
+            return demo_video_screen(name, style,
+                                     dark=dark), "demo-video"
         if name not in _PLATFORMS and name not in _DEMO_VARIANTS:
             raise MockScreensError(
                 "demo families: whatsapp · group · instagram "
@@ -918,7 +1275,15 @@ def parse_mock_tail(tail: str) -> tuple:
                 "whatsapp-status-views · call · "
                 "call-incoming · whatsapp-call · "
                 "facebook-call · instagram-call · "
-                "hangouts-call · iphone-call-history")
+                "hangouts-call · iphone-call-history · "
+                "facebook-post · instagram-post · "
+                "threads-post · x-tweet · tiktok-post · "
+                "facebook-profile · instagram-profile · "
+                "x-profile · tiktok-profile · "
+                "youtube-channel · instagram-story · "
+                "instagram-story-text · tiktok-comment · "
+                "youtube-video · youtube-video-comments · "
+                "youtube-video-description")
         return demo_screen(name, style, dark=dark), "demo"
     if head not in _PLATFORMS:
         raise MockScreensError(USAGE)

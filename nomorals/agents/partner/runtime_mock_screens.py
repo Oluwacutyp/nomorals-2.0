@@ -29,7 +29,8 @@ Phase 2b demos (``/mock demo whatsapp-list`` and its
 siblings) parse to the organ's list / status / call
 screen classes and dispatch to their own service doors
 below — the same delivery contract, the picture WAS the
-reply.
+reply.  Phase 3 demos (posts / profiles / stories /
+comments / video pages) ride the same dispatch.
 """
 
 from __future__ import annotations
@@ -141,15 +142,22 @@ class RuntimeMockScreensMixin:
         service = self._mock_screens_service()
         audience = self._makers_audience(message)
         if mode not in ("demo", "built"):
-            # Phase 2b screen classes (lists / status /
-            # calls): their own service doors, the same
-            # delivery contract — a picture WAS the reply
+            # Phase 2b/3 screen classes (lists / status /
+            # calls, then posts / profiles / stories /
+            # comments / video pages): their own service
+            # doors, the same delivery contract — a
+            # picture WAS the reply
             door = {
                 "demo-list": "render_list",
                 "demo-status": "render_status",
                 "demo-views": "render_status_views",
                 "demo-call": "render_call",
                 "demo-history": "render_call_history",
+                "demo-post": "render_post",
+                "demo-profile": "render_profile",
+                "demo-story": "render_story",
+                "demo-comment": "render_comment",
+                "demo-video": "render_video",
             }[mode]
             if mode == "demo-status":
                 title = screen.owner.name
@@ -159,6 +167,16 @@ class RuntimeMockScreensMixin:
                 title = screen.display_name()
             elif mode == "demo-history":
                 title = screen.title_text
+            elif mode == "demo-post":
+                title = screen.author.name
+            elif mode == "demo-profile":
+                title = screen.identity.name
+            elif mode == "demo-story":
+                title = screen.owner.name
+            elif mode == "demo-comment":
+                title = str(screen.total) + " comments"
+            elif mode == "demo-video":
+                title = screen.title
             else:
                 title = screen.title
             caption = ("🖼 " + screen.platform
