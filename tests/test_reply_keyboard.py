@@ -25,6 +25,14 @@ def _bot_adapter():
     adapter.token = "test-token"
     adapter.stats = {"sent": 0, "send_errors": 0}
     adapter.chat_allow = set()
+    # The __init__ state send() consults, at its real defaults: the
+    # screen-stack nav-edit marker (Bot Hub ship — send() pops it on
+    # every send), the origin-command freshness pair send() reads when
+    # deriving inline buttons, and owner_only (default: the gated bot).
+    adapter.owner_only = False
+    adapter._last_command = {}
+    adapter._last_inbound_was_command = {}
+    adapter._nav_edit = {}
     return adapter
 
 
@@ -86,21 +94,40 @@ class BotApiReplyKeyboardTests(unittest.TestCase):
 
 class GatewayPassthroughTests(unittest.TestCase):
     def test_gateway_forwards_reply_keyboard(self):
+        # The gateway forwards a reply keyboard only to platforms whose
+        # limits descriptor supports buttons — a platform declares that
+        # in its limits row (register_limits is how a platform lands).
+        # Register the fake platform as button-capable, the way a real
+        # button platform's row reads.
+        from nomorals.social.chat.platform_limits import (
+            PlatformLimits,
+            register_limits,
+        )
+        register_limits(PlatformLimits(
+            platform="fake-kb", max_text=2000, max_caption=1024,
+            max_file_mb=0, supports_buttons=True, supports_html=False,
+            supports_media_edit=False, rate_per_hour=0, cost_model="free"))
         gw = ChatGateway.__new__(ChatGateway)
         gw.dry_run = False
+        # The __init__ defaults send() consults: durable-outbox routing
+        # OFF with no outbox (sends go direct) and the default (None)
+        # retry policy _send_one_chunk hands to send_with_retry.
+        gw.durable_outbox = False
+        gw.outbox = None
+        gw.retry_policy = None
         gw._adapters = {}
         captured = {}
 
         class _FakeAdapter:
-            name = "fake"
+            name = "fake-kb"
 
             def send(self, chat, text, *, reply_to="",
                      buttons=None, reply_keyboard=None, parse_mode=""):
                 captured["reply_keyboard"] = reply_keyboard
                 from nomorals.social.chat.base import SendResult
-                return SendResult(ok=True, platform="fake")
+                return SendResult(ok=True, platform="fake-kb")
 
-        gw._adapters["fake"] = _FakeAdapter()
+        gw._adapters["fake-kb"] = _FakeAdapter()
         # _adapter_for + touch + lock helpers: stub the minimal surface.
         gw._adapter_for = lambda platform: _FakeAdapter()
         gw.touch = lambda chat: None
@@ -108,6 +135,6 @@ class GatewayPassthroughTests(unittest.TestCase):
         gw._locks = {}
         gw._lock_for = lambda chat: threading.Lock()
         gw._bump = lambda *a, **k: None
-        gw.send("fake", ChatRef(platform="fake", chat_id="1"), "hi",
+        gw.send("fake-kb", ChatRef(platform="fake-kb", chat_id="1"), "hi",
                 reply_keyboard=KEYBOARD)
         self.assertEqual(captured["reply_keyboard"], KEYBOARD)

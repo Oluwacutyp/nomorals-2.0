@@ -144,6 +144,18 @@ def _publish(topic: str, data: dict[str, Any]) -> None:
         _log.debug("job bus publish failed", exc_info=True)
 
 
+def _exc_label(exc: BaseException) -> str:
+    """Error label for a failed job: ``Type: message`` — or the bare
+    type name when the exception carries no message. A dangling
+    ``"Type: "`` is the empty-error shape the render layer forbids
+    (a message-less failure must surface as its type, never as
+    punctuation); the pre-jobs synchronous executor rendered it via
+    ``describe_exc`` and the move to background jobs must not lose
+    that."""
+    msg = str(exc)
+    return f"{type(exc).__name__}: {msg}" if msg else type(exc).__name__
+
+
 class JobRegistry:
     """In-memory registry of background jobs. Thread-safe."""
 
@@ -196,14 +208,14 @@ class JobRegistry:
                     if kind == "ok":
                         job.result = val
                     else:
-                        job.error = (f"late {type(val).__name__}: {val}")[:500]
+                        job.error = (f"late {_exc_label(val)}")[:500]
                 elif job.status == "running":
                     if kind == "ok":
                         job.status = "done"
                         job.result = val
                     else:
                         job.status = "failed"
-                        job.error = f"{type(val).__name__}: {val}"[:500]
+                        job.error = _exc_label(val)[:500]
                 job.ended_at = time.time()
             stop.set()
             _publish("tool.job", {"job_id": job.id, "tool": job.tool,

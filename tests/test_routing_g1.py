@@ -21,6 +21,7 @@ iterate the live ``GAME_COMMANDS`` tuple, so new games (``/20q``,
 
 from __future__ import annotations
 
+import types
 import unittest
 
 from nomorals.social.chat.control import (
@@ -75,11 +76,15 @@ class _RuntimeStub:
     ``PartnerRuntime.handle_control`` dispatch chain while recording which
     leaf handler it chose.
 
-    ``handle_control``'s kind checks are pure comparisons until the chosen
-    branch fires, so for kinds ``"arena"`` and ``"game"`` only the two leaf
-    handlers (plus the player helper used by the ``"game"`` branch) need
-    to exist on the stub — plus the two unconditional pre-dispatch
-    helpers handle_control calls before any branch: ``_progression_gate``
+    Since the register-#32 split, ``handle_control`` is a no-empty
+    wrapper whose dispatch lives in ``_handle_control_inner``;
+    :func:`owner_dispatch` binds the REAL inner method onto the stub,
+    so the chain under test stays production code end to end. The
+    inner's kind checks are pure comparisons until the chosen branch
+    fires, so for kinds ``"arena"`` and ``"game"`` only the two leaf
+    handlers (plus the player helper used by both branches) need to
+    exist on the stub — plus the two unconditional pre-dispatch
+    helpers the inner calls before any branch: ``_progression_gate``
     (open) and ``_ref_from_key`` (dummy ref).
     """
 
@@ -112,6 +117,10 @@ def owner_dispatch(text: str, chat_key: str = "test-chat"):
     from nomorals.agents.partner_runtime import PartnerRuntime
 
     stub = _RuntimeStub()
+    # handle_control delegates to _handle_control_inner (register-#32
+    # split); bind the real method so the stub runs the real dispatch.
+    stub._handle_control_inner = types.MethodType(
+        PartnerRuntime._handle_control_inner, stub)
     reply = PartnerRuntime.handle_control(stub, text, chat_key)
     return reply, stub.calls
 

@@ -15,6 +15,7 @@ from types import SimpleNamespace
 
 from nomorals.agents.devon import DevonAgent
 from nomorals.core.errors import NoMoralsError
+from nomorals.core.jobs import JobRegistry
 from nomorals.core.tool_render import (
     describe_exc,
     format_tool_error,
@@ -107,6 +108,11 @@ def _bare_devon(tools):
     agent.step_timeout = 90.0
     agent._tools = tools
     agent._on_progress = None
+    # The real job surface __init__ wires (the doc-18 jobs substrate):
+    # run()/_execute park steps on it and collect the outcomes. A FRESH
+    # registry per agent — never the shared singleton, whose jobs would
+    # leak between tests.
+    agent.jobs = JobRegistry()
     return agent
 
 
@@ -115,11 +121,19 @@ def test_execute_empty_exception_gives_type_not_parens():
         raise RuntimeError()
 
     agent = _bare_devon({"boom": boom})
-    outcome = agent._execute("boom", {})
+    # _execute parks the tool as a background job; the step's real
+    # outcome is the collected job's, rendered by _job_outcome — the
+    # same outcome run()'s drain would surface.
+    parked = agent._execute("boom", {})
+    assert parked.parked and parked.job_id
+    job = agent.jobs.collect(parked.job_id, timeout=10)
+    assert job is not None and job.status == "failed"
+    outcome = agent._job_outcome(job)
     assert outcome.ok is False
-    assert outcome.error == "RuntimeError"
+    assert outcome.error == "tool error: RuntimeError"
     assert outcome.observation == "tool error: RuntimeError"
     assert "()" not in outcome.observation
+    assert not outcome.observation.endswith(": ")
 
 
 def test_run_emits_progress_per_step():
