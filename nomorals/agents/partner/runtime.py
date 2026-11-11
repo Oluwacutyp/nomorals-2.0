@@ -625,6 +625,13 @@ class PartnerRuntime(
         # Tools that deliver files into chats (file_send, report_publish)
         # reach the live gateway through the context, not a second wire.
         context.extras["gateway"] = self.gateway
+        # In-text custom-emoji weaving (F4): the telegram bot
+        # adapters consult her custom-emoji registry per send;
+        # stamp the provider now the gateway is final.
+        try:
+            self._wire_custom_emoji_weaving()
+        except Exception as exc:  # noqa: BLE001 - never blocks boot
+            record_failure("runtime.PartnerRuntime.weave_wire", exc)
         # Unsolicited-send paths that deliver outside a live turn (the
         # Notifier above all) consult the competence gate through the
         # context the same way — one gate instance, the runtime's own.
@@ -4829,7 +4836,12 @@ class PartnerRuntime(
         the gateway reports that message to the owner."""
         from ...social.chat import build_adapter
 
-        return build_adapter(self.settings, name)
+        adapter = build_adapter(self.settings, name)
+        try:
+            self._wire_custom_emoji_weaving(adapter)
+        except Exception as exc:  # noqa: BLE001 - never blocks a start
+            record_failure("runtime.PartnerRuntime.weave_wire", exc)
+        return adapter
 
     def _confirm_gate(self, kind: str, tail: str, chat_key: str,
                       ) -> tuple[Any, bool, str]:

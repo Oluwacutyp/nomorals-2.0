@@ -5450,6 +5450,22 @@ class TelegramBotAdapter(ChatAdapter):
         # Progress-edit throttle (edit-in-place ~1/3s, only on change).
         from .progress_throttle import ProgressThrottler
         self._progress = ProgressThrottler()
+        # ── in-text custom-emoji weaving (F4, 2026-11-11) ──
+        # The provider of her custom-emoji glyph map
+        # (glyph → {"id", "format", "name"} — see
+        # expression.CustomEmojiRegistry.glyph_map).  The
+        # partner runtime stamps its library provider here at
+        # boot; None means weaving is simply off (her text
+        # goes out plain, as it always did).
+        self.custom_emoji_weave_source: Any = None
+        # Chat-type scopes ("dm"/"group"/"channel") where
+        # Telegram has REFUSED a woven send over custom-emoji
+        # eligibility this boot, with the API's own error
+        # text.  A refused scope is never retried this boot:
+        # the refusal is journaled once, the messages still
+        # land plain — OFF after a named refusal is a state,
+        # not a retry storm.
+        self._weave_refused: dict[str, str] = {}
 
     def _note_inbound_seen(self, chat_id: str, message_id: str) -> bool:
         """Record an inbound Bot API message id; True if already seen.
@@ -6859,8 +6875,45 @@ class TelegramBotAdapter(ChatAdapter):
                         params["reply_markup"] = keyboard
                     else:
                         params["reply_markup"] = {"inline_keyboard": keyboard}
+                # ── in-text custom-emoji weaving (F4) ──
+                # Plain chunks (no parse_mode — markup sends
+                # keep their parse path untouched) offer
+                # themselves to the weaver first: registered
+                # glyphs ride as custom_emoji entities so her
+                # text animates mid-sentence.  A refusal over
+                # eligibility is journaled once per scope and
+                # the chunk resends plain right here; a
+                # parse-class failure of the woven entities is
+                # journaled and also resends plain, WITHOUT
+                # the refusal state; anything else raises into
+                # the ordinary classification below.  The
+                # message always lands.
+                weave_entities = None
+                if not parse_mode and not plain_fallback:
+                    weave_entities = self._weave_chunk_entities(
+                        chat, chunk)
                 try:
-                    result = self._api("sendMessage", text=chunk, **params)
+                    if weave_entities:
+                        try:
+                            result = self._api(
+                                "sendMessage", text=chunk,
+                                entities=weave_entities, **params)
+                        except Exception as exc:  # noqa: BLE001
+                            if self._note_weave_refusal(chat, exc):
+                                result = self._api(
+                                    "sendMessage", text=chunk,
+                                    **params)
+                            elif _is_entity_parse_error(exc):
+                                record_failure(
+                                    "telegram.weave.entities", exc)
+                                result = self._api(
+                                    "sendMessage", text=chunk,
+                                    **params)
+                            else:
+                                raise
+                    else:
+                        result = self._api("sendMessage", text=chunk,
+                                           **params)
                 except Exception as exc:  # noqa: BLE001 - classified below
                     if not (parse_mode and not plain_fallback
                             and _is_entity_parse_error(exc)):
@@ -7054,6 +7107,130 @@ class TelegramBotAdapter(ChatAdapter):
             return SendResult(ok=False, platform=self.name,
                               error=str(exc),
                               seconds=time.perf_counter() - started)
+
+    # ── in-text custom-emoji weaving (F4, 2026-11-11) ─────
+    # Her Telegram text itself animates: registered glyphs
+    # ride ordinary sentences as custom_emoji entities (the
+    # Monarq shape the owner pointed at), not only as lone
+    # emoji messages.  Telegram's gate is sender-side: a bot
+    # may send custom_emoji entities only when its owner has
+    # Telegram Premium or the bot bought Fragment usernames,
+    # and only in the messages the bot itself sends to
+    # private/group/supergroup chats (channels are the
+    # Fragment route).  Everyone can SEE them.  A refusal is
+    # a first-class state here — journaled once per boot per
+    # chat-type, weaving off for that scope, text still out.
+
+    @staticmethod
+    def _weave_scope(chat: ChatRef) -> str:
+        """The refusal scope of one send: its chat type."""
+        return str(getattr(chat, "kind", "") or "dm")
+
+    def _weave_chunk_entities(self, chat: ChatRef,
+                              chunk: str) -> str | None:
+        """The ``entities`` JSON for one outgoing chunk, or
+        None when nothing should ride it: weaving refused in
+        this scope, no provider wired, an empty registry, or
+        no registered glyph in the chunk."""
+        if self._weave_scope(chat) in self._weave_refused:
+            return None
+        provider = self.custom_emoji_weave_source
+        if provider is None:
+            return None
+        try:
+            glyph_map = provider() or {}
+        except Exception as exc:  # noqa: BLE001 - plain text wins
+            record_failure("telegram.weave.provider", exc)
+            return None
+        if not glyph_map:
+            return None
+        from .expression import weave_custom_emoji_entities
+
+        entities, woven = weave_custom_emoji_entities(
+            chunk, (), glyph_map)
+        if not woven:
+            return None
+        return json.dumps(entities, ensure_ascii=False)
+
+    def _note_weave_refusal(self, chat: ChatRef,
+                            exc: BaseException) -> bool:
+        """Classify one failed woven send: True when the API
+        refused over the custom emoji themselves (the
+        eligibility gate) — the scope is recorded refused
+        with the API's own words, journaled ONCE per boot,
+        and the caller resends the chunk plain.  Any other
+        failure returns False and keeps its ordinary path."""
+        text = str(exc).lower()
+        if "custom_emoji" not in text and "custom emoji" not in text:
+            return False
+        scope = self._weave_scope(chat)
+        if scope not in self._weave_refused:
+            self._weave_refused[scope] = str(exc)
+            record_failure("telegram.weave.refused", exc)
+            _log.warning(
+                "telegram-bot: custom-emoji weaving refused for "
+                "%s chats (%s) — weaving off for that scope this "
+                "boot; text continues plain", scope, exc)
+        return True
+
+    def custom_emoji_weaving_status(self) -> dict[str, Any]:
+        """The weaving state, plainly: whether a registry
+        provider is wired, and which scopes stand refused
+        (with the API's own refusal text) — OFF vs BROKEN
+        stays distinguishable."""
+        return {"wired": self.custom_emoji_weave_source is not None,
+                "refused": dict(self._weave_refused)}
+
+    def get_custom_emoji_pack(self, name: str
+                              ) -> list[dict[str, Any]]:
+        """Read a sticker set and return its CUSTOM-EMOJI
+        stickers as registry rows: ``{"glyph",
+        "custom_emoji_id", "format"}`` — glyph from the
+        sticker's own ``emoji`` (its alt face), format read
+        from the sticker itself (``is_animated`` /
+        ``is_video`` — the truth, never a guess).  Regular
+        stickers in the set import nothing.  Raises (the
+        _api contract) when the set can't be read; the
+        caller reports that honestly."""
+        pack = self._api("getStickerSet", name=str(name))
+        rows: list[dict[str, Any]] = []
+        for sticker in (pack or {}).get("stickers") or []:
+            if str(sticker.get("type") or "") != "custom_emoji":
+                continue
+            cid = str(sticker.get("custom_emoji_id") or "")
+            glyph = str(sticker.get("emoji") or "")
+            if not cid or not glyph:
+                continue
+            fmt = "static"
+            if sticker.get("is_animated"):
+                fmt = "animated"
+            elif sticker.get("is_video"):
+                fmt = "video"
+            rows.append({"glyph": glyph, "custom_emoji_id": cid,
+                         "format": fmt})
+        return rows
+
+    def verify_custom_emoji_ids(self, ids: Any) -> set[str] | None:
+        """Cross-check custom-emoji ids through
+        ``getCustomEmojiStickers``: the set Telegram confirms,
+        or None when the verify call itself failed (journaled
+        — the caller then imports unverified and SAYS so)."""
+        wanted = [str(i) for i in (ids or ()) if str(i)]
+        if not wanted:
+            return set()
+        try:
+            got = self._api(
+                "getCustomEmojiStickers",
+                custom_emoji_ids=json.dumps(wanted))
+        except Exception as exc:  # noqa: BLE001 - unverified is a state
+            record_failure("telegram.custom_emoji.verify", exc)
+            return None
+        confirmed: set[str] = set()
+        for sticker in got or []:
+            cid = str((sticker or {}).get("custom_emoji_id") or "")
+            if cid:
+                confirmed.add(cid)
+        return confirmed
 
     # ── business connections + bot stories (parity bundle #12) ──
 

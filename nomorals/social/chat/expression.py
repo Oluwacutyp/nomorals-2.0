@@ -547,6 +547,73 @@ def lone_emoji_char(text: str) -> str:
         else ""
 
 
+#: Conservative stand-in for Telegram's appConfig
+#: ``message_animated_emoji_max``: a woven message never
+#: carries more custom-emoji entities than this, however
+#: many registered glyphs the text holds — the FIRST matches
+#: win, in reading order.
+WEAVE_MAX_CUSTOM_EMOJI = 25
+
+
+def _utf16_len(text: str) -> int:
+    """Length in UTF-16 code units — the Bot API's entity
+    offset unit.  An astral glyph (most emoji) is TWO units;
+    counting code points instead is the classic broken
+    offset."""
+    return len(str(text).encode("utf-16-le")) // 2
+
+
+def weave_custom_emoji_entities(
+        text: str,
+        existing_entities: Any = (),
+        glyph_map: dict[str, dict[str, Any]] | None = None,
+        *, cap: int = WEAVE_MAX_CUSTOM_EMOJI,
+) -> tuple[list[dict[str, Any]], int]:
+    """Weave custom-emoji entities through ``text``: every
+    grapheme her registry knows (``glyph_map`` — see
+    :meth:`CustomEmojiRegistry.glyph_map`) is wrapped by a
+    ``custom_emoji`` entity spanning EXACTLY that grapheme,
+    so Telegram renders her animated piece in place of the
+    plain glyph, mid-sentence, the way the reference bots
+    do.  Unregistered glyphs stay plain Unicode.
+
+    ``existing_entities`` (Bot API dicts) are preserved
+    untouched and merged: a formatting entity that CONTAINS
+    a glyph (bold over a whole phrase, say) survives whole,
+    and the custom entity nests inside it over the glyph
+    alone.  Offsets/lengths are UTF-16 code units.  Pure:
+    same input, same output, no I/O — the adapter decides
+    whether the result rides a send.
+
+    Returns ``(entities, woven_count)``."""
+    text = str(text or "")
+    existing = [dict(e) for e in (existing_entities or ())]
+    if not text or not glyph_map or cap <= 0:
+        return existing, 0
+    covered = {
+        (int(e.get("offset", -1)), int(e.get("length", 0)))
+        for e in existing if e.get("type") == "custom_emoji"}
+    woven: list[dict[str, Any]] = []
+    offset = 0
+    for cluster in _grapheme_clusters(text):
+        span = _utf16_len(cluster)
+        record = glyph_map.get(cluster)
+        if record is not None and len(woven) < cap \
+                and (offset, span) not in covered:
+            woven.append({
+                "type": "custom_emoji", "offset": offset,
+                "length": span,
+                "custom_emoji_id": str(record["id"])})
+        offset += span
+    if not woven:
+        return existing, 0
+    merged = existing + woven
+    merged.sort(key=lambda e: (int(e.get("offset", 0)),
+                               int(e.get("length", 0)),
+                               str(e.get("type", ""))))
+    return merged, len(woven)
+
+
 def _word_scores(entry: EmojiEntry,
                  words: list[str]) -> list[int]:
     """Per-word scores of one entry against a query: exact name
@@ -718,6 +785,34 @@ def create_emoji_sticker(description: str, out_dir: Any, *,
 
 # ── her own custom emoji set (§22) ───────────────────────────────
 
+#: How alive a registered format is, for every "which piece
+#: represents this glyph" decision: an animated piece moves,
+#: a video piece moves, a still is a still, and an entry with
+#: no recorded format claims nothing.
+_FORMAT_RANK = {"": 0, "static": 1, "video": 2, "animated": 3}
+
+
+def _glyph_keys(glyph: str) -> tuple[str, ...]:
+    """The text forms one registered glyph answers to: the
+    glyph itself, its U+FE0F-stripped form, and the stripped
+    form with U+FE0F re-applied — chat text types the same
+    emoji all three ways."""
+    glyph = str(glyph or "")
+    bare = glyph.replace("️", "")
+    keys = [glyph]
+    if bare and bare != glyph:
+        keys.append(bare)
+    if bare:
+        keys.append(bare + "️")
+    return tuple(dict.fromkeys(keys))
+
+
+def _same_glyph(a: str, b: str) -> bool:
+    """One emoji, however the variation selector was typed."""
+    a, b = str(a or ""), str(b or "")
+    return a == b or a.replace("️", "") == b.replace("️", "")
+
+
 class CustomEmojiRegistry:
     """Devon's signature set: named entries with a unicode
     fallback (always renderable), per-platform custom refs
@@ -801,6 +896,98 @@ class CustomEmojiRegistry:
         return {"kind": "unicode",
                 "value": str(entry.get("unicode") or ""),
                 "name": str(name)}
+
+    def glyph_map(self, platform: str = "telegram"
+                  ) -> dict[str, dict[str, Any]]:
+        """Glyph → ``{"id", "format", "name"}`` for every
+        entry carrying a custom ref on ``platform`` — the
+        lookup the in-text weaver consumes.  Keys are the
+        glyph itself plus its U+FE0F variants (the tolerance
+        :func:`_find_entry` already speaks: ❤️ as typed and
+        ❤ as tabled are one emoji).  When several entries
+        share a glyph, the most-alive format wins (animated
+        > video > static > unrecorded): her own created
+        animated piece is never shadowed by a still import
+        of the same face."""
+        best: dict[str, dict[str, Any]] = {}
+        for name in self.names():
+            entry = self._data[name]
+            glyph = str(entry.get("unicode") or "")
+            ref = str((entry.get("refs") or {}).get(
+                str(platform)) or "")
+            if not glyph or not ref:
+                continue
+            record = {"id": ref,
+                      "format": str(entry.get("format") or ""),
+                      "name": name}
+            rank = _FORMAT_RANK.get(record["format"], 0)
+            for key in _glyph_keys(glyph):
+                current = best.get(key)
+                if current is None or rank > _FORMAT_RANK.get(
+                        current["format"], 0):
+                    best[key] = record
+        return best
+
+    def import_stickers(self, stickers: list[dict[str, Any]],
+                        *, pack: str = "") -> dict[str, Any]:
+        """Register custom-emoji stickers read from a pack
+        (the adapter's ``get_custom_emoji_pack`` rows:
+        ``{"glyph", "custom_emoji_id", "format"}``).
+
+        Dedupe/conflict rule, stated once and applied
+        uniformly: an existing entry for the same glyph is
+        KEPT whenever it already carries a telegram ref of
+        equal-or-more-alive format (hers — created, and
+        animated above all — is never displaced by an
+        import); it is UPGRADED in place when it has no
+        telegram ref yet or only a stiller one; a glyph she
+        has never held becomes a new entry named for the
+        glyph, uniquified, with its pack provenance
+        recorded.  Returns the counts + the new names."""
+        added: list[str] = []
+        upgraded = 0
+        kept = 0
+        for row in stickers or ():
+            glyph = str((row or {}).get("glyph") or "")
+            ref = str((row or {}).get("custom_emoji_id") or "")
+            fmt = str((row or {}).get("format") or "")
+            if not glyph or not ref:
+                continue
+            holder = None
+            for name in self.names():
+                if _same_glyph(
+                        str(self._data[name].get("unicode") or ""),
+                        glyph):
+                    holder = name
+                    break
+            if holder is not None:
+                entry = self._data[holder]
+                have_ref = str((entry.get("refs") or {}).get(
+                    "telegram") or "")
+                have_rank = _FORMAT_RANK.get(
+                    str(entry.get("format") or ""), 0)
+                if have_ref and have_rank >= _FORMAT_RANK.get(
+                        fmt, 0):
+                    kept += 1
+                    continue
+                self.add(holder, platform="telegram", ref=ref,
+                         format=fmt)
+                upgraded += 1
+                continue
+            base = re.sub(r"[^a-z0-9]+", "_",
+                          describe_sequence(glyph).lower()
+                          ).strip("_")[:24].strip("_") or "emoji"
+            name, n = base, 2
+            while self.get(name) is not None:
+                name = f"{base}_{n}"
+                n += 1
+            self.add(name, unicode=glyph, platform="telegram",
+                     ref=ref, format=fmt)
+            if pack:
+                self._data[name]["imported_from"] = str(pack)
+            added.append(name)
+        return {"added": len(added), "upgraded": upgraded,
+                "kept": kept, "names": added}
 
     def to_dict(self) -> dict[str, Any]:
         return dict(self._data)

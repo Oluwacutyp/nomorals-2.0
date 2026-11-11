@@ -517,7 +517,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "convert": (0, None),     # /convert <name> — sticker/gif/mp4/mp3 conversions (§21); in a group, an amount tail is the §25 currency exchange (context kind)
     "gif": (0, None),         # /gif <what> — a GIF from her library / providers
     "emoji": (0, None),       # /emoji <words|emoji> — the full Unicode table, searched; /emoji make <words> creates one it lacks (§22)
-    "customemoji": (0, None), # /customemoji list|add|ref|show|remove — her own set (§22)
+    "customemoji": (0, None), # /customemoji list|status|add|ref|show|import|remove — her own set (§22)
     "emojiart": (0, None),    # /emojiart dot|ascii|mosaic|draw|combo|fancy|remix|save — text-native art (§22)
     "react": (0, None),       # /react [emoji] — react to the replied message (§22)
     "create": (0, None),      # /create [scene|motion] <brief> — procedural creation: an executable description (studio composition / Scene3D document / motion explainer) rendered, inspected and repaired by her own engines — never a generation model
@@ -2574,8 +2574,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/emojiart dot|ascii|mosaic (reply to a picture or paste its link) · draw <subject> · combo <topic> · fancy <style> <words> · remix invert|mirror|smaller|bigger|ascii|braille|mosaic · save <name>",
                  "example": "/emojiart draw a sleepy cat",
                  "related": "/emoji · /customemoji · /sticker"},
-    "customemoji": {"what": "Devon's own custom emoji set: named entries with a unicode face everywhere, platform custom refs where a platform carries them, and sticker art. Curated by the owner (or group admins).",
-                    "usage": "/customemoji list · add <name> <emoji> · ref <name> <platform> <ref> · show <name> · remove <name>",
+    "customemoji": {"what": "Devon's own custom emoji set: named entries with a unicode face everywhere, platform custom refs where a platform carries them, and sticker art. Registered glyphs weave into her Telegram text as animated custom emoji (Telegram gates the sending on the bot's eligibility — /customemoji status says which state she's in). Whole packs join the set with import. Curated by the owner (or group admins).",
+                    "usage": "/customemoji list · status · add <name> <emoji> · ref <name> <platform> <ref> · show <name> · import <pack name> · remove <name>",
                     "example": "/customemoji add devon 🥷",
                     "related": "/emoji · /sticker"},
     "react": {"what": "Devon reacts to the message you reply to — name an emoji or let her pick from the moment. Telegram bots use the standard reaction set; the userbot takes any emoji; on WhatsApp both bridge engines carry the verb (the reaction key is built from the bridge's own memory — a message it never saw refuses honestly), the act is Devon's on your personal account there: your standing stop halts it, and it lands in the personal journal. Reacting again with the same emoji removes it — WhatsApp's own toggle.",

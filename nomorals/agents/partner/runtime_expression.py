@@ -128,6 +128,36 @@ class RuntimeExpressionMixin:
     def _expression_library(self):  # type: ignore[no-untyped-def]
         return self._expression_service().library
 
+    # ── in-text custom-emoji weaving (F4) ───────────────────
+    def _custom_emoji_glyph_map(self):  # type: ignore[no-untyped-def]
+        """The weaving provider the telegram bot adapters
+        consult per send: her registry as a glyph map, read
+        live from the library so a glyph she registers (or
+        imports) mid-boot weaves from the next message on."""
+        try:
+            return self._expression_library().custom_emoji \
+                .glyph_map("telegram")
+        except Exception as exc:  # noqa: BLE001 - plain text wins
+            record_failure("expression.weave.glyph_map", exc)
+            return {}
+
+    def _wire_custom_emoji_weaving(self, adapter=None):  # type: ignore[no-untyped-def]
+        """Stamp the glyph-map provider onto telegram bot
+        adapters (all of the gateway's, or one hot-built
+        adapter): the adapters expose the
+        ``custom_emoji_weave_source`` attribute; anything
+        without it is not a weaving surface and is skipped."""
+        if adapter is not None:
+            targets = [adapter]
+        else:
+            gateway = getattr(self, "gateway", None)
+            targets = list(
+                (getattr(gateway, "adapters", {}) or {}).values())
+        for target in targets:
+            if hasattr(target, "custom_emoji_weave_source"):
+                target.custom_emoji_weave_source = \
+                    self._custom_emoji_glyph_map
+
     def _combo_library(self):  # type: ignore[no-untyped-def]
         """Her combo library (emoji art organ): one JSON
         beside the expression library, seeded with her own
@@ -1119,6 +1149,8 @@ class RuntimeExpressionMixin:
                                 f"live as an emoji.")
             return (f":{words[1]}: on {platform or 'here'} goes "
                     f"out as {rendered['kind']}: {rendered['value']}")
+        if head == "status":
+            return self._customemoji_status(message)
         # mutations are curated
         allowed = False
         if message is not None:
@@ -1147,9 +1179,126 @@ class RuntimeExpressionMixin:
                 library.save_custom_emoji(registry)
                 return f":{words[1]}: removed from my set."
             return f"no custom emoji named :{words[1]}:."
-        return ("usage: /customemoji list · add name emoji · "
-                "ref name platform ref · show name · "
-                "remove name")
+        if head == "import" and len(words) >= 2:
+            return self._customemoji_import(words[1], message)
+        return ("usage: /customemoji list · status · "
+                "add name emoji · ref name platform ref · "
+                "show name · import pack_name · remove name")
+
+    def _customemoji_status(self, message=None) -> str:  # type: ignore[no-untyped-def]
+        """The set + the weaving state, plainly (F4): how
+        many glyphs she holds, how many carry a Telegram id,
+        how many of those MOVE — and per bot adapter whether
+        in-text weaving is on or stands refused, with
+        Telegram's own refusal words when it does.  OFF and
+        BROKEN are never the same sentence."""
+        library = self._expression_library()
+        registry = library.custom_emoji
+        names = registry.names()
+        glyph_map = registry.glyph_map("telegram")
+        ids = {str(rec.get("id") or "")
+               for rec in glyph_map.values()}
+        moving = {str(rec.get("id") or "")
+                  for rec in glyph_map.values()
+                  if rec.get("format") in ("animated", "video")}
+        lines = [
+            f"my custom set: {len(names)} named · "
+            f"{len(ids)} glyphs carry a Telegram id · "
+            f"{len(moving)} of them move (animated/video)."]
+        gateway = getattr(self, "gateway", None)
+        adapters = getattr(gateway, "adapters", {}) or {}
+        seen = False
+        for key in sorted(adapters):
+            fn = getattr(adapters[key],
+                         "custom_emoji_weaving_status", None)
+            if fn is None:
+                continue
+            seen = True
+            state = fn()
+            refused = state.get("refused") or {}
+            if refused:
+                detail = "; ".join(
+                    f"{scope}: {refused[scope]}"
+                    for scope in sorted(refused))
+                lines.append(
+                    f"weaving on {key}: REFUSED by Telegram — "
+                    f"{detail}. My text goes out plain there "
+                    f"until the bot is eligible (owner Premium "
+                    f"or a Fragment username).")
+            elif state.get("wired"):
+                lines.append(
+                    f"weaving on {key}: on — registered glyphs "
+                    f"in my Telegram text ride as animated "
+                    f"custom emoji.")
+            else:
+                lines.append(
+                    f"weaving on {key}: not wired on this bot.")
+        if not seen:
+            lines.append(
+                "weaving: no Telegram bot adapter in this rig "
+                "to report on.")
+        return "\n".join(lines)
+
+    def _customemoji_import(self, pack_name: str, message=None) -> str:  # type: ignore[no-untyped-def]
+        """Grow her set from a whole pack (F4): every
+        custom-emoji sticker in the named set registers its
+        glyph → custom_emoji_id with the format the sticker
+        itself reports — this is how the standard animated
+        glyphs get in, since packs are readable by any bot
+        even though SENDING custom emoji is eligibility
+        gated.  Ids are cross-checked through
+        getCustomEmojiStickers when the adapter can; an
+        unverifiable id is left out when verification ran,
+        and the reply says so when it couldn't run."""
+        platform = str(message.chat.platform or "") \
+            if message is not None else ""
+        adapter = self._group_adapter(platform) \
+            if platform else None
+        fn = getattr(adapter, "get_custom_emoji_pack", None) \
+            if adapter is not None else None
+        if fn is None:
+            return ("pack import needs a Telegram bot surface "
+                    "— this chat's adapter can't read sticker "
+                    "packs.")
+        try:
+            stickers = fn(str(pack_name))
+        except Exception as exc:  # noqa: BLE001 - refused is a fact
+            record_failure("expression.customemoji.import", exc)
+            return f"couldn't read a pack named {pack_name}: {exc}"
+        if not stickers:
+            return (f"no custom emoji in a pack named "
+                    f"{pack_name} that I can read — nothing "
+                    f"imported.")
+        note = ""
+        verify = getattr(adapter, "verify_custom_emoji_ids", None)
+        if verify is not None:
+            confirmed = verify(
+                [row["custom_emoji_id"] for row in stickers])
+            if confirmed is not None:
+                kept = [row for row in stickers
+                        if row["custom_emoji_id"] in confirmed]
+                if len(kept) < len(stickers):
+                    note = (f" ({len(stickers) - len(kept)} ids "
+                            f"Telegram wouldn't verify were left "
+                            f"out)")
+                stickers = kept
+                if not stickers:
+                    return (f"Telegram wouldn't verify any id "
+                            f"in {pack_name} — nothing imported.")
+            else:
+                note = (" (ids unverified — the verify call "
+                        "failed; it's in the journal)")
+        library = self._expression_library()
+        registry = library.custom_emoji
+        result = registry.import_stickers(stickers,
+                                          pack=str(pack_name))
+        library.save_custom_emoji(registry)
+        return (f"imported from {pack_name}: "
+                f"{result['added']} new · "
+                f"{result['upgraded']} upgraded · "
+                f"{result['kept']} already mine{note}. "
+                f"Registered glyphs now weave into my Telegram "
+                f"text wherever their face appears.")
 
     # ---- /emojiart ------------------------------------------------------
     def _control_emojiart(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
