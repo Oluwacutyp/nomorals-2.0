@@ -28,6 +28,18 @@ def _default_db() -> str:
     return str(d / "identities.db")
 
 
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_DDL = """CREATE TABLE IF NOT EXISTS identities (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    email TEXT NOT NULL DEFAULT '',
+    handle TEXT NOT NULL DEFAULT '',
+    purpose TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL
+)"""
+
+
 @dataclass
 class AgentIdentity:
     """One task-scoped identity Devon can act under."""
@@ -50,29 +62,45 @@ class AgentIdentity:
 
 
 class IdentityStore:
-    """SQLite persistence for agent identities. Never raises."""
+    """Persistence for agent identities. Never raises.
 
-    def __init__(self, db_path: str = "") -> None:
+    Native path: a SQLite file at ``db_path``. When a document store
+    is resolved (Mongo program P5 — an explicit ``store`` or the boot
+    ambient), the same API runs over the seam in the
+    ``agent-identities__identities`` collection instead (registered
+    in storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         self._lock = threading.Lock()
         try:
             path = db_path or _default_db()
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("agent-identities", _DDL, ("identities",),
+                                path, store=store)
+            if port is not None:
+                table = port.tables["identities"]
+
+                def write_identities(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"identities": write_identities})
+                self._port = port
+                return
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS identities (
-                    id TEXT PRIMARY KEY,
-                    name TEXT NOT NULL,
-                    email TEXT NOT NULL DEFAULT '',
-                    handle TEXT NOT NULL DEFAULT '',
-                    purpose TEXT NOT NULL DEFAULT '',
-                    created_at REAL NOT NULL
-                )"""
-            )
+            self._db.execute(_DDL)
             self._db.commit()
         except Exception as e:
             record_failure("__init__", e)
             self._db = None
+            self._port = None
 
     # ── CRUD ──────────────────────────────────────────────────────────
 
@@ -81,7 +109,7 @@ class IdentityStore:
         """Mint a new task identity. Never raises."""
         try:
             name = (name or "").strip()
-            if not name or self._db is None:
+            if not name or (self._db is None and self._port is None):
                 return None
             ident = AgentIdentity(
                 id="ident_" + uuid.uuid4().hex[:10],
@@ -92,6 +120,14 @@ class IdentityStore:
                 created_at=time.time(),
             )
             with self._lock:
+                if self._port is not None:
+                    self._port.tables["identities"].put({
+                        "id": ident.id, "name": ident.name,
+                        "email": ident.email, "handle": ident.handle,
+                        "purpose": ident.purpose,
+                        "created_at": ident.created_at,
+                    })
+                    return ident
                 self._db.execute(
                     "INSERT INTO identities VALUES (?, ?, ?, ?, ?, ?)",
                     (ident.id, ident.name, ident.email, ident.handle,
@@ -105,8 +141,11 @@ class IdentityStore:
 
     def get(self, identity_id: str) -> AgentIdentity | None:
         try:
-            if not identity_id or self._db is None:
+            if not identity_id or (self._db is None and self._port is None):
                 return None
+            if self._port is not None:
+                row = self._port.tables["identities"].get(identity_id)
+                return self._row_to_identity(row) if row else None
             with self._lock:
                 row = self._db.execute(
                     "SELECT * FROM identities WHERE id = ?", (identity_id,)
@@ -118,8 +157,12 @@ class IdentityStore:
 
     def list(self) -> list[AgentIdentity]:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            if self._port is not None:
+                rows = self._port.tables["identities"].all()
+                rows.sort(key=lambda r: r["created_at"])
+                return [self._row_to_identity(r) for r in rows]
             with self._lock:
                 rows = self._db.execute(
                     "SELECT * FROM identities ORDER BY created_at"
@@ -131,9 +174,11 @@ class IdentityStore:
 
     def remove(self, identity_id: str) -> bool:
         try:
-            if not identity_id or self._db is None:
+            if not identity_id or (self._db is None and self._port is None):
                 return False
             with self._lock:
+                if self._port is not None:
+                    return self._port.tables["identities"].delete(identity_id)
                 cur = self._db.execute(
                     "DELETE FROM identities WHERE id = ?", (identity_id,))
                 self._db.commit()

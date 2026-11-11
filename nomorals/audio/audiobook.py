@@ -674,31 +674,77 @@ def _default_db() -> str:
     return str(base / "audiobooks.db")
 
 
-class AudiobookStore:
-    """SQLite persistence for audiobook runs. Never raises."""
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_DDL = """CREATE TABLE IF NOT EXISTS audiobooks(
+    book_id TEXT PRIMARY KEY, title TEXT, author TEXT,
+    master_path TEXT, duration_s REAL, target_stores TEXT,
+    disclosure TEXT, created_at REAL)"""
 
-    def __init__(self, db_path: str = "") -> None:
+#: Columns the list read projects (its SELECT list on the native path).
+_LIST_COLUMNS = ("book_id", "title", "author", "master_path", "duration_s",
+                 "target_stores", "created_at")
+
+
+class AudiobookStore:
+    """Persistence for audiobook runs. Never raises.
+
+    Native path: a SQLite file (``audiobooks.db``). When a document
+    store is resolved (Mongo program P5 — an explicit ``store`` or
+    the boot ambient), the same API runs over the seam in the
+    ``audio-audiobooks__audiobooks`` collection instead (registered
+    in storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         self._lock = threading.Lock()
         try:
             p = Path(db_path or _default_db())
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("audio-audiobooks", _DDL, ("audiobooks",),
+                                p, store=store)
+            if port is not None:
+                table = port.tables["audiobooks"]
+
+                def write_audiobooks(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"audiobooks": write_audiobooks})
+                self._port = port
+                return
             self._db = sqlite3.connect(str(p), check_same_thread=False)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS audiobooks(
-                book_id TEXT PRIMARY KEY, title TEXT, author TEXT,
-                master_path TEXT, duration_s REAL, target_stores TEXT,
-                disclosure TEXT, created_at REAL)""")
+            self._db.execute(_DDL)
             self._db.commit()
         except Exception as exc:  # noqa: BLE001
             _log.warning("AudiobookStore init failed: %s", exc)
             self._db = None
+            self._port = None
 
     def save(self, book: Audiobook) -> bool:
         try:
-            if self._db is None or not book or not book.book_id:
+            if not book or not book.book_id:
                 return False
             import json
+            if self._port is not None:
+                with self._lock:
+                    self._port.tables["audiobooks"].put({
+                        "book_id": book.book_id, "title": book.title,
+                        "author": book.author,
+                        "master_path": book.master_path,
+                        "duration_s": book.duration_s,
+                        "target_stores": ",".join(book.target_stores),
+                        "disclosure": json.dumps(book.disclosure),
+                        "created_at": book.created_at})
+                return True
+            if self._db is None:
+                return False
             with self._lock:
                 self._db.execute(
                     "INSERT OR REPLACE INTO audiobooks VALUES (?,?,?,?,?,?,?,?)",
@@ -712,6 +758,15 @@ class AudiobookStore:
 
     def list(self, limit: int = 20) -> list[dict[str, Any]]:
         try:
+            if self._port is not None:
+                rows = self._port.tables["audiobooks"].all()
+                # created_at DESC, NULLs last — the native ORDER BY.
+                rows.sort(
+                    key=lambda r: (r.get("created_at") is not None,
+                                   r.get("created_at") or 0.0),
+                    reverse=True)
+                return [{k: r.get(k) for k in _LIST_COLUMNS}
+                        for r in rows[: max(1, limit)]]
             if self._db is None:
                 return []
             rows = self._db.execute(
@@ -724,6 +779,10 @@ class AudiobookStore:
 
     def get(self, book_id: str) -> dict[str, Any] | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["audiobooks"].get(
+                    (book_id or "").strip())
+                return dict(row) if row else None
             if self._db is None:
                 return None
             row = self._db.execute(

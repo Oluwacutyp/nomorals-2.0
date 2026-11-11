@@ -190,39 +190,74 @@ def _default_keyterm_db() -> str:
     return str(d / "keyterms.db")
 
 
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_KEYTERMS_DDL = (
+    "CREATE TABLE IF NOT EXISTS keyterms ("
+    "term TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'jargon',"
+    "lang TEXT NOT NULL DEFAULT '', added REAL NOT NULL)")
+
+
 class KeytermStore:
     """Per-user vocabulary for STT prompting: names, Ekiti dialect words, jargon.
 
     The terms become faster-whisper's ``initial_prompt`` so transcription is
     accurate on the user's actual speech. Never raises.
+
+    Native path: a SQLite file at ``db_path``. When a document store
+    is resolved (Mongo program P5 — an explicit ``store`` or the boot
+    ambient), the same API runs over the seam in the
+    ``audio-keyterms__keyterms`` collection instead (registered in
+    storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at first construction.
     """
 
-    def __init__(self, db_path: str = "") -> None:
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         self._lock = threading.Lock()
         try:
             self._path = db_path or _default_keyterm_db()
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("audio-keyterms", _KEYTERMS_DDL,
+                                ("keyterms",), self._path, store=store)
+            if port is not None:
+                table = port.tables["keyterms"]
+
+                def write_keyterms(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"keyterms": write_keyterms})
+                self._port = port
+                return
             self._db = sqlite3.connect(self._path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                "CREATE TABLE IF NOT EXISTS keyterms ("
-                "term TEXT PRIMARY KEY, kind TEXT NOT NULL DEFAULT 'jargon',"
-                "lang TEXT NOT NULL DEFAULT '', added REAL NOT NULL)")
+            self._db.execute(_KEYTERMS_DDL)
             self._db.commit()
         except Exception:  # noqa: BLE001
             _log.warning("keyterm store unavailable")
             self._db = None
+            self._port = None
 
     # -- CRUD ----------------------------------------------------------------
     def add(self, term: str, kind: str = "jargon", lang: str = "") -> bool:
         try:
             term = (term or "").strip()
-            if not term or self._db is None:
+            if not term or (self._db is None and self._port is None):
                 return False
             kind = (kind or "jargon").lower()
             if kind not in _KEYTERM_KINDS:
                 kind = "jargon"
             with self._lock:
+                if self._port is not None:
+                    self._port.tables["keyterms"].put({
+                        "term": term, "kind": kind,
+                        "lang": (lang or "").lower(),
+                        "added": time.time()})
+                    return True
                 self._db.execute(
                     "INSERT OR REPLACE INTO keyterms VALUES (?,?,?,?)",
                     (term, kind, (lang or "").lower(), time.time()))
@@ -235,9 +270,17 @@ class KeytermStore:
     def remove(self, term: str) -> bool:
         try:
             term = (term or "").strip()
-            if not term or self._db is None:
+            if not term or (self._db is None and self._port is None):
                 return False
             with self._lock:
+                if self._port is not None:
+                    table = self._port.tables["keyterms"]
+                    lowered = term.lower()
+                    hits = [r for r in table.all()
+                            if (r.get("term") or "").lower() == lowered]
+                    for r in hits:
+                        table.delete(r["term"])
+                    return bool(hits)
                 cur = self._db.execute(
                     "DELETE FROM keyterms WHERE lower(term)=lower(?)", (term,))
                 self._db.commit()
@@ -248,8 +291,20 @@ class KeytermStore:
 
     def list(self, kind: str = "", lang: str = "") -> list[dict[str, Any]]:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            if self._port is not None:
+                rows = self._port.tables["keyterms"].all()
+                if kind:
+                    rows = [r for r in rows
+                            if r.get("kind") == kind.lower()]
+                if lang:
+                    rows = [r for r in rows
+                            if r.get("lang") == lang.lower()
+                            or r.get("lang") == ""]
+                rows.sort(key=lambda r: r.get("added") or 0.0)
+                return [{"term": r.get("term"), "kind": r.get("kind"),
+                         "lang": r.get("lang")} for r in rows]
             q = "SELECT term, kind, lang FROM keyterms"
             clauses, params = [], []
             if kind:

@@ -13,6 +13,9 @@ P5 settles the stores that live BESIDE the central database:
   their unchanged APIs, on BOTH seam rungs (SQLite document store and
   a real mongod), with the SQLite default byte-identical. Their
   existing file data imports lazily, once, through the same mapping.
+  The residue Batch 1 slice-1 ports (agent-identities,
+  audio-audiobooks, audio-characters, audio-overviews,
+  audio-keyterms) follow the same pattern below.
 * **Analytics** — the sync source is backend-aware: for seam-served
   tables the rows come from the seam (identical output on every
   rung); the SQLite passthrough counts them honestly and refuses
@@ -184,7 +187,11 @@ class TestSidecarRegistry:
     def test_ported_set_is_exactly_the_p5_ports(self):
         ported = {n for n, s in sidecars.SIDECAR_STORES.items()
                   if s.verdict == "ported"}
-        assert ported == {"challenge-memory", "preferences", "social-drafts"}
+        assert ported == {
+            "challenge-memory", "preferences", "social-drafts",
+            # residue Batch 1, slice 1:
+            "agent-identities", "audio-audiobooks", "audio-characters",
+            "audio-overviews", "audio-keyterms"}
 
     def test_pinned_sidecars_follow_real_central_pins(self):
         from nomorals.storage.carry import PINNED_DOMAINS
@@ -436,6 +443,334 @@ class TestDraftQueuePort:
             assert doc is not None and doc["content"] == "from the file days"
         finally:
             queue.close()
+
+
+class TestAgentIdentitiesPort:
+    def _scenario(self, store) -> dict:
+        import time as _time
+
+        a = store.create("Devon Research",
+                         email="devon.research@example.com",
+                         handle="@devon_research", purpose="research tasks")
+        _time.sleep(0.01)  # distinct created_at: list order is pinned
+        b = store.create("Devon Scheduler")
+        got = store.get(a.id)
+        return {
+            "empty_name": store.create("   "),
+            "got": (got.name, got.email, got.handle, got.purpose),
+            "names": [i.name for i in store.list()],
+            "removed": store.remove(a.id),
+            "removed_again": store.remove(a.id),
+            "after": [i.name for i in store.list()],
+            "missing": store.get("nope"),
+            "b_id_prefix": b.id.startswith("ident_"),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.agents.identities import IdentityStore
+
+        store = IdentityStore(db_path=str(tmp_path / "identities.db"),
+                              store=rung.store)
+        observed = self._scenario(store)
+        assert observed["empty_name"] is None
+        assert observed["got"] == (
+            "Devon Research", "devon.research@example.com",
+            "@devon_research", "research tasks")
+        assert observed["names"] == ["Devon Research", "Devon Scheduler"]
+        assert observed["removed"] is True
+        assert observed["removed_again"] is False
+        assert observed["after"] == ["Devon Scheduler"]
+        assert observed["missing"] is None
+        assert observed["b_id_prefix"] is True
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.agents.identities import IdentityStore
+
+        path = tmp_path / "identities.db"
+        native = IdentityStore(db_path=str(path))
+        kept = native.create("Devon Research", handle="@devon_research")
+
+        store = IdentityStore(db_path=str(path), store=rung.store)
+        got = store.get(kept.id)
+        assert got is not None and got.name == "Devon Research"
+        assert rung.store.count("agent-identities__identities") == 1
+        doc = rung.store.get("agent-identities__identities", kept.id)
+        assert doc is not None and doc["handle"] == "@devon_research"
+        # second construction: adopted, not re-imported or duplicated
+        again = IdentityStore(db_path=str(path), store=rung.store)
+        assert [i.name for i in again.list()] == ["Devon Research"]
+        assert rung.store.count("agent-identities__identities") == 1
+
+
+class TestAudiobookStorePort:
+    def _scenario(self, store) -> dict:
+        import json as _json
+
+        from nomorals.audio.audiobook import Audiobook
+
+        older = Audiobook(
+            book_id="ab_older", title="Old", author="A",
+            master_path="/old.wav", duration_s=30.0,
+            target_stores=["kobo"],
+            disclosure={"kobo": {"text": "Narrator: Synthesised voice."}},
+            created_at=100.0)
+        newer = Audiobook(
+            book_id="ab_newer", title="New", author="B",
+            master_path="/new.wav", duration_s=90.5,
+            target_stores=["spotify", "kobo"], created_at=200.0)
+        saved = (store.save(older), store.save(newer))
+        older.title = "Old (2nd ed)"  # INSERT OR REPLACE on re-save
+        resaved = store.save(older)
+        listed = store.list()
+        got = store.get("ab_newer")
+        got_older = store.get("ab_older")
+        return {
+            "saved": saved, "resaved": resaved,
+            "listed_ids": [b["book_id"] for b in listed],
+            "listed_keys": sorted(listed[0].keys()),
+            "listed_title": listed[1]["title"],
+            "limit1": [b["book_id"] for b in store.list(limit=1)],
+            "got_title": got["title"],
+            "got_stores": got["target_stores"],
+            "got_disclosure": _json.loads(got_older["disclosure"]),
+            "missing": store.get("nope"),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.audio.audiobook import AudiobookStore
+
+        store = AudiobookStore(db_path=str(tmp_path / "ab.db"),
+                               store=rung.store)
+        observed = self._scenario(store)
+        assert observed["saved"] == (True, True)
+        assert observed["resaved"] is True
+        assert observed["listed_ids"] == ["ab_newer", "ab_older"]
+        assert observed["listed_keys"] == [
+            "author", "book_id", "created_at", "duration_s",
+            "master_path", "target_stores", "title"]
+        assert observed["listed_title"] == "Old (2nd ed)"
+        assert observed["limit1"] == ["ab_newer"]
+        assert observed["got_title"] == "New"
+        assert observed["got_stores"] == "spotify,kobo"
+        assert observed["got_disclosure"] == {
+            "kobo": {"text": "Narrator: Synthesised voice."}}
+        assert observed["missing"] is None
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.audio.audiobook import Audiobook, AudiobookStore
+
+        path = tmp_path / "ab.db"
+        native = AudiobookStore(db_path=str(path))
+        native.save(Audiobook(book_id="ab_kept", title="Kept",
+                              created_at=5.0))
+
+        store = AudiobookStore(db_path=str(path), store=rung.store)
+        got = store.get("ab_kept")
+        assert got is not None and got["title"] == "Kept"
+        assert rung.store.count("audio-audiobooks__audiobooks") == 1
+        again = AudiobookStore(db_path=str(path), store=rung.store)
+        assert [b["book_id"] for b in again.list()] == ["ab_kept"]
+        assert rung.store.count("audio-audiobooks__audiobooks") == 1
+
+
+class TestCharacterStorePort:
+    def _scenario(self, store) -> dict:
+        from nomorals.audio.characters import Character
+
+        ren = Character(name="Renfield", book_id="book_1",
+                        book_title="Dracula", voice="raspy whisper",
+                        knowledge_cutoff=3, goals=["serve the count"],
+                        personality={"loyalty": 0.9})
+        ren.remember(1, "eats flies")
+        ren.remember(2, "waits in the cell")
+        mina = Character(name="Mina", book_id="book_1",
+                         book_title="Dracula")
+        saved = (store.save(ren), store.save(mina))
+        by_name = store.get("renfield")  # case-insensitive, as pinned
+        by_id = store.get(ren.id)
+        return {
+            "saved": saved,
+            "by_name": (by_name.name, by_name.voice, by_name.knows_up_to(),
+                        by_name.goals, by_name.personality,
+                        by_name.chapter_memories),
+            "same_row": by_id.id == by_name.id,
+            "all_names": [c.name for c in store.list()],
+            "book_names": [c.name for c in store.list("book_1")],
+            "other_book": store.list("book_2"),
+            "removed": store.remove("mina"),
+            "removed_again": store.remove("mina"),
+            "after": [c.name for c in store.list()],
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.audio.characters import CharacterStore
+
+        store = CharacterStore(db_path=str(tmp_path / "chars.db"),
+                               store=rung.store)
+        observed = self._scenario(store)
+        assert observed["saved"] == (True, True)
+        assert observed["by_name"] == (
+            "Renfield", "raspy whisper", 3, ["serve the count"],
+            {"loyalty": 0.9},
+            {1: ["eats flies"], 2: ["waits in the cell"]})
+        assert observed["same_row"] is True
+        assert observed["all_names"] == ["Mina", "Renfield"]
+        assert observed["book_names"] == ["Mina", "Renfield"]
+        assert observed["other_book"] == []
+        assert observed["removed"] is True
+        assert observed["removed_again"] is False
+        assert observed["after"] == ["Renfield"]
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.audio.characters import Character, CharacterStore
+
+        path = tmp_path / "chars.db"
+        native = CharacterStore(db_path=str(path))
+        native.save(Character(name="Renfield", book_title="Dracula"))
+
+        store = CharacterStore(db_path=str(path), store=rung.store)
+        got = store.get("renfield")
+        assert got is not None and got.name == "Renfield"
+        assert rung.store.count("audio-characters__characters") == 1
+        again = CharacterStore(db_path=str(path), store=rung.store)
+        assert [c.name for c in again.list()] == ["Renfield"]
+        assert rung.store.count("audio-characters__characters") == 1
+
+
+class TestOverviewStorePort:
+    def _overview(self, oid, title, created):
+        from nomorals.audio.overview import (
+            AudioOverview,
+            Chapter,
+            OverviewScript,
+            ScriptLine,
+        )
+
+        return AudioOverview(
+            overview_id=oid, title=title, format="deep-dive", lang="en",
+            script=OverviewScript(
+                format="deep-dive", lang="en",
+                chapters=[Chapter(title="ch1", start_s=0.0)],
+                lines=[ScriptLine(speaker="A", text="gold rose [S1]",
+                                  cites=[0], chapter="ch1")],
+                dropped=1),
+            sources=[{"title": "Yaba report", "text": "gold rose"}],
+            audio_path="", created_at=created)
+
+    def _scenario(self, store) -> dict:
+        saved = (store.save(self._overview("ov_old", "Old", 100.0)),
+                 store.save(self._overview("ov_new", "New", 200.0)))
+        got = store.get("ov_old")
+        return {
+            "saved": saved,
+            "got": (got.title, got.format, len(got.script.lines),
+                    got.script.lines[0].text, got.script.dropped,
+                    got.sources[0]["title"]),
+            "listed": [o.overview_id for o in store.list()],
+            "latest": store.latest().overview_id,
+            "missing": store.get("nope"),
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.audio.overview import OverviewStore
+
+        store = OverviewStore(db_path=str(tmp_path / "ov.db"),
+                              store=rung.store)
+        observed = self._scenario(store)
+        assert observed["saved"] == (True, True)
+        assert observed["got"] == (
+            "Old", "deep-dive", 1, "gold rose [S1]", 1, "Yaba report")
+        assert observed["listed"] == ["ov_new", "ov_old"]
+        assert observed["latest"] == "ov_new"
+        assert observed["missing"] is None
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.audio.overview import OverviewStore
+
+        path = tmp_path / "ov.db"
+        native = OverviewStore(db_path=str(path))
+        native.save(self._overview("ov_kept", "Kept", 5.0))
+
+        store = OverviewStore(db_path=str(path), store=rung.store)
+        got = store.get("ov_kept")
+        assert got is not None and got.title == "Kept"
+        assert rung.store.count("audio-overviews__overviews") == 1
+        again = OverviewStore(db_path=str(path), store=rung.store)
+        assert [o.overview_id for o in again.list()] == ["ov_kept"]
+        assert rung.store.count("audio-overviews__overviews") == 1
+
+
+class TestKeytermStorePort:
+    def _scenario(self, store) -> dict:
+        import time as _time
+
+        adds = []
+        # distinct `added` stamps: list order (ORDER BY added) is pinned
+        for args in (("Adaeze", "name", ""), ("agbada", "jargon", ""),
+                     ("ẹẹm", "dialect", "yo-ekiti"),
+                     ("Lekki", "place", "yo")):
+            adds.append(store.add(args[0], kind=args[1], lang=args[2]))
+            _time.sleep(0.01)
+        prompt = store.initial_prompt()
+        return {
+            "adds": tuple(adds),
+            "bad_kind": store.add("hustle", kind="bogus"),
+            "all": [(r["term"], r["kind"], r["lang"])
+                    for r in store.list()],
+            "names": [r["term"] for r in store.list(kind="name")],
+            "yo": [r["term"] for r in store.list(lang="yo")],
+            "prompt": ("Adaeze" in prompt, "agbada" in prompt,
+                       "Lekki" in prompt),
+            "removed": store.remove("AGBAda"),  # case-insensitive
+            "removed_again": store.remove("agbada"),
+            "after": [r["term"] for r in store.list()],
+        }
+
+    def test_conformance(self, rung, tmp_path):
+        from nomorals.audio.pipeline import KeytermStore
+
+        store = KeytermStore(db_path=str(tmp_path / "k.db"),
+                             store=rung.store)
+        observed = self._scenario(store)
+        assert observed["adds"] == (True, True, True, True)
+        assert observed["bad_kind"] is True  # unknown kind → jargon
+        assert observed["all"] == [
+            ("Adaeze", "name", ""), ("agbada", "jargon", ""),
+            ("ẹẹm", "dialect", "yo-ekiti"), ("Lekki", "place", "yo"),
+            ("hustle", "jargon", "")]
+        assert observed["names"] == ["Adaeze"]
+        # lang filter: the requested lang plus lang-less terms
+        assert observed["yo"] == ["Adaeze", "agbada", "Lekki", "hustle"]
+        assert observed["prompt"] == (True, True, True)
+        assert observed["removed"] is True
+        assert observed["removed_again"] is False
+        assert observed["after"] == ["Adaeze", "ẹẹm", "Lekki", "hustle"]
+
+    def test_seam_shape_and_lazy_import(self, rung, tmp_path):
+        if rung.store is None:
+            pytest.skip("native rung has no seam to inspect")
+        from nomorals.audio.pipeline import KeytermStore
+
+        path = tmp_path / "k.db"
+        native = KeytermStore(db_path=str(path))
+        native.add("Adaeze", kind="name")
+
+        store = KeytermStore(db_path=str(path), store=rung.store)
+        assert [r["term"] for r in store.list()] == ["Adaeze"]
+        assert rung.store.count("audio-keyterms__keyterms") == 1
+        doc = rung.store.get("audio-keyterms__keyterms", "Adaeze")
+        assert doc is not None and doc["kind"] == "name"
+        again = KeytermStore(db_path=str(path), store=rung.store)
+        assert [r["term"] for r in again.list()] == ["Adaeze"]
+        assert rung.store.count("audio-keyterms__keyterms") == 1
 
 
 class TestAmbientPickup:

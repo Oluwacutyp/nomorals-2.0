@@ -346,24 +346,53 @@ def _default_db() -> str:
     return str(d / "overviews.db")
 
 
-class OverviewStore:
-    """SQLite persistence for overviews. Never raises."""
+#: The store's own DDL — the native path executes it and the seam
+#: mapping is derived from it, so the two can never drift.
+_DDL = """CREATE TABLE IF NOT EXISTS overviews(
+    id TEXT PRIMARY KEY, title TEXT, format TEXT, lang TEXT,
+    script_json TEXT, sources_json TEXT, audio_path TEXT,
+    created_at REAL)"""
 
-    def __init__(self, db_path: str = "") -> None:
+
+class OverviewStore:
+    """Persistence for overviews. Never raises.
+
+    Native path: a SQLite file (``overviews.db``). When a document
+    store is resolved (Mongo program P5 — an explicit ``store`` or
+    the boot ambient), the same API runs over the seam in the
+    ``audio-overviews__overviews`` collection instead (registered
+    in storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         try:
             path = db_path or _default_db()
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("audio-overviews", _DDL, ("overviews",),
+                                path, store=store)
+            if port is not None:
+                table = port.tables["overviews"]
+
+                def write_overviews(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"overviews": write_overviews})
+                self._port = port
+                return
             self._db = sqlite3.connect(path)
             self._db.row_factory = sqlite3.Row
-            self._db.execute(
-                """CREATE TABLE IF NOT EXISTS overviews(
-                    id TEXT PRIMARY KEY, title TEXT, format TEXT, lang TEXT,
-                    script_json TEXT, sources_json TEXT, audio_path TEXT,
-                    created_at REAL)""")
+            self._db.execute(_DDL)
             self._db.commit()
         except Exception as exc:  # noqa: BLE001
             _log.warning("overview store unavailable: %s", exc)
             self._db = None
+            self._port = None
 
     # -- persistence helpers ------------------------------------------
     @staticmethod
@@ -396,11 +425,31 @@ class OverviewStore:
                    for ln in d.get("lines", [])],
         )
 
+    @staticmethod
+    def _row_to_overview(row: Any) -> AudioOverview:
+        import json
+        return AudioOverview(
+            overview_id=row["id"], title=row["title"],
+            format=row["format"], lang=row["lang"],
+            script=OverviewStore._script_from_json(row["script_json"]),
+            sources=json.loads(row["sources_json"] or "[]"),
+            audio_path=row["audio_path"] or "",
+            created_at=row["created_at"])
+
     def save(self, ov: AudioOverview) -> bool:
         try:
+            import json
+            if self._port is not None:
+                self._port.tables["overviews"].put({
+                    "id": ov.overview_id, "title": ov.title,
+                    "format": ov.format, "lang": ov.lang,
+                    "script_json": self._script_to_json(ov.script),
+                    "sources_json": json.dumps(ov.sources),
+                    "audio_path": ov.audio_path,
+                    "created_at": ov.created_at})
+                return True
             if self._db is None:
                 return False
-            import json
             self._db.execute(
                 "INSERT OR REPLACE INTO overviews VALUES (?,?,?,?,?,?,?,?)",
                 (ov.overview_id, ov.title, ov.format, ov.lang,
@@ -413,26 +462,36 @@ class OverviewStore:
 
     def get(self, overview_id: str) -> AudioOverview | None:
         try:
+            if self._port is not None:
+                row = self._port.tables["overviews"].get(overview_id)
+                return self._row_to_overview(row) if row else None
             if self._db is None:
                 return None
-            import json
             row = self._db.execute(
                 "SELECT * FROM overviews WHERE id = ?",
                 (overview_id,)).fetchone()
             if not row:
                 return None
-            return AudioOverview(
-                overview_id=row["id"], title=row["title"],
-                format=row["format"], lang=row["lang"],
-                script=self._script_from_json(row["script_json"]),
-                sources=json.loads(row["sources_json"] or "[]"),
-                audio_path=row["audio_path"] or "",
-                created_at=row["created_at"])
+            return self._row_to_overview(row)
         except Exception:  # noqa: BLE001
             return None
 
     def list(self, limit: int = 20) -> list[AudioOverview]:
         try:
+            if self._port is not None:
+                rows = self._port.tables["overviews"].all()
+                # created_at DESC, NULLs last — the native ORDER BY.
+                rows.sort(
+                    key=lambda r: (r.get("created_at") is not None,
+                                   r.get("created_at") or 0.0),
+                    reverse=True)
+                out: list[AudioOverview] = []
+                for r in rows[: int(limit) or 20]:
+                    try:
+                        out.append(self._row_to_overview(r))
+                    except Exception:  # noqa: BLE001 - get() skips bad rows
+                        continue
+                return out
             if self._db is None:
                 return []
             rows = self._db.execute(

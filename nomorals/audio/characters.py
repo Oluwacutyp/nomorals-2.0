@@ -300,42 +300,74 @@ class Character:
 # ── storage ────────────────────────────────────────────────────────────────
 
 
-class CharacterStore:
-    """SQLite persistence for story characters. Never raises."""
+#: The store's final-shape DDL — the native path executes it (and
+#: migrates older files up to it) and the seam mapping is derived
+#: from it, so the two can never drift.
+_DDL = """
+CREATE TABLE IF NOT EXISTS characters (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    book_id TEXT NOT NULL DEFAULT '',
+    book_title TEXT NOT NULL DEFAULT '',
+    voice TEXT NOT NULL DEFAULT '',
+    knowledge_cutoff INTEGER NOT NULL DEFAULT 1,
+    goals TEXT NOT NULL DEFAULT '[]',
+    speech_patterns TEXT NOT NULL DEFAULT '[]',
+    personality TEXT NOT NULL DEFAULT '{}',
+    chapter_memories TEXT NOT NULL DEFAULT '{}',
+    relationships TEXT NOT NULL DEFAULT '{}',
+    facts TEXT NOT NULL DEFAULT '[]',
+    mood TEXT NOT NULL DEFAULT '',
+    backstory TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL DEFAULT 0
+)
+"""
 
-    def __init__(self, db_path: str = "") -> None:
+
+class CharacterStore:
+    """Persistence for story characters. Never raises.
+
+    Native path: a SQLite file at ``db_path``. When a document store
+    is resolved (Mongo program P5 — an explicit ``store`` or the boot
+    ambient), the same API runs over the seam in the
+    ``audio-characters__characters`` collection instead (registered
+    in storage.sidecars), and the file's existing rows are imported
+    once, through the same mapping, at first construction.
+    """
+
+    def __init__(self, db_path: str = "", *, store: Any = None) -> None:
         self._db: sqlite3.Connection | None = None
+        self._port: Any = None
         self._lock = threading.Lock()
         try:
             path = db_path or _default_db()
+            from ..storage.sidecars import sidecar_port
+
+            port = sidecar_port("audio-characters", _DDL, ("characters",),
+                                path, store=store)
+            if port is not None:
+                table = port.tables["characters"]
+
+                def write_characters(rows: list[dict[str, Any]]) -> int:
+                    for row in rows:
+                        table.put(row)
+                    return len(rows)
+
+                port.ensure_imported({"characters": write_characters})
+                self._port = port
+                return
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
             self._init_schema()
         except Exception:  # noqa: BLE001
             _log.debug("character store init failed", exc_info=True)
             self._db = None
+            self._port = None
 
     def _init_schema(self) -> None:
         assert self._db is not None
         self._db.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS characters (
-                id TEXT PRIMARY KEY,
-                name TEXT NOT NULL,
-                book_id TEXT NOT NULL DEFAULT '',
-                book_title TEXT NOT NULL DEFAULT '',
-                voice TEXT NOT NULL DEFAULT '',
-                knowledge_cutoff INTEGER NOT NULL DEFAULT 1,
-                goals TEXT NOT NULL DEFAULT '[]',
-                speech_patterns TEXT NOT NULL DEFAULT '[]',
-                personality TEXT NOT NULL DEFAULT '{}',
-                chapter_memories TEXT NOT NULL DEFAULT '{}',
-                relationships TEXT NOT NULL DEFAULT '{}',
-                facts TEXT NOT NULL DEFAULT '[]',
-                mood TEXT NOT NULL DEFAULT '',
-                backstory TEXT NOT NULL DEFAULT '',
-                created_at REAL NOT NULL DEFAULT 0
-            );
+            _DDL + """;
             CREATE INDEX IF NOT EXISTS idx_characters_name
                 ON characters (lower(name));
             """
@@ -359,7 +391,7 @@ class CharacterStore:
     # ── CRUD ───────────────────────────────────────────────────────────
     def save(self, ch: Character) -> bool:
         try:
-            if self._db is None or not ch:
+            if (self._db is None and self._port is None) or not ch:
                 return False
             import json as _json
 
@@ -367,7 +399,28 @@ class CharacterStore:
                 ch.id = "char_" + uuid.uuid4().hex[:8]
             if not ch.created_at:
                 ch.created_at = time.time()
+            values = (
+                ch.id, ch.name, ch.book_id, ch.book_title, ch.voice,
+                ch.knowledge_cutoff, _json.dumps(ch.goals),
+                _json.dumps(ch.speech_patterns),
+                _json.dumps(ch.personality),
+                _json.dumps(
+                    {str(k): v for k, v in ch.chapter_memories.items()}
+                ),
+                _json.dumps(ch.relationships),
+                _json.dumps(ch.facts),
+                ch.mood, ch.backstory,
+                ch.created_at,
+            )
             with self._lock:
+                if self._port is not None:
+                    self._port.tables["characters"].put(dict(zip(
+                        ("id", "name", "book_id", "book_title", "voice",
+                         "knowledge_cutoff", "goals", "speech_patterns",
+                         "personality", "chapter_memories", "relationships",
+                         "facts", "mood", "backstory", "created_at"),
+                        values, strict=True)))
+                    return True
                 # explicit column list — physical column order differs
                 # between fresh tables and migrated ones
                 self._db.execute(
@@ -376,19 +429,7 @@ class CharacterStore:
                     " speech_patterns, personality, chapter_memories,"
                     " relationships, facts, mood, backstory, created_at)"
                     " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    (
-                        ch.id, ch.name, ch.book_id, ch.book_title, ch.voice,
-                        ch.knowledge_cutoff, _json.dumps(ch.goals),
-                        _json.dumps(ch.speech_patterns),
-                        _json.dumps(ch.personality),
-                        _json.dumps(
-                            {str(k): v for k, v in ch.chapter_memories.items()}
-                        ),
-                        _json.dumps(ch.relationships),
-                        _json.dumps(ch.facts),
-                        ch.mood, ch.backstory,
-                        ch.created_at,
-                    ),
+                    values,
                 )
                 self._db.commit()
             return True
@@ -396,13 +437,30 @@ class CharacterStore:
             _log.debug("character save failed", exc_info=True)
             return False
 
+    def _seam_lookup(self, key: str) -> dict[str, Any] | None:
+        """The seam twin of ``WHERE id = ? OR lower(name) = ?``:
+        an exact id hit wins; otherwise the first case-insensitive
+        name match in find order."""
+        table = self._port.tables["characters"]
+        row = table.get(key)
+        if row is not None:
+            return row
+        lowered = key.lower()
+        for cand in table.all():
+            if (cand.get("name") or "").lower() == lowered:
+                return cand
+        return None
+
     def get(self, name_or_id: str) -> Character | None:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return None
             key = (name_or_id or "").strip()
             if not key:
                 return None
+            if self._port is not None:
+                row = self._seam_lookup(key)
+                return _row_to_character(row) if row else None
             row = self._db.execute(
                 "SELECT * FROM characters WHERE id = ? OR lower(name) = ? "
                 "LIMIT 1",
@@ -415,8 +473,17 @@ class CharacterStore:
 
     def list(self, book_id: str = "") -> list[Character]:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return []
+            if self._port is not None:
+                rows = self._port.tables["characters"].all()
+                if book_id:
+                    rows = [r for r in rows if r.get("book_id") == book_id]
+                    rows.sort(key=lambda r: r.get("name") or "")
+                else:
+                    rows.sort(key=lambda r: (r.get("book_title") or "",
+                                             r.get("name") or ""))
+                return [c for c in (_row_to_character(r) for r in rows) if c]
             if book_id:
                 rows = self._db.execute(
                     "SELECT * FROM characters WHERE book_id = ? "
@@ -434,10 +501,19 @@ class CharacterStore:
 
     def remove(self, name_or_id: str) -> bool:
         try:
-            if self._db is None:
+            if self._db is None and self._port is None:
                 return False
             key = (name_or_id or "").strip()
             with self._lock:
+                if self._port is not None:
+                    table = self._port.tables["characters"]
+                    lowered = key.lower()
+                    hits = [r for r in table.all()
+                            if r.get("id") == key
+                            or (r.get("name") or "").lower() == lowered]
+                    for r in hits:
+                        table.delete(r["id"])
+                    return bool(hits)
                 cur = self._db.execute(
                     "DELETE FROM characters WHERE id = ? OR lower(name) = ?",
                     (key, key.lower()),

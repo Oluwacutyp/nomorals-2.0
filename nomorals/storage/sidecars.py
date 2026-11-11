@@ -398,6 +398,78 @@ _register(_S(
         "guarantee; the transition graph itself is untouched."),
 ))
 
+_register(_S(
+    name="agent-identities", verdict="ported", kind="sqlite-file",
+    modules=("agents/identities.py",),
+    tables=("identities",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 1): "
+        "IdentityStore's single table routes through the seam "
+        "(agent-identities__identities) whenever a store is "
+        "resolved, behind its unchanged never-raises API; task-"
+        "scoped delegated identities are caller-keyed documents. "
+        "The native sqlite3 path serves the SQLite default."),
+))
+
+_register(_S(
+    name="audio-audiobooks", verdict="ported", kind="sqlite-file",
+    modules=("audio/audiobook.py",),
+    tables=("audiobooks",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 1): "
+        "AudiobookStore's single table routes through the seam "
+        "(audio-audiobooks__audiobooks) whenever a store is "
+        "resolved, behind its unchanged API; production-state rows "
+        "are documents, the disclosure payload rides as its JSON "
+        "text exactly as the file stores it. The native sqlite3 "
+        "path serves the SQLite default."),
+))
+
+_register(_S(
+    name="audio-characters", verdict="ported", kind="sqlite-file",
+    modules=("audio/characters.py",),
+    tables=("characters",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 1): "
+        "CharacterStore's single table routes through the seam "
+        "(audio-characters__characters) whenever a store is "
+        "resolved, behind its unchanged API; voice definitions "
+        "are self-contained documents and the JSON payload "
+        "columns ride as text exactly as the file stores them. "
+        "The native path's in-file column migration stays a "
+        "native-path concern — the seam mapping is derived from "
+        "the module's final-shape DDL. The native sqlite3 path "
+        "serves the SQLite default."),
+))
+
+_register(_S(
+    name="audio-overviews", verdict="ported", kind="sqlite-file",
+    modules=("audio/overview.py",),
+    tables=("overviews",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 1): "
+        "OverviewStore's single table routes through the seam "
+        "(audio-overviews__overviews) whenever a store is "
+        "resolved, behind its unchanged API; the script/sources "
+        "payloads ride as their JSON text exactly as the file "
+        "stores them. The native sqlite3 path serves the SQLite "
+        "default."),
+))
+
+_register(_S(
+    name="audio-keyterms", verdict="ported", kind="sqlite-file",
+    modules=("audio/pipeline.py",),
+    tables=("keyterms",),
+    reason=(
+        "ported in the Mongo residue Batch 1 pass (slice 1): "
+        "KeytermStore's single table routes through the seam "
+        "(audio-keyterms__keyterms) whenever a store is resolved, "
+        "behind its unchanged API. The index is derived data "
+        "(rebuildable from transcripts), but its history is the "
+        "file's, so the lazy import still runs. The native "
+        "sqlite3 path serves the SQLite default."),
+))
+
 # ── federated by reference (files/blobs by nature; metadata accounted) ────
 
 _register(_S(
@@ -687,13 +759,6 @@ def _residue(name: str, module: str, tables: tuple[str, ...],
         reason=clause + _RESIDUE_TAIL))
 
 
-_residue("agent-identities", "agents/identities.py", ("identities",),
-         "task-scoped agent identities (name/email/handle per "
-         "delegated identity) in identities.db.")
-_residue("audio-audiobooks", "audio/audiobook.py", ("audiobooks",),
-         "audiobook production state in audiobooks.db.")
-_residue("audio-characters", "audio/characters.py", ("characters",),
-         "audio character/voice definitions in characters.db.")
 _residue("audio-fingerprints", "audio/fingerprint.py", ("hashes", "tracks"),
          "audio fingerprint hashes per track in fingerprints.db; "
          "hash rows are lookup-keyed blobs, document-shaped but "
@@ -704,10 +769,6 @@ _residue("audio-melodic", "audio/melodic.py", ("works",),
          "under the audio home, a deliberate sibling of the "
          "fingerprint catalog (class-1), kept separate so a work "
          "can never masquerade as a recording.")
-_residue("audio-overviews", "audio/overview.py", ("overviews",),
-         "generated audio overviews in overviews.db.")
-_residue("audio-keyterms", "audio/pipeline.py", ("keyterms",),
-         "the audio pipeline's keyterm index in keyterms.db.")
 _residue("commerce-cart-recovery", "commerce/cart_recovery.py",
          ("carts", "cart_steps", "recoveries"),
          "abandoned-cart recovery flows and their step state.")
