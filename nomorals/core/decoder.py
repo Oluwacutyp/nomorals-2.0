@@ -17,6 +17,12 @@ A modular, extensible analysis + decoding engine for strings and bytes:
 * **Structure** — JSON, YAML (when available), CSV/TSV detection,
   key=value, INI, MIME (part parsing + base64 bodies), PEM (type +
   payload), gzip/zlib byte streams, file magic identification.
+* **Compression cap** — the compressed-stream decoders (gzip/zlib,
+  bzip2, xz) decompress incrementally under a hard cap on the TOTAL
+  decompressed bytes one analysis may produce
+  (``MAX_DECOMPRESSED_BYTES``); a stream that crosses it is refused
+  whole and the refusal is recorded on the report — never silently
+  truncated, never partially decoded.
 * **Forensics** — Shannon entropy, printable-ratio, charset detection
   (BOM / utf-8 / utf-16 / ascii), UUID detection, Luhn (card-shaped
   number) detection.
@@ -36,11 +42,13 @@ from __future__ import annotations
 import base64
 import binascii
 import codecs
+import contextvars
 import hashlib
 import html
 from urllib.parse import unquote as _url_unquote
 import json
 import math
+import os
 import re
 import struct
 import time
@@ -54,11 +62,14 @@ __all__ = [
     "DecoderHit",
     "DecodeReport",
     "DECODERS",
+    "MAX_DECOMPRESSED_BYTES",
+    "DecompressionCapExceeded",
     "analyze",
     "decode_any",
     "identify_hash",
     "known_hash_lookup",
     "identify_magic",
+    "max_decompressed_bytes",
     "shannon_entropy",
     "register_decoder",
     "TOKEN_PATTERNS",
@@ -107,6 +118,10 @@ class DecodeReport:
     tokens: list[dict[str, str]] = field(default_factory=list)
     cookies: list[dict[str, Any]] = field(default_factory=list)
     jwt: dict[str, Any] | None = None
+    #: decompression refusals (compressed streams that crossed the
+    #: decompressed-bytes cap): each names the format, the cap, and
+    #: the running total at the moment it tripped.
+    refusals: list[dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         best = self.best
@@ -125,6 +140,7 @@ class DecodeReport:
             "tokens": self.tokens,
             "cookies": self.cookies,
             "jwt": self.jwt,
+            "refusals": self.refusals,
         }
 
 
@@ -1324,6 +1340,158 @@ class _LuhnDecoder(Decoder):
             data_type="structured")
 
 
+# ─────────────────── decompressed-size cap (D1 remainder) ─────────────────
+#: Hard cap on the TOTAL decompressed bytes the compressed-stream
+#: decoders (gzip/zlib, bzip2, xz) may produce during one analysis.
+#: The decoder's inputs are capped at 2,000,000 bytes, but a deflate
+#: stream expands up to ~1000:1 — an uncapped ``zlib.decompress`` of
+#: a 2 MB input is a ~2 GB in-memory expansion (a zip bomb) inside
+#: the one engine whose whole job is opening untrusted data.  The
+#: cap binds the running TOTAL across every stream and concatenated
+#: member one run decompresses — never a per-stream allowance, which
+#: is the classic bypass.  256 MiB is ~128x the largest input the
+#: decoder can be handed and ~50x the largest legitimate fixture in
+#: the tree (a 5 MB text stream); honest documents and media the
+#: decoder actually meets (compressed JSON/text/blobs, ratios of
+#: ~3–10:1 off a ≤2 MB input) sit far below it, while a bomb's
+#: expansion is stopped after at most the cap plus one pump chunk.
+MAX_DECOMPRESSED_BYTES = 268_435_456  # 256 MiB
+
+
+def max_decompressed_bytes() -> int:
+    """The decompressed-bytes cap in force.
+
+    ``MAX_DECOMPRESSED_BYTES`` unless the owner's
+    ``NM_DECODER_MAX_DECOMPRESSED_BYTES`` setting overrides it with
+    a positive integer.  Anything else (unset, unparsable, zero or
+    negative) falls back to the constant — never to unlimited.
+    Resolved at call time, like the decoder's other owner settings.
+    """
+    raw = os.environ.get("NM_DECODER_MAX_DECOMPRESSED_BYTES", "").strip()
+    if raw:
+        try:
+            value = int(raw)
+        except ValueError:
+            value = 0
+        if value > 0:
+            return value
+    return MAX_DECOMPRESSED_BYTES
+
+
+class DecompressionCapExceeded(Exception):
+    """A compressed stream crossed the decompressed-bytes cap.
+
+    Carries the three facts the refusal must name: the stream's
+    format, the cap, and the shared running total at the moment it
+    tripped.  The partial output is discarded by the caller — a cap
+    breach is a property of the archive, reported whole, never a
+    truncated decode presented as complete.
+    """
+
+    def __init__(self, fmt: str, cap: int, reached: int) -> None:
+        super().__init__(
+            f"{fmt} stream crossed the decompressed-size cap of "
+            f"{cap} bytes (reached {reached} bytes when stopped)")
+        self.format = fmt
+        self.cap_bytes = cap
+        self.reached_bytes = reached
+
+
+class _DecompressBudget:
+    """One analysis run's shared decompressed-bytes budget.
+
+    Every compressed stream the run decompresses charges the SAME
+    running total, so a bomb split across concatenated bzip2/xz
+    streams still trips the one cap.  Refusals are recorded here so
+    ``analyze()`` can put them on the report.
+    """
+
+    __slots__ = ("cap", "total", "refusals")
+
+    def __init__(self, cap: int) -> None:
+        self.cap = cap
+        self.total = 0
+        self.refusals: list[dict[str, Any]] = []
+
+    def charge(self, fmt: str, produced: int) -> None:
+        self.total += produced
+        if self.total > self.cap:
+            raise DecompressionCapExceeded(fmt, self.cap, self.total)
+
+
+#: the budget of the analysis run in flight (set by analyze() /
+#: _run_byte_decoders); a standalone decoder call mints its own, so
+#: the cap binds every decompression, shared or solo.
+_active_budget: contextvars.ContextVar[_DecompressBudget | None] = \
+    contextvars.ContextVar("decoder_decompress_budget", default=None)
+
+_DECOMPRESS_CHUNK = 1 << 20  # 1 MiB of output per pump step
+
+
+def _pump_stream(fmt: str, obj: Any, data: bytes,
+                 budget: _DecompressBudget) -> tuple[bytes, bytes] | None:
+    """Drain ONE compressed stream through decompressor ``obj``.
+
+    Output is produced in bounded chunks and every chunk is charged
+    to the shared budget the moment it exists — the pump stops
+    mid-stream the moment the total crosses the cap
+    (:class:`DecompressionCapExceeded`), never after a full
+    decompression has already happened.  Returns ``(output,
+    unused_input)``; ``None`` when the input ends before the stream
+    does (a truncated stream — the one-shot calls this replaces
+    raised there, so a partial drain is not a decode).
+    """
+    out = bytearray()
+    feed = data
+    stalled = 0
+    while not obj.eof:
+        chunk = obj.decompress(feed, _DECOMPRESS_CHUNK)
+        if chunk:
+            budget.charge(fmt, len(chunk))
+            out += chunk
+            stalled = 0
+        else:
+            stalled += 1
+        feed = getattr(obj, "unconsumed_tail", b"") or b""
+        if obj.eof:
+            break
+        if not chunk and not feed and getattr(obj, "needs_input", True):
+            return None  # input exhausted mid-stream: truncated
+        if stalled > 4:
+            return None  # no progress possible: not a drainable stream
+    return bytes(out), bytes(getattr(obj, "unused_data", b"") or b"")
+
+
+def _decompress_capped(fmt: str, factory: Any, data: bytes, *,
+                       multi_stream: bool) -> bytes | None:
+    """Decompress ``data`` under the run's shared size cap.
+
+    ``factory`` builds a fresh incremental decompressor (a zlib /
+    bz2 / lzma decompressobj).  With ``multi_stream``, concatenated
+    streams (bzip2 and xz data carries several) drain in sequence
+    against the SAME budget — the total is what the cap binds.
+    Without it, bytes after the first stream are ignored, exactly as
+    the one-shot ``zlib.decompress`` call this replaces behaved.
+    Format errors propagate to the caller, which already maps them
+    to "not this format"; a cap breach raises
+    :class:`DecompressionCapExceeded` and the partial output built
+    here is discarded with it — nothing half-decompressed leaves.
+    """
+    budget = _active_budget.get()
+    if budget is None:
+        budget = _DecompressBudget(max_decompressed_bytes())
+    out = bytearray()
+    rest = data
+    while True:
+        drained = _pump_stream(fmt, factory(), rest, budget)
+        if drained is None:
+            return None
+        piece, rest = drained
+        out += piece
+        if not multi_stream or not rest:
+            return bytes(out)
+
+
 class _GzipDecoder(Decoder):
     name = "gzip"
     description = "gzip / zlib byte streams"
@@ -1332,12 +1500,16 @@ class _GzipDecoder(Decoder):
         if not data or data[:2] not in (b"\x1f\x8b", b"\x78\x9c",
                                         b"\x78\x01", b"\x78\xda"):
             return None
+        is_gzip = data[:2] == b"\x1f\x8b"
+        wbits = 16 + zlib.MAX_WBITS if is_gzip else zlib.MAX_WBITS
         try:
-            if data[:2] == b"\x1f\x8b":
-                raw = zlib.decompress(data, 16 + zlib.MAX_WBITS)
-            else:
-                raw = zlib.decompress(data)
+            raw = _decompress_capped(
+                "gzip" if is_gzip else "zlib",
+                lambda: zlib.decompressobj(wbits), data,
+                multi_stream=False)
         except zlib.error:
+            return None
+        if raw is None:
             return None
         return _bytes_hit(self.name, raw, 0.9,
                           f"decompressed {len(data)} → {len(raw)} bytes")
@@ -1353,8 +1525,11 @@ class _Bz2Decoder(Decoder):
         try:
             import bz2
 
-            raw = bz2.decompress(data)
+            raw = _decompress_capped("bzip2", bz2.BZ2Decompressor,
+                                     data, multi_stream=True)
         except (OSError, ValueError, EOFError):
+            return None
+        if raw is None:
             return None
         return _bytes_hit(self.name, raw, 0.9,
                           f"bzip2 {len(data)} → {len(raw)} bytes")
@@ -1371,8 +1546,11 @@ class _XzDecoder(Decoder):
         try:
             import lzma
 
-            raw = lzma.decompress(data)
+            raw = _decompress_capped("xz", lzma.LZMADecompressor,
+                                     data, multi_stream=True)
         except (OSError, ValueError, EOFError):
+            return None
+        if raw is None:
             return None
         return _bytes_hit(self.name, raw, 0.9,
                           f"xz {len(data)} → {len(raw)} bytes")
@@ -1639,15 +1817,43 @@ def _run_decoders(data: str, min_confidence: float) -> list[DecoderHit]:
 
 
 def _run_byte_decoders(raw: bytes) -> list[DecoderHit]:
-    hits: list[DecoderHit] = []
-    for dec in DECODERS:
-        try:
-            hit = dec.try_bytes(raw)
-        except Exception:  # noqa: BLE001
-            hit = None
-        if hit is not None:
-            hits.append(hit)
-    return hits
+    budget = _active_budget.get()
+    token = None
+    if budget is None:
+        budget = _DecompressBudget(max_decompressed_bytes())
+        token = _active_budget.set(budget)
+    try:
+        hits: list[DecoderHit] = []
+        for dec in DECODERS:
+            try:
+                hit = dec.try_bytes(raw)
+            except DecompressionCapExceeded as exc:
+                # a cap breach is a property of the archive, not a
+                # decoder failure: it goes on the run's record (the
+                # report), never down as a silent no-hit.
+                budget.refusals.append({
+                    "decoder": dec.name,
+                    "reason": "decompressed-size-cap",
+                    "format": exc.format,
+                    "cap_bytes": exc.cap_bytes,
+                    "reached_bytes": exc.reached_bytes,
+                    "input_bytes": len(raw),
+                    "detail": (
+                        f"{exc.format} stream refused: decompressed "
+                        f"output crossed the cap of {exc.cap_bytes} "
+                        f"bytes (reached {exc.reached_bytes} bytes "
+                        f"when stopped); the stream was not decoded "
+                        f"and nothing was extracted from it"),
+                })
+                hit = None
+            except Exception:  # noqa: BLE001
+                hit = None
+            if hit is not None:
+                hits.append(hit)
+        return hits
+    finally:
+        if token is not None:
+            _active_budget.reset(token)
 
 
 def decode_any(data: str, *, max_depth: int = 3,
@@ -1742,7 +1948,15 @@ def analyze(data: str | bytes, *, max_depth: int = 3) -> DecodeReport:
         best = str_report["best"]
     else:
         best = None
-    all_hits.extend(_run_byte_decoders(raw))
+    # one shared decompressed-bytes budget for the whole run: every
+    # compressed stream below charges it, and its refusals land on
+    # the report.
+    budget = _DecompressBudget(max_decompressed_bytes())
+    token = _active_budget.set(budget)
+    try:
+        all_hits.extend(_run_byte_decoders(raw))
+    finally:
+        _active_budget.reset(token)
 
     cookies: list[dict[str, Any]] = []
     jwt_info: dict[str, Any] | None = None
@@ -1763,4 +1977,4 @@ def analyze(data: str | bytes, *, max_depth: int = 3) -> DecodeReport:
     all_hits.sort(key=lambda h: (-h.confidence, _rank(h.decoder)))
     return DecodeReport(best=best, hits=all_hits, forensics=forensics,
                         hash=hash_info, tokens=tokens, cookies=cookies,
-                        jwt=jwt_info)
+                        jwt=jwt_info, refusals=budget.refusals)

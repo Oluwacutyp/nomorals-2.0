@@ -25,7 +25,7 @@ from typing import Any
 from ..core.decoder import (DECODERS, analyze, decode_any, identify_hash,
                             identify_magic, known_hash_lookup,
                             known_hash_lookup_chained, learn_hash,
-                            save_report)
+                            max_decompressed_bytes, save_report)
 from ..core.errors import ToolError
 from ..core.policy import Capability
 
@@ -72,14 +72,20 @@ _DECODER_LIMITS_TEXT = (
 
 def decoder_limits() -> dict[str, Any]:
     """The limits record every decoder surface carries (D1)."""
+    cap = max_decompressed_bytes()
     return {
-        "text": _DECODER_LIMITS_TEXT,
+        "text": _DECODER_LIMITS_TEXT + (
+            f" · decompressed output capped at {cap:,} bytes in "
+            "total per decode — a compressed stream that crosses "
+            "the cap is refused whole and named on the report, "
+            "never silently truncated"),
         "executes_decoded_content": False,
         "binary_storage": "artifact-quarantine",
         "scanned": False,
         "verification_state": "unverified",
         "max_input_bytes": _MAX_FILE_BYTES,
         "max_chain_depth": 6,
+        "max_decompressed_bytes": cap,
         "auto_crack_default": auto_crack_default(),
         "auto_crack_max_candidates": 800_000,
         "caller_gating": (
@@ -141,6 +147,9 @@ def _summarize(report: Any) -> str:
                     + (f" [flags: {', '.join(flags[:5])}]" if flags else ""))
     if report.jwt and report.jwt.get("warnings"):
         bits.append("JWT warnings: " + "; ".join(report.jwt["warnings"]))
+    for refusal in getattr(report, "refusals", None) or []:
+        bits.append("refused: " + str(
+            refusal.get("detail") or refusal.get("reason", "")))
     f = report.forensics
     bits.append(f"({f['bytes']} bytes, entropy {f['entropy']}, "
                 f"charset {f['charset']}"
