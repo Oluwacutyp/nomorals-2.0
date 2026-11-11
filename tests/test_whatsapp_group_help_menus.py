@@ -43,7 +43,6 @@ import pytest
 
 from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef
 from nomorals.social.chat.control import (
-    help_menu,
     help_text,
     public_menu_text,
     whatsapp_menu,
@@ -170,25 +169,41 @@ def test_whatsapp_group_help_topic_still_detailed(rig):
 # ── dispatch: /start and /menu serve the WhatsApp menu ───────
 
 def test_whatsapp_start_and_menu_dm(rig):
+    # DELIBERATELY RE-PINNED (buttons completion repair,
+    # 2026-11-11): this test used to pin WhatsApp DM /start and
+    # /menu to the text-only whatsapp_menu() frame — the exact
+    # break the expression audit named: dispatch returned that
+    # frame BEFORE the live menu session was consulted, so the
+    # owner's /menu never carried a button on WhatsApp. Like
+    # /help (re-pinned 2026-11-08, below), /start and /menu now
+    # open the session render; the text frame remains only as
+    # the no-message fallback.
     runtime, _sends = rig
     for text in ("/start", "/menu"):
         out = runtime.handle_control(
             text, "whatsapp:15551234567",
             message=_msg(text, "whatsapp", ChatKind.DM, owner=True,
                          chat_id="15551234567"))
-        assert out == help_menu("whatsapp")
-        assert WA_MENU_MARKER in out
-        assert TAP_A_BUTTON not in out
+        assert not isinstance(out, str)
+        assert out.session == "menu"
+        assert out.buttons
+        assert "command menu" in out.text
+        assert WA_MENU_MARKER not in out.text
 
 
 def test_whatsapp_start_and_menu_group_context(rig):
+    # Re-pinned with the DM test above: in a WhatsApp group,
+    # /start and /menu ride the same live menu session (groups
+    # paged onto it by the 2026-11-07 paging law) instead of the
+    # DM text frame.
     runtime, _sends = rig
     for text in ("/start", "/menu"):
         out = runtime.handle_control(
             text, "whatsapp:777",
             message=_msg(text, "whatsapp", ChatKind.GROUP, owner=True))
-        assert out == help_menu("whatsapp")
-        assert TAP_A_BUTTON not in out
+        assert not isinstance(out, str)
+        assert out.session == "menu"
+        assert out.buttons
 
 
 def test_telegram_start_and_menu_unchanged(rig):

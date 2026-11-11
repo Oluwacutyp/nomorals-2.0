@@ -764,11 +764,16 @@ def test_boards_command_and_gsettings_grammar(tmp_path):
     _seed(surface, "55", "Bola", "bola", 200)
     admin = _Msg(sender_id="99", sender="Boss")
     index = rt._control_boards("", admin)
-    assert "this group publishes" in index
+    assert "this group publishes" in _text(index)
+    # Buttons completion repair (2026-11-11): board renders are
+    # ActionableMessages now — the index's buttons open the boards
+    # it lists, a board's buttons walk its metrics / hop scope.
+    assert index.buttons
     board = rt._control_boards("sparks", admin)
-    assert "Bola" in board
-    assert "no board called" in rt._control_boards("bogus",
-                                                   admin)
+    assert "Bola" in _text(board)
+    assert board.buttons
+    assert "no board called" in _text(rt._control_boards("bogus",
+                                                         admin))
     out = rt._control_gsettings("boards daily sparks messages",
                                 admin)
     assert "daily boards" in out

@@ -196,6 +196,8 @@ class Outbox:
         media: dict[str, Any] | None = None,
         caption_rest: list[str] | None = None,
         fresh: bool = False,
+        output_kind: str | None = None,
+        output_meta: dict[str, Any] | None = None,
     ) -> str:
         """Enqueue one send. Returns the job id (the receipt handle).
 
@@ -245,6 +247,13 @@ class Outbox:
             # gateway.send): the drain forwards it to the adapter on
             # this row's first delivery attempt only.
             payload["fresh"] = True
+        if output_kind is not None:
+            # The producer's output classification (see gateway.send):
+            # the drain forwards it so the adapter derives the same
+            # content keyboard the direct path would.
+            payload["output_kind"] = str(output_kind)
+        if output_meta is not None:
+            payload["output_meta"] = json.loads(json.dumps(output_meta))
         job_id = self.queue.enqueue(
             topic, payload,
             max_attempts=self.max_attempts,

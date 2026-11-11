@@ -843,6 +843,8 @@ class ChatGateway:
         reply_keyboard: list[list[str]] | None = None,
         parse_mode: str = "",
         fresh: bool = False,
+        output_kind: str | None = None,
+        output_meta: dict[str, Any] | None = None,
     ) -> tuple[SendResult, int]:
         """Send one already-sized chunk. Returns ``(result, attempts)``.
 
@@ -856,6 +858,11 @@ class ChatGateway:
         wrapper below re-enters ``_call`` for later attempts, and a
         retry must never present itself as a fresh solicited reply
         (that distinction is what send-once guards key on).
+
+        ``output_kind`` / ``output_meta`` follow the same declared-only
+        rule: they reach the adapter only when its ``send`` declares
+        both, so an adapter that cannot use the producer's output
+        classification never sees it.
         """
         limits = for_platform(chat.platform)
         kwargs: dict[str, Any] = {"reply_to": reply_to}
@@ -874,6 +881,16 @@ class ChatGateway:
                     "fresh" in inspect.signature(adapter.send).parameters)
             except (TypeError, ValueError):
                 adapter_accepts_fresh = False
+        adapter_accepts_kind = False
+        if output_kind is not None:
+            try:
+                import inspect
+
+                _params = inspect.signature(adapter.send).parameters
+                adapter_accepts_kind = (
+                    "output_kind" in _params and "output_meta" in _params)
+            except (TypeError, ValueError):
+                adapter_accepts_kind = False
         attempts = 0
 
         def _call() -> SendResult:
@@ -881,7 +898,12 @@ class ChatGateway:
             attempts += 1
             call_kwargs = kwargs
             if adapter_accepts_fresh:
-                call_kwargs = {**kwargs, "fresh": fresh and attempts == 1}
+                call_kwargs = {**call_kwargs,
+                               "fresh": fresh and attempts == 1}
+            if adapter_accepts_kind:
+                call_kwargs = {**call_kwargs,
+                               "output_kind": output_kind,
+                               "output_meta": output_meta}
             result = adapter.send(chat, chunk, **call_kwargs)
             if result.ok:
                 self.touch(chat)
@@ -998,6 +1020,8 @@ class ChatGateway:
             buttons=buttons,
             reply_keyboard=payload.get("reply_keyboard"),
             parse_mode=str(payload.get("parse_mode") or ""),
+            output_kind=payload.get("output_kind"),
+            output_meta=payload.get("output_meta"),
             # The row's fresh mark counts only on its first delivery
             # attempt (deliver_chat stamps _attempts from the job;
             # the queue's lease increments it before the send, so a
@@ -1050,6 +1074,8 @@ class ChatGateway:
         reply_keyboard: list[list[str]] | None = None,
         parse_mode: str = "",
         fresh: bool = False,
+        output_kind: str | None = None,
+        output_meta: dict[str, Any] | None = None,
     ) -> SendResult:
         """Synchronous path: chunk, then send chunk-by-chunk in order.
         Stops at the first failed chunk — later chunks must never overtake
@@ -1076,6 +1102,11 @@ class ChatGateway:
                     # formatted send rendering literally.
                     parse_mode=parse_mode,
                     fresh=fresh,
+                    # The output kind rides the last chunk only, like
+                    # the buttons it derives: an earlier chunk earning
+                    # the keyboard would strand it mid-message.
+                    output_kind=output_kind if is_last else None,
+                    output_meta=output_meta if is_last else None,
                 )
                 if not result.ok:
                     return SendResult(
@@ -1102,6 +1133,8 @@ class ChatGateway:
         parse_mode: str = "",
         durable_kind: str = "chat",
         fresh: bool = False,
+        output_kind: str | None = None,
+        output_meta: dict[str, Any] | None = None,
     ) -> SendResult:
         """Durable path: every chunk becomes a row, then the chat's queue
         drains in order. Returns the delivery verdict when
@@ -1110,7 +1143,11 @@ class ChatGateway:
 
         ``fresh`` rides the row: the drain delivers it to the adapter
         on the row's FIRST delivery attempt only — a redelivery of a
-        failed row is a retry, and retries are never fresh."""
+        failed row is a retry, and retries are never fresh.
+
+        ``output_kind`` / ``output_meta`` ride the LAST chunk's row
+        the same way, so a durable send derives the same keyboard
+        the direct path would."""
         assert self.outbox is not None  # noqa: S101 - caller checked
         chunks = self._chunked(chat, text, formatted=bool(parse_mode))
         total = len(chunks)
@@ -1130,6 +1167,8 @@ class ChatGateway:
                     parse_mode=parse_mode,
                     durable_kind=durable_kind, group_id=group_id,
                     fresh=fresh,
+                    output_kind=output_kind if is_last else None,
+                    output_meta=output_meta if is_last else None,
                 ))
             return job_ids
 
@@ -1214,6 +1253,8 @@ class ChatGateway:
         durable: bool | None = None,
         durable_kind: str = "chat",
         fresh: bool = False,
+        output_kind: str | None = None,
+        output_meta: dict[str, Any] | None = None,
     ) -> SendResult:
         """Send one message on one platform. Ordered per chat by default.
 
@@ -1236,6 +1277,15 @@ class ChatGateway:
         ``nm sent``). None means the gateway's ``durable_outbox`` flag
         (default OFF). ``durable_kind`` labels the row (``chat``,
         ``report``, ``media``, ``digest``).
+
+        ``output_kind`` / ``output_meta`` name the output being sent
+        (the producer's own classification — a search result, a game
+        move) for adapters that derive content keyboards from it
+        (the Telegram bot adapter's adaptive derivation). They ride
+        the LAST chunk only, like authored buttons, survive the
+        durable outbox as row fields, and reach only adapters whose
+        ``send`` declares them — every other adapter's behavior is
+        byte-for-byte what it was.
         """
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         text = text if text is not None else ""
@@ -1273,7 +1323,8 @@ class ChatGateway:
                 platform, chat, text, ordered=ordered, reply_to=reply_to,
                 buttons=buttons, reply_keyboard=reply_keyboard,
                 parse_mode=parse_mode, durable_kind=durable_kind,
-                fresh=fresh)
+                fresh=fresh, output_kind=output_kind,
+                output_meta=output_meta)
         if use_durable and self.outbox is None:
             _log.warning(
                 "gateway.send: durable requested for %s but no outbox "
@@ -1281,13 +1332,15 @@ class ChatGateway:
             degraded = self._send_direct(
                 platform, chat, text, ordered=ordered, reply_to=reply_to,
                 buttons=buttons, reply_keyboard=reply_keyboard,
-                parse_mode=parse_mode, fresh=fresh)
+                parse_mode=parse_mode, fresh=fresh,
+                output_kind=output_kind, output_meta=output_meta)
             degraded.delivery_degraded = True
             return degraded
         return self._send_direct(
             platform, chat, text, ordered=ordered, reply_to=reply_to,
             buttons=buttons, reply_keyboard=reply_keyboard,
-            parse_mode=parse_mode, fresh=fresh)
+            parse_mode=parse_mode, fresh=fresh,
+            output_kind=output_kind, output_meta=output_meta)
 
     def send_file(
         self,

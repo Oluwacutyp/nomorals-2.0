@@ -356,6 +356,53 @@ _control_deliveries: contextvars.ContextVar[int] = (
     contextvars.ContextVar("nm_control_deliveries", default=0))
 
 
+def _control_output_kind(command: Any) -> tuple[str | None,
+                                                dict[str, Any] | None]:
+    """The adaptive-buttons output kind a control reply carries,
+    derived from the PARSED command that produced it — producer
+    data, never a guess from the reply text (buttons completion
+    repair, 2026-11-11: the Telegram send path derived keyboards
+    without output_kind, so the kind keyboards — a search result's
+    deepen/save/re-run row, a game's rematch row, the memory
+    system's recall/memories row — were unreachable on ordinary
+    command replies).
+
+    Only kinds whose keyboards are real operations on THIS output
+    map: ``search`` (payload = the query the caller actually ran),
+    ``game`` (payload = the game actually being played — the
+    ``/game`` verb's argument, or the direct game command's own
+    kind), ``memory`` (the recall/memories commands). Everything
+    else returns (None, None) and keeps the existing derivation:
+    inventing a kind for an unrelated reply would paste the same
+    strip onto everything, which is filler, not buttons.
+    """
+    if command is None:
+        return None, None
+    kind = str(getattr(command, "kind", "") or "").strip().lower()
+    arg = str(getattr(command, "arg", "") or "").strip()
+    tail = str(getattr(command, "tail", "") or "").strip()
+    if kind in ("search", "searchdeep"):
+        # The handlers read the query from the tail (the arg slot
+        # holds at most the first token for free-text kinds).
+        query = tail or arg
+        return ("search", {"query": query}) if query else (None, None)
+    if kind == "game":
+        verb = tail or arg
+        game = verb.split(None, 1)[0] if verb else ""
+        return ("game", {"game": game}) if game else (None, None)
+    if kind in ("recall", "memories"):
+        return "memory", None
+    try:
+        from ...social.chat.control import GAME_COMMANDS
+    except Exception:  # noqa: BLE001 - a missing table maps nothing
+        GAME_COMMANDS = ()
+    if kind in GAME_COMMANDS:
+        # A direct game command (/trivia, /digits, …): the kind
+        # itself names the game this output belongs to.
+        return "game", {"game": kind}
+    return None, None
+
+
 class PartnerRuntime(
     RuntimeLiveMixin,
     RuntimeMetaMixin,
@@ -1799,7 +1846,10 @@ class PartnerRuntime(
                              f"or /game quit and start it fresh")
                 if reply:
                     try:
-                        result = self._send_control_reply(message, reply)
+                        _okind, _ometa = _control_output_kind(command)
+                        result = self._send_control_reply(
+                            message, reply, output_kind=_okind,
+                            output_meta=_ometa)
                         if result is not None and not result.ok:
                             _log.warning("game reply send failed in %s: %s",
                                          message.chat.key, result.error)
@@ -1867,7 +1917,10 @@ class PartnerRuntime(
                             # client still holds — once per chat.
                             if bare_menu:
                                 self._clear_menu_grid_once(message)
-                            self._send_control_reply(message, reply)
+                            _okind, _ometa = _control_output_kind(command)
+                            self._send_control_reply(
+                                message, reply, output_kind=_okind,
+                                output_meta=_ometa)
                         except Exception:  # noqa: BLE001
                             _log.warning("public-bot reply send failed")
                     return
@@ -1940,7 +1993,10 @@ class PartnerRuntime(
                         reply = "that broke something on my end — try again."
                     if reply:
                         try:
-                            self._send_control_reply(message, reply)
+                            _okind, _ometa = _control_output_kind(command)
+                            self._send_control_reply(
+                                message, reply, output_kind=_okind,
+                                output_meta=_ometa)
                         except Exception:  # noqa: BLE001
                             _log.warning("group command reply send failed")
                     return
@@ -2054,7 +2110,10 @@ class PartnerRuntime(
                         # client still holds, once per chat.
                         if message.text.strip() in ("/start", "/menu"):
                             self._clear_menu_grid_once(message)
-                        self._send_control_reply(message, reply)
+                        _okind, _ometa = _control_output_kind(_cmd)
+                        self._send_control_reply(
+                            message, reply, output_kind=_okind,
+                            output_meta=_ometa)
                     except Exception as exc:  # noqa: BLE001
                         _log.warning("control reply send failed: %s", exc)
                 return
@@ -5271,7 +5330,8 @@ class PartnerRuntime(
                 "runtime.PartnerRuntime._clear_menu_grid_once", exc)
 
     def _send_control_reply(self, message, reply, *,  # type: ignore[no-untyped-def]
-                            reply_keyboard=None):
+                            reply_keyboard=None,
+                            output_kind=None, output_meta=None):
         """The ONE send channel for control-command replies, on
         every bot and surface (presentation build, owner order
         2026-11-03: buttons + formatting are platform-wide, not a
@@ -5282,6 +5342,12 @@ class PartnerRuntime(
         buttons authored together from the same state that
         rendered the display, so the buttons always match what's
         on screen.  Platforms without buttons ignore the keyboard.
+
+        ``output_kind`` / ``output_meta`` (from
+        :func:`_control_output_kind`, at the dispatch call sites)
+        name what this reply IS for adapters that derive content
+        keyboards from the output's kind; they never override
+        authored buttons.
 
         Formatting convention: reply text carrying <b> or <code>
         goes out as HTML (the adapter falls back to plain text if
@@ -5434,7 +5500,15 @@ class PartnerRuntime(
                                    # turn: its first dispatch attempt is
                                    # fresh — a send-once guard may hold
                                    # retries, never the answer itself.
-                                   fresh=True)
+                                   fresh=True,
+                                   # The producer's output kind (from
+                                   # the parsed command, via
+                                   # _control_output_kind): adapters
+                                   # that derive content keyboards use
+                                   # it; authored buttons above still
+                                   # win wherever they exist.
+                                   output_kind=output_kind,
+                                   output_meta=output_meta)
         if session and result is not None \
                 and getattr(result, "ok", False):
             _mid = str(getattr(result, "message_id", "") or "")
@@ -5650,10 +5724,22 @@ class PartnerRuntime(
                 from ...social.chat.hub import hub_text
                 return hub_text()
             if _platform in ("whatsapp", "wa"):
-                # WhatsApp gets its OWN menu (owner rule): the
-                # public menu is the Telegram-shaped one — wrong
-                # command set for this surface, and it tells the
-                # reader to tap a button WhatsApp doesn't have.
+                # WhatsApp /start lands on the same live menu
+                # session as /menu (buttons completion repair,
+                # 2026-11-11): the session render is authored
+                # per-platform (the whatsapp section tree), its
+                # keyboards ride the bridges' interactive form, and
+                # it is the button-bearing frame — the text-only
+                # WhatsApp menu below is the fallback for contexts
+                # the session cannot serve (no inbound message,
+                # buttonless surface), never the /start answer a
+                # real message gets.
+                _menu_cmd = parse_control("/menu")
+                if _menu_cmd is not None:
+                    _home = self._menu_session_reply(
+                        message, chat_key, _menu_cmd)
+                    if _home is not None:
+                        return _home
                 from ...social.chat.control import help_menu
                 return help_menu("whatsapp")
             return public_menu_text()
@@ -5722,19 +5808,27 @@ class PartnerRuntime(
         # owner-only catalog to non-owners). /menu <group> still goes to
         # list_catalog below — and the telegram-bot gate redirects it.
         if kind == "menu" and not command.tail:
-            # WhatsApp gets its OWN menu (owner rule) — same
-            # reasoning as bare /start above: never the
-            # Telegram-shaped public menu on this surface.
+            # The live menu session's home is the /menu answer on
+            # every button surface, WhatsApp included (buttons
+            # completion repair, 2026-11-11): the session render
+            # was authored per-platform all along and WhatsApp's
+            # keyboards ride the bridges' interactive form — but
+            # this branch used to return the text-only WhatsApp
+            # frame BEFORE the session was consulted, so the exact
+            # command the owner uses never carried a button there.
+            # The session helper self-gates (no inbound message,
+            # buttonless surface → None); only then do the text
+            # paths below answer.
+            home = self._menu_session_reply(message, chat_key, command)
+            if home is not None:
+                return home
+            # WhatsApp keeps its OWN text menu as that fallback
+            # (owner rule): never the Telegram-shaped public menu
+            # on this surface.
             if (chat_key or "").partition(":")[0].strip().lower() \
                     in ("whatsapp", "wa"):
                 from ...social.chat.control import help_menu
                 return help_menu("whatsapp")
-            # Bot-DM button surfaces get the live menu session's home
-            # (one message; categories page inside it) — the text menu
-            # stays for groups and buttonless surfaces.
-            home = self._menu_session_reply(message, chat_key, command)
-            if home is not None:
-                return home
             return public_menu_text()
 
         # The originating surface, from the chat key — one computation,

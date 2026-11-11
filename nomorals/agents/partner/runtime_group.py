@@ -4283,7 +4283,14 @@ class RuntimeGroupMixin:
         reads the last published snapshot and a peek never
         advances it; the group's scheduled publishes are what
         move the baseline.  /top is untouched: it IS the group
-        sparks board."""
+        sparks board.
+
+        Renders return as ActionableMessages (buttons completion
+        repair, 2026-11-11): the index's buttons open the boards
+        it lists, and a board's buttons walk its scope's metrics
+        and hop scope at the same metric — every tap re-runs
+        /boards at a validated board id (see _board_nav_buttons).
+        """
         surface = self._group_surface()
         key = self._group_key_or_none(message)
         name = str(tail or "").strip().lower()
@@ -4314,7 +4321,13 @@ class RuntimeGroupMixin:
                     f"[{', '.join(cfg.get('weekly') or []) or '—'}]"
                     f" at {int(cfg.get('hour', 20))}:00 — "
                     "/gsettings boards changes it.")
-            return "\n".join(lines)
+            text = "\n".join(lines)
+            rows = self._board_index_buttons(key)
+            if rows:
+                from ...social.chat.tgbot_buttons import actionable
+
+                return actionable(text, rows)
+            return text
         board_id = name if ":" in name else f"group:{name}"
         text = surface.render_board(
             board_id, group_key=key or "",
@@ -4324,9 +4337,124 @@ class RuntimeGroupMixin:
             # names no board — unavailable and failed boards
             # render their designed state boards instead
             # (design absorption #6).
-            return (f"no board called {name!r} — /boards lists "
-                    "what exists.")
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(
+                f"no board called {name!r} — /boards lists "
+                "what exists.",
+                [[("🏆 Boards", "boards")]])
+        rows = self._board_nav_buttons(board_id, key)
+        if rows:
+            from ...social.chat.tgbot_buttons import actionable
+
+            return actionable(text, rows)
         return text
+
+    @staticmethod
+    def _board_id_for(parsed, metric):  # type: ignore[no-untyped-def]
+        """Rebuild a board id like ``parsed``'s, at another metric."""
+        scope = parsed["scope"]
+        if scope == "platform":
+            return f"platform:{parsed['platform']}:{metric}"
+        if scope == "community":
+            return f"community:{parsed['community']}:{metric}"
+        if scope == "game":
+            return f"game:{parsed['game']}:{metric}"
+        return f"{scope}:{metric}"
+
+    def _board_nav_buttons(self, board_id, key):  # type: ignore[no-untyped-def]
+        """The board render's buttons, from the board's own state
+        (buttons completion repair, 2026-11-11: board renders were
+        text-only — group_boards carried no button code at all).
+
+        Every button performs the navigation it names: ◀ / ▶ walk
+        THIS scope's metric list (the tap re-runs /boards at the
+        neighbouring metric and that board renders), the scope hop
+        reads the SAME metric at the wider/narrower scope, and
+        "All boards" opens the index. Candidates are validated
+        against parse_board_id and the callback budget before they
+        ship — an id that names no board never becomes a button.
+        Returns rows, or None when nothing valid remains."""
+        from ...social.chat.group_boards import (
+            GAME_METRICS,
+            GAMES_METRICS,
+            GANG_METRICS,
+            GROUP_METRICS,
+            PEOPLE_METRICS,
+            parse_board_id,
+        )
+        from ...social.chat.tgbot_buttons import check_callback_data
+
+        parsed = parse_board_id(board_id)
+        if parsed is None:
+            return None
+        tables = {"group": GROUP_METRICS, "global": PEOPLE_METRICS,
+                  "platform": PEOPLE_METRICS,
+                  "community": PEOPLE_METRICS, "game": GAME_METRICS,
+                  "games": GAMES_METRICS, "gangs": GANG_METRICS}
+        metrics = list(tables[parsed["scope"]])
+        metric = parsed["metric"]
+
+        def _ok(candidate_id: str) -> bool:
+            if parse_board_id(candidate_id) is None:
+                return False
+            try:
+                check_callback_data(f"boards {candidate_id}")
+            except ValueError:
+                return False
+            return True
+
+        rows: list = []
+        nav: list = []
+        idx = metrics.index(metric)
+        if idx > 0:
+            prev = metrics[idx - 1]
+            prev_id = self._board_id_for(parsed, prev)
+            if _ok(prev_id):
+                nav.append((f"◀ {prev}", f"boards {prev_id}"))
+        if idx < len(metrics) - 1:
+            nxt = metrics[idx + 1]
+            next_id = self._board_id_for(parsed, nxt)
+            if _ok(next_id):
+                nav.append((f"{nxt} ▶", f"boards {next_id}"))
+        if nav:
+            rows.append(nav)
+        hop: list = []
+        if parsed["scope"] == "group" and metric in PEOPLE_METRICS \
+                and _ok(f"global:{metric}"):
+            hop.append(("🌍 Global", f"boards global:{metric}"))
+        elif parsed["scope"] == "global" and key \
+                and metric in GROUP_METRICS \
+                and _ok(f"group:{metric}"):
+            hop.append(("👥 This group", f"boards group:{metric}"))
+        hop.append(("🏆 All boards", "boards"))
+        rows.append(hop)
+        return rows or None
+
+    def _board_index_buttons(self, key):  # type: ignore[no-untyped-def]
+        """The board index's buttons: the boards the index text
+        lists, as taps that open them (this group's metric boards
+        when in a group, plus the global + games anchors)."""
+        from ...social.chat.group_boards import GROUP_METRICS, parse_board_id
+        from ...social.chat.tgbot_buttons import check_callback_data
+
+        flat: list = []
+        if key:
+            for metric in GROUP_METRICS:
+                flat.append((f"🏆 {metric}", f"boards group:{metric}"))
+        flat.append(("🌍 global sparks", "boards global:sparks"))
+        flat.append(("🎮 games xp", "boards games:xp"))
+        pairs: list = []
+        for label, data in flat:
+            board_id = data.partition(" ")[2]
+            if parse_board_id(board_id) is None:
+                continue
+            try:
+                check_callback_data(data)
+            except ValueError:
+                continue
+            pairs.append((label, data))
+        return [pairs[i:i + 2] for i in range(0, len(pairs), 2)] or None
 
     # ---- webshot (§18/§20): the capture surface --------------
     def _webshot_vision(self, data: bytes) -> str:

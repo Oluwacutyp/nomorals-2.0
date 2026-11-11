@@ -645,6 +645,7 @@ class WhatsAppAdapter(ChatAdapter):
         # disk and flushed on reconnect, so a bridge restart doesn't eat
         # the reply the brain already composed.
         self.outbox_enabled = bool(outbox_enabled)
+        self._outbox_dir = str(outbox_dir)
         self.outbox = Outbox(os.path.join(outbox_dir, "whatsapp.jsonl"))
         #: Delivery receipts from the bridge's messages.update feed:
         #: message_id -> {"status": "sent|delivered|read", "ts": float}.
@@ -688,6 +689,13 @@ class WhatsAppAdapter(ChatAdapter):
         #: The buttons_form the bridge reported for the most recent
         #: button-carrying send ("" = none yet / not reported).
         self._last_buttons_form: str = ""
+        # The form evidence above is persisted beside the outbox
+        # and restored here (buttons completion repair, 2026-11-11):
+        # it used to live only in these two attributes, so every
+        # restart unlearned that quick_reply degrades on this
+        # account and the first button sends after each restart
+        # went out in the form already known to fail.
+        self._load_buttons_form()
 
     # ── button derivation + form evidence ─────────────────────────
     def _deliver(self, handler: Any, message: Any) -> None:
@@ -756,6 +764,7 @@ class WhatsAppAdapter(ChatAdapter):
         form = str(form or "")
         if form:
             self._last_buttons_form = form
+            self._save_buttons_form()
         if form != "text":
             return
         record_failure(
@@ -768,10 +777,65 @@ class WhatsAppAdapter(ChatAdapter):
                 "lines"))
         if self._buttons_form_pref != "list":
             self._buttons_form_pref = "list"
+            self._save_buttons_form()
             _log.info("whatsapp: buttons_form=text for %s — this "
                       "account's sends now use the list form "
                       "(evidence, /pair buttons can pin it back)",
                       jid)
+
+    def _buttons_form_store_path(self) -> str:
+        """Where the button-form evidence persists: beside the
+        outbox, in the adapter's own durable store directory."""
+        return os.path.join(self._outbox_dir,
+                            "whatsapp_buttons_form.json")
+
+    def _load_buttons_form(self) -> None:
+        """Restore the persisted button-form evidence at startup.
+
+        A missing store is the honest unprobed default (quick_reply,
+        no evidence yet). A corrupt one is journaled and also lands
+        on the default — never a startup failure, and never a
+        silent reset of LEARNED evidence: when a persisted list
+        preference is restored, the restore is logged, so "the form
+        reverted" vs "the form was never learned" stay
+        distinguishable in the journal."""
+        try:
+            with open(self._buttons_form_store_path(),
+                      encoding="utf-8") as fh:
+                data = json.load(fh)
+        except FileNotFoundError:
+            return
+        except Exception as exc:  # noqa: BLE001 - corrupt store: default + journal
+            record_failure(
+                "whatsapp.WhatsAppAdapter._load_buttons_form", exc)
+            return
+        pref = str((data or {}).get("preference") or "")
+        if pref in ("", "list"):
+            self._buttons_form_pref = pref
+        last = str((data or {}).get("last_form") or "")
+        if last:
+            self._last_buttons_form = last
+        if self._buttons_form_pref == "list":
+            _log.info("whatsapp: restored the persisted button-form "
+                      "preference — this account's button sends use "
+                      "the list form (learned evidence, not a guess)")
+
+    def _save_buttons_form(self) -> None:
+        """Persist the button-form evidence, atomically like the
+        outbox itself (tmp file + os.replace). Best-effort: a
+        failed write is journaled and loses the memory, never
+        the send."""
+        try:
+            path = self._buttons_form_store_path()
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump({"preference": self._buttons_form_pref,
+                           "last_form": self._last_buttons_form}, fh)
+            os.replace(tmp, path)
+        except Exception as exc:  # noqa: BLE001 - persistence is best-effort
+            record_failure(
+                "whatsapp.WhatsAppAdapter._save_buttons_form", exc)
 
     def buttons_form_state(self) -> dict[str, Any]:
         """The account's button-form evidence, for /pair buttons:
@@ -785,6 +849,7 @@ class WhatsAppAdapter(ChatAdapter):
         via /pair buttons. Returns the preference now in force."""
         style = str(style or "").strip().lower()
         self._buttons_form_pref = "list" if style == "list" else ""
+        self._save_buttons_form()
         return self._buttons_form_pref or "quick"
 
     # ── delivery receipts ────────────────────────────────────────────────

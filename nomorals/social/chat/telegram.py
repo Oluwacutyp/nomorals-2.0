@@ -6643,11 +6643,55 @@ class TelegramBotAdapter(ChatAdapter):
             _log.debug("telegram-bot: edit_message failed: %s", exc)
             return None
 
+    def _public_rich_buttons(self, text: str,
+                             fresh_origin: str) -> Any:
+        """The rich personal keyboards, gated-bot edition.
+
+        ``personal_buttons_for`` keys real keyboards off the origin
+        command (a search result's deepen/save/re-run row, a book's
+        list/status row, a wisdom read's page turns). The old
+        derivation consulted it only ``if self.owner_only``, so on
+        the gated public bot those keyboards did not exist even for
+        commands every visitor may run — the keyboard FORM was
+        acting as the gate. It is not the gate: a tap re-enters
+        dispatch, which re-checks the caller's grant, so a button
+        can never grant what its command would refuse.
+
+        The extension is therefore keyed on the ORIGIN's public
+        standing (``caller_may_run`` for a non-owner — the same
+        predicate dispatch enforces): public origins (search, book,
+        wisdom…) get their rich keyboard here exactly as on the
+        personal bot; owner-only origins (power, toolhub, task…)
+        never reach the personal set from this branch. Menu-family
+        origins are excluded — the live menu session owns those
+        renders on this bot, with the public catalog, and the
+        personal category grid names the owner-only catalog.
+        Never raises: derivation must not break a send.
+        """
+        try:
+            origin = (fresh_origin or "").strip().lstrip("/")
+            kind = origin.split(None, 1)[0].lower() if origin else ""
+            if not kind or kind in ("menu", "help", "list",
+                                    "commands", "start"):
+                return None
+            from .control import caller_may_run
+            if not caller_may_run(kind, False):
+                return None
+            from .tgbot_buttons import personal_buttons_for
+
+            return personal_buttons_for(text, fresh_origin)
+        except Exception as exc:  # noqa: BLE001 - derivation is best-effort
+            record_failure(
+                "telegram.TelegramBotAdapter._public_rich_buttons", exc)
+            return None
+
     def send(self, chat: ChatRef, text: str, *, reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
              reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "",
-             fresh: bool = False) -> SendResult:
+             fresh: bool = False,
+             output_kind: str | None = None,
+             output_meta: dict[str, Any] | None = None) -> SendResult:
         from .adaptive_buttons import adaptive_buttons_for
         from .progress_throttle import LongOutput
         from .tgbot_buttons import personal_buttons_for
@@ -6759,11 +6803,28 @@ class TelegramBotAdapter(ChatAdapter):
                         resolved = (
                             personal_buttons_for(text, fresh_origin)
                             or adaptive_buttons_for(
+                                output_kind=output_kind,
+                                payload=output_meta,
                                 origin_command=fresh_origin, text=text)
                         )
                     else:
-                        resolved = adaptive_buttons_for(
-                            origin_command=fresh_origin, text=text)
+                        # Gated bot: the producer's output kind (when
+                        # the send path carries one) drives the kind
+                        # keyboards — a search result gets its
+                        # deepen/save/re-run actions, a game its
+                        # rematch — and public commands also earn the
+                        # rich personal keyboards (see
+                        # _public_rich_buttons). Deriving WITHOUT the
+                        # kind, as this branch used to, left every
+                        # kind handler unreachable and most replies
+                        # keyboardless (expression audit, 2026-11-11).
+                        resolved = (
+                            self._public_rich_buttons(text, fresh_origin)
+                            or adaptive_buttons_for(
+                                output_kind=output_kind,
+                                payload=output_meta,
+                                origin_command=fresh_origin, text=text)
+                        )
                 if resolved:
                     keyboard = []
                     for row in resolved:
@@ -7738,10 +7799,19 @@ class TelegramBotAdapter(ChatAdapter):
                   options: list[str], *, anonymous: bool = True,
                   multiple: bool = False, quiz: bool = False,
                   correct_option: int | None = None,
-                  explanation: str = "") -> SendResult:
+                  explanation: str = "",
+                  buttons: list[list[tuple[str, str]]] | None = None
+                  ) -> SendResult:
         """Publish a poll via sendPoll.  Flags are the Bot
         API's own: is_anonymous, allows_multiple_answers, and
-        type=quiz with correct_option_id + explanation."""
+        type=quiz with correct_option_id + explanation.
+
+        ``buttons`` (optional) ride as the poll's ``reply_markup``
+        inline keyboard — the Bot API accepts one on sendPoll, so
+        a poll whose follow-up actions exist (results, close,
+        re-run) can carry them instead of stranding the reader in
+        text (expression audit, 2026-11-11: send_poll never passed
+        reply_markup, so polls carried no buttons, ever)."""
         import json as _json
 
         opts = [str(o or "").strip() for o in options or []]
@@ -7775,6 +7845,15 @@ class TelegramBotAdapter(ChatAdapter):
             params["correct_option_id"] = int(correct_option)
             if explanation:
                 params["explanation"] = str(explanation)[:200]
+        if buttons:
+            keyboard = []
+            for row in buttons:
+                krow = [self._button_json(label, data)
+                        for label, data in row]
+                if krow:
+                    keyboard.append(krow)
+            if keyboard:
+                params["reply_markup"] = {"inline_keyboard": keyboard}
         started = time.perf_counter()
         try:
             result = self._api("sendPoll", **params)
