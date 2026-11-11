@@ -4472,9 +4472,29 @@ class PartnerRuntime(
     def _command_claims(self):  # type: ignore[no-untyped-def]
         ledger = getattr(self, "_command_claims_obj", None)
         if ledger is None:
-            from .command_claims import CommandClaimLedger
+            from .command_claims import (
+                CommandClaimLedger,
+                DurableCommandClaimLedger,
+            )
 
-            ledger = CommandClaimLedger()
+            # The claim record lives in the home store whenever
+            # one is attached: surfaces hosted by other runtime
+            # instances/processes claim against the same table
+            # (2026-11-11 seam — the in-memory ledger arbitrates
+            # only inside one instance). A db-less construction
+            # (test doubles, partial boots) keeps the in-memory
+            # ledger and its exact legacy behaviour.
+            db = getattr(getattr(self, "context", None), "db", None)
+            if db is not None and hasattr(db, "query_one") \
+                    and hasattr(db, "execute"):
+                try:
+                    ledger = DurableCommandClaimLedger(db)
+                except Exception as exc:  # noqa: BLE001 - degrade
+                    record_failure(
+                        "runtime.PartnerRuntime._command_claims", exc)
+                    ledger = CommandClaimLedger()
+            else:
+                ledger = CommandClaimLedger()
             self._command_claims_obj = ledger
         return ledger
 
@@ -4554,6 +4574,25 @@ class PartnerRuntime(
                         continue
         return ids
 
+    def _surface_account_id(self, platform: str) -> str:
+        """This runtime's own account id on ``platform`` — the
+        bot adapter's id for a Bot API surface, the userbot's own
+        user id for the MTProto surface — or "" when the surface
+        is not attached or has not learned it yet. The DM half of
+        the canonical command-claim key: a surface names a DM by
+        the pair (its own id, the peer's id), which is the same
+        pair from both sides of the chat."""
+        gateway = getattr(self, "gateway", None)
+        adapters = getattr(gateway, "adapters", {}) or {}
+        adapter = adapters.get(str(platform or ""))
+        if adapter is None:
+            return ""
+        for attr in ("_bot_id", "_me_id"):
+            value = getattr(adapter, attr, None)
+            if value:
+                return str(value)
+        return ""
+
     def _command_stands_down(self, message, command) -> bool:  # type: ignore[no-untyped-def]
         """True when THIS surface must not handle ``command``:
         another surface owns it. Silent by design — standing down
@@ -4606,16 +4645,22 @@ class PartnerRuntime(
         # (4) One handling: claim this message identity. The same
         # message carries the same platform message id on every
         # surface; the family collapses Telegram's three platform
-        # names. A prior claim by another surface stands this one
-        # down; this surface's own claim re-checks as its own.
-        message_id = str(getattr(message, "message_id", "") or "")
-        if message_id:
-            family = ("telegram" if platform.startswith("telegram")
-                      else platform)
-            key = f"{family}:{chat.chat_id}:{message_id}"
-            if not self._command_claims().claim(key, platform):
-                return True
-        return False
+        # names. The key is canonical (command_claim_key): a DM
+        # keys on BOTH participant ids, so the bot's copy and the
+        # owner's own echo name the same claim from opposite
+        # sides of the chat — the perspective-shaped key they
+        # used before could never collide in a DM. The ledger is
+        # the home store's, so the claim binds across runtime
+        # instances too. A prior claim by another surface stands
+        # this one down; this surface's own claim re-checks as
+        # its own.
+        from .command_claims import command_claim_key
+
+        key = command_claim_key(
+            message, self._surface_account_id(platform))
+        if not key:
+            return False
+        return not self._command_claims().claim(key, platform)
 
     def _money_send_hook(self, message: ChatMessage) -> str | None:
         """Build-map #49: "send 5k to Mama" → staged transfer + guard.
