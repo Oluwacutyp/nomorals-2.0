@@ -264,6 +264,11 @@ class StageLog:
     note: str = ""
 
 
+#: Sentinel for ``DownloadReport.login_block``: no login block
+#: has been recorded on this report.
+_LOGIN_BLOCK_NONE: Any = object()
+
+
 @dataclass
 class DownloadReport:
     """The outcome of ``MediaDownloader.download()`` — never raises."""
@@ -289,6 +294,25 @@ class DownloadReport:
     #: at ``path`` either way — extraction is additive, never a
     #: replacement (see ``MediaDownloader._unpack_archive``).
     archive: dict[str, Any] | None = None
+    #: Structured block class when the failure is one the site
+    #: itself classified (the resolver's vocabulary: preview / drm
+    #: / region / login / private) — ``"login"`` when the
+    #: authenticated rung (B5) failed the download for a missing
+    #: session, or a login-gated track had no session to retry
+    #: with and no later rung served it.  "" when the failure is
+    #: unclassified — callers render the class, never a guessed
+    #: sentence.
+    block_reason: str = ""
+    #: Pending login block (B5): the session outcome recorded
+    #: when a connector reported a classified ``login`` block and
+    #: no session resolved.  The chain CONTINUES — a later rung
+    #: (the rendered tab runs with the profile's own cookies)
+    #: may still serve the download — and only when the chain
+    #: exhausts does the verdict become the LOGIN failure.  The
+    #: stored value is the resolver's session outcome, or None
+    #: when no resolver existed at all.  ``_LOGIN_BLOCK_NONE``
+    #: when no login block was recorded.
+    login_block: Any = _LOGIN_BLOCK_NONE
 
     def tried(self) -> list[str]:
         """Stage names attempted, in order, deduped."""
@@ -560,6 +584,7 @@ class MediaDownloader:
                  soundcloud_connector: Any | None = None,
                  site_descriptors: Any | None = None,
                  site_connectors: dict[str, Any] | None = None,
+                 site_auth: Any | None = None,
                  rendered_tab_factory: Any | None = None) -> None:
         self.context = context
         self.profile = profile or detect_profile()
@@ -617,6 +642,12 @@ class MediaDownloader:
         # default (SoundCloud first) is resolved lazily.
         self._site_descriptors_injected = site_descriptors
         self._site_descriptors_cache: Any = None
+        # Authenticated rung (B5): the session resolver.  An
+        # injected resolver wins (tests hand in one over a fake
+        # vault store + a tmp estate); otherwise it is built
+        # lazily over the context's database.
+        self._site_auth_injected = site_auth
+        self._site_auth_cache: Any = None
         # Rendered capture stage (B3): an injected tab factory wins
         # (tests hand in a fake tab); the production default opens a
         # real rendered tab on the browser service.  The factory
@@ -686,6 +717,141 @@ class MediaDownloader:
         except Exception as e:
             record_failure("_site_descriptor_for", e)
             return None
+
+    # ── authenticated rung (B5) ───────────────────────────────────
+
+    def _site_auth_resolver(self) -> Any | None:
+        """The authenticated rung's session resolver: an injected
+        resolver wins; otherwise one is built lazily over the
+        context's database.  None when there is no database for a
+        vault / estate to open over — the gate then reports the
+        vault unavailable, never a fabricated session."""
+        if self._site_auth_cache is not None:
+            return self._site_auth_cache
+        if self._site_auth_injected is not None:
+            self._site_auth_cache = self._site_auth_injected
+            return self._site_auth_cache
+        try:
+            from .site_auth import SiteAuthResolver
+            db = getattr(self.context, "db", None) \
+                if self.context is not None else None
+            self._site_auth_cache = SiteAuthResolver(
+                db=db, context=self.context)
+        except Exception as e:  # a resolver that cannot be built
+            record_failure("_site_auth_resolver", e)  # is no resolver
+            self._site_auth_cache = None
+        return self._site_auth_cache
+
+    def _resolve_site_auth(self, desc: Any, *,
+                         require: bool = False) -> Any | None:
+        """Resolve *desc*'s session through the B5 rung.  None
+        when no resolver exists (no database) — the caller
+        reports the vault unavailable, it never proceeds
+        anonymously.  ``require`` forwards to the resolver: the
+        login-block retry already knows a session is needed, so
+        an ``auth == "none"`` descriptor must resolve a real
+        session (or fail) instead of answering ok empty."""
+        try:
+            resolver = self._site_auth_resolver()
+            if resolver is None:
+                return None
+            return resolver.resolve(desc, require=require)
+        except Exception as e:  # resolution never breaks the chain
+            record_failure("_resolve_site_auth", e)
+            return None
+
+    def _login_block_outcome(self, desc: Any, auth: Any | None
+                             ) -> tuple[str, str]:
+        """(status, owner action) for a login block that found no
+        session.  ``auth`` None means no resolver existed at all.
+        Never a value, never a guess at the credential itself."""
+        if auth is None:
+            return ("unavailable",
+                    "the credential vault could not be opened — no "
+                    "database is attached to this context; unlock "
+                    "the vault and retry.")
+        return (str(getattr(auth, "status", "") or "missing"),
+                str(getattr(auth, "owner_action", "") or ""))
+
+    def _login_block_note(self, report: DownloadReport, desc: Any,
+                          auth: Any | None) -> None:
+        """Append the auth stage log for a login block that found
+        no session.  The log names the credential state, never a
+        value.  No verdict fields are set here — the caller
+        decides whether the LOGIN failure stands now (the
+        up-front gate) or only if the chain exhausts (the
+        login-block retry)."""
+        site = str(getattr(desc, "site", "") or "")
+        status, _ = self._login_block_outcome(desc, auth)
+        report.stages.append(StageLog(
+            stage="auth", url=report.url,
+            error_class=FailureKind.SITE_ERROR.value,
+            error=f"no {site} session stored ({status})",
+            note="login"))
+        self._log_stage("auth", report.url, "", 0.0, 0,
+                        FailureKind.SITE_ERROR,
+                        f"no {site} session stored ({status})",
+                        note="login")
+
+    def _login_failure(self, report: DownloadReport, desc: Any,
+                       auth: Any | None, *, noted: bool = False
+                       ) -> None:
+        """Fill *report* as a found-but-blocked LOGIN failure: the
+        site needs a signed-in account and no session resolved.
+        ``auth`` None means no resolver existed at all.  The hint
+        carries the exact owner action.  ``noted`` means the auth
+        stage log was already appended (the deferred login-block
+        path) — only the verdict fields are set."""
+        site = str(getattr(desc, "site", "") or "")
+        status, action = self._login_block_outcome(desc, auth)
+        if not noted:
+            self._login_block_note(report, desc, auth)
+        report.extractor = site
+        report.failure = FailureKind.SITE_ERROR
+        report.block_reason = "login"
+        report.likely_cause = (
+            f"{site} wants a signed-in account for this content — "
+            f"no session resolved ({status})")
+        report.hint = action
+
+    def _auth_retry_after_login_block(
+            self, report: DownloadReport, url: str, target_dir: Path,
+            audio_only: bool, format_spec: str, timeout: float,
+            budget: dict[str, float]) -> bool:
+        """The login-block retry (B5): the connector stage just
+        reported a classified ``login`` block — the site itself
+        says this content needs a signed-in account.  Resolve the
+        session (estate, then vault — the resolver upserts it
+        into the estate) and retry the direct stage once,
+        authenticated through the estate's cookies file.  True
+        when the retry landed.  False when no session resolved —
+        but the block is recorded as PENDING (``login_block``),
+        not a verdict: the chain continues, because a later rung
+        (the rendered tab runs with the profile's own cookies)
+        may still serve the download.  Only when the chain
+        exhausts does the LOGIN failure stand (download()'s
+        post-loop handling).  False with nothing recorded when
+        the connector failure was not a login block at all."""
+        last = report.stages[-1] if report.stages else None
+        if last is None or last.stage != "connector" \
+                or "block: login" not in (last.note or ""):
+            return False
+        desc = self._site_descriptor_for(url)
+        if desc is None or not tuple(
+                getattr(desc, "auth_domains", ()) or ()):
+            return False
+        auth = self._resolve_site_auth(desc, require=True)
+        if auth is None or not getattr(auth, "ok", False):
+            # No session: record the block as pending and let the
+            # chain continue — the rendered / browser rungs run
+            # with the profile's own cookies and may still serve
+            # the download.  The LOGIN verdict is imposed only if
+            # the chain exhausts.
+            report.login_block = auth
+            self._login_block_note(report, desc, auth)
+            return False
+        return self._stage_direct(report, url, target_dir, audio_only,
+                                  format_spec, timeout, budget)
 
     # ── source growth: outcomes + discovery (Pass #86) ────────────────
 
@@ -942,8 +1108,17 @@ class MediaDownloader:
             return self._stage_kit(report, url, target_dir, audio_only,
                                    budget)
         if stage == "connector":
-            return self._stage_connector(report, url, target_dir,
-                                         audio_only, budget)
+            if self._stage_connector(report, url, target_dir,
+                                     audio_only, budget):
+                return True
+            # A classified login block from the connector is the
+            # site itself saying this content needs a signed-in
+            # account — the authenticated rung retries the direct
+            # stage once with the resolved session, or records
+            # the LOGIN failure and stops the chain.
+            return self._auth_retry_after_login_block(
+                report, url, target_dir, audio_only, format_spec,
+                timeout, budget)
         if stage == "proxy":
             return self._stage_proxy(report, url, target_dir, audio_only,
                                      format_spec, timeout, budget)
@@ -1267,6 +1442,18 @@ class MediaDownloader:
             report.hint = ("find the same title on a downloadable "
                            "source, or play it in the source's own app")
             return self._finish(report, started)
+        # Authenticated rung, up-front gate (B5): a descriptor that
+        # declares auth resolves its session BEFORE the chain — a
+        # missing / expired / unavailable session fails here as
+        # found-but-blocked, class ``login``, and the chain never
+        # runs anonymously for a site that declared it needs an
+        # account.  A learned rule bypasses neither this gate nor
+        # the descriptor gate above.
+        if site_desc is not None and site_desc.auth_needed:
+            auth = self._resolve_site_auth(site_desc)
+            if auth is None or not getattr(auth, "ok", False):
+                self._login_failure(report, site_desc, auth)
+                return self._finish(report, started)
         try:
             if learned_pair is not None:
                 learned_desc, learned_rule = learned_pair
@@ -1288,6 +1475,12 @@ class MediaDownloader:
                     rule_failure_recorded = True
                     skip_stages.add(learned_rule.stage)
             for stage_name in chain:
+                if report.block_reason:
+                    # A classified login block already set the
+                    # LOGIN failure fields (up-front gate or the
+                    # connector retry) — the chain stops here and
+                    # never burns another anonymous rung.
+                    break
                 if stage_name in skip_stages:
                     continue
                 if self._attempt_stage(
@@ -1301,6 +1494,25 @@ class MediaDownloader:
             report.stages.append(StageLog(
                 stage="chain", url=url, error_class="site_error",
                 error=f"orchestrator error: {_err_text(exc, 380)}"))
+        if report.block_reason:
+            # The LOGIN failure fields are already set by the auth
+            # path.  No outcome recording — a missing account is
+            # not the source's failure, exactly like the early
+            # returns above (disk preflight, a registry-marked
+            # not-downloadable source).
+            return self._finish(report, started)
+        if report.login_block is not _LOGIN_BLOCK_NONE:
+            # A connector login block found no session, and no
+            # later rung served the download — the LOGIN verdict
+            # stands now.  The auth stage log was already appended
+            # when the block was recorded, so only the verdict
+            # fields are set (noted=True).  No outcome recording
+            # — a missing account is not the source's failure.
+            desc = self._site_descriptor_for(work_url)
+            if desc is not None:
+                self._login_failure(report, desc, report.login_block,
+                                    noted=True)
+                return self._finish(report, started)
         self._finish_failure(report)
         # The chain exhausted: the attempt's failure (with its error
         # class) is recorded against the source that was asked to

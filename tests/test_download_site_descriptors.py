@@ -209,10 +209,15 @@ class TestDescriptorValidation:
             "site": "tunes", "url_patterns": [r"tunes\.test/"],
             "chain": ["connector"], "connector": "tunes",
             "block_classes": ["preview"], "auth": "account",
+            "auth_domains": ["tunes.test"],
+            "auth_cookie_names": ["sess"],
             "downloadable": True, "notes": "toy",
         })
         assert desc.site == "tunes"
         assert desc.auth_needed is True
+        assert desc.auth_domains == ("tunes.test",)
+        assert desc.auth_cookie_names == ("sess",)
+        assert SiteDescriptor.from_dict(desc.to_dict()) == desc
         assert desc.to_dict()["site"] == "tunes"
         assert SiteDescriptor.from_dict(desc.to_dict()) == desc
 
@@ -457,20 +462,32 @@ class TestEngineIsDataDriven:
         assert "exampletunes" in report.likely_cause
         assert report.tried() == ["extractor"]
 
-    def test_auth_requirement_is_declared_not_enforced(self, tmp_path):
-        # B4 declares auth; B5 is the rung that honours it.  A
-        # descriptor with auth="account" still runs its chain on
-        # the access the chain already has — the requirement is
-        # data, not a new gate.
+    def test_auth_requirement_is_enforced(self, tmp_path, monkeypatch):
+        # B5 honours the auth B4 only declared (RE-PINNED: the old
+        # test asserted the requirement was data, not a gate).
+        # A descriptor with auth="account" and no session stored
+        # fails as found-but-blocked, class login, before the
+        # chain runs — the connector that could have served the
+        # track is never called.
         from unittest.mock import patch
 
-        connector = SimpleNamespace(stream_url=lambda url: {
-            "url": "https://cdn.exampletunes.test/song.mp3",
-            "protocol": "progressive", "mime_type": "audio/mpeg",
-            "track": {"title": "Toy Song",
-                      "permalink_url":
-                          "https://exampletunes.test/toy-song"}})
-        desc = _toy_descriptor(auth="account")
+        # The lazy resolver opens the home estate; keep the test
+        # hermetic.
+        monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+        calls: list[str] = []
+
+        def stream_url(url):
+            calls.append(url)
+            return {
+                "url": "https://cdn.exampletunes.test/song.mp3",
+                "protocol": "progressive", "mime_type": "audio/mpeg",
+                "track": {"title": "Toy Song",
+                          "permalink_url":
+                              "https://exampletunes.test/toy-song"}}
+
+        connector = SimpleNamespace(stream_url=stream_url)
+        desc = _toy_descriptor(
+            auth="account", auth_domains=("exampletunes.test",))
         assert desc.auth_needed is True
         registry = SiteDescriptorRegistry([desc])
         dl = _downloader(tmp_path, site_descriptors=registry,
@@ -480,4 +497,8 @@ class TestEngineIsDataDriven:
             report = dl.download(
                 "https://exampletunes.test/toy-song",
                 dest_dir=tmp_path, audio_only=True)
-        assert report.ok
+        assert report.ok is False
+        assert report.block_reason == "login"
+        assert report.tried() == ["auth"]
+        assert calls == []
+        assert "vault" in report.hint

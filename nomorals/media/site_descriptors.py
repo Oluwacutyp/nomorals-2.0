@@ -23,9 +23,15 @@ downloads nothing).
 
 Auth: ``auth="none"`` means the public path (SoundCloud today).
 ``"account"`` / ``"vault"`` name a requirement the authenticated
-rung (B5) will honour — B4 declares the requirement, it does not
-enforce it: a descriptor whose auth is not ``"none"`` still runs
-its chain on the access the chain already has.
+rung (B5, :mod:`nomorals.media.site_auth`) honours: a descriptor
+with ``auth != "none"`` resolves its session before the chain
+runs, and a missing session fails the download as found-but-
+blocked, class ``login``, instead of running anonymously.  A
+descriptor with ``auth == "none"`` may still declare
+``auth_domains`` / ``auth_cookie_names`` — the shape of the
+site's session — so a classified ``login`` block from the
+site's own connector can retry the direct stage authenticated
+through the estate's cookies file.
 
 Validation is at LOAD, never mid-download: a malformed descriptor
 fails in :meth:`SiteDescriptor.validate` / the registry's
@@ -75,8 +81,10 @@ BLOCK_CLASSES: tuple[str, ...] = (
 
 #: Auth requirements a descriptor may declare.  ``"none"`` is the
 #: public path; ``"account"`` needs the owner's signed-in account
-#: on the site; ``"vault"`` needs vault-held credentials.  B5 is
-#: the rung that honours the non-``"none"`` requirements.
+#: on the site; ``"vault"`` needs vault-held credentials.  B5
+#: (:mod:`nomorals.media.site_auth`) is the rung that honours the
+#: non-``"none"`` requirements — the engine resolves the session
+#: before the chain and never runs anonymously for such a site.
 AUTH_KINDS: tuple[str, ...] = ("none", "account", "vault")
 
 
@@ -106,8 +114,15 @@ class SiteDescriptor:
     "" when the site has no connector rung; required whenever
     ``"connector"`` is in ``chain``.  ``block_classes``: the block
     vocabulary this site can produce.  ``auth``: the auth the site
-    needs (see :data:`AUTH_KINDS`).  ``downloadable``: False when
-    the site serves no downloads at all.
+    needs (see :data:`AUTH_KINDS`).  ``auth_domains``: the cookie
+    domains the site's session lives under (required whenever
+    ``auth`` is not ``"none"``; also the domains a ``login``-block
+    retry consults for an ``auth == "none"`` site).
+    ``auth_cookie_names``: the session cookie names that prove a
+    signed-in session (``("auth_token",)`` for SoundCloud) — when
+    given, a live cookie of any other name does not count as a
+    session.  ``downloadable``: False when the site serves no
+    downloads at all.
     """
 
     site: str
@@ -116,6 +131,8 @@ class SiteDescriptor:
     connector: str = ""
     block_classes: tuple[str, ...] = ()
     auth: str = "none"
+    auth_domains: tuple[str, ...] = ()
+    auth_cookie_names: tuple[str, ...] = ()
     downloadable: bool = True
     notes: str = ""
 
@@ -191,6 +208,21 @@ class SiteDescriptor:
                 site, "auth",
                 f"unknown auth kind {self.auth!r} (want one of "
                 f"{', '.join(AUTH_KINDS)})")
+        for field_name, values in (
+                ("auth_domains", self.auth_domains),
+                ("auth_cookie_names", self.auth_cookie_names)):
+            for value in values or ():
+                if not isinstance(value, str) or not value.strip():
+                    raise SiteDescriptorError(
+                        site, field_name,
+                        f"{field_name} entries must be non-empty "
+                        "strings")
+        if self.auth != "none" and not tuple(self.auth_domains or ()):
+            raise SiteDescriptorError(
+                site, "auth_domains",
+                f"auth {self.auth!r} requires at least one "
+                "auth_domains entry — the cookie domains the "
+                "session lives under")
 
     # -- data round-trip ------------------------------------------------
 
@@ -203,7 +235,8 @@ class SiteDescriptor:
             raise SiteDescriptorError(
                 "", "descriptor", "a descriptor must be a mapping")
         known = {"site", "url_patterns", "chain", "connector",
-                 "block_classes", "auth", "downloadable", "notes"}
+                 "block_classes", "auth", "auth_domains",
+                 "auth_cookie_names", "downloadable", "notes"}
         for key in data:
             if key not in known:
                 raise SiteDescriptorError(
@@ -221,6 +254,9 @@ class SiteDescriptor:
             connector=str(data.get("connector") or ""),
             block_classes=tuple(data.get("block_classes") or ()),
             auth=str(data.get("auth") or "none"),
+            auth_domains=tuple(data.get("auth_domains") or ()),
+            auth_cookie_names=tuple(
+                data.get("auth_cookie_names") or ()),
             downloadable=bool(data.get("downloadable", True)),
             notes=str(data.get("notes") or ""),
         )
@@ -233,6 +269,8 @@ class SiteDescriptor:
             "connector": self.connector,
             "block_classes": list(self.block_classes),
             "auth": self.auth,
+            "auth_domains": list(self.auth_domains),
+            "auth_cookie_names": list(self.auth_cookie_names),
             "downloadable": self.downloadable,
             "notes": self.notes,
         }
@@ -299,11 +337,15 @@ SOUNDCLOUD_DESCRIPTOR = SiteDescriptor(
     connector="soundcloud",
     block_classes=BLOCK_CLASSES,
     auth="none",
+    auth_domains=("soundcloud.com",),
+    auth_cookie_names=("auth_token",),
     downloadable=True,
     notes="SoundCloud public api-v2: no account; progressive MP3 "
           "preferred, HLS fallback; track_authorization forwarded "
           "on transcoding calls; blocks are preview/drm/region/"
-          "login/private and resolve found-but-blocked",
+          "login/private and resolve found-but-blocked; a login-"
+          "gated track retries the direct stage authenticated "
+          "through the owner's soundcloud.com session (B5)",
 )
 
 #: The descriptors the engine reads by default.
