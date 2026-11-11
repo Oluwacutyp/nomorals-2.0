@@ -1,0 +1,311 @@
+"""Per-site download descriptors — the download chain as data (B4).
+
+B1–B3 hard-coded the SoundCloud path inside the download engine:
+``_stage_connector`` carried a ``soundcloud.com`` host check, and
+``download()`` carried the ladder order as a tuple literal.  Adding
+a site meant editing the engine.
+
+This module is the data that replaces that: one
+:class:`SiteDescriptor` per site — URL patterns, the chain of rungs
+that applies to the site in order, the connector id that resolves
+its streams, the block vocabulary the site can produce, the auth
+the site needs, and whether the site serves downloads at all.  The
+engine (:mod:`nomorals.media.downloader`) reads descriptors; a new
+site is a new descriptor, never an engine edit.
+
+Honest-failure shape (the contract the engine keeps for every
+descriptor): a connector refusal carrying a class from the
+descriptor's ``block_classes`` is journaled WITH its class and the
+chain moves on — the block is evidence, never a dead end, and the
+download never raises.  True DRM is named, never chased (the
+rendered stage reports it from the log's license traffic and
+downloads nothing).
+
+Auth: ``auth="none"`` means the public path (SoundCloud today).
+``"account"`` / ``"vault"`` name a requirement the authenticated
+rung (B5) will honour — B4 declares the requirement, it does not
+enforce it: a descriptor whose auth is not ``"none"`` still runs
+its chain on the access the chain already has.
+
+Validation is at LOAD, never mid-download: a malformed descriptor
+fails in :meth:`SiteDescriptor.validate` / the registry's
+constructor with a :class:`SiteDescriptorError` naming the site
+and the field — a bad pattern, an unknown rung, or a missing
+required field can never surface as a failed download.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from typing import Any
+
+from ..core.logging_setup import get_logger
+from .downloader_failures import record_failure
+
+_log = get_logger(__name__)
+
+__all__ = [
+    "CHAIN_STAGES",
+    "BLOCK_CLASSES",
+    "AUTH_KINDS",
+    "SiteDescriptorError",
+    "SiteDescriptor",
+    "SiteDescriptorRegistry",
+    "SOUNDCLOUD_DESCRIPTOR",
+    "DEFAULT_SITE_DESCRIPTORS",
+]
+
+#: The chain's stage vocabulary, in the canonical ladder order
+#: (B2/B3 pinned: direct, kit, connector, proxy, rendered, browser).
+#: A descriptor's ``chain`` is a subsequence of this, in this order
+#: unless the site genuinely needs a different order.
+CHAIN_STAGES: tuple[str, ...] = (
+    "direct", "kit", "connector", "proxy", "rendered", "browser",
+)
+
+#: The structured block vocabulary a site may produce — the same
+#: classes the SoundCloud connector speaks (``connectors.soundcloud``
+#: ``BLOCK_*``): preview / drm / region / login / private.  A
+#: connector refusal carrying one of these is journaled with its
+#: class; a class outside the vocabulary is never invented.
+BLOCK_CLASSES: tuple[str, ...] = (
+    "preview", "drm", "region", "login", "private",
+)
+
+#: Auth requirements a descriptor may declare.  ``"none"`` is the
+#: public path; ``"account"`` needs the owner's signed-in account
+#: on the site; ``"vault"`` needs vault-held credentials.  B5 is
+#: the rung that honours the non-``"none"`` requirements.
+AUTH_KINDS: tuple[str, ...] = ("none", "account", "vault")
+
+
+class SiteDescriptorError(ValueError):
+    """A site descriptor is malformed.  The message always names
+    the site and the field, so a bad descriptor is fixable at its
+    definition instead of surfacing as a failed download."""
+
+    def __init__(self, site: str, field_name: str, detail: str) -> None:
+        self.site = str(site or "")
+        self.field_name = str(field_name or "")
+        super().__init__(
+            f"site descriptor for {self.site!r}: field "
+            f"{self.field_name!r}: {detail}")
+
+
+@dataclass(frozen=True)
+class SiteDescriptor:
+    """One site's download behaviour, as data.
+
+    ``site``: the site's name (``"soundcloud"``).  ``url_patterns``:
+    regexes matched against the URL (same convention as
+    :class:`nomorals.media.download_kit.ExtractorDescriptor`).
+    ``chain``: the rungs that apply to this site, in order — a
+    subsequence of :data:`CHAIN_STAGES`.  ``connector``: the
+    connector id that resolves this site's streams (``"soundcloud"``),
+    "" when the site has no connector rung; required whenever
+    ``"connector"`` is in ``chain``.  ``block_classes``: the block
+    vocabulary this site can produce.  ``auth``: the auth the site
+    needs (see :data:`AUTH_KINDS`).  ``downloadable``: False when
+    the site serves no downloads at all.
+    """
+
+    site: str
+    url_patterns: tuple[str, ...]
+    chain: tuple[str, ...] = CHAIN_STAGES
+    connector: str = ""
+    block_classes: tuple[str, ...] = ()
+    auth: str = "none"
+    downloadable: bool = True
+    notes: str = ""
+
+    def __post_init__(self) -> None:
+        # Frozen dataclass: validate on construction so a bad
+        # descriptor can never exist to be registered.
+        self.validate()
+
+    # -- matching ------------------------------------------------------
+
+    def matches(self, url: str) -> bool:
+        try:
+            return any(re.search(p, url or "", re.I)
+                       for p in self.url_patterns)
+        except Exception as e:
+            record_failure("site_descriptor.matches", e)
+            return False
+
+    @property
+    def auth_needed(self) -> bool:
+        return self.auth != "none"
+
+    # -- validation (at LOAD, never mid-download) ----------------------
+
+    def validate(self) -> None:
+        """Raise :class:`SiteDescriptorError` naming site + field
+        when this descriptor is malformed."""
+        site = str(self.site or "")
+        if not site.strip():
+            raise SiteDescriptorError(
+                site, "site", "site name is empty")
+        patterns = self.url_patterns
+        if not patterns:
+            raise SiteDescriptorError(
+                site, "url_patterns",
+                "at least one URL pattern is required")
+        for pattern in patterns:
+            if not isinstance(pattern, str) or not pattern.strip():
+                raise SiteDescriptorError(
+                    site, "url_patterns",
+                    "URL patterns must be non-empty strings")
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise SiteDescriptorError(
+                    site, "url_patterns",
+                    f"pattern {pattern!r} does not compile: {exc}"
+                    ) from exc
+        chain = tuple(self.chain or ())
+        if not chain:
+            raise SiteDescriptorError(
+                site, "chain", "chain is empty — at least one rung "
+                "is required")
+        for stage in chain:
+            if stage not in CHAIN_STAGES:
+                raise SiteDescriptorError(
+                    site, "chain",
+                    f"unknown rung {stage!r} (want one of "
+                    f"{', '.join(CHAIN_STAGES)})")
+        if "connector" in chain and not str(self.connector or "").strip():
+            raise SiteDescriptorError(
+                site, "connector",
+                "chain includes the connector rung but no connector "
+                "id is declared")
+        for block in self.block_classes or ():
+            if block not in BLOCK_CLASSES:
+                raise SiteDescriptorError(
+                    site, "block_classes",
+                    f"unknown block class {block!r} (want one of "
+                    f"{', '.join(BLOCK_CLASSES)})")
+        if self.auth not in AUTH_KINDS:
+            raise SiteDescriptorError(
+                site, "auth",
+                f"unknown auth kind {self.auth!r} (want one of "
+                f"{', '.join(AUTH_KINDS)})")
+
+    # -- data round-trip ------------------------------------------------
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> SiteDescriptor:
+        """Build + validate from a plain dict (a JSON/YAML-shaped
+        descriptor).  Unknown keys and missing required fields fail
+        naming the field."""
+        if not isinstance(data, dict):
+            raise SiteDescriptorError(
+                "", "descriptor", "a descriptor must be a mapping")
+        known = {"site", "url_patterns", "chain", "connector",
+                 "block_classes", "auth", "downloadable", "notes"}
+        for key in data:
+            if key not in known:
+                raise SiteDescriptorError(
+                    str(data.get("site") or ""), str(key),
+                    f"unknown descriptor field {key!r}")
+        for required in ("site", "url_patterns"):
+            if required not in data:
+                raise SiteDescriptorError(
+                    str(data.get("site") or ""), required,
+                    f"required field {required!r} is missing")
+        return cls(
+            site=data["site"],
+            url_patterns=tuple(data["url_patterns"]),
+            chain=tuple(data.get("chain") or CHAIN_STAGES),
+            connector=str(data.get("connector") or ""),
+            block_classes=tuple(data.get("block_classes") or ()),
+            auth=str(data.get("auth") or "none"),
+            downloadable=bool(data.get("downloadable", True)),
+            notes=str(data.get("notes") or ""),
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "site": self.site,
+            "url_patterns": list(self.url_patterns),
+            "chain": list(self.chain),
+            "connector": self.connector,
+            "block_classes": list(self.block_classes),
+            "auth": self.auth,
+            "downloadable": self.downloadable,
+            "notes": self.notes,
+        }
+
+
+class SiteDescriptorRegistry:
+    """The site descriptors the engine reads: a validated list,
+    specific first.  Construction validates every descriptor, so a
+    malformed one fails at LOAD — never at download time."""
+
+    def __init__(
+        self, descriptors: list[SiteDescriptor] | None = None
+    ) -> None:
+        self._descs: list[SiteDescriptor] = []
+        for desc in descriptors or []:
+            # __post_init__ already validated; re-validating here
+            # keeps a hand-built (frozen, bypassed) instance honest.
+            desc.validate()
+            self._descs.append(desc)
+
+    def register(self, desc: SiteDescriptor) -> None:
+        """Add (or replace, by site) one validated descriptor."""
+        desc.validate()
+        self._descs = [d for d in self._descs if d.site != desc.site]
+        self._descs.append(desc)
+
+    def get(self, site: str) -> SiteDescriptor | None:
+        for desc in self._descs:
+            if desc.site == site:
+                return desc
+        return None
+
+    def all(self) -> list[SiteDescriptor]:
+        return list(self._descs)
+
+    def for_url(self, url: str) -> SiteDescriptor | None:
+        """The first descriptor whose patterns match *url* (None
+        when no site descriptor claims it — the engine then runs
+        the canonical chain)."""
+        try:
+            for desc in self._descs:
+                if desc.matches(url or ""):
+                    return desc
+        except Exception as e:
+            record_failure("site_descriptors.for_url", e)
+        return None
+
+
+#: SoundCloud — the FIRST site descriptor (B4): the B1–B3 behaviour
+#: as data.  Public api-v2, no account: progressive MP3 preferred,
+#: HLS fallback, the track's ``track_authorization`` forwarded on
+#: the transcoding call (the connector does that — see
+#: :mod:`nomorals.connectors.soundcloud`); blocks carry the full
+#: structured vocabulary; a blocked track resolves found-but-blocked
+#: and the chain moves on.  The canonical ladder order is the
+#: chain: direct, kit, connector, proxy, rendered, browser.
+SOUNDCLOUD_DESCRIPTOR = SiteDescriptor(
+    site="soundcloud",
+    url_patterns=(
+        r"https?://([a-z0-9-]+\.)*soundcloud\.com/",
+        r"https?://on\.soundcloud\.com/",
+    ),
+    chain=CHAIN_STAGES,
+    connector="soundcloud",
+    block_classes=BLOCK_CLASSES,
+    auth="none",
+    downloadable=True,
+    notes="SoundCloud public api-v2: no account; progressive MP3 "
+          "preferred, HLS fallback; track_authorization forwarded "
+          "on transcoding calls; blocks are preview/drm/region/"
+          "login/private and resolve found-but-blocked",
+)
+
+#: The descriptors the engine reads by default.
+DEFAULT_SITE_DESCRIPTORS = SiteDescriptorRegistry(
+    [SOUNDCLOUD_DESCRIPTOR])

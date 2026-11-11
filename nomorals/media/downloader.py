@@ -23,13 +23,16 @@ four-stage chain that keeps trying instead of erroring out:
    not-downloadable, quality-label → format translation, and an
    integrity-ledger entry for every landed download.
 1c. **connector** — a source's own connector resolves the stream
-   itself (today: SoundCloud — ``stream_url`` with the track's
+   itself (the site descriptor names the connector id — today:
+   SoundCloud, ``stream_url`` with the track's
    ``track_authorization`` forwarded), and the resolved stream URL
    is fetched as a first-class rung: progressive streams through
    the download kit, HLS playlists through the direct backend.
    A classified block (preview / DRM / region / login) is recorded
    with its class and the chain moves on — the connector's answer
-   is evidence, never a dead end.
+   is evidence, never a dead end.  The chain a site runs, in
+   order, comes from its site descriptor (B4); no descriptor
+   means the canonical ladder above.
 2. **proxy** — retry through the proxy lab (:class:`ProxyPoolConnector`
    via :meth:`healthy_proxies`, protocol-aware ordering).  A proxy that
    fails is *demoted* (``record_failure``) and the chain moves to the
@@ -103,6 +106,7 @@ from typing import Any
 from ..core.logging_setup import get_logger
 from .cookies import BOT_COOKIE_HELP, is_bot_detection_error
 from .downloader_failures import record_failure
+from .site_descriptors import CHAIN_STAGES
 
 _log = get_logger(__name__)
 
@@ -554,6 +558,8 @@ class MediaDownloader:
                  source_registry: Any | None = None,
                  artifact_store: Any | None = None,
                  soundcloud_connector: Any | None = None,
+                 site_descriptors: Any | None = None,
+                 site_connectors: dict[str, Any] | None = None,
                  rendered_tab_factory: Any | None = None) -> None:
         self.context = context
         self.profile = profile or detect_profile()
@@ -595,9 +601,22 @@ class MediaDownloader:
         # Connector stage (B2): an injected SoundCloud connector
         # wins; otherwise the stage builds one through the injected
         # connector factory + vault, exactly like the proxy pool.
+        # B4: the stage is descriptor-driven — the site descriptor
+        # names the connector id, and any connector id resolves
+        # through the same path (injected ``site_connectors`` win,
+        # then the legacy injected SoundCloud connector, then the
+        # factory).  The per-id cache below is the old SoundCloud
+        # cache generalized.
         self._soundcloud_connector_injected = soundcloud_connector
-        self._soundcloud_connector_cache: Any = None
-        self._soundcloud_connector_tried = False
+        self._site_connectors_injected: dict[str, Any] = dict(
+            site_connectors or {})
+        self._connector_cache: dict[str, Any] = {}
+        self._connector_tried: set[str] = set()
+        # Site descriptors (B4): the per-site download behaviour
+        # as data.  An injected registry wins; otherwise the
+        # default (SoundCloud first) is resolved lazily.
+        self._site_descriptors_injected = site_descriptors
+        self._site_descriptors_cache: Any = None
         # Rendered capture stage (B3): an injected tab factory wins
         # (tests hand in a fake tab); the production default opens a
         # real rendered tab on the browser service.  The factory
@@ -641,6 +660,32 @@ class MediaDownloader:
             return self._extractors
         from .download_kit import ExtractorRegistry
         return ExtractorRegistry(registry=self.source_registry())
+
+    def _site_descriptor_registry(self) -> Any:
+        """The per-site download descriptors (B4): an injected
+        registry wins, otherwise the default — SoundCloud first.
+        Descriptors are validated at load, so this accessor never
+        raises on a bad descriptor (construction already did)."""
+        if self._site_descriptors_cache is not None:
+            return self._site_descriptors_cache
+        if self._site_descriptors_injected is not None:
+            self._site_descriptors_cache = \
+                self._site_descriptors_injected
+            return self._site_descriptors_cache
+        from .site_descriptors import DEFAULT_SITE_DESCRIPTORS
+        self._site_descriptors_cache = DEFAULT_SITE_DESCRIPTORS
+        return self._site_descriptors_cache
+
+    def _site_descriptor_for(self, url: str) -> Any | None:
+        """The site descriptor claiming *url*; None when no site
+        descriptor claims it — the engine then runs the canonical
+        chain.  Best-effort: a registry failure is never a
+        download failure."""
+        try:
+            return self._site_descriptor_registry().for_url(url)
+        except Exception as e:
+            record_failure("_site_descriptor_for", e)
+            return None
 
     # ── source growth: outcomes + discovery (Pass #86) ────────────────
 
@@ -1195,11 +1240,39 @@ class MediaDownloader:
         learned_pair = self._learned_for(work_url)
         rule_failure_recorded = False
         skip_stages: set[str] = set()
+        # Per-site chain (B4): a site descriptor names the rungs
+        # that apply to its URLs, in order; no descriptor means the
+        # canonical ladder.  A learned rule's stage is only tried
+        # first when the site's chain actually runs it.
+        site_desc = self._site_descriptor_for(work_url)
+        chain = tuple(site_desc.chain) if site_desc is not None \
+            else CHAIN_STAGES
+        # A site that declares itself not downloadable is refused
+        # here with its own reason (the same shape as the
+        # extractor-descriptor gate above) instead of burning every
+        # stage to learn the same thing.
+        if site_desc is not None and not site_desc.downloadable:
+            report.extractor = site_desc.site
+            report.stages.append(StageLog(
+                stage="extractor", url=work_url,
+                error_class=FailureKind.SITE_ERROR.value,
+                error=f"{site_desc.site}: "
+                      f"{site_desc.notes or 'does not serve downloads'}",
+                note="site descriptor marks this site "
+                     "not downloadable"))
+            report.failure = FailureKind.SITE_ERROR
+            report.likely_cause = (
+                f"{site_desc.site} does not serve downloads — "
+                f"{site_desc.notes or 'the site descriptor says so'}")
+            report.hint = ("find the same title on a downloadable "
+                           "source, or play it in the source's own app")
+            return self._finish(report, started)
         try:
             if learned_pair is not None:
                 learned_desc, learned_rule = learned_pair
                 if learned_rule.stage in ("kit", "connector", "proxy",
-                                          "rendered", "browser"):
+                                          "rendered", "browser") \
+                        and learned_rule.stage in chain:
                     _log.info(
                         "download learned rule host=%s stage=%s "
                         "rule=%s — trying the learned path first",
@@ -1214,8 +1287,7 @@ class MediaDownloader:
                     self._note_rule_failure(learned_desc)
                     rule_failure_recorded = True
                     skip_stages.add(learned_rule.stage)
-            for stage_name in ("direct", "kit", "connector", "proxy",
-                               "rendered", "browser"):
+            for stage_name in chain:
                 if stage_name in skip_stages:
                     continue
                 if self._attempt_stage(
@@ -1392,17 +1464,25 @@ class MediaDownloader:
 
     # ── stage 1c: connector streams (B2) ──────────────────────────
 
-    def _soundcloud_connector(self) -> Any | None:
-        """The SoundCloud connector for the connector stage: an
-        injected one wins; otherwise it is built through the
-        injected connector factory + the accounts vault, exactly
-        like the proxy pool.  None when no factory is wired — the
-        stage then records its absence and the chain moves on."""
-        if self._soundcloud_connector_injected is not None:
+    def _site_connector(self, connector_id: str) -> Any | None:
+        """The connector for the connector stage, by id: an injected
+        one wins (the ``site_connectors`` mapping, then the legacy
+        injected SoundCloud connector for id ``"soundcloud"``);
+        otherwise it is built through the injected connector
+        factory + the accounts vault, exactly like the proxy pool.
+        None when no factory is wired — the stage then records its
+        absence and the chain moves on."""
+        connector_id = str(connector_id or "")
+        if not connector_id:
+            return None
+        if connector_id in self._site_connectors_injected:
+            return self._site_connectors_injected[connector_id]
+        if connector_id == "soundcloud" \
+                and self._soundcloud_connector_injected is not None:
             return self._soundcloud_connector_injected
-        if self._soundcloud_connector_tried:
-            return self._soundcloud_connector_cache
-        self._soundcloud_connector_tried = True
+        if connector_id in self._connector_tried:
+            return self._connector_cache.get(connector_id)
+        self._connector_tried.add(connector_id)
         factory = self._connector_factory or _CONNECTOR_FACTORY
         if factory is None:
             return None
@@ -1410,39 +1490,46 @@ class MediaDownloader:
             from ..accounts.vault import open_vault
             vault = open_vault(getattr(self.context, "db", None),
                                context=self.context,
-                               actor="downloader-soundcloud")
-            self._soundcloud_connector_cache = factory(
-                "soundcloud", vault)
+                               actor=f"downloader-{connector_id}")
+            self._connector_cache[connector_id] = factory(
+                connector_id, vault)
         except Exception as exc:  # noqa: BLE001 — connector optional
-            record_failure("_soundcloud_connector", exc)
-            self._soundcloud_connector_cache = None
-        return self._soundcloud_connector_cache
+            record_failure("_site_connector", exc)
+            self._connector_cache[connector_id] = None
+        return self._connector_cache.get(connector_id)
+
+    def _soundcloud_connector(self) -> Any | None:
+        """The SoundCloud connector (the B2 seam, kept): the
+        descriptor-driven stage resolves it by id."""
+        return self._site_connector("soundcloud")
 
     def _stage_connector(self, report: DownloadReport, url: str,
                          target_dir: Path, audio_only: bool,
                          budget: dict[str, float]) -> bool:
         """The connector's own resolved stream as a download rung.
 
-        Engages only for SoundCloud URLs: the connector resolves the
-        track and hands back the stream URL (progressive MP3 or an
-        HLS playlist, with the track's ``track_authorization``
-        forwarded by the connector itself).  Progressive streams are
-        fetched through the download kit (validator-verified, like
-        the kit stage); HLS playlists go to the direct backend,
-        which speaks HLS.  A classified block (preview / DRM /
-        region / login) is journaled WITH its class and the chain
-        moves on — later rungs (proxy, rendered capture) still get
-        their turn, and true DRM is named, never chased.
+        Engages only when the matched site descriptor declares a
+        connector (B4 — no per-site host check lives here any
+        more): the connector resolves the track and hands back the
+        stream URL (progressive MP3 or an HLS playlist, with the
+        track's ``track_authorization`` forwarded by the connector
+        itself for SoundCloud).  Progressive streams are fetched
+        through the download kit (validator-verified, like the kit
+        stage); HLS playlists go to the direct backend, which
+        speaks HLS.  A classified block (preview / DRM / region /
+        login — one of the descriptor's ``block_classes``) is
+        journaled WITH its class and the chain moves on — later
+        rungs (proxy, rendered capture) still get their turn, and
+        true DRM is named, never chased.
         """
-        host = (urllib.parse.urlparse(url).hostname or "").lower()
-        if host != "soundcloud.com" \
-                and not host.endswith(".soundcloud.com"):
+        desc = self._site_descriptor_for(url)
+        if desc is None or not desc.connector:
             return False
-        connector = self._soundcloud_connector()
+        connector = self._site_connector(desc.connector)
         if connector is None:
             report.stages.append(StageLog(
                 stage="connector", url=url,
-                note="SoundCloud connector unavailable (no connector "
+                note=f"{desc.site} connector unavailable (no connector "
                      "factory wired)"))
             _log.info("download stage=connector url=%s skipped: no "
                       "connector factory", url)
@@ -1459,7 +1546,7 @@ class MediaDownloader:
             report.stages.append(StageLog(
                 stage="connector", url=url, latency_s=lat,
                 error_class=kind.value, error=_err_text(exc),
-                note=f"soundcloud block: {block}" if block else ""))
+                note=f"{desc.site} block: {block}" if block else ""))
             self._log_stage("connector", url, "", lat, 0, kind,
                             _err_text(exc, 200))
             return False
@@ -1480,7 +1567,7 @@ class MediaDownloader:
             return False
         if protocol == "hls":
             return self._connector_hls(report, final, target_dir,
-                                       title, t0, budget)
+                                       title, t0, budget, desc)
         dest = target_dir / _safe_name(
             str(track.get("permalink_url") or url), audio_only=True)
         try:
@@ -1526,18 +1613,18 @@ class MediaDownloader:
         report.stages.append(StageLog(
             stage="connector", url=url, latency_s=lat,
             size_bytes=size, ok=True,
-            note="soundcloud connector stream (progressive) via "
+            note=f"{desc.site} connector stream (progressive) via "
                  "download kit"))
         self._log_stage("connector", url, "", lat, size,
                         FailureKind.OK, "")
         self._fill_success(report, {
             "path": _path, "bytes": size, "title": title,
-            "extractor": "soundcloud-connector"}, size)
+            "extractor": f"{desc.connector}-connector"}, size)
         return True
 
     def _connector_hls(self, report: DownloadReport, playlist_url: str,
                        target_dir: Path, title: str, t0: float,
-                       budget: dict[str, float]) -> bool:
+                       budget: dict[str, float], desc: Any) -> bool:
         """An HLS stream URL from the connector, fetched through the
         direct backend (yt-dlp/ffmpeg speak HLS natively)."""
         from ..tools.media import download as direct_download
@@ -1578,13 +1665,13 @@ class MediaDownloader:
         report.stages.append(StageLog(
             stage="connector", url=playlist_url, latency_s=lat,
             size_bytes=size, ok=True,
-            note="soundcloud connector stream (HLS) via direct "
+            note=f"{desc.site} connector stream (HLS) via direct "
                  "backend"))
         self._log_stage("connector", playlist_url, "", lat, size,
                         FailureKind.OK, "")
         merged = dict(result)
         merged["title"] = title or str(result.get("title", "") or "")
-        merged["extractor"] = "soundcloud-connector"
+        merged["extractor"] = f"{desc.connector}-connector"
         self._fill_success(report, merged, size)
         return True
 
