@@ -1828,7 +1828,19 @@ class WhatsAppAdapter(ChatAdapter):
             request["buttons"] = [
                 [[str(label), str(data)] for label, data in row]
                 for row in buttons if row]
-            if self._buttons_form_pref == "list":
+            # Form follows the KEYBOARD's shape too, not only the
+            # account's degradation history: both bridges cap the
+            # native quick_reply set at 3 buttons and demote the
+            # overflow to inert body text, so a keyboard carrying
+            # more than 3 buttons goes out in the list form — where
+            # every row stays tappable — from the start. (The
+            # draft review card's Edit/Discard sat at #4/#5 and
+            # were never buttons at all under the old rule: the
+            # persisted preference only ever flipped after a
+            # degradation REPORT, which a "successful" 3-native
+            # send never produces.)
+            flat_count = sum(len(row) for row in buttons if row)
+            if self._buttons_form_pref == "list" or flat_count > 3:
                 request["buttons_style"] = "list"
         for attempt in (1, 2):
             response = self._send_cmd(request)
@@ -2338,7 +2350,13 @@ class WhatsAppAdapter(ChatAdapter):
             payload["buttons"] = [
                 [[str(label), str(data)] for label, data in row]
                 for row in buttons if row]
-            if buttons and self._buttons_form_pref == "list":
+            # Same form rule as the send path: the persisted list
+            # preference, or any keyboard too wide for the native
+            # quick_reply cap of 3 — an edited card's overflow
+            # buttons must not demote to inert text either.
+            flat_count = sum(len(row) for row in buttons if row)
+            if buttons and (self._buttons_form_pref == "list"
+                            or flat_count > 3):
                 payload["buttons_style"] = "list"
         verdict = self._admin_cmd("edit", payload, timeout=15)
         if verdict.get("ok") or buttons is None or len(buttons) > 0:

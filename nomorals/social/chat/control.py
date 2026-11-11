@@ -60,6 +60,7 @@ __all__ = ["CONTROL_COMMANDS", "COMMAND_DETAILS", "ControlCommand",
            "list_catalog", "LIST_GROUPS", "LIST_ONELINERS", "GAME_COMMANDS",
            "GAME_START_COMMANDS",
            "PUBLIC_COMMANDS", "PUBLIC_GAME_COMMANDS", "caller_may_run",
+           "callback_command_kind",
            "public_menu_text", "menu_home_text",
            "MAX_STACK_DEPTH", "NON_STACKABLE_COMMANDS", "STACK_DENIAL_REPLY",
            "split_command_stack", "expand_prev_placeholders", "stack_header",
@@ -321,6 +322,47 @@ def caller_may_run(kind: str, is_owner: bool) -> bool:
     if is_owner:
         return True
     return kind in PUBLIC_COMMANDS or kind in GAME_COMMANDS
+
+
+#: Colon-stamp callback families whose stamp head is NOT their
+#: command kind: ``draft:<action>:<id>`` belongs to the ``drafts``
+#: command. Mirrors the pre-parse interceptions in
+#: agents/partner/runtime.py (_DRAFT_CALLBACK_RE) — a stamp family
+#: added there that classifies under a different kind than its head
+#: belongs in this map.
+_CALLBACK_STAMP_KINDS: dict[str, str] = {
+    "draft": "drafts",
+}
+
+
+def callback_command_kind(data: str) -> str:
+    """The command kind a callback payload belongs to, read by the
+    payload's real grammar — the classifier the adapter allowlist
+    gates (e.g. Telegram's ``chat_allow``) must use.
+
+    Payloads come in three grammars, all of which re-enter the
+    runtime as ``"/" + data``:
+
+    * catalog commands — ``"research approve latest"``: the kind is
+      the first whitespace-delimited word;
+    * space stamps — ``"cardtap <id> <rev> <idx>"``: the first word
+      IS the interception family, hence the kind;
+    * colon stamps — ``"draft:discard:<ULID>"``: no whitespace at
+      all, so a whitespace split yields the WHOLE stamp (id and
+      action included) as a garbage "kind" that matches nothing —
+      the family head before the first colon is the stamp's family,
+      mapped to its command kind via :data:`_CALLBACK_STAMP_KINDS`.
+
+    Returns "" for an empty payload.
+    """
+    text = (data or "").strip().lstrip("/")
+    if not text:
+        return ""
+    head = text.split(None, 1)[0]
+    if ":" in head:
+        family = head.split(":", 1)[0].lower()
+        return _CALLBACK_STAMP_KINDS.get(family, family)
+    return head.lower()
 
 
 #: kind -> (min_args, max_args) — used by /help and by validation.

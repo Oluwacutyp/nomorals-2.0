@@ -6257,9 +6257,19 @@ class TelegramBotAdapter(ChatAdapter):
             self._answer_callback(query_id, text="Not authorized")
             return
         if self.chat_allow and chat_id not in self.chat_allow:
-            from .control import GAME_COMMANDS, PUBLIC_COMMANDS
-            kind = (data or "").lstrip("/").split(None, 1)
-            kind = kind[0].lower() if kind and kind[0] else ""
+            from .control import (
+                GAME_COMMANDS,
+                PUBLIC_COMMANDS,
+                callback_command_kind,
+            )
+            # Classify by the payload's real grammar, not a
+            # whitespace split: a colon stamp ("draft:discard:<id>")
+            # has no whitespace, so the split made the whole stamp —
+            # id included — the "kind", which matched nothing and
+            # bounced stamped taps (draft cards, living cards) as
+            # unauthorized-by-garbage even where their true kind
+            # would have classified cleanly.
+            kind = callback_command_kind(data)
             if (kind != "game" and kind not in GAME_COMMANDS
                     and kind not in PUBLIC_COMMANDS and kind != "arena"):
                 _log.info("telegram-bot: ignoring callback from %s — not in allowlist",

@@ -1897,7 +1897,8 @@ class RuntimeSystemMixin:
         return DraftQueue()
 
     def _draft_callback(self, data: str, chat_key: str = "",
-                        message: Any = None) -> str:
+                        message: Any = None, *,
+                        schedule_answer: float | None = None) -> str:
         """Route one ``draft:<action>:<id>`` review-button tap.
 
         The tap re-entered as the text ``/draft:<action>:<id>`` (the
@@ -1911,6 +1912,16 @@ class RuntimeSystemMixin:
         both back to pending_review, where the callback's approve is
         legal — because a card tap on it means "post it now", not
         "wait for the window". Never raises: a tap always answers.
+
+        Schedule and Edit are two-step acts: the organ's reply to
+        the tap is a question ("when should I post it?") or a
+        prompt ("send me the revised text") — so the tap ARMS an
+        ask for this chat (see :meth:`_note_draft_ask`) and the
+        owner's next message completes the act through
+        :meth:`_draft_ask_answer`. ``schedule_answer`` is that
+        completion re-entering: the parsed time rides the organ's
+        own ``ask_schedule_time`` seam into ``schedule_post``, so
+        the stored schedule is the tap's answer, not a default.
         """
         from ...social.drafts import (
             DRAFT,
@@ -1929,6 +1940,15 @@ class RuntimeSystemMixin:
             if draft is not None and action == "post" \
                     and draft.status in (DRAFT, SCHEDULED):
                 queue.propose(draft_id)
+            if draft is not None and action == "schedule" \
+                    and schedule_answer is not None \
+                    and draft.status in (DRAFT, SCHEDULED):
+                # The completing step of a Schedule tap moves the
+                # draft to SCHEDULED, a transition the graph only
+                # allows from review — same re-presentation as the
+                # post tap above, done at answer time (the asking
+                # tap itself moves nothing).
+                queue.propose(draft_id)
             manager = None
             if action == "post":
                 try:
@@ -1939,12 +1959,130 @@ class RuntimeSystemMixin:
                     return f"can't post — no publisher wired: {exc}"
             scheduler = getattr(self, "_scheduler", None) or \
                 self.context.extras.get("scheduler")
-            return handle_draft_callback(
-                queue, payload, manager=manager, scheduler=scheduler)
+            reply = handle_draft_callback(
+                queue, payload, manager=manager, scheduler=scheduler,
+                ask_schedule_time=(
+                    (lambda _id: schedule_answer)
+                    if schedule_answer is not None else None))
+            if chat_key and draft is not None:
+                # Arm the second step (see the docstring): a
+                # Schedule tap that just asked its question, and
+                # every Edit tap, wait on the owner's next message
+                # in THIS chat. A completed schedule (an answer
+                # re-entering) never re-arms.
+                if action == "schedule" and schedule_answer is None:
+                    self._note_draft_ask(chat_key, "schedule", draft_id)
+                elif action == "edit":
+                    self._note_draft_ask(chat_key, "edit", draft_id)
+            return reply
         except Exception as exc:  # noqa: BLE001 — a tap must answer
             return f"draft action failed: {exc}"
         finally:
             queue.close()
+
+    # ── draft asks: the Schedule/Edit second step ─────────────────
+
+    #: How long a Schedule/Edit ask stays armed for its answer —
+    #: long enough for the owner to type a time or a revision,
+    #: short enough that an unrelated message much later is never
+    #: captured as one.
+    _DRAFT_ASK_TTL_S = 900.0
+
+    def _draft_ask_store(self) -> dict[str, dict[str, Any]]:
+        store = getattr(self, "_draft_asks", None)
+        if store is None:
+            store = self._draft_asks = {}
+        return store
+
+    def _note_draft_ask(self, chat_key: str, action: str,
+                        draft_id: str) -> None:
+        """Arm one chat's draft ask (single slot per chat — a new
+        tap's ask replaces the old, the pending-ask idiom)."""
+        self._draft_ask_store()[chat_key] = {
+            "action": action, "draft_id": draft_id, "at": time.time()}
+
+    @staticmethod
+    def _parse_draft_schedule_answer(text: str) -> float | None:
+        """A schedule answer → a timestamp, or None when the text
+        carries no readable time. The drafts organ's own grammar
+        first ("post at 6" — the exact phrase its question
+        suggests), then the scheduler's natural-datetime parser
+        for the bare forms ("tomorrow 9am", "in 2 hours",
+        "9:30pm")."""
+        from ...social.drafts import parse_post_time
+
+        when = parse_post_time(text)
+        if when is not None:
+            return when
+        try:
+            from ...scheduler.recurrence import parse_natural_datetime
+
+            return parse_natural_datetime(text).timestamp()
+        except Exception:  # noqa: BLE001 - unparseable is an outcome
+            return None
+
+    def _draft_ask_answer(self, message: Any) -> str | None:
+        """Complete an armed draft Schedule/Edit ask from the
+        owner's next message in the same chat.
+
+        Called from ``_process_inner`` for incoming operator
+        messages that are not commands. Returns the reply to send,
+        or None when no live ask is armed for this chat (the
+        message is ordinary chat and flows on untouched). An
+        unparseable schedule answer does NOT consume the ask — the
+        owner is told how to phrase it and the ask stays armed;
+        "cancel" disarms either ask with the draft untouched.
+        Never raises.
+        """
+        chat_key = getattr(getattr(message, "chat", None), "key", "") or ""
+        store = self._draft_ask_store()
+        ask = store.get(chat_key)
+        if not ask:
+            return None
+        if time.time() - float(ask.get("at") or 0) > self._DRAFT_ASK_TTL_S:
+            store.pop(chat_key, None)
+            return None
+        text = (getattr(message, "text", "") or "").strip()
+        if not text:
+            return None
+        action = str(ask.get("action") or "")
+        draft_id = str(ask.get("draft_id") or "")
+        if text.lower() in ("cancel", "never mind", "nevermind"):
+            store.pop(chat_key, None)
+            return "okay — dropped that; the draft stays as it was."
+        if action == "schedule":
+            when = self._parse_draft_schedule_answer(text)
+            if when is None:
+                return ("I couldn't read a time in that — say e.g. "
+                        "'post at 6' or 'tomorrow 9am', or 'cancel' "
+                        "to drop the scheduling.")
+            store.pop(chat_key, None)
+            return self._draft_callback(
+                f"draft:schedule:{draft_id}", chat_key,
+                message=message, schedule_answer=when)
+        if action == "edit":
+            store.pop(chat_key, None)
+            from ...social.drafts import DISCARDED, POSTED
+
+            queue = self._draft_queue()
+            try:
+                draft = queue.get(draft_id)
+                if draft is None:
+                    return "that draft is gone."
+                if draft.status in (POSTED, DISCARDED):
+                    # Settled between the tap and the answer: a
+                    # late answer must never rewrite history.
+                    return (f"that draft is already {draft.status} — "
+                            "it can't be edited now.")
+                queue.update_content(draft_id, text)
+            except Exception as exc:  # noqa: BLE001 - answered in words
+                return f"couldn't update the draft: {exc}"
+            finally:
+                queue.close()
+            preview = text[:200] + ("…" if len(text) > 200 else "")
+            return f"✏️ draft updated — it now reads:\n\n{preview}"
+        store.pop(chat_key, None)
+        return None
 
     def _control_drafts(self, tail: str, chat_key: str = "",
                         message: Any = None) -> Any:

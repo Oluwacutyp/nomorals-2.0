@@ -202,6 +202,7 @@ SURFACES: tuple[Surface, ...] = (
             "anime — lookup · schedules · pictures",
             "fun one-shots — jokes · facts · pictures · space",
             "makers & tools — cards · qr · links · bible",
+            "mock screens — authored chat screens",
             "chat & privacy — your chats · your accounts",
             "memory & thinking",
             "games — 41, DM + group, start them directly",
@@ -785,6 +786,46 @@ SURFACES: tuple[Surface, ...] = (
         fallback="none — inline mode is a bot-only surface",
         tests=("tests/test_inline_buttons.py",
                "tests/test_living_chat_p1.py"),
+    ),
+    Surface(
+        id="drafts",
+        title="Draft review board + per-draft review card",
+        producer="nomorals.agents.partner.runtime_system:"
+                 "RuntimeSystemMixin._control_drafts",
+        card_type="review card (styled draft card with action buttons)",
+        # The card's five actions ride "draft:<action>:<id>" colon
+        # stamps — pre-parse interceptions in handle_control, NOT
+        # catalog commands — so their ActionRefs carry no data
+        # payload for the drift test to resolve (a stamp does not
+        # parse via parse_control, by design); the board's own
+        # navigation payload below does resolve and stands as the
+        # surface's resolvable representative.
+        actions=(
+            ActionRef("drafts.open-card", "navigate", "control:drafts",
+                      "drafts show 1"),
+            ActionRef("drafts.post", "callback", "control:drafts"),
+            ActionRef("drafts.schedule", "callback", "control:drafts"),
+            ActionRef("drafts.variants", "callback", "control:drafts"),
+            ActionRef("drafts.edit", "callback", "control:drafts"),
+            ActionRef("drafts.discard", "callback", "control:drafts"),
+        ),
+        platforms=("telegram-personal", "telegram", "whatsapp",
+                   "local"),
+        routes=_routes(_tg_personal(), _tg_userbot(), _wa(),
+                       _plain("local", "LocalAdapter (in-process)")),
+        operation="a card tap re-enters as /draft:<action>:<id> and "
+                  "routes through PartnerRuntime._draft_callback into "
+                  "social.drafts.handle_draft_callback (post / "
+                  "schedule / variants / edit / discard on the named "
+                  "draft); Schedule and Edit arm a one-slot ask the "
+                  "owner's next message answers",
+        receipt=_RECEIPT,
+        fallback="the board's typed verbs (/drafts show|post|discard "
+                 "<n>) run the same callback route; on WhatsApp a "
+                 ">3-button card goes out in the bridges' list form "
+                 "so every action stays tappable",
+        tests=("tests/test_ws3p2_draft_review.py",
+               "tests/test_draft_button_taps.py"),
     ),
 )
 

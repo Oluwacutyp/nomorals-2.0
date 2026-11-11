@@ -2152,6 +2152,29 @@ class PartnerRuntime(
                     except Exception as exc:  # noqa: BLE001
                         _log.warning("control reply send failed: %s", exc)
                 return
+        # Draft Schedule/Edit asks (button-fix lane 1): a review
+        # card's Schedule/Edit tap armed an ask for this chat, and
+        # the owner's next non-command message IS its answer — it
+        # completes the act (the schedule lands with its time; the
+        # revision replaces the draft's content). Checked BEFORE
+        # the explicit-post override below: an armed ask names its
+        # draft, while the override would act on the first pending
+        # one it finds.
+        if (message.incoming and self._is_operator(message)
+                and not message.text.strip().startswith("/")):
+            try:
+                ask_reply = self._draft_ask_answer(message)
+            except Exception:  # noqa: BLE001 - an ask never eats chat
+                _log.exception("draft ask answer failed")
+                ask_reply = None
+            if ask_reply is not None:
+                self._bump("controls")
+                try:
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      ask_reply)
+                except Exception:  # noqa: BLE001
+                    _log.warning("draft ask reply send failed")
+                return
         # Build-map #43 — the explicit-override rule (user's standing
         # directive 2026-10-07): the owner's explicit "post this" / "send
         # it" / "post at 6" / "publish now" / "reply now" means EXECUTE

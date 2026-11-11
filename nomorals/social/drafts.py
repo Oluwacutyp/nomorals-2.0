@@ -347,6 +347,49 @@ class DraftQueue:
         draft.scheduled_time = when_ts
         return draft
 
+    def update_content(self, draft_id: str, content: str) -> Draft:
+        """Replace a draft's content — the Edit flow's write.
+
+        Same dual-backend shape as :meth:`schedule`: the seam
+        (``_port``) when this queue is seam-backed, native sqlite
+        otherwise, so an edit lands on whichever store the queue
+        actually runs on."""
+        draft = self.get(draft_id)
+        if draft is None:
+            raise KeyError(f"unknown draft {draft_id!r}")
+        content = (content or "").strip()
+        if not content:
+            raise ValueError("draft content is empty")
+        if self._port is not None:
+            self._port.tables["social_drafts"].update(
+                draft_id, {"content": content})
+        else:
+            self._db.execute(
+                "UPDATE social_drafts SET content = ? WHERE id = ?",
+                (content, draft_id))
+            self._db.commit()
+        draft.content = content
+        return draft
+
+    def update_metadata(self, draft_id: str,
+                        metadata: dict[str, Any]) -> Draft:
+        """Replace a draft's metadata dict — same dual-backend
+        shape as :meth:`update_content`."""
+        import json as _json
+        draft = self.get(draft_id)
+        if draft is None:
+            raise KeyError(f"unknown draft {draft_id!r}")
+        if self._port is not None:
+            self._port.tables["social_drafts"].update(
+                draft_id, {"metadata": _json.dumps(metadata)})
+        else:
+            self._db.execute(
+                "UPDATE social_drafts SET metadata = ? WHERE id = ?",
+                (_json.dumps(metadata), draft_id))
+            self._db.commit()
+        draft.metadata = dict(metadata)
+        return draft
+
     def pending(self) -> list[Draft]:
         if self._port is not None:
             rows = self._port.tables["social_drafts"].find(
@@ -557,9 +600,13 @@ def add_variant(queue: DraftQueue, draft_id: str, hook_text: str) -> Draft:
 
     ``hook_text`` is an alternative FIRST LINE; the body stays the draft's.
     The review UI shows variants so the owner picks the strongest hook.
-    """
-    import json as _json
 
+    The write goes through the queue's own backend
+    (:meth:`DraftQueue.update_metadata`): a seam-backed queue has
+    no ``_db`` at all, and writing through the native handle there
+    used to raise AttributeError into a caller's bare swallow —
+    variants silently never persisted on seam-backed queues.
+    """
     draft = queue.get(draft_id)
     if draft is None:
         raise KeyError(f"unknown draft {draft_id!r}")
@@ -571,10 +618,7 @@ def add_variant(queue: DraftQueue, draft_id: str, hook_text: str) -> Draft:
     if hook_text not in variants:
         variants.append(hook_text)
         meta["variants"] = variants
-        queue._db.execute(
-            "UPDATE social_drafts SET metadata = ? WHERE id = ?",
-            (_json.dumps(meta), draft_id))
-        queue._db.commit()
+        queue.update_metadata(draft_id, meta)
         draft.metadata = meta
     return draft
 
@@ -1137,12 +1181,20 @@ def handle_draft_callback(
         from .voice import suggest_hook_upgrades
         variants = (draft.metadata or {}).get("variants") or []
         if not variants:
+            failures: list[str] = []
             for sug in suggest_hook_upgrades(draft.content):
                 try:
                     add_variant(queue, draft_id, sug["text"].split("\n")[0])
-                except Exception:  # noqa: BLE001
-                    pass
+                except Exception as exc:  # noqa: BLE001 - collected, surfaced below
+                    failures.append(f"{type(exc).__name__}: {exc}")
             variants = (queue.get(draft_id).metadata or {}).get("variants") or []
+            if not variants and failures:
+                # One bad suggestion must not kill the others — but
+                # when NOTHING persisted, the failure is the answer:
+                # a silent empty variant list is how the seam-backed
+                # queue's AttributeError stayed invisible for months.
+                return ("🧪 couldn't store hook variants for this "
+                        f"draft: {failures[0]}")
         lines = ["🧪 hook variants — pick the strongest first line:", ""]
         for i, v in enumerate(variants[:5], 1):
             first = v.split("\n")[0][:120]
