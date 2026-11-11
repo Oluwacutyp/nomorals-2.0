@@ -60,6 +60,7 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
+from ..core.inflight import run_inflight
 from ..core.logging_setup import get_logger
 from .pairing import PERSONAL_TOGGLES, PairingRegistry, PairingUnavailable, default_supervisor
 
@@ -792,8 +793,14 @@ def launch_pairing_page(context: Any, *,
                       workspace=ws)
     if php is None and provision:
         try:
-            php = provision_php(env=env, platform=platform,
-                                home=home, workspace=ws)
+            # §3.9: the install is a deduplicated flight per
+            # workspace — concurrent page launches attach to the
+            # one PHP install instead of racing downloads into
+            # the same managed dir.
+            php = run_inflight(
+                f"provision:php:{ws}",
+                lambda: provision_php(env=env, platform=platform,
+                                      home=home, workspace=ws))
         except PhpProvisionFailed as exc:
             raise PairingUnavailable(
                 "no PHP runtime on this device, and Devon's "

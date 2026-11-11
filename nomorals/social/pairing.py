@@ -47,6 +47,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
 
+from ..core.inflight import run_inflight
 from .bridge_process import AdoptedProcess, default_inspector
 
 _ACCOUNT_ID_RE = re.compile(r"[^a-z0-9]+")
@@ -1229,7 +1230,6 @@ class BridgeSupervisor:
         self._deps_runner = deps_runner
         self._npm_resolver = npm_resolver
         self._node_provisioner = node_provisioner
-        self._deps_lock = threading.Lock()
         # One Node install attempt per supervisor per missing
         # state — a broken environment must not reinstall-loop
         # on every /pair; the recorded attempts ride the failure
@@ -1273,22 +1273,48 @@ class BridgeSupervisor:
         if found:
             self._node_cache = str(found)
             return self._node_cache
-        if not self._provision_tried and self._provisioning_applies():
+        if self._provisioning_applies():
+            # §3.9: the install runs as a deduplicated flight —
+            # concurrent resolutions (this supervisor's threads,
+            # or another supervisor instance for the same
+            # machine) attach to the one install instead of
+            # starting parallel ones. Attaching counts as this
+            # supervisor's attempt: the shared outcome is adopted
+            # into its cache / attempts below.
+            installed, attempts = run_inflight(
+                "provision:node", self._provision_node_once)
             self._provision_tried = True
-            provisioner = self._node_provisioner or provision_node
-            try:
-                installed = provisioner()
-            except NodeProvisionFailed as exc:
-                self._provision_attempts = list(exc.attempts)
-                installed = None
+            if attempts and not self._provision_attempts:
+                self._provision_attempts = attempts
             if installed:
                 self._node_cache = str(installed)
                 return self._node_cache
-            if not self._provision_attempts:
-                self._provision_attempts = [
-                    "the Node.js installer finished without "
-                    "leaving a node Devon can find"]
         return None
+
+    def _provision_node_once(self) -> tuple[str | None, list[str]]:
+        """One Node install attempt, as a flight callable: the
+        (installed path, recorded attempts) outcome every caller
+        of the flight shares. The tried-guard lives INSIDE the
+        flight — a flight led later by a supervisor that already
+        attempted returns its recorded outcome without running
+        the installer again, so nothing reinstall-loops and the
+        recorded attempts keep riding the failure guidance,
+        exactly the shipped contract, now concurrency-safe."""
+        if self._provision_tried:
+            if self._node_cache:
+                return self._node_cache, []
+            return None, list(self._provision_attempts)
+        self._provision_tried = True
+        provisioner = self._node_provisioner or provision_node
+        try:
+            installed = provisioner()
+        except NodeProvisionFailed as exc:
+            return None, list(exc.attempts)
+        if installed:
+            return str(installed), []
+        return None, [
+            "the Node.js installer finished without "
+            "leaving a node Devon can find"]
 
     # ── go rung: the bridge program ──────────────────────────────
     def resolve_bridge_binary(self) -> str | None:
@@ -1423,14 +1449,16 @@ class BridgeSupervisor:
         silent death this fixes at the root.  When node_modules
         is absent (and the bridge dir carries a package.json to
         install from), npm runs ONCE per missing state: ``npm
-        ci`` when the lockfile exists, else ``npm install``,
-        serialized on the deps lock so concurrent launches never
-        double-install.  npm unresolvable, a timeout, or a failed
-        install raises PairingUnavailable naming what failed
-        plus the tail of npm's own output.  With an injected
-        spawn and no injected deps_runner, the caller owns its
-        staging and this is skipped — the same seam contract as
-        node resolution."""
+        ci`` when the lockfile exists, else ``npm install``.
+        The install is a deduplicated flight (§3.9): concurrent
+        launches attach to the one install and share its outcome
+        — on failure every waiter gets the same
+        PairingUnavailable instead of each retrying npm in turn.
+        npm unresolvable, a timeout, or a failed install raises
+        PairingUnavailable naming what failed plus the tail of
+        npm's own output.  With an injected spawn and no injected
+        deps_runner, the caller owns its staging and this is
+        skipped — the same seam contract as node resolution."""
         bridge_dir = self.bridge_path.parent
         if (bridge_dir / "node_modules").is_dir():
             return
@@ -1438,58 +1466,66 @@ class BridgeSupervisor:
             return
         if self._deps_runner is None and not self._spawn_is_default:
             return
-        with self._deps_lock:
-            if (bridge_dir / "node_modules").is_dir():
-                return  # a concurrent launch installed them
-            npm = self._npm_resolver(node) \
-                if self._npm_resolver is not None \
-                else resolve_npm(node)
-            if not npm:
-                raise PairingUnavailable(
-                    "WhatsApp pairing is unavailable on this "
-                    "machine: the bridge's packages are not "
-                    "installed and npm was not found beside node "
-                    f"({node}) or on PATH, so Devon cannot "
-                    "install them herself. Run `npm ci` in "
-                    f"{bridge_dir} by hand, or reinstall Node.js "
-                    "LTS (https://nodejs.org), then run /pair "
-                    "again. Telegram pairing does not need the "
-                    "bridge and still works.")
-            argv = [npm, "ci"] \
-                if (bridge_dir / "package-lock.json").is_file() \
-                else [npm, "install"]
-            runner = self._deps_runner or _default_deps_runner
-            try:
-                rc, output = runner(argv, bridge_dir)
-            except subprocess.TimeoutExpired:
-                raise PairingUnavailable(
-                    "WhatsApp pairing is unavailable on this "
-                    "machine: installing the bridge's packages "
-                    f"(`{' '.join(argv)}` in {bridge_dir}) timed "
-                    f"out after {BRIDGE_DEPS_TIMEOUT_S:.0f}s. "
-                    "Check the machine's network and run /pair "
-                    "again. Telegram pairing does not need the "
-                    "bridge and still works.") from None
-            except OSError as exc:  # noqa: BLE001 - named, plain
-                raise PairingUnavailable(
-                    "WhatsApp pairing is unavailable on this "
-                    "machine: Devon could not run npm to install "
-                    f"the bridge's packages ({exc}). Run "
-                    f"`{' '.join(argv)}` in {bridge_dir} by "
-                    "hand, then run /pair again. Telegram "
-                    "pairing does not need the bridge and still "
-                    "works.") from exc
-            if rc != 0 or not (bridge_dir / "node_modules").is_dir():
-                raise PairingUnavailable(
-                    "WhatsApp pairing is unavailable on this "
-                    "machine: the bridge's packages are not "
-                    "installed, and Devon's own install — "
-                    f"`{' '.join(argv)}` in {bridge_dir} — "
-                    f"failed (exit {rc}): {_output_tail(output)}. "
-                    "Check the machine's network, or run that "
-                    "command by hand, then run /pair again. "
-                    "Telegram pairing does not need the bridge "
-                    "and still works.")
+        run_inflight(f"provision:bridge-deps:{bridge_dir}",
+                     lambda: self._install_bridge_deps(node))
+
+    def _install_bridge_deps(self, node: str) -> None:
+        """The npm install itself, as a flight callable: at most
+        one runs per bridge dir at a time, and its verdict —
+        return, or the PairingUnavailable it raises — is the
+        outcome every attached launch shares."""
+        bridge_dir = self.bridge_path.parent
+        if (bridge_dir / "node_modules").is_dir():
+            return  # landed while this flight was forming
+        npm = self._npm_resolver(node) \
+            if self._npm_resolver is not None \
+            else resolve_npm(node)
+        if not npm:
+            raise PairingUnavailable(
+                "WhatsApp pairing is unavailable on this "
+                "machine: the bridge's packages are not "
+                "installed and npm was not found beside node "
+                f"({node}) or on PATH, so Devon cannot "
+                "install them herself. Run `npm ci` in "
+                f"{bridge_dir} by hand, or reinstall Node.js "
+                "LTS (https://nodejs.org), then run /pair "
+                "again. Telegram pairing does not need the "
+                "bridge and still works.")
+        argv = [npm, "ci"] \
+            if (bridge_dir / "package-lock.json").is_file() \
+            else [npm, "install"]
+        runner = self._deps_runner or _default_deps_runner
+        try:
+            rc, output = runner(argv, bridge_dir)
+        except subprocess.TimeoutExpired:
+            raise PairingUnavailable(
+                "WhatsApp pairing is unavailable on this "
+                "machine: installing the bridge's packages "
+                f"(`{' '.join(argv)}` in {bridge_dir}) timed "
+                f"out after {BRIDGE_DEPS_TIMEOUT_S:.0f}s. "
+                "Check the machine's network and run /pair "
+                "again. Telegram pairing does not need the "
+                "bridge and still works.") from None
+        except OSError as exc:  # noqa: BLE001 - named, plain
+            raise PairingUnavailable(
+                "WhatsApp pairing is unavailable on this "
+                "machine: Devon could not run npm to install "
+                f"the bridge's packages ({exc}). Run "
+                f"`{' '.join(argv)}` in {bridge_dir} by "
+                "hand, then run /pair again. Telegram "
+                "pairing does not need the bridge and still "
+                "works.") from exc
+        if rc != 0 or not (bridge_dir / "node_modules").is_dir():
+            raise PairingUnavailable(
+                "WhatsApp pairing is unavailable on this "
+                "machine: the bridge's packages are not "
+                "installed, and Devon's own install — "
+                f"`{' '.join(argv)}` in {bridge_dir} — "
+                f"failed (exit {rc}): {_output_tail(output)}. "
+                "Check the machine's network, or run that "
+                "command by hand, then run /pair again. "
+                "Telegram pairing does not need the bridge "
+                "and still works.")
 
     # ── process plumbing ────────────────────────────────────────────
     @staticmethod

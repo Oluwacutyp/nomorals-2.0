@@ -24,6 +24,7 @@ from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..core.inflight import run_inflight
 from . import failures
 
 
@@ -115,6 +116,16 @@ def ensure_bridge() -> BridgeProvision:
     path = bridge_binary_path()
     if path.is_file() and os.access(path, os.X_OK):
         return BridgeProvision(path, "found", "repo bridge/bin")
+    # §3.9: the build is a deduplicated flight — concurrent
+    # session starts attach to the one build instead of racing
+    # `go build` runs at the same output binary.
+    return run_inflight("provision:desktop-bridge", _build_bridge)
+
+
+def _build_bridge() -> BridgeProvision:
+    """Build the desktop bridge once, as a flight callable: its
+    result — or its ProvisionError — is the outcome every
+    attached caller shares."""
     try:
         built = build_bridge()
     except ProvisionError:
@@ -147,6 +158,22 @@ def ensure_xvfb_binary() -> str:
     found = find_xvfb()
     if found:
         return found
+    # §3.9: the install is a deduplicated flight — concurrent
+    # display starts attach to the one package-manager run.
+    found = run_inflight("provision:xvfb", _install_xvfb)
+    if found:
+        return found
+    raise ProvisionError(
+        "this host has no virtual display server (Xvfb) and Devon "
+        "could not install one here (no package route with the "
+        "rights to use it). The computer needs a display facility: "
+        "a real X display, or Xvfb for a virtual one.")
+
+
+def _install_xvfb() -> str | None:
+    """One Xvfb install attempt, as a flight callable: the found
+    path, or None when no route landed one (the caller raises
+    the plain-words ProvisionError — shared by every attacher)."""
     # Self-provisioning route: the system package manager, when we
     # are root (her own hosts) — never a command handed to the owner.
     apt = shutil.which("apt-get")
@@ -157,16 +184,10 @@ def ensure_xvfb_binary() -> str:
                 capture_output=True, text=True, timeout=600,
                 env=dict(os.environ, DEBIAN_FRONTEND="noninteractive"))
             if proc.returncode == 0:
-                found = find_xvfb()
-                if found:
-                    return found
+                return find_xvfb()
         except (OSError, subprocess.TimeoutExpired) as exc:
             failures.record_failure("provision apt xvfb", exc)
-    raise ProvisionError(
-        "this host has no virtual display server (Xvfb) and Devon "
-        "could not install one here (no package route with the "
-        "rights to use it). The computer needs a display facility: "
-        "a real X display, or Xvfb for a virtual one.")
+    return None
 
 
 def display_socket_path(number: int) -> Path:
