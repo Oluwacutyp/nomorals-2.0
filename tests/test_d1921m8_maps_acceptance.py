@@ -480,9 +480,25 @@ class TestSurfaceOnExtract(_SurfaceRig):
 class TestRealGazetteer(unittest.TestCase):
 
     def test_the_extract_index_built_from_real_tiles(self):
-        # 506 real tiles → 2,115 name rows at probe time; the band
-        # is generous, the point is a real index of real places.
-        self.assertGreater(_S.built.total_entries, 1500)
+        # 506 real tiles. The entry floor was recalibrated after
+        # the zoom-aware label merge (M12) collapsed one place's
+        # duplicate sightings into one row: measured on this real
+        # extract, rows fell 2,115 → 1,264 while the distinct
+        # folded-name count held at exactly 1,197 on both sides of
+        # the merge — the smaller index is the correct one. The
+        # entries floor (1,000) sits ~20% under the measured count
+        # as a catastrophe guard; the names floor (1,150, ~96% of
+        # measured) is the sharp guard: an index/merge change that
+        # LOSES names fails here even if the row count looks fine.
+        self.assertGreater(_S.built.total_entries, 1000)
+        conn = _S.gaz._connect(create=False)
+        try:
+            distinct_names = conn.execute(
+                "SELECT COUNT(DISTINCT norm)"
+                " FROM gazetteer_entries").fetchone()[0]
+        finally:
+            conn.close()
+        self.assertGreater(distinct_names, 1150)
         result = [p for p in _S.built.packs
                   if p.pack_id == EXTRACT_ID][0]
         self.assertEqual(result.corrupt_tiles, ())
