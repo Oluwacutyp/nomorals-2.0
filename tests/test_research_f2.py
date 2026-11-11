@@ -58,6 +58,12 @@ def _ctx(db=None, proactive=True):
     return SimpleNamespace(db=db, settings=settings)
 
 
+def _disable_research(ctx):
+    from nomorals.agents.features import FeatureRegistry
+
+    FeatureRegistry(ctx.db).set("research", False)
+
+
 def _concrete_claim(cid="t1", text=None, confidence=0.85):
     """A claim with a verified proposal spec: the loop never sends a
     weekly email digest — a behavior genuinely absent from
@@ -290,9 +296,12 @@ class PromotionGateTests(unittest.TestCase):
 
 class LoopGatedOffTests(unittest.TestCase):
     def _disabled_ctx(self):
-        # feature flag "research" defaults to off — the opt-in loop stays
-        # off unless the owner explicitly enables it.
-        return _ctx()
+        # the research feature is explicitly switched off via the
+        # registry — the gated-off loop under test is off because it
+        # was turned off, never because of a default.
+        ctx = _ctx()
+        _disable_research(ctx)
+        return ctx
 
     def test_tick_when_disabled_does_nothing(self):
         ctx = self._disabled_ctx()

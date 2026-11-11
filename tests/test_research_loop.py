@@ -53,6 +53,12 @@ def _enable_research(ctx):
     FeatureRegistry(ctx.db).set("research", True)
 
 
+def _disable_research(ctx):
+    from nomorals.agents.features import FeatureRegistry
+
+    FeatureRegistry(ctx.db).set("research", False)
+
+
 class HoursTests(unittest.TestCase):
     def setUp(self):
         self._old = os.environ.get("NM_RESEARCH_LOOP_HOURS")
@@ -85,6 +91,7 @@ class HoursTests(unittest.TestCase):
 class GatesTests(unittest.TestCase):
     def test_feature_off_defers(self):
         ctx = _ctx()
+        _disable_research(ctx)
         ok, reason = rl.loop_gates(ctx)
         self.assertFalse(ok)
         self.assertIn("research", reason)
@@ -205,7 +212,8 @@ class TickTests(unittest.TestCase):
         return ctx
 
     def test_tick_deferred_records_run(self):
-        ctx = _ctx()  # feature flag off by default
+        ctx = _ctx()
+        _disable_research(ctx)  # feature flag explicitly off
         out = rl.ResearchLoop(ctx).tick()
         self.assertFalse(out["ok"])
         self.assertTrue(out["skipped_reason"])
@@ -274,6 +282,7 @@ class TickTests(unittest.TestCase):
 class StatusTests(unittest.TestCase):
     def test_status_shape(self):
         ctx = _ctx()
+        _disable_research(ctx)
         rl.ensure_research_job(ctx)
         rl.record_run(ctx, {"started_at": time.time() - 60,
                             "finished_at": time.time() - 50,
