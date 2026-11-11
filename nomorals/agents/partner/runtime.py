@@ -2154,20 +2154,24 @@ class PartnerRuntime(
                     except Exception as exc:  # noqa: BLE001
                         _log.warning("control reply send failed: %s", exc)
                 return
-        # Draft Schedule/Edit asks (button-fix lane 1): a review
-        # card's Schedule/Edit tap armed an ask for this chat, and
-        # the owner's next non-command message IS its answer — it
-        # completes the act (the schedule lands with its time; the
-        # revision replaces the draft's content). Checked BEFORE
-        # the explicit-post override below: an armed ask names its
-        # draft, while the override would act on the first pending
-        # one it finds.
+        # Armed asks (button-fix lanes 1 + 3): a review card's
+        # Schedule/Edit tap — or a proposals Deny tap on an
+        # upgrade ticket, which arms a reason ask — waits on the
+        # owner's next non-command message in this chat, and that
+        # message IS its answer: it completes the act (the
+        # schedule lands with its time; the revision replaces the
+        # draft's content; the denial lands with its reason
+        # recorded). Checked BEFORE the explicit-post override
+        # below: an armed ask names its target, while the
+        # override would act on the first pending one it finds.
         if (message.incoming and self._is_operator(message)
                 and not message.text.strip().startswith("/")):
             try:
                 ask_reply = self._draft_ask_answer(message)
+                if ask_reply is None:
+                    ask_reply = self._proposal_ask_answer(message)
             except Exception:  # noqa: BLE001 - an ask never eats chat
-                _log.exception("draft ask answer failed")
+                _log.exception("ask answer failed")
                 ask_reply = None
             if ask_reply is not None:
                 self._bump("controls")
@@ -5974,6 +5978,21 @@ class PartnerRuntime(
                 in _PROPOSALS_VERBS:
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
+            # A deny of an upgrade ticket with no reason in the
+            # tail cannot complete — UpgradeQueue.deny requires
+            # one, and the proposals list's Deny button carries
+            # only "deny <id>" (its payload budget has no room
+            # for a reason). Arm the reason ask for this chat
+            # instead of failing the tap: the prompt names the
+            # ticket, and the owner's next message completes the
+            # denial through deny() itself (see
+            # _proposal_ask_answer — the draft Schedule/Edit
+            # two-step shape). A typed bare deny arms the same
+            # ask: one handler, one behaviour.
+            _ask = self._proposal_deny_ask_prompt(_prop.group(1),
+                                                  chat_key)
+            if _ask is not None:
+                return _ask
             _handled = self._proposals_command(_prop.group(1))
             if _handled is not None:
                 return _handled
@@ -6942,6 +6961,14 @@ class PartnerRuntime(
             sub = (arg or "").strip().split(None, 1)
             pid = sub[0] if sub else ""
             reason = sub[1] if len(sub) > 1 else ""
+            if pid and not reason and chat_key \
+                    and self._is_pending_upgrade(pid):
+                # The proposals list's Deny tap re-enters as
+                # exactly this text ("/deny <id>", no reason) and
+                # an upgrade denial cannot complete without one —
+                # arm the reason ask; the owner's next message
+                # completes it (see _proposal_ask_answer).
+                return self._deny_ask_prompt(pid, chat_key)
             result = self.deny(pid, reason)
             if result.get("ok"):
                 return "denied."
@@ -8844,6 +8871,121 @@ class PartnerRuntime(
             (initiative.id, platform, chat_id, content, reason,
              time.time()))
         return initiative.id
+
+    # ── proposal deny asks: the Deny tap's second step ────────
+
+    #: How long a deny-reason ask stays armed for its answer —
+    #: the draft asks' TTL (long enough to type a reason, short
+    #: enough that an unrelated message much later is never
+    #: captured as one).
+    _PROPOSAL_ASK_TTL_S = 900.0
+
+    def _proposal_ask_store(self) -> dict[str, dict[str, Any]]:
+        store = getattr(self, "_proposal_asks", None)
+        if store is None:
+            store = self._proposal_asks = {}
+        return store
+
+    def _note_proposal_ask(self, chat_key: str,
+                           proposal_id: str) -> None:
+        """Arm one chat's deny-reason ask (single slot per chat —
+        a new tap's ask replaces the old, the pending-ask
+        idiom)."""
+        self._proposal_ask_store()[chat_key] = {
+            "action": "deny", "proposal_id": proposal_id,
+            "at": time.time()}
+
+    def _is_pending_upgrade(self, proposal_id: str) -> bool:
+        """True when *proposal_id* is a research upgrade ticket
+        still ``proposed`` — the one proposal kind whose denial
+        REQUIRES a reason (UpgradeQueue.deny demands it; the
+        proactive kinds deny reasonless). Fail-soft: a lookup
+        failure reads as False and the plain deny result
+        stands."""
+        pid = (proposal_id or "").strip()
+        if not pid:
+            return False
+        try:
+            from ..upgrade_queue import UpgradeQueue
+
+            row = UpgradeQueue(self.context).get(pid)
+        except Exception as e:  # noqa: BLE001 - lookup garnish only
+            record_failure(
+                "runtime.PartnerRuntime._is_pending_upgrade", e)
+            return False
+        return row is not None and row.get("status") == "proposed"
+
+    def _deny_ask_prompt(self, proposal_id: str,
+                         chat_key: str) -> str:
+        """Arm the reason ask for *chat_key* and return its
+        prompt — the reply a Deny tap (or a typed bare deny) on
+        an upgrade ticket produces, naming the ticket and what
+        happens next. The proposal itself does not move."""
+        self._note_proposal_ask(chat_key, proposal_id)
+        return (f"⛔ denying upgrade proposal {proposal_id} "
+                "needs a reason — reply with it and the denial "
+                "lands with the reason recorded. ('cancel' drops "
+                "the ask; the proposal stays pending.)")
+
+    def _proposal_deny_ask_prompt(self, arg: str,
+                                  chat_key: str) -> str | None:
+        """The /proposals interception's deny arm: when the tail
+        is ``deny <id>`` with NO reason and <id> is a pending
+        upgrade ticket, arm the reason ask and return its
+        prompt; otherwise None — the tail runs through
+        :meth:`_proposals_command` exactly as before (a deny
+        carrying its reason, any proactive deny, and every
+        other verb)."""
+        if not chat_key:
+            return None
+        parts = (arg or "").strip().split(None, 2)
+        if len(parts) < 2 or parts[0].lower() != "deny":
+            return None
+        if len(parts) > 2 and parts[2].strip():
+            return None
+        if not self._is_pending_upgrade(parts[1]):
+            return None
+        return self._deny_ask_prompt(parts[1], chat_key)
+
+    def _proposal_ask_answer(self, message: Any) -> str | None:
+        """Complete an armed deny-reason ask from the owner's
+        next message in the same chat.
+
+        Called from ``_process_inner`` for incoming operator
+        messages that are not commands (after the draft asks).
+        Returns the reply to send, or None when no live ask is
+        armed for this chat (the message is ordinary chat and
+        flows on untouched). The answer text IS the reason: the
+        ask is consumed by the attempt and the outcome reported
+        either way — a ticket decided between the tap and the
+        answer fails honestly here (UpgradeQueue.deny refuses
+        a non-proposed ticket), never silently re-denied with
+        the new reason. "cancel" disarms with the proposal
+        untouched. Never raises.
+        """
+        chat_key = getattr(getattr(message, "chat", None), "key",
+                           "") or ""
+        store = self._proposal_ask_store()
+        ask = store.get(chat_key)
+        if not ask:
+            return None
+        if time.time() - float(ask.get("at") or 0) \
+                > self._PROPOSAL_ASK_TTL_S:
+            store.pop(chat_key, None)
+            return None
+        text = (getattr(message, "text", "") or "").strip()
+        if not text:
+            return None
+        pid = str(ask.get("proposal_id") or "")
+        if text.lower() in ("cancel", "never mind", "nevermind"):
+            store.pop(chat_key, None)
+            return f"okay — dropped that; {pid} stays pending."
+        store.pop(chat_key, None)
+        result = self.deny(pid, text)
+        if result.get("ok"):
+            return (f"⛔ denied {pid} — reason recorded: {text}")
+        err = result.get("error") or "no reason given"
+        return f"couldn't deny {pid}: {err}"
 
     def _proposals_command(self, arg: str) -> str | None:
         """The /proposals subcommands: ``show <id>`` (the

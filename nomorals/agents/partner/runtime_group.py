@@ -11546,7 +11546,21 @@ class RuntimeGroupMixin:
         if proposals:
             card.line(f"🗳️ {len(proposals)} treasury proposal(s) "
                       "waiting for a second admin.")
-            treasury_buttons = [[("🗳️ Second it", "approve")]]
+            # One "Second it" per open proposal, each carrying
+            # ITS proposal id — the tap seconds the very motion
+            # it renders under, through _control_approve's own
+            # gating (a bare "approve" here used to open the
+            # proposals LIST instead of seconding anything).
+            # With several motions open the label names the
+            # kind, so the admin seconds the one they mean;
+            # the cap mirrors the /approve list card's own.
+            multi = len(proposals) > 1
+            treasury_buttons = [
+                [(f"🗳️ Second it — {proposal.get('kind') or 'spend'}"
+                  if multi else "🗳️ Second it",
+                  f"approve {open_pid}")]
+                for open_pid, proposal
+                in list(proposals.items())[:6]]
         card.note("triple 7️⃣ on /slots takes the jackpot pot")
         return self._card(message, card, treasury_buttons)
 
