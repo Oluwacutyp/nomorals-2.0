@@ -52,6 +52,10 @@ def _enable(ctx):
     FeatureRegistry(ctx.db).set("research", True)
 
 
+def _disable(ctx):
+    FeatureRegistry(ctx.db).set("research", False)
+
+
 def _claim(cid, text, confidence=0.85, domain="systems", query="q"):
     return ResearchClaim(
         id=cid, claim=text, domain=domain, angle="core",
@@ -375,13 +379,18 @@ class UsefulnessSignalsTests(unittest.TestCase):
         self.assertEqual(row["signals"]["denied"], 1)
 
 
-# ── opt-in stays opt-in (extends the F2 loop-gated-off tests) ───────────────
+# ── the owner's off switch gates absolutely (extends the F2 tests) ─────
+# Written when features were opt-in (default off). 1e8d5455 ("Features ON
+# by default: opt-out, not opt-in") flipped the default, so these tests
+# now set the flag off EXPLICITLY and pin the gate itself: with
+# 'research' off, the loop never runs and the deferral names the flag.
 
 class DisabledLoopTests(unittest.TestCase):
     def test_disabled_loop_never_runs_pipeline(self):
-        # feature flag "research" defaults to off — the opt-in loop stays
-        # off unless the owner explicitly enables it.
+        # feature flag "research" set off — the loop stays off until the
+        # owner explicitly enables it.
         ctx = _ctx()
+        _disable(ctx)
         fake_pipeline = mock.Mock()
         fake_notifier = mock.Mock()
         with (mock.patch("nomorals.agents.research_digest.ResearchPipeline",
@@ -403,6 +412,7 @@ class DisabledLoopTests(unittest.TestCase):
 
     def test_run_topic_disabled_defers(self):
         ctx = _ctx()
+        _disable(ctx)
         fake_pipeline = mock.Mock()
         with (mock.patch("nomorals.agents.research_digest.ResearchPipeline",
                          fake_pipeline),
@@ -410,6 +420,7 @@ class DisabledLoopTests(unittest.TestCase):
                          return_value=False)):
             out = rl.run_topic(ctx, "anything at all")
         self.assertTrue(out.get("deferred"))
+        self.assertIn("research", out["skipped_reason"])
         fake_pipeline.run.assert_not_called()
 
 

@@ -9,11 +9,20 @@ class TestPulseCatchupWiring:
         assert callable(check_pulse_catchup)
 
     def test_boot_wires_catchup(self):
-        import ast
         src = open("nomorals/agents/partner/runtime.py").read()
-        assert "check_pulse_catchup" in src
+        # Boot wires the multi-slot successor: 443b784a (afternoon +
+        # evening briefing slots) generalized the direct phase-10
+        # check_pulse_catchup boot call into check_all_catchup, which
+        # walks every slot at boot.
+        assert "check_all_catchup" in src
         # Both ensure AND check must be in the boot block
-        assert "ensure_pulse_job" in src
+        assert "ensure_pulse_jobs" in src
+        # The chain must still REACH the original pulse catch-up: the
+        # all-slot walk delegates per slot, and the morning slot is
+        # the existing check_pulse_catchup path.
+        pulse = open("nomorals/agents/morning_pulse.py").read()
+        assert "check_slot_catchup(context, slot)" in pulse
+        assert "return check_pulse_catchup(context)" in pulse
 
 
 class TestImprovementQueueWiring:
