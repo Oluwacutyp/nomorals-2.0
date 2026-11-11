@@ -122,5 +122,39 @@ def test_unfenced_completion_remains_the_admin_path(tmp_path):
     assert q.result_of(jid) == {"admin": True}
 
 
+def test_plain_fail_before_any_lease_on_a_fresh_database(tmp_path):
+    """The lease write path must ensure the column it clears.
+
+    ``lease_token`` is not in the frozen base DDL: it arrives via
+    WorkQueue's guarded ALTER, lazily, on token-presenting calls.
+    A plain (tokenless) fail of a never-leased job — MeshTasks
+    reaping an expired job on a cold DB is the production shape —
+    is a first-touch of that column and must record the failure,
+    not raise StorageError for the missing column.
+    """
+    q, db = _queue(tmp_path)
+    cols = {r["name"] for r in db.table_info("work_queue")}
+    assert "lease_token" not in cols
+    jid = q.enqueue("t", {"n": 1})
+    assert q.fail(jid, "boom", retry=True) == "retrying"
+    assert q.get(jid).status == "ready"
+    jid2 = q.enqueue("t", {"n": 2})
+    assert q.fail(jid2, "boom", retry=False) == "dead"
+    assert q.get(jid2).status == "dead"
+    cols = {r["name"] for r in db.table_info("work_queue")}
+    assert "lease_token" in cols
+
+
+def test_lease_token_round_trips_on_a_fresh_database(tmp_path):
+    q, _db = _queue(tmp_path)
+    jid = q.enqueue("t", {"n": 1})
+    job = q.lease_one("t", worker="w")
+    assert job is not None and job.lease_token
+    assert q.get(jid).lease_token == job.lease_token
+    assert q.fail(jid, "late", retry=False,
+                  lease_token=job.lease_token) == "dead"
+    assert q.get(jid).lease_token == ""
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

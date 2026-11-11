@@ -539,6 +539,13 @@ class WorkQueue:
                 return "stale"
             fence = " AND status = 'leased' AND lease_token = ?"
             fence_params = (lease_token,)
+        # The plain (administrative) path also clears the token, so it
+        # needs the column the guarded-ALTER precedent provides — a
+        # database whose first lease-column touch is this fail (a
+        # never-leased job reaped on a cold DB) must not explode.
+        # Same conditional splice as reclaim_expired().
+        token_clear = ", lease_token = ''" \
+            if self._ensure_token_column() else ""
         now = time.time()
         attempts = int(row["attempts"])
         if retry and attempts < int(row["max_attempts"]):
@@ -549,7 +556,7 @@ class WorkQueue:
                 f"""
                 UPDATE {self.TABLE}
                    SET status = 'ready', error = ?, available_at = ?,
-                       lease_owner = '', lease_until = 0, lease_token = '',
+                       lease_owner = '', lease_until = 0{token_clear},
                        updated_at = ?
                  WHERE id = ?{fence}
                 """,
@@ -563,7 +570,7 @@ class WorkQueue:
             f"""
             UPDATE {self.TABLE}
                SET status = 'dead', error = ?, lease_owner = '',
-                   lease_until = 0, lease_token = '', updated_at = ?
+                   lease_until = 0{token_clear}, updated_at = ?
              WHERE id = ?{fence}
             """,
             (error[:2000], now, job_id, *fence_params),
