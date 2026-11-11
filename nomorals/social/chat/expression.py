@@ -2581,9 +2581,8 @@ REACTION_SETS: dict[str, frozenset[str] | None] = {
         "💋 😈 👻 🎃 👀".split()),
     "telegram": None,        # MTProto userbot: any emoji
     "telegram-personal": None,
-    "whatsapp": None,        # any emoji — but see the adapter:
-                             # the current bridge carries no
-                             # reaction verb at all (reported)
+    "whatsapp": None,        # any emoji — both bridges carry the
+                             # react verb (parity G1)
     "discord": None,         # any unicode emoji + guild customs
 }
 

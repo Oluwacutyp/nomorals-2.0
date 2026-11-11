@@ -1587,6 +1587,55 @@ class ChatGateway:
             _log.debug("typing failed on %s: %s", platform, exc)
             return False
 
+    def react(self, platform: str, chat: ChatRef | str, message_id: str,
+              emoji: str) -> SendResult:
+        """Place a reaction on one message through the origin adapter.
+
+        The passthrough the conversational runtime was missing:
+        the adapters (both WhatsApp bridges, both Telegram paths)
+        implement ``react``; before this the gateway exposed
+        ``typing`` but no reaction verb, so a caller had to hold an
+        adapter directly. An adapter without the verb inherits the
+        base class's honest refusal, which is what comes back —
+        never a fake success."""
+        chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
+        adapter = self._adapter_for(chat.platform)
+        if adapter is None:
+            return SendResult(ok=False, platform=platform,
+                              error="no adapter for this platform")
+        if self.dry_run:
+            return SendResult(ok=False, platform=platform,
+                              error="dry run")
+        try:
+            return adapter.react(chat, str(message_id or ""),
+                                 str(emoji or ""))
+        except Exception as exc:  # noqa: BLE001 - a receipt never breaks intake
+            return SendResult(ok=False, platform=platform,
+                              error=f"{type(exc).__name__}: {exc}")
+
+    def mark_read(self, platform: str, chat: ChatRef | str) -> bool:
+        """Fire the adapter's read-receipt verb for one chat, where
+        the adapter carries one (WhatsApp, Telegram MTProto). The
+        Bot API has no such verb and the base adapter doesn't
+        define it — those platforms honestly return False. Adapter
+        return shapes differ (a bool on WhatsApp, a verdict dict
+        on MTProto); both normalize here."""
+        chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
+        adapter = self._adapter_for(chat.platform)
+        if adapter is None or self.dry_run:
+            return False
+        fn = getattr(adapter, "mark_read", None)
+        if not callable(fn):
+            return False
+        try:
+            verdict = fn(chat)
+        except Exception as exc:  # noqa: BLE001 - a receipt never breaks intake
+            _log.debug("mark_read failed on %s: %s", platform, exc)
+            return False
+        if isinstance(verdict, dict):
+            return bool(verdict.get("ok"))
+        return bool(verdict)
+
     def history(self, platform: str, chat: ChatRef | str, limit: int = 20) -> list[ChatMessage]:
         chat = chat if isinstance(chat, ChatRef) else ChatRef.parse(str(chat))
         adapter = self._adapter_for(chat.platform)

@@ -529,6 +529,22 @@ class PartnerSettings:
     #: after this much silence mid-reply, send one "still thinking" line
     slow_reply_notice_seconds: float = 45.0
     part_delay_seconds: float = 0.5
+    #: Receipt acknowledgment (presentation Phase 1): when she WILL
+    #: answer an inbound message, she first lands a light reaction
+    #: on it (expression.pick_reaction — mood/context aware, never a
+    #: fixed emoji) so the message visibly lands before the reply,
+    #: on every surface whose adapter carries the verb. Gated on
+    #: will-answer, exactly once per message, and on personal
+    #: surfaces by the §15 live gate (owner stop + degraded-brain
+    #: observe-only + vault journal).
+    receipt_reactions: bool = True
+    #: The read-receipt rung of the same acknowledgment ladder:
+    #: where no reaction landed and the adapter carries mark_read
+    #: (WhatsApp, Telegram MTProto), mark the chat read at intake.
+    #: The account's own platform privacy setting stays sovereign —
+    #: WhatsApp downgrades receipts itself when the owner turned
+    #: them off there; this rung never forces one past it.
+    receipt_read_rung: bool = True
     #: Dynamic lexicon voice feed (nomorals/partner/lexicon_feed.py): blend
     #: scored lexicon terms into her phrasing — catchphrases, pet names,
     #: openers, transitions, acknowledgments, mood expressions, fallback

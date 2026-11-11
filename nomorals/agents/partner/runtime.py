@@ -1393,6 +1393,20 @@ class PartnerRuntime(
                 return
         except Exception:  # noqa: BLE001 - intake never breaks chat
             _log.exception("login intake consume failed")
+        # Receipt acknowledgment (presentation Phase 1): everything
+        # above has OBSERVED this message — housekeeping, the
+        # personal-surface hooks, the stale / channel / group-surface
+        # consumption, the login intake. What reaches here flows on
+        # to an answer (hooks, commands, the mind, the brain), so
+        # this is where the message visibly lands: a light reaction
+        # (or the read rung) placed BEFORE any reply composes, gated
+        # on her actually answering — _acknowledge_inbound owns the
+        # constitution. Failure-isolated like every intake beat.
+        try:
+            self._acknowledge_inbound(message)
+        except Exception as e:  # noqa: BLE001 - a receipt never breaks intake
+            record_failure(
+                "runtime.PartnerRuntime._acknowledge_inbound", e)
         # Autonomy: every inbound message resets the idle clock and feeds
         # the pattern/interest models. Cheap, never blocks — and never
         # raises (the shared-ledger helper owns its failure episodes).
@@ -2693,7 +2707,14 @@ class PartnerRuntime(
                 send_text = part
                 result = self.gateway.send(
                     message.chat.platform, message.chat, send_text,
-                    reply_to=message.reply_to if message.chat.kind == ChatKind.GROUP else "",
+                    # Quote anchoring (presentation Phase 1): the
+                    # reply chain already names ONE specific prior
+                    # message — the one this turn answers through —
+                    # or none. Groups have always anchored to it;
+                    # DMs now do the same instead of floating free.
+                    # Where the bridge never saw the target it
+                    # honestly sends unquoted.
+                    reply_to=message.reply_to or "",
                     # A live turn's reply, first dispatch attempt:
                     # send-once guards must never swallow it.
                     fresh=True,
@@ -8152,6 +8173,203 @@ class PartnerRuntime(
             record_failure("runtime.PartnerRuntime._typing_for", e)
             _log.debug("typing indicator failed (cosmetic)", exc_info=True)
 
+    # ── receipt acknowledgment (presentation Phase 1) ─────────────
+
+    def _ack_will_answer(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """Will this surface answer ``message``? The receipt gate.
+
+        Mirrors the dispatch disciplines in ``_process_inner``: a
+        recognized command stands down when another surface owns
+        it; an operator's recognized command is always handled;
+        game / public-bot / group-claimed commands always earn a
+        reply (a run or an honest refusal); an unrecognized or
+        outsider slash falls through to conversation, where a
+        group message is answered only when the brain would speak
+        and a DM always gets its turn."""
+        text = str(getattr(message, "text", "") or "").strip()
+        if text.startswith("/"):
+            try:
+                from ...social.chat.control import GAME_COMMANDS, parse_control
+                command = parse_control(text)
+            except Exception as exc:  # noqa: BLE001 - a gate never breaks intake
+                record_failure(
+                    "runtime.PartnerRuntime._ack_will_answer", exc)
+                command = None
+            if command is not None:
+                if self._command_stands_down(message, command):
+                    return False
+                if self._is_operator(message):
+                    return True
+                # /math in an outsider DM is conversation, not a
+                # game claim — the conversational rule below decides
+                # it (a DM answers).
+                game_claim = (
+                    (command.kind == "game"
+                     or command.kind in GAME_COMMANDS)
+                    and not (command.kind == "math"
+                             and message.chat.kind == ChatKind.DM))
+                if game_claim:
+                    return True
+                if message.chat.platform == "telegram-bot":
+                    return True
+                if message.chat.kind == ChatKind.GROUP:
+                    return True
+                # An outsider's slash in a DM falls through to her
+                # as ordinary text — the conversational rule below.
+        if message.chat.kind == ChatKind.GROUP:
+            try:
+                return bool(self.brain.should_speak_in_group(message))
+            except Exception as exc:  # noqa: BLE001 - a gate never breaks intake
+                record_failure(
+                    "runtime.PartnerRuntime._ack_will_answer:group", exc)
+                return False
+        return True
+
+    def _acknowledge_inbound(self, message) -> None:  # type: ignore[no-untyped-def]
+        """Receipt acknowledgment: when she WILL answer an inbound
+        message, the message first visibly lands — a light reaction
+        in her moment vocabulary (``expression.pick_reaction``,
+        context-aware, never a fixed emoji), or, where no reaction
+        can land, the read-receipt rung (``gateway.mark_read``).
+
+        The constitution, in order:
+
+        - exactly once per message: the meta flag is set before
+          any attempt, and redeliveries of one platform message id
+          within the boot are deduped by id;
+        - never when she won't answer (:meth:`_ack_will_answer`) —
+          stood-down commands, group turns she stays silent on;
+        - personal surfaces (the §15 live gate): a standing owner
+          stop halts the act like every personal-surface act; a
+          degraded / no-model brain is observe-only — no receipt
+          while a degraded episode is open; every landed act is
+          journaled in the personal vault (``note_message_acted``),
+          the ``/react`` path's own discipline;
+        - group rooms: the §33 system-output gate decides whether
+          her bot systems may show output there at all (the
+          ``_group_gate`` the ``/react`` command answers to; DMs
+          pass by construction);
+        - failures are recorded, never raised: a receipt must not
+          break intake.
+        """
+        if not getattr(message, "incoming", False) or self.dry_run:
+            return
+        meta = getattr(message, "meta", None)
+        if not isinstance(meta, dict) or meta.get("ack_done"):
+            return
+        partner_cfg = getattr(self.settings, "partner", None)
+        reactions_on = bool(
+            getattr(partner_cfg, "receipt_reactions", True))
+        read_on = bool(getattr(partner_cfg, "receipt_read_rung", True))
+        if not reactions_on and not read_on:
+            return
+        chat = message.chat
+        platform = str(chat.platform or "")
+        # Redelivery dedupe: one platform message identity gets one
+        # acknowledgment per boot, however many times a bridge
+        # replays it inside the stale window.
+        seen = getattr(self, "_ack_seen_ids", None)
+        if seen is None:
+            seen = self._ack_seen_ids = set()
+        dedupe_key = ""
+        if getattr(message, "message_id", ""):
+            dedupe_key = (
+                f"{platform}:{chat.key}:{message.message_id}")
+            if dedupe_key in seen:
+                meta["ack_done"] = True
+                return
+        if not self._ack_will_answer(message):
+            return
+        # Group rooms: §33 decides whether her bot systems show
+        # output there (DMs pass by construction).
+        try:
+            if not self._group_gate(message, "reaction"):
+                return
+        except Exception as exc:  # noqa: BLE001 - the gate is a guard
+            record_failure(
+                "runtime.PartnerRuntime._acknowledge_inbound:gate", exc)
+            return
+        # Personal surfaces: sticky owner stop + degraded-brain
+        # observe-only, and the vault journal for what lands.
+        personal = is_personal_platform(platform)
+        svc: Any = None
+        rec: Any = None
+        if personal:
+            try:
+                if self._get_brain_gate().degraded_now:
+                    return
+            except Exception as exc:  # noqa: BLE001 - the gate is a guard
+                record_failure(
+                    "runtime.PartnerRuntime._acknowledge_inbound:gate",
+                    exc)
+                return
+            try:
+                svc, rec = self._chatops_personal_account(platform)
+            except Exception:  # noqa: BLE001 - the gate is a guard
+                svc, rec = None, None
+            if rec is not None:
+                try:
+                    if svc["registry"].owner_stopped(platform):
+                        return
+                except Exception as exc:  # noqa: BLE001 - a guard
+                    record_failure(
+                        "runtime.PartnerRuntime._acknowledge_inbound:gate",
+                        exc)
+                    return
+        # From here the act is committed: mark BEFORE attempting,
+        # so no failure (and no second path) can double-fire.
+        meta["ack_done"] = True
+        if dedupe_key:
+            if len(seen) > 4096:
+                seen.clear()
+            seen.add(dedupe_key)
+        landed = ""
+        emoji = ""
+        if reactions_on and getattr(message, "message_id", ""):
+            try:
+                from ...social.chat.expression import pick_reaction
+                emoji = pick_reaction(
+                    str(getattr(message, "text", "") or ""),
+                    platform=platform)
+            except Exception as exc:  # noqa: BLE001 - a receipt is cosmetic
+                record_failure(
+                    "runtime.PartnerRuntime._acknowledge_inbound:pick",
+                    exc)
+                emoji = ""
+            if emoji:
+                result = self.gateway.react(
+                    platform, chat, str(message.message_id), emoji)
+                if getattr(result, "ok", False):
+                    landed = "reaction"
+                else:
+                    _log.debug(
+                        "receipt reaction refused on %s: %s",
+                        platform, getattr(result, "error", ""))
+        if not landed and read_on \
+                and self.gateway.mark_read(platform, chat):
+            landed = "read"
+        if not landed:
+            return
+        self._bump("acks")
+        if personal and rec is not None:
+            try:
+                svc["personal"].note_message_acted(
+                    platform,
+                    kind=("message_reacted" if landed == "reaction"
+                          else "message_read"),
+                    account_id=rec.id,
+                    chat_id=str(chat.chat_id or ""),
+                    source_id=str(
+                        getattr(message, "message_id", "") or ""),
+                    note=("receipt " + landed
+                          + (f" {emoji}" if landed == "reaction"
+                             else "")
+                          + " — she is answering this one"))
+            except Exception as exc:  # noqa: BLE001 - journal is a record
+                record_failure(
+                    "runtime.PartnerRuntime._acknowledge_inbound:journal",
+                    exc)
+
     def _typing_keepalive(self, chat: ChatRef, stop: threading.Event) -> None:
         """Hold "typing…" up while the brain is working (own daemon thread).
 
@@ -8178,7 +8396,7 @@ class PartnerRuntime(
         tick = max(0.2, partner_cfg.typing_keepalive_seconds)
         deadline = time.time() + partner_cfg.typing_keepalive_budget
         # One "still thinking" line in a DM when the answer is taking a long
-        # time — on a phone a cold 7B needs minutes, and silence reads as
+        # time — a cold model rung needs minutes, and silence reads as
         # death (which is exactly when owners reach for Ctrl+C).
         notice_at = partner_cfg.slow_reply_notice_seconds
         noticed = False
@@ -8190,7 +8408,7 @@ class PartnerRuntime(
                 noticed = True
                 try:
                     self.gateway.send(chat.platform, chat,
-                                      "one sec — still thinking, the model is slow on the phone")
+                                      "one sec — still thinking, the model is slow right now")
                 except Exception:  # noqa: BLE001 - the notice must never kill the reply
                     _log.warning("slow-reply notice failed for %s", chat.key)
             started = time.time()
