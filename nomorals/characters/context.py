@@ -7,10 +7,18 @@ expression) instead of the partner persona.
 
 When a character talks to the owner in chat, this is the prompt builder.
 The brain stays the speaker; the character is the voice.
+
+The prompt carries NO fixed token ceiling. By default the builder
+assembles everything in full; when a budget is in force it comes from
+an explicit caller budget or a resolver deriving it from the serving
+model's real context window, and the memory shrink engages only on
+genuine overflow of that budget. An explicit budget can still be
+supplied for callers that need one.
 """
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from ..core.text import approx_token_count
 from .character import Character
@@ -35,10 +43,64 @@ def _trait_line(persona: dict[str, float]) -> str:
 
 
 class CharacterContextBuilder:
-    """Assembles the system prompt for a character speaking."""
+    """Assembles the system prompt for a character speaking.
 
-    def __init__(self, *, total_budget: int = 3500) -> None:
-        self.total_budget = max(1200, int(total_budget))
+    There is no built-in token ceiling: a fixed constant here was an
+    artificial limitation — past it, the memory shrink silently
+    dropped a character's recalled memories from its prompt. The
+    budget in force is, in order:
+
+    * ``total_budget`` when a caller passes one explicitly (tests and
+      genuine callers keep this; the shrink contract below applies);
+    * else the value of ``budget_resolver`` at build time — a caller
+      that knows the serving model's real context window wires it
+      here, re-resolved per build so a rung swap is honored;
+    * else NO budget: assembly includes everything, untruncated.
+
+    An unknown window resolves to no budget on purpose: the failure
+    mode to avoid is silent eviction. An oversized prompt errors
+    loudly at the provider; a quietly truncated one lies.
+
+    Divergence from the partner builder, by architecture: the partner
+    has a per-block shrink walk; this builder's only shrink lever is
+    the single-pass memory reduction in :meth:`build`, so the budget
+    gates that one pass. And the live construction seam —
+    ``Character.speak`` — receives a bare ``SuggestFn`` prompt
+    callback: no brain, window, or reply reserve exists there to
+    derive from, so production constructs the default (unbounded)
+    builder rather than threading a resolver through every dialogue,
+    ensemble, and game caller of ``speak``.
+    """
+
+    def __init__(
+        self,
+        *,
+        total_budget: int | None = None,
+        budget_resolver: Callable[[], int | None] | None = None,
+    ) -> None:
+        #: The explicit fixed budget, or None when none was imposed.
+        self.total_budget: int | None = (
+            max(1200, int(total_budget)) if total_budget is not None else None
+        )
+        self._budget_resolver = budget_resolver
+
+    def _effective_budget(self) -> int | None:
+        """The budget for THIS build, or None for assemble-in-full.
+
+        A resolver that fails or reports no window yields None —
+        assembly never breaks a reply and never invents a ceiling.
+        """
+        if self.total_budget is not None:
+            return self.total_budget
+        if self._budget_resolver is not None:
+            try:
+                value = self._budget_resolver()
+            except Exception:  # noqa: BLE001 — derivation never breaks assembly
+                return None
+            if value is None:
+                return None
+            return max(0, int(value))
+        return None
 
     # ── blocks ─────────────────────────────────────────────────────
     @staticmethod
@@ -218,8 +280,11 @@ class CharacterContextBuilder:
         ]
         blocks = [b for b in blocks if b]
         text = "\n\n".join(blocks)
-        # budget: shrink memory first (identity must survive)
-        if approx_token_count(text) > self.total_budget:
+        # Budget: shrink memory first (identity must survive) — and
+        # only when a budget is in force. No budget in force = the
+        # assembly above stands in full.
+        budget = self._effective_budget()
+        if budget is not None and approx_token_count(text) > budget:
             mem_block = self._memory_block(memories[:2])
             blocks = [
                 self._identity_block(char),

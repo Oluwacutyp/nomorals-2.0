@@ -12,6 +12,7 @@ from nomorals.characters.voice import (
 )
 from nomorals.characters.context import CharacterContextBuilder
 from nomorals.characters.memory import CharacterMemory
+from nomorals.core.text import approx_token_count
 
 
 def _zara() -> Character:
@@ -180,6 +181,75 @@ def test_context_builder_budget():
     # identity must survive even under a tight budget
     assert "Zara" in prompt
     assert "Reply as the character" in prompt
+
+
+# ── power mode: no fixed ceiling (owner directive 2026-11-10) ───────
+# The builder's old total_budget=3500 default was a builder-set
+# ceiling: past it, the memory shrink silently dropped a character's
+# recalled memories. Default construction now assembles in full; a
+# budget exists only when a caller imposes one explicitly or a
+# resolver derives it from the serving model's real window.
+
+def _fat_char() -> Character:
+    """A character whose identity block alone exceeds 3,500 approx
+    tokens (8 knowledge domains x ~450 words each)."""
+    char = _zara()
+    char.knowledge = [
+        f"domain{i} " + " ".join(f"fact{i}w{j}" for j in range(450))
+        + f" TAIL{i}"
+        for i in range(8)
+    ]
+    return char
+
+
+_FAT_MEMS = [f"memory {i} " + "filler " * 24 + f"MEMTAIL{i}"
+             for i in range(5)]
+
+
+def test_context_builder_default_no_ceiling():
+    prompt = CharacterContextBuilder().build(_fat_char(),
+                                             memories=_FAT_MEMS)
+    assert approx_token_count(prompt) > 3500
+    # every block's tail intact — identity's last domain and ALL five
+    # memories (the old ceiling's shrink kept only the first two)
+    assert "TAIL7" in prompt
+    for i in range(5):
+        assert f"MEMTAIL{i}" in prompt
+
+
+def test_context_builder_resolver_tracks_window():
+    char = _fat_char()
+    roomy = CharacterContextBuilder(
+        budget_resolver=lambda: 10 ** 9).build(char, memories=_FAT_MEMS)
+    assert "MEMTAIL4" in roomy  # window fits everything: no shrink
+    tight = CharacterContextBuilder(
+        budget_resolver=lambda: 1500).build(char, memories=_FAT_MEMS)
+    assert "Zara" in tight  # identity survives the shrink
+    assert "MEMTAIL0" in tight and "MEMTAIL1" in tight
+    assert "MEMTAIL2" not in tight and "MEMTAIL4" not in tight
+
+
+def test_context_builder_unknown_window_unbounded():
+    char = _fat_char()
+    no_window = CharacterContextBuilder(
+        budget_resolver=lambda: None).build(char, memories=_FAT_MEMS)
+    assert "MEMTAIL4" in no_window
+
+    def _boom():
+        raise RuntimeError("no rung metadata")
+
+    failed = CharacterContextBuilder(
+        budget_resolver=_boom).build(char, memories=_FAT_MEMS)
+    assert "MEMTAIL4" in failed
+
+
+def test_context_builder_explicit_budget_beats_resolver():
+    prompt = CharacterContextBuilder(
+        total_budget=1500,
+        budget_resolver=lambda: 10 ** 9).build(_fat_char(),
+                                               memories=_FAT_MEMS)
+    assert "MEMTAIL0" in prompt
+    assert "MEMTAIL4" not in prompt
 
 
 def test_character_serialization_with_fingerprint():
