@@ -101,7 +101,7 @@ _SEARCH_CLASSES = (
     "NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
     "MdundoSource",
     "BandcampSource", "ArchiveOrgSource", "JamendoSource",
-    "FMASource", "MusicBrainzSource",
+    "FMASource", "JioSaavnSource", "MusicBrainzSource",
     "OpenverseSource", "WikimediaSource", "ITunesSource",
     "DeezerSource", "BoomplaySource",
 )

@@ -418,3 +418,33 @@ class TestPalcoMP3Row:
         assert "mp3File" in notes
         assert "live-browser probe" in notes
         assert "Do NOT add a PalcoMP3Source" in notes
+
+
+# ── JioSaavn: wired as metadata-class (CENSUS C1) ────────────────────
+#
+# Verified live 2026-11-12: the official search API
+# (api.php __call=search.getResults) answers keyless and anonymous
+# with track metadata per row, and the response carries no direct
+# audio URL — audio needs a per-track auth-token exchange, unverified
+# live from this box — so the chain wires it as metadata-class
+# (identification + track page, never audio), the Spotify shape.
+
+
+class TestJioSaavnRow:
+    def test_row_exists_and_is_metadata_keyless_api(self):
+        row = by_id("jiosaavn")
+        assert row is not None
+        assert row.source_class == "metadata"
+        assert row.auth == "none"
+        assert row.api is True
+        assert row.bot_wall is False
+
+    def test_row_records_the_verified_shape(self):
+        row = by_id("jiosaavn")
+        assert row is not None
+        notes = row.notes
+        assert "search.getResults" in notes
+        assert "keyless" in notes
+        assert "metadata-class" in notes
+        assert "no direct audio URL" in notes
+        assert "token-lenient" in notes

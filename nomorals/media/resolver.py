@@ -545,6 +545,7 @@ class SourceResolver:
             ("archiveorg-search", self._archiveorg_search_many),
             ("jamendo-search", self._jamendo_search_many),
             ("fma-search", self._fma_search_many),
+            ("jiosaavn-search", self._jiosaavn_search_many),
             ("musicbrainz-search", self._musicbrainz_search_many),
             ("openverse-search", self._openverse_search_many),
             ("wikimedia-search", self._wikimedia_search_many),
@@ -813,6 +814,18 @@ class SourceResolver:
             query, limit, "FMASource", "fma",
             "Free Music Archive search", downloadable=False)
 
+    def _jiosaavn_search_many(self, query: str,
+                              limit: int) -> list[ResolvedAudio]:
+        # JioSaavn is a keyless JSON API like Jamendo, but
+        # METADATA-class like FMA (downloadable=False): the search
+        # response identifies the track and its page and carries no
+        # direct audio URL — audio needs a per-track auth-token
+        # exchange, unverified live — so the sweep surfaces the hit
+        # as identification, never as audio.
+        return self._api_source_search_many(
+            query, limit, "JioSaavnSource", "jiosaavn",
+            "JioSaavn search", downloadable=False)
+
     def _mdundo_search_many(self, query: str,
                             limit: int) -> list[ResolvedAudio]:
         # Mdundo is HTML-scraped like FMA, but FULL-track (the
@@ -1054,6 +1067,10 @@ class SourceResolver:
                 query, "FMASource", "fma",
                 "Free Music Archive — track identified, no audio; "
                 "download via the track page")),
+            ("jiosaavn-search", lambda: self._s_metadata_search(
+                query, "JioSaavnSource", "jiosaavn",
+                "JioSaavn — track identified, no audio; open the "
+                "track page or the JioSaavn app")),
             ("boomplay-search", lambda: self._s_boomplay_search(query)),
             ("musicbrainz-search", lambda: self._s_metadata_search(
                 query, "MusicBrainzSource", "musicbrainz",

@@ -42,7 +42,8 @@ class PlayGlobalCoverageTests(unittest.TestCase):
     def test_new_global_sources_present(self):
         for name in ("youtube-music-search", "musicbrainz-search",
                      "openverse-search", "wikimedia-search",
-                     "jamendo-search", "fma-search", "mdundo-search"):
+                     "jamendo-search", "fma-search", "mdundo-search",
+                     "jiosaavn-search"):
             self.assertIn(name, MUSIC_SEARCH_SOURCES)
 
     def test_every_chain_entry_has_a_region(self):

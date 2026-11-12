@@ -24,6 +24,7 @@ from nomorals.media.sources import (
     BoomplaySource,
     FMASource,
     JamendoSource,
+    JioSaavnSource,
     MdundoSource,
     NetNaijaSource,
     SourceCandidate,
@@ -434,6 +435,109 @@ class TestFMASource:
             assert FMASource().search("zzz") == []
 
 
+#: Realistic JioSaavn search-API rows — field names, value shapes and
+#: the HTML-entity encoded titles copied from the LIVE api.php
+#: search.getResults response fetched 2026-11-12 (q=ar rahman,
+#: total=7394).  Titles arrive entity-encoded (&quot;), duration is
+#: seconds as a STRING, artists are one comma string, and every row
+#: observed carries is_drm=1.  The response carries NO direct audio
+#: URL (only encrypted_media_url + a preview URL), so the fixture
+#: carries none either — the source is metadata-class.
+_JIOSAAVN_PAYLOAD = """{"total": 7394, "start": 1, "results": [
+{"id": "DHA4PFZA", "song": "Mangal Rang (From &quot;Ramayana&quot;)",
+"album": "Mangal Rang (From &quot;Ramayana&quot;)", "year": "2026",
+"music": "A.R. Rahman",
+"primary_artists": "A.R. Rahman, Arijit Singh, Shreya Ghoshal",
+"image": "https://c.saavncdn.com/316/Mangal-Rang-From-Ramayana-Hindi-2026-20261024141033-150x150.jpg",
+"label": "T-Series", "language": "hindi", "is_drm": 1,
+"encrypted_media_url": "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyBUX2cFrVT909AyN7wsnm1BEmBTLDZ2Rb59VWbCOFftJ8Qp6EZq3e3Rw7tS9a8Gtq",
+"media_preview_url": "https://preview.saavncdn.com/316/O2cXdTW5cXFqHascOoSxLRU7vQfXkSG1EdCOskSaIMnE_96_p.mp4",
+"perma_url": "https://www.jiosaavn.com/song/mangal-rang-from-ramayana/NCAqBSR2bXI",
+"duration": "277"},
+{"id": "HCwJcgF1ZV8", "song": "Jai Jai Ram (From &quot;Ramayana&quot;)",
+"album": "Jai Jai Ram (From &quot;Ramayana&quot;)", "year": "2026",
+"music": "A.R. Rahman",
+"primary_artists": "A.R. Rahman, Shreya Ghoshal, Arijit Singh",
+"image": "https://c.saavncdn.com/816/Jai-Jai-Ram-From-Ramayana-Hindi-2026-20260914170135-150x150.jpg",
+"label": "T-Series", "language": "hindi", "is_drm": 1,
+"encrypted_media_url": "ID2ieOjCrwfgWvL5sXl4B1ImC5QfbsDyBUX2cFrVT909AyN7wsnm1BEmBTLDZ2Rb59VWbCOFftJ8Qp6EZq3e3Rw7tS9a8Gtq",
+"media_preview_url": "https://preview.saavncdn.com/816/GGwjcfEANjjeHRtehhlCINnUWCUw2k5nV2m5G09BcQIoC7_96_p.mp4",
+"perma_url": "https://www.jiosaavn.com/song/jai-jai-ram-from-ramayana/HCwJcgF1ZV8",
+"duration": "320"},
+{"id": "DHA4PFZA", "song": "Mangal Rang (From &quot;Ramayana&quot;)",
+"album": "Mangal Rang (From &quot;Ramayana&quot;)", "year": "2026",
+"primary_artists": "A.R. Rahman, Arijit Singh, Shreya Ghoshal",
+"language": "hindi", "is_drm": 1,
+"perma_url": "https://www.jiosaavn.com/song/mangal-rang-from-ramayana/NCAqBSR2bXI",
+"duration": "277"},
+{"id": "BADROW1", "song": "", "album": "No Title",
+"primary_artists": "Nobody", "language": "hindi",
+"perma_url": "https://www.jiosaavn.com/song/no-title/XXXX",
+"duration": "100"},
+{"id": "BADROW2", "song": "No Page Song", "album": "No Page",
+"primary_artists": "Nobody", "language": "hindi",
+"perma_url": "", "duration": "100"}]}"""
+
+
+# ── JioSaavnSource ────────────────────────────────────────────────────
+
+
+class TestJioSaavnSource:
+    def test_search_url_shape(self):
+        url = JioSaavnSource().search_url("ar rahman")
+        assert url == ("https://www.jiosaavn.com/api.php"
+                       "?__call=search.getResults&q=ar+rahman"
+                       "&p=1&n=10&_format=json&_marker=0&ctx=web6dot0")
+
+    def test_search_parses_live_shaped_rows(self):
+        with patch.object(JioSaavnSource, "_get",
+                          return_value=_JIOSAAVN_PAYLOAD):
+            cands = JioSaavnSource().search("ar rahman")
+        assert [c.title for c in cands] == [
+            'Mangal Rang (From "Ramayana")',
+            'Jai Jai Ram (From "Ramayana")']
+        first = cands[0]
+        # HTML entities in the title are unescaped
+        assert '"' in first.title and "&quot;" not in first.title
+        assert first.artist == "A.R. Rahman, Arijit Singh, Shreya Ghoshal"
+        assert first.extra["album"] == 'Mangal Rang (From "Ramayana")'
+        assert first.extra["year"] == "2026"
+        assert first.extra["language"] == "hindi"
+        assert first.extra["image"].startswith("https://c.saavncdn.com/")
+        assert first.duration == pytest.approx(277.0)
+        assert first.url == ("https://www.jiosaavn.com/song/"
+                             "mangal-rang-from-ramayana/NCAqBSR2bXI")
+        # metadata-class: identified, no audio — never a download claim
+        assert first.downloadable is False
+        assert candidate_asset_class(first) == "metadata"
+        assert first.direct_url == ""
+        assert "no direct audio URL" in first.extra["note"]
+        # duration is seconds-as-string on the wire
+        assert cands[1].duration == pytest.approx(320.0)
+
+    def test_search_skips_bad_rows_and_dedupes(self):
+        with patch.object(JioSaavnSource, "_get",
+                          return_value=_JIOSAAVN_PAYLOAD):
+            cands = JioSaavnSource().search("ar rahman")
+        assert all(c.title for c in cands)
+        assert all(c.url.startswith("https://www.jiosaavn.com/song/")
+                   for c in cands)
+        assert len({c.url for c in cands}) == len(cands)
+
+    def test_search_empty_and_garbage(self):
+        with patch.object(JioSaavnSource, "_get") as get:
+            assert JioSaavnSource().search("   ") == []
+            get.assert_not_called()
+        with patch.object(JioSaavnSource, "_get",
+                          return_value="not json {"):
+            assert JioSaavnSource().search("zzz") == []
+        with patch.object(JioSaavnSource, "_get",
+                          return_value='{"total": 0, "results": []}'):
+            assert JioSaavnSource().search("zzz") == []
+        with patch.object(JioSaavnSource, "_get", return_value=""):
+            assert JioSaavnSource().search("zzz") == []
+
+
 #: Realistic Mdundo search-page rows — titles, artists, durations
 #: and /stream/ URL shapes copied from the LIVE search page fetched
 #: 2026-11-12 (play.mdundo.com/search-results?term=diamond+platnumz,
@@ -653,6 +757,47 @@ class TestResolverWiring:
         ov = src.index("openverse-search")
         assert ja < fm < bp
         assert fm < ov
+
+    def test_jiosaavn_search_hit_is_metadata_only(self):
+        # JioSaavn identifies the track and its page — the search
+        # response carries no direct audio URL (audio needs a
+        # per-track auth-token exchange, unverified live), so no
+        # audio is claimed.  The chain keeps going for a full track
+        # and only surfaces this when nothing downloadable exists
+        # anywhere (MusicBrainz shape).
+        r = self._resolver()
+        cands = [SourceCandidate(
+            source="jiosaavn",
+            title='Mangal Rang (From "Ramayana")',
+            artist="A.R. Rahman, Arijit Singh, Shreya Ghoshal",
+            url="https://www.jiosaavn.com/song/mangal-rang-from-ramayana/"
+                "NCAqBSR2bXI",
+            duration=277.0, downloadable=False)]
+        with patch.object(JioSaavnSource, "search", return_value=cands):
+            out = r._s_metadata_search(
+                "mangal rang", "JioSaavnSource", "jiosaavn",
+                "JioSaavn — track identified, no audio; open the "
+                "track page or the JioSaavn app")
+        assert out.ok and out.kind == "jiosaavn"
+        assert out.title == 'Mangal Rang (From "Ramayana")'
+        assert out.path_or_url.endswith("/mangal-rang-from-ramayana/"
+                                        "NCAqBSR2bXI")
+        assert out.downloadable is False
+
+    def test_text_chain_places_jiosaavn_after_fma(self):
+        # The Indian streaming catalogue, metadata-class like FMA,
+        # grouped with the metadata sources after FMA and before
+        # Boomplay — and before the Openverse aggregator.
+        import inspect
+
+        from nomorals.media import resolver as res_mod
+        src = inspect.getsource(res_mod.SourceResolver._resolve_text)
+        fm = src.index("fma-search")
+        js = src.index("jiosaavn-search")
+        bp = src.index("boomplay-search")
+        ov = src.index("openverse-search")
+        assert fm < js < bp
+        assert js < ov
 
     def test_text_chain_does_not_claim_soundclick(self):
         # SoundClick is NOT in the chain, deliberately (CENSUS B4):

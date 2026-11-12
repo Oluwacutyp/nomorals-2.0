@@ -1082,6 +1082,95 @@ class FMASource(AudioSource):
         return out
 
 
+class JioSaavnSource(_JsonApiSource):
+    """JioSaavn — Indian streaming catalogue, metadata-class.
+
+    Verified live 2026-11-12, NOT assumed: the official search API
+    answers keyless and anonymous — GET
+    ``https://www.jiosaavn.com/api.php?__call=search.getResults&q=<q>&p=1&n=<n>&_format=json&_marker=0&ctx=web6dot0``
+    returns HTTP 200 JSON ``{"total": N, "start": 1, "results":
+    [...]}`` with title, artist, album, year, duration, track page
+    and cover per row.  No account, no key, no cookies — a plain GET
+    with a browser UA.  (The third-party wrapper saavn.dev is NOT
+    used: it answers an empty reply from this box, curl 52, on both
+    the root and the api subdomain, 2026-11-12.)
+
+    Honest classification: METADATA-class
+    (``candidate_asset_class`` == "metadata",
+    ``downloadable=False``).  The search response carries NO direct
+    audio URL: the audio lives behind ``encrypted_media_url`` (an
+    encrypted token) plus a per-track ``song.generateAuthToken``
+    POST exchange — the path yt-dlp's JioSaavn extractor uses to get
+    an ``auth_url`` — and ``media_preview_url`` is a preview only,
+    never a full track.  The token exchange was NOT verified live
+    from this box (the POST timed out after 30s with 0 bytes,
+    2026-11-12), so no audio is claimed here and the chain must
+    never WIN on a JioSaavn hit for audio.  The resolver routes
+    JioSaavn through the metadata path (MusicBrainz shape):
+    identification + track page, never a download.  Promotion to
+    full-track needs the token exchange proven live (an ``auth_url``
+    answering audio) — named here, not silently assumed.  Every row
+    observed so far carries ``is_drm: 1`` — recorded, never chased.
+
+    Search is TOKEN-LENIENT (verified 2026-11-12: the nonsense query
+    "xyqz totally unknown 999" returns total=329 with 5 rows, the
+    same class as Mdundo's token-lenient search) — a JioSaavn hit
+    never proves the query matched; the metadata path only
+    identifies, so leniency is recorded, not hidden.
+
+    Parser shape, from the live response (2026-11-12): each row has
+    ``song`` (HTML-entity encoded — unescape it), ``primary_artists``
+    (comma string), ``album``, ``year``, ``duration`` (seconds as a
+    string), ``perma_url`` (track page), ``image`` (150x150 cover),
+    ``language``.  A row missing title or track page is skipped; a
+    changed shape degrades to [] and the chain moves on.
+    """
+
+    name = "jiosaavn"
+    _API = "https://www.jiosaavn.com/api.php"
+
+    def search_url(self, query: str) -> str:
+        """The search URL this source fetches (registry probe)."""
+        return (self._API + "?__call=search.getResults&q="
+                + urllib.parse.quote_plus((query or "").strip())
+                + "&p=1&n=10&_format=json&_marker=0&ctx=web6dot0")
+
+    def parse(self, payload: Any, query: str) -> list[SourceCandidate]:
+        out: list[SourceCandidate] = []
+        seen: set[str] = set()
+        for row in (payload or {}).get("results") or []:
+            if not isinstance(row, dict):
+                continue
+            title = html_mod.unescape(str(row.get("song") or "")).strip()
+            page = str(row.get("perma_url") or "").strip()
+            if len(title) < 2 or not page.startswith("http"):
+                continue
+            if page in seen:
+                continue
+            seen.add(page)
+            try:
+                duration = float(str(row.get("duration") or "0"))
+            except (TypeError, ValueError):
+                duration = 0.0
+            out.append(SourceCandidate(
+                source=self.name, title=title or query,
+                artist=html_mod.unescape(
+                    str(row.get("primary_artists") or "")).strip(),
+                url=page, duration=duration, downloadable=False,
+                extra={"album": html_mod.unescape(
+                    str(row.get("album") or "")).strip(),
+                       "year": str(row.get("year") or ""),
+                       "language": str(row.get("language") or ""),
+                       "image": str(row.get("image") or ""),
+                       "note": "JioSaavn — Indian streaming catalogue; "
+                               "track identified, no audio: the search "
+                               "response carries no direct audio URL "
+                               "(audio needs a per-track auth-token "
+                               "exchange, unverified live); open the "
+                               "track page or the JioSaavn app"}))
+        return out
+
+
 class MdundoSource(AudioSource):
     """Mdundo — East African music downloads, HTML search, full-track.
 
@@ -1313,6 +1402,7 @@ SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("archiveorg-search", ArchiveOrgSource()),
     ("jamendo-search", JamendoSource()),
     ("fma-search", FMASource()),
+    ("jiosaavn-search", JioSaavnSource()),
     ("musicbrainz-search", MusicBrainzSource()),
     ("openverse-search", OpenverseSource()),
     ("wikimedia-search", WikimediaSource()),
@@ -1341,6 +1431,7 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "archiveorg-search",
     "jamendo-search",
     "fma-search",
+    "jiosaavn-search",
     "boomplay-search",
     "musicbrainz-search",
     "openverse-search",
@@ -1376,6 +1467,7 @@ MUSIC_SOURCE_DOMAINS: dict[str, str | None] = {
     "archiveorg-search": "archive.org",
     "jamendo-search": "api.jamendo.com",
     "fma-search": "freemusicarchive.org",
+    "jiosaavn-search": "jiosaavn.com",
     "boomplay-search": "boomplay.com",
     "musicbrainz-search": "musicbrainz.org",
     "openverse-search": "api.openverse.org",
@@ -1409,6 +1501,7 @@ MUSIC_SOURCE_REGIONS: dict[str, str] = {
     "archiveorg-search": "global",
     "jamendo-search": "global",
     "fma-search": "global",
+    "jiosaavn-search": "asia",
     "boomplay-search": "africa",
     "musicbrainz-search": "global",
     "openverse-search": "global",

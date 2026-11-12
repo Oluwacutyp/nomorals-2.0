@@ -570,6 +570,22 @@ MUSIC_REGISTRY: List[MusicSource] = [
        volatility="platform_api", bulk=False, api=True, bot_wall=True,
        etiquette=API_POLITE,
        notes="Metadata only here; audio use needs a licensing deal."),
+    _M(id="jiosaavn", name="JioSaavn", source_class="metadata", auth="none",
+       formats=[], quality_ceiling="metadata only",
+       licence="API terms; metadata only, no audio use without a licensing deal",
+       volatility="platform_api", bulk=False, api=True, bot_wall=False,
+       etiquette=API_POLITE,
+       notes="Indian streaming catalogue, metadata only here. The "
+             "official search API (api.php __call=search.getResults) "
+             "answers keyless and anonymous (verified live 2026-11-12: "
+             "HTTP 200 JSON, title/artist/album/duration/track page "
+             "per row); the chain reads it as metadata-class — the "
+             "response carries no direct audio URL (audio needs a "
+             "per-track auth-token exchange, unverified live from "
+             "this box; the preview URL is a preview only), so no "
+             "audio is claimed. Search is token-lenient (a nonsense "
+             "query still returns rows), so a hit never proves the "
+             "query matched."),
     _M(id="musixmatch", name="Musixmatch", source_class="metadata",
        auth="api_key", formats=[], quality_ceiling="metadata only",
        licence="API terms", volatility="platform_api",

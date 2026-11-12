@@ -258,7 +258,8 @@ def test_unknown_title_fails_all_strategies_honestly(monkeypatch, tmp_path):
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
                  "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
-                 "DeezerSource", "BoomplaySource", "MdundoSource"):
+                 "DeezerSource", "BoomplaySource", "MdundoSource",
+                 "JioSaavnSource"):
         monkeypatch.setattr(getattr(_src, _cls), "search",
                             lambda self, q, limit=8: [])
     out = SourceResolver(_ctx(str(tmp_path)),
@@ -291,7 +292,8 @@ def test_spotify_search_only_when_linked(monkeypatch):
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
                  "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
-                 "DeezerSource", "BoomplaySource", "MdundoSource"):
+                 "DeezerSource", "BoomplaySource", "MdundoSource",
+                 "JioSaavnSource"):
         monkeypatch.setattr(getattr(_src, _cls), "search",
                             lambda self, q, limit=8: [])
     monkeypatch.setattr(
@@ -319,7 +321,8 @@ def test_spotify_search_works_when_linked(monkeypatch, tmp_path):
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
                  "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
-                 "DeezerSource", "BoomplaySource", "MdundoSource"):
+                 "DeezerSource", "BoomplaySource", "MdundoSource",
+                 "JioSaavnSource"):
         monkeypatch.setattr(getattr(_src, _cls), "search",
                             lambda self, q, limit=8: [])
     monkeypatch.setattr(
