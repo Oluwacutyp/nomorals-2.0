@@ -180,10 +180,24 @@ def _seed_owner(runtime) -> None:
 
 
 @pytest.fixture()
-def split_whatsapp():
+def shared_claims_file(monkeypatch):
+    """One temp shared-claims file for the test (groupdup2):
+    the runtimes' claims must not leak into the real default
+    shared file, or into another test's claims."""
+    tmp = tempfile.TemporaryDirectory(prefix="nm-gd-shared-",
+                                      dir=_TEST_TMPDIR)
+    path = str(Path(tmp.name) / "claims.db")
+    monkeypatch.setenv("NM_SHARED_CLAIMS", path)
+    yield path
+    tmp.cleanup()
+
+
+@pytest.fixture()
+def split_whatsapp(shared_claims_file):
     """Two runtimes, SEPARATE homes — the live shape. The bot
     runtime's store never knows the group; the userbot's store
-    learns it when the test marks it."""
+    learns it when the test marks it. Claims live in the
+    per-test shared file (groupdup2)."""
     clear_failures()
     tmp_a = tempfile.TemporaryDirectory(prefix="nm-gd-a-",
                                         dir=_TEST_TMPDIR)
@@ -471,17 +485,18 @@ def test_arbitration_room_owner_wins_over_known_claim(
 
 def test_arbitration_non_game_group_command(split_whatsapp):
     """Rule (3) does NOT defer non-game group commands on
-    unproven standing: they fall through to rule (4) and run
-    at once — the claimed-once contract pins immediate
-    exactly-once handling, and a deferral here would mute
-    every group command until a sweep. The cross-surface
-    deferral is the game commands' rule (1.5) above; a
-    non-game cross-runtime double is the shared-home-store
-    follow-up, not a deferral."""
+    unproven standing when the claims ARE shared: they fall
+    through to rule (4) and run at once — the claimed-once
+    contract pins immediate exactly-once handling, and a
+    deferral here would mute every group command until a
+    sweep. The first runtime claims the shared ledger and
+    handles; the second reads the sibling's claim and stands
+    down (groupdup2 — the shared-home-store follow-up is
+    closed: the double is arbitrated, not deferred)."""
     (rt_a, _ad_a, _ctx_a), (rt_b, _ad_b, _ctx_b) = split_whatsapp
     _mark_group_known_blocked(rt_b)
     assert _arbitrate(rt_b, "/play haza", "p1") == "handle"
-    assert _arbitrate(rt_a, "/play haza", "p1") == "handle"
+    assert _arbitrate(rt_a, "/play haza", "p1") == "down"
 
 
 def test_arbitration_unknown_group_handles(split_whatsapp):

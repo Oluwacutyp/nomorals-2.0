@@ -139,14 +139,18 @@ class RuntimeGroupMixin:
         # the home store's bot_admin record with its local JSON
         # records, so a probe that landed in a SHARED home is one
         # truth for every runtime that reads it. Wired once, from
-        # the same home database the command claims use; a db-less
+        # the shared claims file whenever it opens (groupdup2 —
+        # the two runtimes' probe stamps then land in ONE table),
+        # else the home database the command claims use; a db-less
         # construction keeps the local records alone.
         try:
             if getattr(surface, "durable_claims", None) is None:
                 from .command_claims import DurableGroupClaimStore
 
-                db = getattr(getattr(self, "context", None),
-                             "db", None)
+                db = self._shared_claims_db()
+                if db is None:
+                    db = getattr(getattr(self, "context", None),
+                                 "db", None)
                 if db is not None and hasattr(db, "query_one") \
                         and hasattr(db, "execute"):
                     surface.durable_claims = DurableGroupClaimStore(db)

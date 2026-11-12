@@ -4322,6 +4322,13 @@ class PartnerRuntime(
                 _ledger.close()
             except Exception as e:  # noqa: BLE001 - best-effort teardown
                 record_failure("runtime.PartnerRuntime.stop:ledger", e)
+        _shared = getattr(self, "_shared_claims_db_obj", None)
+        if _shared is not None:
+            self._shared_claims_db_obj = None
+            try:
+                _shared.close()
+            except Exception as e:  # noqa: BLE001 - best-effort teardown
+                record_failure("runtime.PartnerRuntime.stop:shared", e)
         if getattr(self, "_scheduler", None) is not None:
             try:
                 self._scheduler.stop()
@@ -4542,6 +4549,35 @@ class PartnerRuntime(
     # _process_inner consult _command_stands_down before any
     # command branch runs.
 
+    def _shared_claims_db(self):  # type: ignore[no-untyped-def]
+        """The shared claims database both runtimes write
+        (groupdup2, 2026-11-12), or None when it cannot be
+        opened. Opened once per runtime, closed by :meth:`stop`.
+        The file is derived with no new config
+        (``~/.nomorals/shared/claims.db``, overridable by
+        ``NM_SHARED_CLAIMS``) — both runtimes run as the same OS
+        user on one host, so both reach it whatever their own
+        ``NM_HOME`` is. A failed open is remembered for the
+        runtime's life: arbitration falls back to the home
+        database and to defer, never to double-handle."""
+        if getattr(self, "_shared_claims_db_obj", None) is not None:
+            return self._shared_claims_db_obj
+        if getattr(self, "_shared_claims_db_tried", False):
+            return None
+        self._shared_claims_db_tried = True
+        from .command_claims import open_shared_claims_db
+
+        db = open_shared_claims_db()
+        self._shared_claims_db_obj = db
+        return db
+
+    def _claims_are_shared(self) -> bool:
+        """True when this runtime's claims live in the shared
+        file both runtimes write (so a sibling's claim is
+        visible here). False = home database only, and
+        arbitration must fail to defer on unproven standing."""
+        return self._shared_claims_db() is not None
+
     def _command_claims(self):  # type: ignore[no-untyped-def]
         ledger = getattr(self, "_command_claims_obj", None)
         if ledger is None:
@@ -4557,7 +4593,19 @@ class PartnerRuntime(
             # only inside one instance). A db-less construction
             # (test doubles, partial boots) keeps the in-memory
             # ledger and its exact legacy behaviour.
-            db = getattr(getattr(self, "context", None), "db", None)
+            #
+            # Groupdup2: the SHARED claims file wins over the
+            # home database whenever it opens — the two runtimes
+            # (userbot + personal bot, separate homes on one
+            # host) then claim against ONE table, so a non-game
+            # cross-runtime double in groups is arbitrated, not
+            # merely recorded twice. When it cannot open, the
+            # home database stands and arbitration fails to
+            # defer on unproven standing (rule 3).
+            db = self._shared_claims_db()
+            if db is None:
+                db = getattr(getattr(self, "context", None),
+                             "db", None)
             if db is not None and hasattr(db, "query_one") \
                     and hasattr(db, "execute"):
                 try:
@@ -4675,6 +4723,104 @@ class PartnerRuntime(
             if value:
                 return str(value)
         return ""
+
+    def _own_account_ids(self, platform: str) -> list[str]:
+        """This runtime's own account ids on ``platform`` — every
+        id shape the adapters carry. Bot API surfaces carry
+        ``_bot_id``/``_me_id``; WhatsApp carries ``user_jid`` /
+        ``user_lid`` (the adapter has no ``_bot_id`` at all —
+        see :meth:`_whatsapp_bot_account_id`)."""
+        gateway = getattr(self, "gateway", None)
+        adapters = getattr(gateway, "adapters", {}) or {}
+        adapter = adapters.get(str(platform or ""))
+        if adapter is None:
+            return []
+        ids: list[str] = []
+        for attr in ("_bot_id", "_me_id", "user_jid", "user_lid"):
+            value = getattr(adapter, attr, None)
+            if value and str(value) not in ids:
+                ids.append(str(value))
+        return ids
+
+    def _claim_surface(self, platform: str) -> str:
+        """The claimant identity for rule (4) claims: the
+        platform plus this runtime's own account id on it.
+        The claim contract is per-SURFACE — a surface
+        re-checking its OWN claim still owns it, a twin
+        surface stands down — and both WhatsApp runtimes used
+        to claim as the bare platform ``"whatsapp"``, so the
+        second runtime's claim read as its own and the shared
+        file alone could never arbitrate them. ``whatsapp:<bot
+        jid>`` vs ``whatsapp:<owner jid>`` are different
+        surfaces; the same account re-checking is still its
+        own. Falls back to the bare platform when this runtime
+        has not learned its own id — the legacy shape."""
+        platform = str(platform or "")
+        own = self._own_account_ids(platform)
+        if own:
+            return f"{platform}:{own[0]}"
+        return platform
+
+    def _is_owner_surface(self, platform: str,
+                          message=None) -> bool:  # type: ignore[no-untyped-def]
+        """True when THIS runtime is the owner's surface on
+        ``platform`` — the side that waits (8s) while the bot
+        surface answers first (3s) on a deferred group command.
+        Decided by role, not by probe state: the shipped
+        blocked-based window diverged only when the bot-claim
+        probe had stamped the bot side during the turn, and
+        with the owner registry unseeded the probe stays silent
+        on BOTH sides, both took 8s, and both sweepers answered
+        together (groupdup2 rig). Two grounds, either suffices:
+
+        (a) the owner registry knows one of this runtime's own
+        account ids is the owner's;
+        (b) this runtime IS the command's sender — the owner
+        typed on his own account (WhatsApp JID/LID folded to
+        the canonical form, so either addressing names him).
+
+        No own id at all, or any error, fails SLOW (True) —
+        fail to defer, never to double-handle."""
+        try:
+            own_ids = self._own_account_ids(platform)
+            if not own_ids:
+                return True
+            try:
+                registry = self._owner_registry()
+            except Exception:  # noqa: BLE001 - unproven: fall through
+                registry = None
+            if registry is not None:
+                for own in own_ids:
+                    try:
+                        if registry.is_owner(platform, own):
+                            return True
+                    except Exception:  # noqa: BLE001 - try the next id
+                        continue
+            if message is not None:
+                sender_id = str(
+                    getattr(message, "sender_id", "") or "")
+                alt_id = ""
+                meta = getattr(message, "meta", None)
+                if isinstance(meta, dict):
+                    alt_id = str(
+                        meta.get("sender_alt_id") or "").strip()
+                if sender_id or alt_id:
+                    from ...games.players import canonical_whatsapp_sender_id
+
+                    # Both sides folded to the canonical phone
+                    # form: a LID sender and a phone-JID own
+                    # account are the same human.
+                    folded_sender = canonical_whatsapp_sender_id(
+                        sender_id, alt_id) or sender_id
+                    folded_own = canonical_whatsapp_sender_id(
+                        *own_ids) or own_ids[0]
+                    if folded_own and folded_own == folded_sender:
+                        return True
+                    if sender_id and sender_id in own_ids:
+                        return True
+            return False
+        except Exception:  # noqa: BLE001 - fail slow, never double
+            return True
 
     def _command_stands_down(self, message, command) -> bool:  # type: ignore[no-untyped-def]
         """True when THIS surface must not handle ``command`` right
@@ -4960,7 +5106,13 @@ class PartnerRuntime(
                 message, self._surface_account_id(platform))
             if key and self._sibling_bot_owns(peer_bot_id):
                 holder = self._command_claims().claimed_by(key)
-                if holder in ("telegram-bot", "telegram-personal"):
+                # The holder names its surface as
+                # ``platform:own-account-id`` (groupdup2) or the
+                # bare platform (legacy rows, id-less runtimes):
+                # the family is the part before the first colon.
+                holder_family = str(holder or "").split(":", 1)[0]
+                if holder_family in ("telegram-bot",
+                                     "telegram-personal"):
                     return "down"
             return "defer"
         # (3) In a group where the bot's standing is VERIFIED
@@ -4969,18 +5121,16 @@ class PartnerRuntime(
         # commands to it. Designated rooms without a bot keep
         # their personal-surface handling — designation is not
         # bot standing, and those rooms have no bot copy coming.
-        # No defer-on-unproven here (groupdup): a non-game group
-        # command on unproven standing falls through to rule
-        # (4) and runs at once — the claimed-once contract
-        # (test_claimed_once_groups) pins immediate exactly-once
-        # handling, and a deferral would mute every group
-        # command until a sweep. Game commands never reach
-        # this rule — (1.5) above already decided them, and the
+        # Unproven standing with NO shared truth (groupdup2):
+        # a sibling runtime may own this room, and a per-home
+        # claim cannot see it — DEFER and watch the room
+        # instead of handling blind (fail to defer, never to
+        # double-handle). The shared file is what makes the
+        # fall-through to rule (4) safe: one claim ledger both
+        # runtimes write. Game commands never reach this rule —
+        # (1.5) above already decided them, and the
         # peer-observation channel is what keeps a game command
-        # to one answer across surfaces. The remaining
-        # cross-runtime double for NON-game group commands is a
-        # named follow-up: it needs the shared home store (one
-        # claim ledger both runtimes write), not a deferral.
+        # to one answer across surfaces.
         if chat.kind == ChatKind.GROUP and not bot_surface:
             try:
                 surface = self._group_surface()
@@ -4989,6 +5139,8 @@ class PartnerRuntime(
                 state = None
             if state and state.get("bot_admin") is True:
                 return "down"
+            if not self._claims_are_shared():
+                return "defer"
         # (4) One handling: claim this message identity. The same
         # message carries the same platform message id on every
         # surface; the family collapses Telegram's three platform
@@ -5000,7 +5152,12 @@ class PartnerRuntime(
         # the home store's, so the claim binds across runtime
         # instances too. A prior claim by another surface stands
         # this one down; this surface's own claim re-checks as
-        # its own.
+        # its own. The claimant is the runtime's own account on
+        # the platform (``platform:own-id``), not the bare
+        # platform: two runtimes on one platform (the bot and
+        # the userbot, both ``whatsapp``) are different
+        # surfaces, and only a distinct claimant lets the
+        # ledger stand the second one down.
         from .command_claims import command_claim_key
 
         key = command_claim_key(
@@ -5008,7 +5165,7 @@ class PartnerRuntime(
         if not key:
             return "handle"
         return "down" if not self._command_claims().claim(
-            key, platform) else "handle"
+            key, self._claim_surface(platform)) else "handle"
 
     # ── peer-answer deferral (dupfix2) ──────────────────────────
     # A command in a bot's DM on a non-bot surface is deferred,
@@ -5051,17 +5208,20 @@ class PartnerRuntime(
                 "message": message,
             }
             # Group deferrals run on the short windows, not the
-            # DM's 20s: the side whose §33 gate says the room is
-            # blocked waits (8s) for the unblocked side's fast
-            # failover (3s) — the fast side's answer resolves
-            # the slow side before its window ever expires, so a
-            # split-home group command lands exactly once.
-            # KNOWN is the gate, not store presence: the surface
-            # turn observes every group message into the ledger,
-            # so a bare record exists for any room with traffic
-            # — and the bot runtime's probe stamps bot_admin
-            # True on top of it. Presence is traffic; the gate
-            # is the standing.
+            # DM's 20s — and the windows diverge BY ROLE, not by
+            # the §33 gate: the bot surface fails over fast (3s)
+            # and answers; the owner surface waits (8s) and
+            # observes the answer in the room. The shipped
+            # gate-based split (known-blocked waits, stateless
+            # fails over first) only diverged when the bot-claim
+            # probe had stamped the bot side during the turn —
+            # with the owner registry unseeded the probe stays
+            # silent on BOTH sides, both took 8s, and both
+            # sweepers answered together (groupdup2). Role is
+            # decided from this runtime's own account and the
+            # command's sender, so it holds with no registry, no
+            # probe, and no shared store; on any doubt the side
+            # waits slow.
             if message.chat.kind == ChatKind.GROUP:
                 from .peer_deferral import (
                     GROUP_PEER_ANSWER_WINDOW_FAST_S,
@@ -5069,12 +5229,12 @@ class PartnerRuntime(
                 )
 
                 try:
-                    known = self._group_system_blocked(
-                        message.chat.key)
+                    owner_side = self._is_owner_surface(
+                        platform, message)
                 except Exception:  # noqa: BLE001 - unknown side
-                    known = False
+                    owner_side = True
                 record["window_s"] = (
-                    GROUP_PEER_ANSWER_WINDOW_S if known
+                    GROUP_PEER_ANSWER_WINDOW_S if owner_side
                     else GROUP_PEER_ANSWER_WINDOW_FAST_S)
             registered = self._peer_deferral().register(record)
             if registered:
@@ -5131,7 +5291,7 @@ class PartnerRuntime(
                 key = str(record.get("claim_key") or "")
                 platform = str(record.get("platform") or "")
                 if key and not self._command_claims().claim(
-                        key, platform):
+                        key, self._claim_surface(platform)):
                     _log.info(
                         "deferred /%s in %s expired but another "
                         "surface claimed it meanwhile — standing "

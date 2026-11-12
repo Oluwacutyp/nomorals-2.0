@@ -247,12 +247,21 @@ def _owner_msg(platform, *, kind, chat_id, text, incoming,
 
 
 @pytest.fixture()
-def split_home():
+def split_home(monkeypatch):
     clear_failures()
     tmp = tempfile.TemporaryDirectory(prefix="nm-dupfix-",
                                       dir=_TEST_TMPDIR)
+    # Per-test shared file (groupdup2): the runtimes' claims
+    # must not leak into the real default shared file, or
+    # into another test's claims.
+    shared_tmp = tempfile.TemporaryDirectory(
+        prefix="nm-dupfix-shared-", dir=_TEST_TMPDIR)
+    monkeypatch.setenv(
+        "NM_SHARED_CLAIMS",
+        str(Path(shared_tmp.name) / "claims.db"))
     yield tmp.name
     tmp.cleanup()
+    shared_tmp.cleanup()
 
 
 def _split_runtimes(home: str):
@@ -298,12 +307,16 @@ def test_split_instances_one_confirmation(split_home):
         assert len(sent_a) == 1, sent_a
         assert "is now games-only" in sent_a[0]
         assert sent_b == [], sent_b
-        row = ctx_b.db.query_one(
+        # The claim row lives in the SHARED store now (groupdup2),
+        # and names the claimant runtime, not the bare platform.
+        shared_b = rt_b._shared_claims_db()
+        assert shared_b is not None
+        row = shared_b.query_one(
             "SELECT claim_key, surface FROM command_claims"
             " WHERE claim_key = ?",
             ("telegram:dm:4242:888:100",))
         assert row is not None
-        assert row["surface"] == "telegram-personal"
+        assert row["surface"] == "telegram-personal:888"
     finally:
         _teardown(rig_a, rig_b)
 
@@ -371,12 +384,15 @@ def test_split_instances_stale_claim_does_not_mute(split_home):
     rt_b, adapters_b, _ctx_b = rig_b
     try:
         # The crashed surface had run: its ledger exists (the
-        # table is created with it) and its claim row is stale.
+        # table is created with it, in the SHARED store now —
+        # groupdup2) and its claim row is stale.
         rt_a._command_claims()
-        ctx_a.db.execute(
+        shared_a = rt_a._shared_claims_db()
+        assert shared_a is not None
+        shared_a.execute(
             "INSERT INTO command_claims"
             " (claim_key, surface, claimed_at) VALUES (?, ?, ?)",
-            ("telegram:dm:4242:888:102", "telegram-personal",
+            ("telegram:dm:4242:888:102", "telegram-personal:888",
              time.time() - WINDOW_S - 500.0))
         rt_b._process_inner(_owner_msg(
             "telegram", kind=ChatKind.DM,

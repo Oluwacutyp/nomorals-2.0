@@ -53,10 +53,57 @@ shape — their chat ids are already perspective-independent.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import time
 from collections import OrderedDict
+from pathlib import Path
 from typing import Any
+
+#: The shared claims file both runtimes derive with no new
+#: config (groupdup2, 2026-11-12): the two runtimes run as the
+#: same OS user on one host, so both can reach the default data
+#: home whatever their own ``NM_HOME`` is. ``NM_SHARED_CLAIMS``
+#: overrides the path outright (tests, operators). The file
+#: holds the same two tables the home store held — the claim
+#: contract (atomic insert-or-nothing, compare-and-swap steal
+#: of an expired row, never raises) is unchanged; only the
+#: location moves from per-home to shared, so one truth binds
+#: both runtimes. A runtime that cannot open it falls back to
+#: its home database and arbitrates to defer, never to
+#: double-handle (see :func:`open_shared_claims_db`).
+SHARED_CLAIMS_FILENAME = "claims.db"
+
+
+def shared_claims_path() -> str:
+    """The shared claims file path. Pure derivation, never
+    raises: an explicit ``NM_SHARED_CLAIMS`` wins, else the
+    default data home's ``shared/claims.db``."""
+    override = os.environ.get("NM_SHARED_CLAIMS", "").strip()
+    if override:
+        return override
+    return str(Path.home() / ".nomorals" / "shared"
+               / SHARED_CLAIMS_FILENAME)
+
+
+def open_shared_claims_db(path: str | None = None):
+    """Open the shared claims database, or None when it cannot
+    be opened (parent uncreatable, file corrupt, permissions).
+    Never raises: the caller falls back to its home database.
+    The Database import is local — this module must not pull
+    the storage layer in at import time."""
+    target = str(path or shared_claims_path())
+    try:
+        from ...storage.db import Database
+
+        db = Database(target)
+        db.scalar("SELECT 1")
+        return db
+    except Exception:  # noqa: BLE001 - degrade to the home store
+        _log.warning(
+            "shared claims store unavailable at %s; claims fall "
+            "back to the home store", target, exc_info=True)
+        return None
 
 __all__ = [
     "CommandClaimLedger",
@@ -65,6 +112,8 @@ __all__ = [
     "WINDOW_S",
     "MAX_KEYS",
     "command_claim_key",
+    "shared_claims_path",
+    "open_shared_claims_db",
 ]
 
 _log = logging.getLogger(__name__)

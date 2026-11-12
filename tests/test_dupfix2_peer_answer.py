@@ -187,8 +187,22 @@ def _peer_post(text, message_id, *, reply_to="", service="peer_post"):
 
 
 @pytest.fixture()
-def split_homes():
-    """Two runtimes, SEPARATE homes — the live shape."""
+def shared_claims_file(monkeypatch):
+    """One temp shared-claims file for the test (groupdup2):
+    the runtimes' claims must not leak into the real default
+    shared file, or into another test's claims."""
+    tmp = tempfile.TemporaryDirectory(prefix="nm-d2-shared-",
+                                      dir=_TEST_TMPDIR)
+    path = str(Path(tmp.name) / "claims.db")
+    monkeypatch.setenv("NM_SHARED_CLAIMS", path)
+    yield path
+    tmp.cleanup()
+
+
+@pytest.fixture()
+def split_homes(shared_claims_file):
+    """Two runtimes, SEPARATE homes — the live shape. Claims
+    live in the per-test shared file (groupdup2)."""
     clear_failures()
     tmp_a = tempfile.TemporaryDirectory(prefix="nm-d2a-",
                                         dir=_TEST_TMPDIR)

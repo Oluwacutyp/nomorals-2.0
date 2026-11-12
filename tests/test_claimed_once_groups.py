@@ -11,16 +11,33 @@ honest redirect. Operators keep their own branch; DMs are untouched.
 """
 from __future__ import annotations
 
+import os
 import tempfile
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef
 
+_TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
+
 
 @pytest.fixture()
-def rig():
+def shared_claims_file(monkeypatch):
+    """One temp shared-claims file for the test (groupdup2):
+    the runtime's claims must not leak into the real default
+    shared file, or into another test's claims."""
+    tmp = tempfile.TemporaryDirectory(prefix="nm-claim-shared-",
+                                      dir=_TEST_TMPDIR)
+    path = str(Path(tmp.name) / "claims.db")
+    monkeypatch.setenv("NM_SHARED_CLAIMS", path)
+    yield path
+    tmp.cleanup()
+
+
+@pytest.fixture()
+def rig(shared_claims_file):
     from nomorals.agents.context import build_context
     from nomorals.agents.partner_runtime import PartnerRuntime
     from nomorals.core.config import load_settings

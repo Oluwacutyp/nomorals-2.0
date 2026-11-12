@@ -1313,7 +1313,18 @@ class WhatsAppAdapter(ChatAdapter):
             with self._responses_lock:
                 return self._responses.pop(req_id, (event, {}))[1]
         except ConnectionError as exc:
-            return {"id": req_id, "ok": False, "error": str(exc)}
+            # Two shapes share this class, and only one is a known
+            # non-send: "whatsapp bridge not connected" is raised
+            # by _write_line BEFORE any byte leaves (no socket at
+            # all). Any other ConnectionError here came out of
+            # sendall — BrokenPipe, reset — after the write may
+            # have partly landed, so it is ambiguous exactly like
+            # a lost ack: the send paths must guard it, never
+            # retry it blind (groupdup2 — a mid-write failure
+            # retried as a clean failure re-sends a live message).
+            return {"id": req_id, "ok": False, "error": str(exc),
+                    "ambiguous": str(exc)
+                    != "whatsapp bridge not connected"}
         finally:
             # never leak the pending entry — a late response must not
             # wake a future command reusing nothing (ids are unique, but
@@ -2038,7 +2049,25 @@ class WhatsAppAdapter(ChatAdapter):
             if self._buttons_list_form(buttons):
                 request["buttons_style"] = "list"
         for attempt in (1, 2):
-            response = self._send_cmd(request)
+            try:
+                response = self._send_cmd(request)
+            except Exception:  # noqa: BLE001 - outcome unknown
+                # The write may have landed and the reply was
+                # lost (a socket TimeoutError/OSError escaping
+                # _send_cmd — _send_cmd only marks the timeout
+                # and ConnectionError shapes ambiguous itself).
+                # An exception here is a lost ack, not a clean
+                # failure: guard the key and report unconfirmed,
+                # so no retry layer re-dispatches a message that
+                # may already be live (groupdup2 — candidate (c)
+                # proven: the raise propagated with no guard
+                # noted and the gateway's retry re-sent it).
+                self._note_unconfirmed(key)
+                self.stats["send_errors"] += 1
+                return SendResult(ok=False, platform=self.name,
+                                  error=UNCONFIRMED_SEND_ERROR,
+                                  seconds=time.perf_counter()
+                                  - started), False
             if response.get("ok"):
                 self.stats["sent"] += 1
                 if buttons:
@@ -2343,7 +2372,18 @@ class WhatsAppAdapter(ChatAdapter):
             cmd["ptv"] = True
         if view_once:
             cmd["view_once"] = True
-        response = self._send_cmd(cmd, timeout=60)
+        try:
+            response = self._send_cmd(cmd, timeout=60)
+        except Exception:  # noqa: BLE001 - outcome unknown
+            # Same lost-ack law as text (see _send_text_outcome):
+            # an exception escaping _send_cmd means the media
+            # write may have landed with the reply lost — guard
+            # the key and report unconfirmed, never re-dispatch.
+            self.stats["send_errors"] += 1
+            self._note_unconfirmed(media_key)
+            return SendResult(ok=False, platform=self.name,
+                              error=UNCONFIRMED_SEND_ERROR,
+                              seconds=time.perf_counter() - started)
         if response.get("ok"):
             self._clear_unconfirmed(media_key)
             self.stats["sent"] += 1
