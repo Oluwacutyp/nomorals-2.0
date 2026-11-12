@@ -61,6 +61,7 @@ from typing import Any
 __all__ = [
     "CommandClaimLedger",
     "DurableCommandClaimLedger",
+    "DurableGroupClaimStore",
     "WINDOW_S",
     "MAX_KEYS",
     "command_claim_key",
@@ -315,3 +316,127 @@ class DurableCommandClaimLedger:
         if ts - held_ts > self._window_s:
             return ""
         return holder
+
+
+_GROUP_CLAIMS_DDL = """
+CREATE TABLE IF NOT EXISTS group_claims (
+  group_key TEXT PRIMARY KEY,
+  bot_admin INTEGER,
+  bot_jid TEXT NOT NULL DEFAULT '',
+  updated_at REAL NOT NULL DEFAULT 0
+);
+"""
+
+
+class DurableGroupClaimStore:
+    """The room's §33 standing, durable in the home store.
+
+    The group surface's JSON store is per-runtime: two runtimes
+    on split homes hold SPLIT claim state for one group, and the
+    bot's verified admin standing — stamped by whichever runtime
+    probed it — never reaches the other surface. This table is
+    the same Batch-B seam as the command claims: one row per
+    group key, the tri-state bot_admin (1/0/NULL — verified,
+    verified-demoted, unproven), the JID of the bot account the
+    stamp belongs to, and the stamp time. The group surface
+    merges it with its local records (same tri-state rule: True
+    wins, then False, then None), so a probe that lands in a
+    SHARED home store is one truth for every runtime that reads
+    it — and a runtime that restarts keeps the standing instead
+    of re-proving it.
+
+    The honest limit, stated here and in the surface: on split
+    homes (the live EC2 shape) this table is still per-home —
+    it unifies the record's SHAPE and fixes the same-home case,
+    but the live split-home arbitration is carried by the
+    in-band defer-and-observe channel, not by this table. A
+    store fault degrades to "unproven" (None) and is logged —
+    claim bookkeeping must not eat a turn.
+    """
+
+    def __init__(self, db: Any) -> None:
+        self._db = db
+        self._lock = threading.Lock()
+        self._broken = False
+        try:
+            self._db.executescript(_GROUP_CLAIMS_DDL)
+        except Exception:  # noqa: BLE001 - degraded, never fatal
+            _log.warning("group claims: DDL failed; claims degrade "
+                         "to unproven", exc_info=True)
+            self._broken = True
+
+    def _row(self, group_key: str) -> tuple[Any, str, float] | None:
+        row = self._db.query_one(
+            "SELECT bot_admin, bot_jid, updated_at FROM group_claims"
+            " WHERE group_key = ?", (group_key,))
+        if row is None:
+            return None
+        admin = row["bot_admin"]
+        return (None if admin is None else bool(admin),
+                str(row["bot_jid"] or ""),
+                float(row["updated_at"] or 0))
+
+    def note_bot_admin(self, group_key: str, is_admin: bool,
+                       bot_jid: str | None = None) -> None:
+        """Stamp the verified standing. A stamp that changes
+        nothing (same standing, same JID) does not write. A
+        demotion keeps the last known bot JID — the identity is
+        still the sibling's, even when its standing lapsed."""
+        group_key = str(group_key or "")
+        if not group_key or self._broken:
+            return
+        ts = time.time()
+        with self._lock:
+            try:
+                row = self._row(group_key)
+                jid = str(bot_jid or "")
+                if row is not None and jid == "":
+                    jid = row[1]
+                if row is not None and row[0] is bool(is_admin) \
+                        and row[1] == jid:
+                    return
+                self._db.execute(
+                    "INSERT INTO group_claims"
+                    " (group_key, bot_admin, bot_jid, updated_at)"
+                    " VALUES (?, ?, ?, ?)"
+                    " ON CONFLICT(group_key) DO UPDATE SET"
+                    " bot_admin = excluded.bot_admin,"
+                    " bot_jid = excluded.bot_jid,"
+                    " updated_at = excluded.updated_at",
+                    (group_key, 1 if is_admin else 0, jid, ts))
+            except Exception:  # noqa: BLE001 - degraded, never fatal
+                _log.warning("group claims: note failed for %s",
+                             group_key, exc_info=True)
+
+    def bot_admin(self, group_key: str) -> bool | None:
+        """The room's verified bot standing, or None when
+        unproven (no record, or a store fault)."""
+        group_key = str(group_key or "")
+        if not group_key or self._broken:
+            return None
+        try:
+            row = self._row(group_key)
+        except Exception:  # noqa: BLE001 - a probe, never fatal
+            _log.debug("group claims: read failed for %s",
+                       group_key, exc_info=True)
+            return None
+        if row is None:
+            return None
+        return row[0]
+
+    def record(self, group_key: str) -> dict[str, Any] | None:
+        """The whole durable record for the room, or None when
+        the room has no durable standing yet."""
+        group_key = str(group_key or "")
+        if not group_key or self._broken:
+            return None
+        try:
+            row = self._row(group_key)
+        except Exception:  # noqa: BLE001 - a probe, never fatal
+            _log.debug("group claims: read failed for %s",
+                       group_key, exc_info=True)
+            return None
+        if row is None:
+            return None
+        return {"bot_admin": row[0], "bot_jid": row[1],
+                "updated_at": row[2]}

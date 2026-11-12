@@ -43,7 +43,10 @@ import threading
 import time
 from typing import Any
 
-__all__ = ["DEFAULT_PEER_ANSWER_WINDOW_S", "PeerAnswerDeferral"]
+__all__ = ["DEFAULT_PEER_ANSWER_WINDOW_S",
+           "GROUP_PEER_ANSWER_WINDOW_S",
+           "GROUP_PEER_ANSWER_WINDOW_FAST_S",
+           "PeerAnswerDeferral"]
 
 #: How long a deferred command waits for the primary's answer before
 #: the deferring surface fails over and handles it itself. Long
@@ -52,6 +55,21 @@ __all__ = ["DEFAULT_PEER_ANSWER_WINDOW_S", "PeerAnswerDeferral"]
 #: breath. The value is visible in the journaled deferral, never
 #: silent.
 DEFAULT_PEER_ANSWER_WINDOW_S = 20.0
+
+#: The group window: a bot's group answer is a fast command reply
+#: (a refusal, a list, a quit), not a slow model call — 8s covers
+#: poll jitter plus a fast reply, and a down bot still fails over
+#: within a breath. It is the side whose §33 gate says the room
+#: is blocked that waits this long.
+GROUP_PEER_ANSWER_WINDOW_S = 8.0
+
+#: The unblocked side's group window: a surface whose own gate
+#: would let the command through fails over FIRST (3s), so its
+#: answer can resolve the blocked side's longer deferral before
+#: that side ever has to speak. The two windows are the
+#: tiebreaker that makes a split-home group command land
+#: exactly once.
+GROUP_PEER_ANSWER_WINDOW_FAST_S = 3.0
 
 
 class PeerAnswerDeferral:
@@ -72,19 +90,31 @@ class PeerAnswerDeferral:
                  now: float | None = None) -> bool:
         """Register one deferred command. False when an identical
         (chat, message) deferral already lives — a re-delivery of
-        the same echo never double-registers."""
+        the same echo never double-registers.
+
+        A record may carry its own ``window_s`` (group deferrals
+        are shorter than DM deferrals, and the stateless side is
+        shorter still — the fast side's answer resolves the slow
+        side before its window ever expires). Without one the
+        registry's default window applies."""
         now = time.time() if now is None else float(now)
         chat_key = str(record.get("chat_key") or "")
         message_id = str(record.get("message_id") or "")
         if not chat_key or not message_id:
             return False
         key = (chat_key, message_id)
+        try:
+            window_s = float(record.get("window_s")
+                             or self._window_s)
+        except (TypeError, ValueError):
+            window_s = self._window_s
         with self._lock:
             if key in self._pending:
                 return False
             record = dict(record)
             record["created_at"] = now
-            record["deadline"] = now + self._window_s
+            record["deadline"] = now + window_s
+            record["window_s"] = window_s
             self._pending[key] = record
             latest = self._latest.get(chat_key)
             if latest is None or now >= latest[1]:
@@ -94,6 +124,17 @@ class PeerAnswerDeferral:
     def pending_count(self) -> int:
         with self._lock:
             return len(self._pending)
+
+    def has_pending(self, chat_key: str) -> bool:
+        """True when this chat has any deferral still waiting —
+        the cheap gate the peer-post branch checks before it
+        spends a roster lookup identifying the sender."""
+        chat_key = str(chat_key or "")
+        if not chat_key:
+            return False
+        with self._lock:
+            return any(key[0] == chat_key
+                       for key in self._pending)
 
     # -- resolution by observation ------------------------------------
 

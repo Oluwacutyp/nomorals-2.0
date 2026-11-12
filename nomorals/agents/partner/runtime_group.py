@@ -135,6 +135,23 @@ class RuntimeGroupMixin:
                 surface.owner_registry = registry
         except Exception:  # noqa: BLE001 - a rig without a
             pass               # registry keeps the surface's own
+        # Durable group standing (groupdup): the surface merges
+        # the home store's bot_admin record with its local JSON
+        # records, so a probe that landed in a SHARED home is one
+        # truth for every runtime that reads it. Wired once, from
+        # the same home database the command claims use; a db-less
+        # construction keeps the local records alone.
+        try:
+            if getattr(surface, "durable_claims", None) is None:
+                from .command_claims import DurableGroupClaimStore
+
+                db = getattr(getattr(self, "context", None),
+                             "db", None)
+                if db is not None and hasattr(db, "query_one") \
+                        and hasattr(db, "execute"):
+                    surface.durable_claims = DurableGroupClaimStore(db)
+        except Exception:  # noqa: BLE001 - local records stand
+            pass
         return surface
 
     def _owner_registry(self):  # type: ignore[no-untyped-def]
@@ -453,10 +470,23 @@ class RuntimeGroupMixin:
         the result on the surface — a demotion observed here
         lapses the claim for every session at once.  Probed at
         most once per room per TTL (the fact changes rarely);
-        an adapter that cannot say leaves the stamp alone."""
+        an adapter that cannot say leaves the stamp alone.
+
+        WhatsApp (groupdup): the adapter carries no ``_bot_id``
+        — the bot's own member status is probed under its own
+        account JID, and only when this runtime's WhatsApp
+        account is PROVABLY not the owner's (the owner registry
+        knows WhatsApp identities, and this JID is not one of
+        them). When the registry holds no WhatsApp identities
+        at all the probe cannot prove bot-ness and stays silent
+        — a missing seed must never mistake the owner for the
+        bot (he is an admin in his own groups; stamping his
+        standing as the bot's would stand the userbot down
+        everywhere)."""
         platform = str(getattr(message.chat, "platform", "")
                        or "")
-        if platform not in ("telegram-bot", "telegram-personal"):
+        if platform not in ("telegram-bot", "telegram-personal",
+                            "whatsapp"):
             return
         probes = getattr(self, "_bot_claim_probes", None)
         if probes is None:
@@ -468,6 +498,8 @@ class RuntimeGroupMixin:
         adapter = self._group_adapter(platform)
         bot_id = getattr(adapter, "_bot_id", None) \
             if adapter is not None else None
+        if bot_id is None and platform == "whatsapp":
+            bot_id = self._whatsapp_bot_account_id(adapter)
         fn = getattr(adapter, "admin_member", None) \
             if adapter is not None else None
         if bot_id is None or fn is None:
@@ -486,7 +518,34 @@ class RuntimeGroupMixin:
             return
         surface.note_bot_admin(
             key, str(status).lower() in (
-                "creator", "administrator", "admin", "owner"))
+                "creator", "administrator", "admin", "owner"),
+            bot_jid=str(bot_id))
+
+    def _whatsapp_bot_account_id(self, adapter) -> str | None:  # type: ignore[no-untyped-def]
+        """This runtime's WhatsApp account JID when it is
+        provably Devon's BOT account, else None.
+
+        The adapter knows its own account (``user_jid``); the
+        owner registry knows the owner's WhatsApp identities
+        (seeded from the §15 pairing registry). A JID that is
+        not one of the owner's — with the registry actually
+        holding WhatsApp identities, so an empty seed fails
+        closed — is a bot account."""
+        if adapter is None:
+            return None
+        own = str(getattr(adapter, "user_jid", "") or "").strip()
+        if not own:
+            return None
+        try:
+            registry = self._owner_registry()
+            known = registry.identities("whatsapp") or []
+            if not known:
+                return None
+            if registry.is_owner("whatsapp", own):
+                return None
+        except Exception:  # noqa: BLE001 - unproven, unstamped
+            return None
+        return own
 
     def _send_action_notice(self, surface, key, message,  # type: ignore[no-untyped-def]
                             action) -> None:

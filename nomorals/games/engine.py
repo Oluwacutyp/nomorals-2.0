@@ -233,11 +233,21 @@ class GameEngine:
     """The table host for every game in every chat, on every platform."""
 
     def __init__(self, context: Any, *, send: SendFn | None = None,
-                 suggest: Callable[[str], str] | None = None) -> None:
+                 suggest: Callable[[str], str] | None = None,
+                 blocked: Callable[[str], bool] | None = None
+                 ) -> None:
         self.context = context
         self.db = getattr(context, "db", None)
         self._send = send
         self._suggest = suggest
+        #: Optional §33 gate: callable(chat_key) -> True when the
+        #: room's chat is a group Devon's bot systems must not
+        #: play in. Installed by the runtime; None = no gate
+        #: (standalone/CLI rigs, DMs, unclaimed rooms). A blocked
+        #: room's autonomous emissions are suppressed at _emit,
+        #: and the sweep reaps the room instead of ticking it —
+        #: the gate is command-path-only no longer.
+        self._blocked = blocked
         #: Optional group-economy bridge: callable(chat_key, player,
         #: coins, game) invoked when a human wins coins in a group
         #: room.  Installed by the runtime; None = no bridge.
@@ -482,9 +492,19 @@ class GameEngine:
         now = time.time()
         due: list[Room] = []
         idle: list[Room] = []
+        blocked_rooms: list[Room] = []
         with self._lock:
             for room in self._rooms.values():
                 if room.status != "active":
+                    continue
+                # §33, unified: a room in a newly-blocked group
+                # never ticks again — it is reaped below instead
+                # of timing out, stalling, or pumping AI turns
+                # into a room the bot systems must not play in.
+                # A room can predate its block (or be created via
+                # another path); nothing else ever evicts it.
+                if self._is_blocked(room.chat_key):
+                    blocked_rooms.append(room)
                     continue
                 # idle expiry runs regardless of the per-turn clock —
                 # games with move_timeout=0 never time out otherwise.
@@ -513,6 +533,17 @@ class GameEngine:
                 self._finish_idle(room)
             except Exception:  # noqa: BLE001
                 _log.exception("game idle-expiry failed: %s", room.game)
+        # Reap the blocked rooms: finish them silently — the
+        # settle messages are DISCARDED, never emitted into a
+        # room the bot systems must not play in.
+        for room in blocked_rooms:
+            try:
+                self._finish(
+                    room, "the table closed — games aren't running "
+                    "in this group.")
+            except Exception:  # noqa: BLE001
+                _log.exception("game blocked-room reap failed: %s",
+                               room.game)
         # reap expired invites / long-idle relay rooms (throttled inside)
         try:
             relay = self._relay_obj
@@ -584,8 +615,27 @@ class GameEngine:
         except Exception:  # noqa: BLE001
             _log.debug("game room history prune failed", exc_info=True)
 
+    def _is_blocked(self, chat_key: str) -> bool:
+        """True when the §33 gate bars autonomous emissions for
+        this chat. Never raises: a gate error never blocks a
+        game (the strict gates live in the group surface)."""
+        blocked = self._blocked
+        if blocked is None or not chat_key:
+            return False
+        try:
+            return bool(blocked(chat_key))
+        except Exception:  # noqa: BLE001 - never break games
+            return False
+
     # ── sending ────────────────────────────────────────────────────────────
     def _emit(self, room: Room, *texts: str) -> None:
+        if self._is_blocked(room.chat_key):
+            # §33, unified: nothing the engine composes for a
+            # blocked room reaches the chat — not a timeout, not
+            # a stall, not a house move, not a board re-render.
+            # The room is reaped by the sweep; the transcript
+            # keeps no unsent lines as if they had landed.
+            return
         for text in texts:
             if not text:
                 continue

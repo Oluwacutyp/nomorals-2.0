@@ -705,6 +705,11 @@ class WhatsAppAdapter(ChatAdapter):
         #: The buttons_form the bridge reported for the most recent
         #: button-carrying send ("" = none yet / not reported).
         self._last_buttons_form: str = ""
+        #: The form the bridge reported for the most recent send
+        #: that went through _send_text_outcome with buttons —
+        #: stashed per send so the buttons journal names the
+        #: form THIS send rode ("" when the bridge reported none).
+        self._last_send_buttons_form: str = ""
         # The form evidence above is persisted beside the outbox
         # and restored here (buttons completion repair, 2026-11-11):
         # it used to live only in these two attributes, so every
@@ -748,13 +753,22 @@ class WhatsAppAdapter(ChatAdapter):
         except Exception as exc:  # noqa: BLE001
             record_failure('whatsapp.WhatsAppAdapter._track_inbound', exc)
 
-    def _derive_buttons(self, chat: ChatRef, text: str) -> Any:
+    def _derive_buttons(self, chat: ChatRef, text: str, *,
+                        output_kind: str | None = None,
+                        output_meta: dict[str, Any] | None = None
+                        ) -> Any:
         """The keyboard a plain send on this surface carries when
         the caller declared none — the Telegram bot adapter's
         derivation contract mirrored: this adapter IS the owner's
         personal account surface, so the personal set is tried
         first, then the adaptive set, both keyed on the chat's
-        freshest command. Never raises; None when nothing fits."""
+        freshest command. Never raises; None when nothing fits.
+
+        ``output_kind`` / ``output_meta`` (the producer's own
+        classification, via the gateway) drive the kind
+        keyboards — a game output earns its rematch/next/
+        leaderboard rows — exactly as on the Telegram bot
+        adapter; without a kind the text patterns decide."""
         try:
             from .adaptive_buttons import adaptive_buttons_for
             from .tgbot_buttons import personal_buttons_for
@@ -764,6 +778,8 @@ class WhatsAppAdapter(ChatAdapter):
                 fresh_origin = self._last_command.get(chat.chat_id, "")
             return (personal_buttons_for(text, fresh_origin)
                     or adaptive_buttons_for(
+                        output_kind=output_kind,
+                        payload=output_meta,
                         origin_command=fresh_origin, text=text))
         except Exception as exc:  # noqa: BLE001
             record_failure('whatsapp.WhatsAppAdapter._derive_buttons', exc)
@@ -798,6 +814,61 @@ class WhatsAppAdapter(ChatAdapter):
                       "account's sends now use the list form "
                       "(evidence, /pair buttons can pin it back)",
                       jid)
+
+    def _buttons_journal_path(self) -> str:
+        """Where the button-delivery journal lives: beside the
+        form store, in the adapter's own durable store
+        directory (one JSON row per button-carrying send/edit)."""
+        return os.path.join(self._outbox_dir,
+                            "whatsapp_buttons_journal.jsonl")
+
+    def _journal_buttons(self, *, direction: str, chat: ChatRef,
+                         buttons: Any, declared: bool,
+                         derived: bool, output_kind: str | None,
+                         form: str) -> None:
+        """Append one journal row for a button-carrying send or
+        edit: what was declared vs derived, which output kind
+        drove it, the form the bridge reported, and the bridge
+        build that sent it. This is the evidence that closes
+        the "buttons render on WhatsApp groups" question: the
+        row names the delivery path instead of guessing it.
+        Never raises: journaling must not break a send."""
+        if not buttons:
+            return
+        try:
+            rows = []
+            for row in buttons:
+                if not row:
+                    continue
+                rows.append([[str(label), str(data)]
+                             for label, data in row])
+            entry = {
+                "ts": time.time(),
+                "adapter": "whatsapp",
+                "direction": str(direction or ""),
+                "chat": str(getattr(chat, "chat_id", "") or ""),
+                "output_kind": str(output_kind or ""),
+                "declared": bool(declared),
+                "derived": bool(derived),
+                "buttons": rows,
+                "form": str(form or ""),
+                "bridge_program": str(self.bridge_program or ""),
+                "bridge_build": dict(self.bridge_build or {}),
+            }
+            # The journal is the first write a fresh outbox
+            # ever sees (an edit journals before any send
+            # persists the form store) — create the directory
+            # like _save_buttons_form does, or the row is lost
+            # to a silent FileNotFoundError.
+            journal_path = self._buttons_journal_path()
+            os.makedirs(os.path.dirname(journal_path) or ".",
+                        exist_ok=True)
+            with open(journal_path, "a",
+                      encoding="utf-8") as fh:
+                fh.write(json.dumps(entry) + "\n")
+        except Exception as exc:  # noqa: BLE001 - journal only
+            record_failure(
+                "whatsapp.WhatsAppAdapter._journal_buttons", exc)
 
     # ── the keyboard form policy (one seam) ─────────────────────
     def _buttons_list_form(self, buttons: Any) -> bool:
@@ -1286,6 +1357,30 @@ class WhatsAppAdapter(ChatAdapter):
         finally:
             self.connected.clear()
 
+    def _seen_inbound_redelivery(self, message_id: str) -> bool:
+        """True when this platform message id already arrived
+        inside the window — a bridge redelivery (reconnect
+        replay), not a new message. Bounded (1024 ids, 600s);
+        the window runs from first sight, so a replay an hour
+        later is a new event, not a drop. Never raises."""
+        from collections import OrderedDict
+
+        seen = getattr(self, "_seen_inbound", None)
+        if seen is None:
+            seen = self._seen_inbound = OrderedDict()
+        now = time.time()
+        try:
+            while seen and next(iter(seen.values())) < now - 600.0:
+                seen.popitem(last=False)
+            if message_id in seen:
+                return True
+            seen[message_id] = now
+            while len(seen) > 1024:
+                seen.popitem(last=False)
+        except Exception:  # noqa: BLE001 - dedupe never breaks intake
+            return False
+        return False
+
     def _dispatch(self, obj: dict[str, Any], handler: IncomingHandler) -> None:
         kind = obj.get("type")
         if kind in (None, "response") and "id" in obj:
@@ -1655,6 +1750,18 @@ class WhatsAppAdapter(ChatAdapter):
                     obj, msg.text)
                 self._deliver(handler, msg)
         elif kind == "message":
+            # Bridge redelivery dedupe (groupdup): the same
+            # platform message id inside the window is a replay,
+            # not a new message — drop it here so the runtime
+            # never answers it twice. Edits ride a different
+            # event kind and are never dropped here (the antiedit
+            # layer owns them); the reply-claims content key
+            # catches a redelivery that minted a fresh id.
+            _mid = str(obj.get("id") or "")
+            if _mid and self._seen_inbound_redelivery(_mid):
+                _log.info("whatsapp: dropping redelivered message %s",
+                          _mid)
+                return
             chat = obj.get("chat") or {}
             chat_id = str(chat.get("id") or "")
             if not chat_id:
@@ -1904,9 +2011,14 @@ class WhatsAppAdapter(ChatAdapter):
                     # (interactive / list / text-degraded) is
                     # ledgered — and a text degradation is the
                     # evidence that flips later sends to the list
-                    # form (see _note_buttons_form).
+                    # form (see _note_buttons_form). The reported
+                    # form is also stashed for this send, so the
+                    # buttons journal names the form THIS send
+                    # rode ("" when the bridge reported none).
                     self._note_buttons_form(
                         str(response.get("buttons_form") or ""), jid)
+                    self._last_send_buttons_form = str(
+                        response.get("buttons_form") or "")
                 # The bridge's reply id is OUR request id — the real
                 # WhatsApp message id rides in ``message_id`` (it is
                 # the key space delivery receipts use; the request id
@@ -1955,8 +2067,18 @@ class WhatsAppAdapter(ChatAdapter):
              reply_keyboard: list[list[str]] | None = None,
              parse_mode: str = "",
              mentions: list[str] | None = None,
-             fresh: bool = False) -> SendResult:
+             fresh: bool = False,
+             output_kind: str | None = None,
+             output_meta: dict[str, Any] | None = None) -> SendResult:
+        """``output_kind`` / ``output_meta`` name the output being
+        sent (the producer's own classification — a game move, a
+        search result) for the kind keyboards the Telegram bot
+        adapter derives from them. Declaring them here is the
+        seam the gateway needs: it passes them only to adapters
+        whose ``send`` declares them, and without them a game
+        reply on WhatsApp could never earn its keyboard."""
         started = time.perf_counter()
+        declared = buttons is not None
         if buttons is None:
             # Derivation parity with the Telegram bot adapter: a
             # caller that declared no keyboard gets the surface's
@@ -1964,9 +2086,12 @@ class WhatsAppAdapter(ChatAdapter):
             # explicit empty list — always win). Derived before
             # the connected check so a queued send carries the
             # same keyboard the live path would have sent.
-            buttons = self._derive_buttons(chat, text)
+            buttons = self._derive_buttons(
+                chat, text, output_kind=output_kind,
+                output_meta=output_meta)
+        derived = (not declared) and bool(buttons)
         if not self.connected.is_set():
-            return self._enqueue({
+            queued = self._enqueue({
                 "kind": "text",
                 "chat_id": chat.chat_id,
                 "chat_kind": chat.kind,
@@ -1980,6 +2105,14 @@ class WhatsAppAdapter(ChatAdapter):
                 "mentions": [str(m) for m in mentions if m]
                             if mentions else None,
             })
+            # A queued send's form is unknown until the flush —
+            # the journal still names what was queued, so the
+            # queued keyboard is evidence too, not a gap.
+            self._journal_buttons(
+                direction="send", chat=chat, buttons=buttons,
+                declared=declared, derived=derived,
+                output_kind=output_kind, form="queued")
+            return queued
         # Convert Telegram HTML / canonical markdown to WhatsApp markdown
         # (game output and styled menus are authored Telegram-first).
         try:
@@ -2001,6 +2134,11 @@ class WhatsAppAdapter(ChatAdapter):
             if not result.ok:
                 return result
         assert result is not None
+        self._journal_buttons(
+            direction="send", chat=chat, buttons=buttons,
+            declared=declared, derived=derived,
+            output_kind=output_kind,
+            form=getattr(self, "_last_send_buttons_form", ""))
         return result
 
     def edit_progress(self, chat: ChatRef, message_id: str,
@@ -2479,6 +2617,15 @@ class WhatsAppAdapter(ChatAdapter):
             if self._buttons_list_form(buttons):
                 payload["buttons_style"] = "list"
         verdict = self._admin_cmd("edit", payload, timeout=15)
+        if verdict.get("ok") and buttons:
+            # The edit verdict carries no form report — the row
+            # names the declared keyboard and the edit, and the
+            # form stays honestly empty (the send journal holds
+            # the form evidence for sends).
+            self._journal_buttons(
+                direction="edit", chat=chat, buttons=buttons,
+                declared=True, derived=False,
+                output_kind=None, form="")
         if verdict.get("ok") or buttons is None or len(buttons) > 0:
             return verdict
         # A keyboard-CLEARING edit the bridge refused: revoke the

@@ -1675,6 +1675,27 @@ class PartnerRuntime(
                     == _bot_peer:
                 self._peer_post_observed(message)
                 return
+        # WhatsApp group peer posts (groupdup): the bot's answer
+        # in a group — and the userbot's answer, which the bot
+        # runtime sees as its owner's account posting — arrive
+        # on the sibling's WhatsApp stream as ordinary incoming
+        # messages. When a deferral is pending in that chat, a
+        # post from one of Devon's own surfaces is an
+        # OBSERVATION for the deferral registry, never a turn:
+        # the sibling answered, this surface stands down
+        # silently. The pending check runs first so the hot path
+        # pays nothing when nothing is deferred; the sender is
+        # identified only then (durable bot JID, then the owner
+        # registry, then the group roster).
+        if message.incoming and message.chat.kind == ChatKind.GROUP:
+            try:
+                _pending = self._peer_deferral().has_pending(
+                    message.chat.key)
+            except Exception:  # noqa: BLE001 - observation never dies
+                _pending = False
+            if _pending and self._is_peer_surface_group_post(message):
+                self._peer_post_observed(message)
+                return
         # Trigger engine hook (nomorals/triggers): message-source triggers
         # evaluate the final inbound text here.  One call, no fork of the
         # dispatch path below; a no-op when no engine is attached, and a
@@ -1794,15 +1815,31 @@ class PartnerRuntime(
             # it, in its DM, in a group where the bot's standing
             # is verified, or already claimed by it. Then this
             # copy stands down silently: observed and persisted
-            # above, never handled, never answered here.
-            if command is not None and self._command_stands_down(
-                    message, command):
-                self._bump("controls")
-                _log.info(
-                    "command /%s in %s stands down on %s — another "
-                    "surface owns it", command.kind, message.chat.key,
-                    message.chat.platform)
-                return
+            # above, never handled, never answered here. A
+            # "defer" verdict is NOT a stand-down for game
+            # commands: the deferral must be REGISTERED (the
+            # control branch below does this for its commands),
+            # or the command would vanish with no failover — the
+            # silence hole the old stands-down check left open
+            # for every deferred game command.
+            if command is not None:
+                _arb = self._command_arbitration(message, command)
+                if _arb == "defer":
+                    self._bump("controls")
+                    self._defer_peer_command(message, command)
+                    _log.info(
+                        "command /%s in %s defers on %s — waiting "
+                        "to see whether the bot answers",
+                        command.kind, message.chat.key,
+                        message.chat.platform)
+                    return
+                if _arb != "handle":
+                    self._bump("controls")
+                    _log.info(
+                        "command /%s in %s stands down on %s — another "
+                        "surface owns it", command.kind, message.chat.key,
+                        message.chat.platform)
+                    return
             # /math in an outsider DM is conversation only (social_gate:
             # games are public in groups, not in DMs). Skip the game
             # branch entirely so the message falls through to the brain
@@ -4552,12 +4589,22 @@ class PartnerRuntime(
         Never raises: a ledger fault must not silence chat, so a
         failure here lets the turn proceed unclaimed."""
         try:
-            from .reply_claims import reply_claim_key
+            from .reply_claims import (
+                CONTENT_WINDOW_S,
+                reply_claim_key,
+                reply_content_key,
+            )
 
             key = reply_claim_key(message)
-            if not key:
-                return False
-            return not self._reply_claims().claim(key)
+            if key and not self._reply_claims().claim(key):
+                return True
+            # A redelivery that minted a FRESH id wears a new
+            # identity — the id key cannot catch it. The content
+            # key (same chat, same sender, same words, short
+            # window) is the same event under its new name.
+            content = reply_content_key(message)
+            return bool(content) and not self._reply_claims().claim(
+                content, window_s=CONTENT_WINDOW_S)
         except Exception as exc:  # noqa: BLE001 - arbitration
             record_failure(               # never eats a turn
                 "runtime.PartnerRuntime._reply_already_claimed", exc)
@@ -4684,6 +4731,156 @@ class PartnerRuntime(
                 return True
         return False
 
+    def _is_peer_surface_group_post(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """True when ``message`` is a post by one of Devon's own
+        surfaces in a group — the bot account, or the owner's
+        account (the userbot surface) — as observed on THIS
+        runtime's stream. The WhatsApp equivalent of the
+        Telegram ``peer_post`` observation: both runtimes see
+        the same group traffic, so a sibling's answer landing
+        in the room resolves a deferral here.
+
+        Identification, strongest first:
+        (a) the sender's id is the durable group-claims
+            record's ``bot_jid`` for this group (a probe stamped
+            it in a shared home store);
+        (b) the sender is the owner — the userbot surface IS the
+            owner's account, so its answers arrive on the bot
+            runtime as the owner posting;
+        (c) the sender is a group admin who is neither the owner
+            nor this runtime's own account (the bot is an admin
+            in the groups it serves; the roster is cached per
+            chat, 5 minutes).
+
+        Guards, both load-bearing: a slash-led post is a NEW
+        command, never a peer answer — eating it would swallow
+        the owner's next command (the supersede path must see
+        it); and an owner post is a peer answer only when this
+        runtime holds NO live game room for the chat — with a
+        room live the owner's plain words are moves, and eating
+        a move would unplay his turn. The residual risk is
+        bounded and named: the owner chatting plain text within
+        the 3–8s window while no game is live resolves the
+        deferral early and the command goes unanswered until he
+        retypes. The resolution basis is logged, so a false
+        resolution is diagnosable, never silent. Never raises.
+        """
+        try:
+            chat = message.chat
+            chat_key = str(chat.key or "")
+            if not chat_key:
+                return False
+            text = str(getattr(message, "text", "") or "").strip()
+            if text.startswith("/"):
+                return False
+            sender = str(getattr(message, "sender_id", "") or "")
+            meta = getattr(message, "meta", None) or {}
+            alt = str(meta.get("sender_alt_id") or "") \
+                if isinstance(meta, dict) else ""
+            if not sender and not alt:
+                return False
+            platform = str(getattr(chat, "platform", "") or "")
+
+            def _same(a: str, b: str) -> bool:
+                if not a or not b:
+                    return False
+                if platform.startswith("whatsapp"):
+                    from ...social.chat.owner_system import same_person
+
+                    return same_person("whatsapp", a, b)
+                return a.strip().lower() == b.strip().lower()
+
+            # (a) the durable record's bot JID.
+            try:
+                surface = self._group_surface()
+                durable = getattr(surface, "durable_claims", None)
+                rec = durable.record(chat_key) \
+                    if durable is not None else None
+            except Exception:  # noqa: BLE001 - next ground
+                rec = None
+            bot_jid = str((rec or {}).get("bot_jid") or "")
+            if bot_jid and (_same(sender, bot_jid)
+                            or _same(alt, bot_jid)):
+                _log.info("peer surface post in %s: sender matches "
+                          "durable bot_jid", chat_key)
+                return True
+            # (b) the owner (the userbot surface).
+            try:
+                registry = self._owner_registry()
+                if registry.is_owner(platform, sender) \
+                        or (alt and registry.is_owner(platform, alt)):
+                    try:
+                        live = self._game_engine().live(chat_key)
+                    except Exception:  # noqa: BLE001 - no room
+                        live = None
+                    if live is not None:
+                        return False
+                    _log.info("peer surface post in %s: sender is "
+                              "the owner, no live room", chat_key)
+                    return True
+            except Exception:  # noqa: BLE001 - next ground
+                pass
+            # (c) a group admin who is neither the owner nor us.
+            try:
+                roster = self._peer_group_roster(chat)
+            except Exception:  # noqa: BLE001 - no roster, no peer
+                roster = []
+            for row in roster or []:
+                jid = str((row or {}).get("jid") or "")
+                if not jid or not (_same(sender, jid)
+                                  or _same(alt, jid)):
+                    continue
+                role = str((row or {}).get("role") or "").lower()
+                if role not in ("admin", "superadmin"):
+                    return False
+                try:
+                    registry = self._owner_registry()
+                    if registry.is_owner(platform, jid):
+                        return False
+                except Exception:  # noqa: BLE001 - not the owner
+                    pass
+                adapter = (getattr(self.gateway, "adapters", {})
+                           or {}).get(platform)
+                own = str(getattr(adapter, "user_jid", "")
+                          or "") if adapter is not None else ""
+                if own and _same(jid, own):
+                    return False
+                _log.info("peer surface post in %s: roster-admin "
+                          "sender %s", chat_key, jid)
+                return True
+            return False
+        except Exception:  # noqa: BLE001 - never eats a turn
+            return False
+
+    def _peer_group_roster(self, chat) -> list:  # type: ignore[no-untyped-def]
+        """The group roster for ``chat``, cached 5 minutes per
+        chat (one bridge round-trip per group per window, only
+        ever called while a deferral is pending there). [] when
+        the adapter cannot say."""
+        cache = getattr(self, "_peer_roster_cache", None)
+        if cache is None:
+            cache = self._peer_roster_cache = {}
+        import time as _time
+
+        now = _time.time()
+        key = str(getattr(chat, "key", "") or "")
+        held = cache.get(key)
+        if held is not None and now - held[0] < 300.0:
+            return held[1]
+        roster: list = []
+        try:
+            adapter = (getattr(self.gateway, "adapters", {})
+                       or {}).get(str(getattr(chat, "platform", "")
+                                     or ""))
+            fn = getattr(adapter, "group_participants", None) \
+                if adapter is not None else None
+            if callable(fn):
+                roster = list(fn(chat) or [])
+        except Exception:  # noqa: BLE001 - no roster, no peer
+            roster = []
+        cache[key] = (now, roster)
+        return roster
+
     def _command_arbitration(self, message, command) -> str:  # type: ignore[no-untyped-def]
         """One of ``"handle"`` | ``"down"`` | ``"defer"`` for
         ``command`` on this surface.
@@ -4712,6 +4909,36 @@ class PartnerRuntime(
                 if owner_surface is None \
                         or owner_surface != platform:
                     return "down"
+        # (1.5) A group game command belongs to the runtime that
+        # OWNS the live room in that chat — it answers at once,
+        # because only it can end the game (the /game quit trap:
+        # a deferral here would leave the room playing while
+        # another surface answered "no game is live here"). A
+        # runtime with NO live room defers instead: a sibling may
+        # own the room, and its answer in the room is the one
+        # that counts. The deferral window is set at registration
+        # (known side waits, stateless side fails over first).
+        # Non-game commands and DMs never reach this rule.
+        if chat.kind == ChatKind.GROUP and command is not None:
+            from ...social.chat.control import GAME_COMMANDS
+
+            if command.kind == "game" \
+                    or command.kind in GAME_COMMANDS:
+                try:
+                    from ..features import feature_enabled
+
+                    games_on = feature_enabled(
+                        self.context, "games")
+                except Exception:  # noqa: BLE001 - unproven: defer
+                    games_on = True
+                if games_on:
+                    try:
+                        live = self._game_engine().live(chat.key)
+                    except Exception:  # noqa: BLE001 - unproven
+                        live = None
+                    if live is not None:
+                        return "handle"
+                    return "defer"
         # (2) A bot's DM belongs to that bot: a non-bot surface
         # never handles commands in a DM whose peer is one of
         # Devon's bots at once (the userbot sees the owner's bot
@@ -4742,10 +4969,23 @@ class PartnerRuntime(
         # commands to it. Designated rooms without a bot keep
         # their personal-surface handling — designation is not
         # bot standing, and those rooms have no bot copy coming.
+        # No defer-on-unproven here (groupdup): a non-game group
+        # command on unproven standing falls through to rule
+        # (4) and runs at once — the claimed-once contract
+        # (test_claimed_once_groups) pins immediate exactly-once
+        # handling, and a deferral would mute every group
+        # command until a sweep. Game commands never reach
+        # this rule — (1.5) above already decided them, and the
+        # peer-observation channel is what keeps a game command
+        # to one answer across surfaces. The remaining
+        # cross-runtime double for NON-game group commands is a
+        # named follow-up: it needs the shared home store (one
+        # claim ledger both runtimes write), not a deferral.
         if chat.kind == ChatKind.GROUP and not bot_surface:
             try:
-                state = self._group_surface().claim_state(chat.key)
-            except Exception:  # noqa: BLE001 - unproven, no defer
+                surface = self._group_surface()
+                state = surface.claim_state(chat.key)
+            except Exception:  # noqa: BLE001 - unproven, no down
                 state = None
             if state and state.get("bot_admin") is True:
                 return "down"
@@ -4810,6 +5050,32 @@ class PartnerRuntime(
                     message, self._surface_account_id(platform)),
                 "message": message,
             }
+            # Group deferrals run on the short windows, not the
+            # DM's 20s: the side whose §33 gate says the room is
+            # blocked waits (8s) for the unblocked side's fast
+            # failover (3s) — the fast side's answer resolves
+            # the slow side before its window ever expires, so a
+            # split-home group command lands exactly once.
+            # KNOWN is the gate, not store presence: the surface
+            # turn observes every group message into the ledger,
+            # so a bare record exists for any room with traffic
+            # — and the bot runtime's probe stamps bot_admin
+            # True on top of it. Presence is traffic; the gate
+            # is the standing.
+            if message.chat.kind == ChatKind.GROUP:
+                from .peer_deferral import (
+                    GROUP_PEER_ANSWER_WINDOW_FAST_S,
+                    GROUP_PEER_ANSWER_WINDOW_S,
+                )
+
+                try:
+                    known = self._group_system_blocked(
+                        message.chat.key)
+                except Exception:  # noqa: BLE001 - unknown side
+                    known = False
+                record["window_s"] = (
+                    GROUP_PEER_ANSWER_WINDOW_S if known
+                    else GROUP_PEER_ANSWER_WINDOW_FAST_S)
             registered = self._peer_deferral().register(record)
             if registered:
                 # A newer command supersedes older pendings in
@@ -7982,16 +8248,27 @@ class PartnerRuntime(
                 kind + (" " + (command.tail or arg)
                         if (command.tail or arg) else ""),
                 chat_key=chat_key,
-                player=self._game_player_for_key(chat_key), kind="dm",
+                player=self._game_player_for_key(chat_key),
+                # The chat kind rides the inbound message when
+                # there is one (a failover re-entry for a GROUP
+                # game must meet the §33 gate — the old hardcoded
+                # "dm" smuggled starts into blocked groups);
+                # the console path has no message and stays dm.
+                kind=getattr(getattr(message, "chat", None),
+                             "kind", "dm"),
                 is_owner=is_owner)
 
         # ── expansion wave ───────────────────────────────────────────────────
         if kind == "game":
             # console path: no inbound message, so the player is derived from
             # the chat key (stable per chat) and the kind defaults to dm.
+            # A failover re-entry carries the inbound message, so the
+            # kind is the chat's real kind (see above).
             return self._control_game(
                 command.tail or arg, chat_key=chat_key,
-                player=self._game_player_for_key(chat_key), kind="dm",
+                player=self._game_player_for_key(chat_key),
+                kind=getattr(getattr(message, "chat", None),
+                             "kind", "dm"),
                 is_owner=is_owner)
         if kind == "math":
             # Math Class via its standalone handler (same as the

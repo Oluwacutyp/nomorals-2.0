@@ -31,6 +31,7 @@ raised.  Writes are atomic (tmp + replace).
 """
 from __future__ import annotations
 
+import contextlib
 import copy
 import json
 import time
@@ -542,6 +543,15 @@ class GroupSurface:
         # the pipeline reads roles from it; None = no record
         # wired (bare rigs), roles simply never resolve.
         self.owner_registry = owner_registry
+        #: The durable group-claims store (command_claims), when
+        #: the runtime wired one from its home database: the
+        #: surface merges the durable bot standing with its local
+        #: JSON records (same tri-state rule), so a probe that
+        #: landed in a shared home store is one truth for every
+        #: runtime that reads it. None = no durable store wired
+        #: (bare rigs, or a home without a database) — the local
+        #: records alone decide, exactly as before.
+        self.durable_claims: Any = None
         self._moderators: dict[str, Moderator] = {}
         self._msg_cache: dict[str, deque] = {}
         self._signatures: SignatureStore | None = None
@@ -629,6 +639,19 @@ class GroupSurface:
                     f"{prefix}:{rest}").get("system_claim") or {}
                 if sibling:
                     records.append(sibling)
+        # The durable standing (when a home store is wired) reads
+        # as one more record under the same tri-state rule — a
+        # shared home's probe is the room's standing on every
+        # surface that reads it. A durable read never raises: a
+        # store fault is "unproven", never a gate flip.
+        durable = getattr(self, "durable_claims", None)
+        if durable is not None:
+            try:
+                rec = durable.record(group_key)
+            except Exception:  # noqa: BLE001 - unproven, never fatal
+                rec = None
+            if isinstance(rec, dict) and "bot_admin" in rec:
+                records.append({"bot_admin": rec.get("bot_admin")})
         designated = any(bool(r.get("designated"))
                          for r in records)
         stamps = [r.get("bot_admin") for r in records]
@@ -755,22 +778,35 @@ class GroupSurface:
         self.store.save()
         return self.claim_state(group_key)
 
-    def note_bot_admin(self, group_key: str, is_admin: bool
-                       ) -> None:
+    def note_bot_admin(self, group_key: str, is_admin: bool,
+                       bot_jid: str | None = None) -> None:
         """Record the runtime's verified standing of Devon's
         bot in this room (its probe of the bot's own member
         status).  Only a CHANGE writes + audits: a demotion
         lapsing the claim is an event worth the /glog line; a
-        steady state is not."""
+        steady state is not. The same stamp lands in the durable
+        store when one is wired, carrying the bot's JID — the
+        identity the peer-observation channel reads."""
         claim = dict(self.store.settings(group_key).get(
             "system_claim") or {})
-        if claim.get("bot_admin") is bool(is_admin):
-            return
-        claim["bot_admin"] = bool(is_admin)
-        self.update_settings(group_key, system_claim=claim)
-        self._audit(group_key, "bot_claim",
-                    bot_admin=bool(is_admin))
-        self.store.save()
+        changed = claim.get("bot_admin") is not bool(is_admin)
+        if changed:
+            claim["bot_admin"] = bool(is_admin)
+            self.update_settings(group_key, system_claim=claim)
+            self._audit(group_key, "bot_claim",
+                        bot_admin=bool(is_admin))
+            self.store.save()
+        durable = getattr(self, "durable_claims", None)
+        if durable is not None:
+            # The durable store guards its own no-change
+            # writes; a stamp lands there even when the local
+            # record already held it (split homes can hold
+            # different local states for one room). Best
+            # effort: a durable failure never breaks the
+            # local stamp.
+            with contextlib.suppress(Exception):
+                durable.note_bot_admin(group_key, bool(is_admin),
+                                       bot_jid=bot_jid)
 
     def _card_render(self, group_key: str, card: Any) -> str:
         """Render a typography Card (§27) for this group's

@@ -126,7 +126,8 @@ class RuntimeGamesMixin:
                         "with /math.")
             return res
         if str(kind).lower() == "group" \
-                and self._group_system_blocked(chat_key):
+                and self._group_system_blocked(chat_key) \
+                and not (verb in {"quit", "resign"} and is_owner):
             # §33: ENGINE games are bot-system play — they start
             # only in claimed rooms.  (Math Class above keeps its
             # own social gate: public games for outsiders in
@@ -134,6 +135,13 @@ class RuntimeGamesMixin:
             # purse never touches the group ledger — the coin
             # sink into the group purse is claim-gated in the
             # surface.)
+            #
+            # Owner-terminating verbs are exempt from the gate:
+            # an owner /game quit in a blocked group must REACH
+            # the runtime that owns the live room and end it —
+            # the gate firing first was the trap that left the
+            # game playing while the owner was refused twice.
+            # Non-owners still meet the gate (see the pin).
             return ("games aren't running in this group — my "
                     "bot systems only play where my bot "
                     "operates, or where the owner has "
@@ -2320,6 +2328,11 @@ class RuntimeGamesMixin:
                 self.context,
                 send=self._game_send,
                 suggest=self._game_suggest(),
+                # §33, unified (groupdup): the engine's autonomous
+                # emissions are gated per chat key, and blocked
+                # rooms are reaped by the sweep — the tick can no
+                # longer play in a group the commands refuse.
+                blocked=self._group_system_blocked,
             )
             # Group economy bridge (P2): in-group game coins land
             # in the group's purse too — one purse for group play.
@@ -2435,6 +2448,13 @@ class RuntimeGamesMixin:
         real chats — otherwise scheduler emissions (turn timeouts, idle
         expiry, finishes) would vanish into a chat key no platform
         owns."""
+        if self._group_system_blocked(chat_key):
+            # §33, unified (groupdup): the runtime's last mile
+            # suppresses what the engine's own _emit gate missed
+            # (a direct _game_send caller, a relay fan-out into a
+            # blocked room) — nothing autonomous reaches a group
+            # the bot systems must not play in.
+            return
         if (chat_key or "").startswith("relay:"):
             try:
                 relay = self._game_engine().relay
