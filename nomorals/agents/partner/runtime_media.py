@@ -95,6 +95,12 @@ def _looks_like_path_or_url(ref: str) -> bool:
     return False
 
 
+#: Sentinel for ``_edit_chat_message``'s ``buttons``: the caller said
+#: nothing about the keyboard — the settled-render clear
+#: (``buttons=[]``) every existing caller relies on.
+_EDIT_BUTTONS_UNSET: Any = object()
+
+
 class RuntimeMediaMixin:
     """RuntimeMediaMixin for :class:`PartnerRuntime`."""
 
@@ -1027,9 +1033,9 @@ class RuntimeMediaMixin:
     def _play_pick(self, rest: str, chat_key: str = "") -> str:
         """`/play pick <token> <n>` — download+send pick-list choice n.
 
-        The token comes from a Telegram inline button or the WhatsApp
-        number-reply hook.  Single-use: the pick-list is consumed on a
-        successful pick.  Never raises.
+        The token comes from a Telegram inline button, a WhatsApp
+        list-row tap, or the WhatsApp number-reply hook.  Single-use:
+        the pick-list is consumed on a successful pick.  Never raises.
         """
         from ...media.picklist import PickCache
         from ...media.playback import PlaybackEngine
@@ -1878,8 +1884,36 @@ class RuntimeMediaMixin:
                 "runtime_media.RuntimeMediaMixin._chat_adapter", e)
             return None
 
+    def _derive_edit_buttons(self, adapter: Any, chat: Any,
+                             text: str) -> Any:
+        """The keyboard an edited message carries when the caller asked
+        for derivation (``buttons=None``): the adapter's own derivation
+        first — the exact one ``send()`` uses — else the shared content
+        patterns (adapters whose edit verb takes buttons but which
+        derive nothing themselves). None when nothing fits. Never
+        raises.
+        """
+        derive = getattr(adapter, "_derive_buttons", None)
+        if callable(derive):
+            try:
+                return derive(chat, text)
+            except Exception as e:  # noqa: BLE001 - derivation never breaks an edit
+                record_failure(
+                    "runtime_media.RuntimeMediaMixin._derive_edit_buttons",
+                    e)
+                return None
+        try:
+            from ...social.chat.tgbot_buttons import buttons_for_text
+
+            return buttons_for_text(text)
+        except Exception as e:  # noqa: BLE001 - derivation never breaks an edit
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._derive_edit_buttons", e)
+            return None
+
     def _edit_chat_message(self, chat: Any, message_id: str,
-                           text: str, *, progress: bool = False) -> bool:
+                           text: str, *, progress: bool = False,
+                           buttons: Any = _EDIT_BUTTONS_UNSET) -> bool:
         """Edit one of Devon's own messages in *chat* in place.
 
         Verb ladder: ``edit_message`` (the unthrottled final edit —
@@ -1890,12 +1924,25 @@ class RuntimeMediaMixin:
         edits.  Success shapes differ per adapter (API dict, verdict
         dict with ``ok``, None on refusal/throttle) — normalized
         here to a bool.  Never raises.
+
+        ``buttons`` (pick-list buttons, 2026-11-12): the default
+        (``_EDIT_BUTTONS_UNSET``) keeps today's settled-render clear
+        (``buttons=[]``); ``None`` derives the keyboard from the
+        final text — the same derivation ``send()`` uses — so a live
+        choice surface (the /play pick-list offer) rides the edit as
+        tappable rows instead of losing its keyboard; a list passes
+        through as-is, and an explicit empty list clears the
+        keyboard.
         """
         if not message_id:
             return False
         adapter = self._chat_adapter(chat.platform)
         if adapter is None:
             return False
+        if buttons is _EDIT_BUTTONS_UNSET:
+            buttons = []
+        elif buttons is None:
+            buttons = self._derive_edit_buttons(adapter, chat, text)
         verbs: list[str] = (["edit_progress"] if progress else
                             ["edit_message", "edit_progress"])
         for name in verbs:
@@ -1906,7 +1953,7 @@ class RuntimeMediaMixin:
                 if name == "edit_message":
                     try:
                         out = verb(chat, str(message_id), text,
-                                   buttons=[])
+                                   buttons=buttons)
                     except TypeError:
                         out = verb(chat, str(message_id), text)
                 else:
@@ -2140,7 +2187,20 @@ class RuntimeMediaMixin:
             # possible, posted once when not.
             edited = False
             if ack_id and final:
-                edited = self._edit_chat_message(chat, ack_id, final)
+                # A pick-list offer is a LIVE choice surface, not a
+                # settled render: the ack-edit must carry the derived
+                # keyboard (the ListMessage rows on WhatsApp) instead
+                # of the clearing edit — the buttons were never sent
+                # on this path, so the owner saw plain text
+                # (2026-11-12 /play pick-list). Every other final
+                # keeps the settled-render clear.
+                from ...media.picklist import PICK_MARKER_RE
+
+                if PICK_MARKER_RE.search(final):
+                    edited = self._edit_chat_message(
+                        chat, ack_id, final, buttons=None)
+                else:
+                    edited = self._edit_chat_message(chat, ack_id, final)
             delivered = False
             if edited:
                 delivered = True

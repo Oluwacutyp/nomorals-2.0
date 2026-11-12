@@ -272,7 +272,7 @@ class TestTelegramButtons:
         msg = ("🎵 “lifestyle” — pick one (reply with the number):\n"
                "1. Lifestyle — Ya Man (3:24)\n"
                "2. Lifestyle — Other (3:00)\n"
-               "tap a number below 👇\n"
+               "tap a button below 👇\n"
                "pick:a1b2c3d4")
         kb = buttons_for_text(msg)
         assert kb is not None

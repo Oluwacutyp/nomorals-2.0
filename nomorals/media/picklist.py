@@ -3,8 +3,9 @@
 When a query is vague (``/play lifestyle``), auto-downloading the top
 guess is worse than asking: the wrong song wastes the user's data and
 patience.  So vague queries get a numbered pick-list — tappable buttons
-on Telegram, "reply with the number" on WhatsApp — and the chosen track
-is the one that downloads.
+on Telegram and WhatsApp (a ListMessage row list on WhatsApp) — and
+the chosen track is the one that downloads.  Replying with the number
+still works as the fallback rung.
 
 When a query is specific (``/play lifestyle ya man``), the top result
 is downloaded directly, no list.
@@ -65,9 +66,11 @@ _STOPWORDS = frozenset({
     "with", "by", "ft", "feat", "featuring", "vs", "x",
 })
 
-#: Marker embedded in the pick-list message so the Telegram adapter can
+#: Marker embedded in the pick-list message so the adapters can
 #: derive tappable buttons from the reply text (see
-#: ``tgbot_buttons.buttons_for_text``).
+#: ``tgbot_buttons.buttons_for_text``).  It also marks a final text as
+#: a LIVE pick-list offer (see ``runtime_media._body``): an ack-edit
+#: carrying it derives the keyboard instead of clearing it.
 PICK_MARKER_RE = re.compile(r"pick:([0-9a-f]{8})")
 
 
@@ -521,7 +524,7 @@ def format_picklist(candidates: list[Any], query: str, token: str) -> str:
             else:
                 tag = ""
             lines.append(f"{i}. {title}{who}{when}{tag}")
-        lines.append("tap a number below 👇")
+        lines.append("tap a button below 👇")
         if token:
             lines.append(f"pick:{token}")
         return "\n".join(lines)

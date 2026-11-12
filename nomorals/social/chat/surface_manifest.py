@@ -348,8 +348,9 @@ SURFACES: tuple[Surface, ...] = (
                   "resolve in the sender's (chat, owner) slot",
         receipt="the downloaded file is sent into the chat; the "
                 "pick-list is consumed only when the send lands",
-        fallback="the numbered list IS the primary form on "
-                 "buttonless surfaces (reply with the number)",
+        fallback="on surfaces that take no buttons the numbered list "
+                 "is the fallback (reply with the number); on WhatsApp "
+                 "the list arrives with tappable rows",
         tests=("tests/test_play_picklist.py",
                "tests/test_living_chat_p1.py"),
     ),
