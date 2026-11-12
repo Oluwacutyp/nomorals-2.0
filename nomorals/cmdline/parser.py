@@ -20,6 +20,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "memory": ["mem"],
     "power": ["pw"],
     "proxy": [],
+    "sources": [],
     "maps": [],
     "pulse": [],
     "run": ["r"],
@@ -3289,6 +3290,22 @@ def _parser() -> argparse.ArgumentParser:
     p_receipts.add_argument("--source", default="",
                             help="only this source (e.g. proxypool, proxylab)")
     p_receipts.add_argument("--json", action="store_true", help="Output as JSON")
+
+    sources = sub.add_parser("sources", aliases=CLI_ALIASES["sources"],
+        help="source candidates: the active intake — name a host to verify and grow into the registry; list pending candidates with provenance",
+        description=("nm sources candidates [--json]\n"
+                     "nm sources add <host|url> [--class downloads|music|film|news|books|maps|general] [--json]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    sources_sub = sources.add_subparsers(dest="sources_action", required=True)
+    s_cand = sources_sub.add_parser("candidates", help="pending candidates: domain, health, last verification error, provenance (who named it, when, what class)")
+    s_cand.add_argument("--json", action="store_true", help="Output as JSON")
+    s_add = sources_sub.add_parser("add", help="drop a host into the candidate queue — untrusted until the health loop verifies it, then promoted through the existing verified path")
+    s_add.add_argument("host", help="host or URL to name as a candidate (e.g. mp3.pm)")
+    s_add.add_argument("--class", dest="source_class", default="downloads",
+                       choices=["downloads", "music", "film", "news", "books", "maps", "general"],
+                       help="what class the host serves (default downloads)")
+    s_add.add_argument("--json", action="store_true", help="Output as JSON")
 
     maps = sub.add_parser("maps", aliases=CLI_ALIASES["maps"],
         help="Devon Atlas basemap pipeline: build Devon-built map packs (acquire, build, package, verify, install), list packs and sources, re-verify an installed pack",

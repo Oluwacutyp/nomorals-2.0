@@ -74,6 +74,7 @@ from .owner import _cmd_owner
 from .partner import _cmd_partner_ask, _cmd_reason, _cmd_workspace
 from .power import _cmd_power
 from .proxy import _cmd_proxy
+from .sources import _cmd_sources
 from .project import _cmd_project
 from .queue import _cmd_queue
 from .recover import _cmd_recover
@@ -214,6 +215,7 @@ __all__ = [
     "_cmd_partner_ask",
     "_cmd_power",
     "_cmd_proxy",
+    "_cmd_sources",
     "_cmd_project",
     "_cmd_queue",
     "_cmd_sent",

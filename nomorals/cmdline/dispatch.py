@@ -73,6 +73,7 @@ from .commands.partner import _cmd_reason, _cmd_workspace
 from .commands.power import _cmd_power
 from .commands.maps import _cmd_maps
 from .commands.proxy import _cmd_proxy
+from .commands.sources import _cmd_sources
 from .commands.project import _cmd_project
 from .commands.pulse import _cmd_pulse
 from .commands.plugin import _cmd_plugin
@@ -321,6 +322,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "owner": _CommandSpec(_cmd_owner),
     "power": _CommandSpec(_cmd_power),
     "proxy": _CommandSpec(_cmd_proxy),
+    "sources": _CommandSpec(_cmd_sources),
     "maps": _CommandSpec(_cmd_maps),
     "pulse": _CommandSpec(_cmd_pulse),
     "run": _CommandSpec(_cmd_run),

@@ -642,6 +642,17 @@ _MAX_SHED = 50
 #: A shed domain is not re-intaken for a week — no flap loop.
 _SHED_REINTAKE_S = 7 * 86400.0
 
+#: Named-candidate classes (the active intake, mp3.pm lesson):
+#: class label → the registry kinds a candidate of that class
+#: serves.  "downloads" is the download path's own pair; every
+#: other class serves under its own label (kinds are free-form
+#: labels, not an enum — a "maps" candidate is probed at its
+#: root like any other candidate and never serves until the
+#: health loop promotes it).
+_NAMED_CLASS_KINDS: dict[str, tuple[str, ...]] = {
+    "downloads": ("music", "film"),
+}
+
 _BOT_SIGNALS = ("captcha", "cloudflare", "just a moment",
                 "verify you are human", "are you a robot",
                 "access denied", "attention required")
@@ -1202,6 +1213,16 @@ class SourceRegistry:
         is a real state, dead-before-any-attempt is not."""
         entry = self._health.get(desc.key) or {}
         status = str(entry.get("status") or "unknown")
+        if desc.key in self._candidates \
+                and float(entry.get("last_checked") or 0) > 0:
+            # A pending candidate's probe IS its attempt: the
+            # health loop verified it directly, so the stored
+            # verdict (dead included) is presented as-is.  The
+            # unprobed mask below is for never-attempted sources
+            # only (the DexScreener case) — a candidate that
+            # failed verification must read failed, with its
+            # reason, never unprobed.
+            return status
         if status == "dead":
             st = self._stats.get(desc.key)
             if st is None or (st.ok == 0 and st.fail == 0
@@ -1595,7 +1616,9 @@ class SourceRegistry:
     # ── discovery intake (Pass #86) ──
     def note_candidate(self, url_or_domain: str, *, via: str = "",
                        now: float = 0.0,
-                       kinds: tuple[str, ...] = ("music", "film")) -> bool:
+                       kinds: tuple[str, ...] = ("music", "film"),
+                       named_by: str = "",
+                       source_class: str = "") -> bool:
         """Record a discovered host as a CANDIDATE source.
 
         Candidates are untrusted by construction: they are not in
@@ -1608,7 +1631,11 @@ class SourceRegistry:
         ``kinds`` is the discovering class's kind labels (default the
         download path's music/film; the book path, Pass #89, passes
         ``("book",)`` so a candidate is promoted into its own class).
-        Never raises."""
+        ``named_by`` / ``source_class`` are the active intake's
+        provenance (see :meth:`note_named_candidate`): who named
+        the host and what class it serves — recorded in the
+        candidate meta alongside ``first_seen`` and ``via``, and
+        persisted with the candidate itself.  Never raises."""
         try:
             now = now or time.time()
             host = self._host_of(url_or_domain)
@@ -1633,6 +1660,12 @@ class SourceRegistry:
                     key, {"first_seen": now, "seen": 0, "via": via})
                 meta["seen"] = int(meta.get("seen") or 0) + 1
                 meta["last_seen"] = now
+                if named_by and not meta.get("named_by"):
+                    # A host first seen passively, then named: the
+                    # naming is provenance, recorded, never lost.
+                    meta["named_by"] = named_by
+                    if source_class:
+                        meta["class"] = source_class
                 self._persist()
                 return False
             for entry in self._shed:
@@ -1650,9 +1683,15 @@ class SourceRegistry:
                     self._candidate_meta.pop(oldest[0], None)
                     self._health.pop(oldest[0], None)
             self._candidates[key] = desc
-            self._candidate_meta[key] = {
+            meta: dict[str, Any] = {
                 "first_seen": now, "last_seen": now, "seen": 1,
-                "via": via or "download path"}
+                "via": via or (f"named:{named_by}" if named_by
+                               else "download path")}
+            if named_by:
+                meta["named_by"] = named_by
+            if source_class:
+                meta["class"] = source_class
+            self._candidate_meta[key] = meta
             self._health.setdefault(key, {
                 "status": "unknown", "consecutive_failures": 0,
                 "fail_count": 0, "last_checked": 0.0, "last_ok": 0.0,
@@ -1668,6 +1707,72 @@ class SourceRegistry:
     def candidates(self) -> list[SourceDescriptor]:
         """Pending candidate sources (untrusted, serving nothing)."""
         return list(self._candidates.values())
+
+    def note_named_candidate(self, host: str, *,
+                             named_by: str = "owner",
+                             source_class: str = "downloads",
+                             now: float = 0.0) -> bool:
+        """Drop a NAMED host into the candidate queue — the active
+        intake (the mp3.pm lesson: a source nobody ever pastes
+        can never be discovered passively).
+
+        A named candidate is a projection over the SAME queue
+        the download path's :meth:`note_candidate` feeds — same
+        store, same health loop, same promotion rule — never a
+        second registry.  Provenance is recorded in the
+        candidate meta: who named it (``named_by``), when
+        (``first_seen``) and what class it serves
+        (``source_class`` — "downloads" by default; the label
+        also becomes the candidate's kind unless the class maps
+        to the download pair, see ``_NAMED_CLASS_KINDS``).
+        Returns True when a NEW candidate was recorded; False
+        when the host is already a source/candidate, was shed
+        within the re-intake window, or is not a plausible host
+        or class.  Never raises."""
+        try:
+            named_by = str(named_by or "").strip() or "owner"
+            source_class = str(source_class or "").strip().lower() \
+                or "downloads"
+            if not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", source_class):
+                return False
+            kinds = _NAMED_CLASS_KINDS.get(
+                source_class, (source_class,))
+            return self.note_candidate(
+                host, via=f"named:{named_by}", kinds=kinds,
+                named_by=named_by, source_class=source_class,
+                now=now)
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.note_named_candidate", e)
+            return False
+
+    def candidate_list(self) -> list[dict[str, Any]]:
+        """Pending candidates as operator rows: domain, health,
+        last verification error, sightings, and the full
+        provenance (who named it, when, what class, via which
+        path).  One shape — :meth:`status` renders these same
+        rows, so the list and the status surface can never
+        drift.  Never raises."""
+        try:
+            rows = []
+            for key, desc in self._candidates.items():
+                meta = self._candidate_meta.get(key) or {}
+                health = self._health.get(key) or {}
+                rows.append({
+                    "domain": desc.domain,
+                    "health": self.health_for(desc),
+                    "last_error": str(health.get("last_error") or ""),
+                    "seen": int(meta.get("seen") or 0),
+                    "via": str(meta.get("via") or ""),
+                    "named_by": str(meta.get("named_by") or ""),
+                    "class": str(meta.get("class") or ""),
+                    "kinds": list(desc.kinds),
+                    "first_seen": float(meta.get("first_seen") or 0),
+                    "last_seen": float(meta.get("last_seen") or 0)})
+            rows.sort(key=lambda r: r["domain"])
+            return rows
+        except Exception as e:  # noqa: BLE001
+            record_failure("SourceRegistry.candidate_list", e)
+            return []
 
     def _shed_key(self, key: tuple[str, str, str], desc: SourceDescriptor,
                   reason: str, now: float) -> None:
@@ -2302,16 +2407,7 @@ class SourceRegistry:
                     "learned_rule": learned.to_dict()
                     if learned is not None else None})
             sources.sort(key=lambda s: (s["origin"], s["domain"]))
-            candidates = []
-            for key, desc in self._candidates.items():
-                meta = self._candidate_meta.get(key) or {}
-                candidates.append({
-                    "domain": desc.domain,
-                    "health": self.health_for(desc),
-                    "seen": int(meta.get("seen") or 0),
-                    "via": str(meta.get("via") or ""),
-                    "first_seen": float(meta.get("first_seen") or 0),
-                    "last_seen": float(meta.get("last_seen") or 0)})
+            candidates = self.candidate_list()
             return {
                 "total": len(self._by_key),
                 "seeds": counts["seed"], "grown": counts["grown"],
