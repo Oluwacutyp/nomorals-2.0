@@ -39,6 +39,7 @@ from nomorals.media.site_descriptors import (
     BLOCK_CLASSES,
     CHAIN_STAGES,
     MP3PM_DESCRIPTOR,
+    NETNAIJA_DESCRIPTOR,
     SOUNDCLOUD_DESCRIPTOR,
     TIKTOK_DESCRIPTOR,
     YOUTUBE_DESCRIPTOR,
@@ -669,6 +670,170 @@ class TestAudiomackDescriptor:
                    side_effect=_fail_direct):
             report = dl.download(
                 "https://audiomack.com/jstontrapp_/song/kwabena-adu",
+                dest_dir=tmp_path, audio_only=True)
+        assert report.ok is False
+        # Kit silent (page, not a direct-rule file), connector
+        # skipped.
+        assert report.tried() == ["direct", "proxy", "rendered",
+                                  "browser"]
+        assert "connector" not in report.tried()
+        connector.stream_url.assert_not_called()
+
+
+# ── the NetNaija descriptor (descriptor #6) ─────────────────────
+
+
+class TestNetnaijaDescriptor:
+    #: Real NetNaija URL shapes, one per form the descriptor
+    #: claims.  Provenance is in the descriptor comment — the
+    #: live site could NOT be fetched from this box (geo-block:
+    #: netnaija.com answers an empty reply, thenetnaija.com
+    #: answers HTTP 521 via Cloudflare, 2026-11-12), so the
+    #: shapes come from the in-repo source and its tests, not a
+    #: live fetch: post pages ``/music/burna-boy-last-last/`` and
+    #: ``/music/ayra-starr-rush/`` (``tests/test_audio_sources.py``
+    #: fixtures), the ``/?s=`` search (``NetNaijaSource.search_url``),
+    #: the ``/dl/<id>/`` hop and the ``dl.`` / ``files.`` direct
+    #: MP3s (source-test fixtures).  The ``thenetnaija.com``
+    #: post shape is the same WordPress permalink on the site's
+    #: current domain, whose ``/music/`` category is verified
+    #: live (cached crawl 2025-06-01; Feedspot music feed).
+    NETNAIJA_URLS = (
+        "https://netnaija.com/music/burna-boy-last-last/",
+        "https://netnaija.com/music/ayra-starr-rush/",
+        "http://netnaija.com/music/x/",
+        "https://www.netnaija.com/music/burna-boy-last-last/",
+        "https://www.thenetnaija.com/music/burna-boy-last-last/",
+        "https://thenetnaija.com/music/ayra-starr-rush/",
+        "https://netnaija.com/?s=davido",
+        "https://www.thenetnaija.com/?s=burna+boy",
+        "https://netnaija.com/dl/abc123/",
+        "https://dl.netnaija.com/music/last-last.mp3",
+        "https://files.netnaija.com/x/last-last.mp3",
+        "http://files.netnaija.com/x/last-last.mp3",
+    )
+
+    #: URLs the descriptor must NOT claim: non-NetNaija hosts,
+    #: look-alikes, the film host ``thenetnaija.net`` (the film
+    #: chain's seed — not the music descriptor's), and NetNaija
+    #: pages that are not one playable item (home, the ``/music/``
+    #: category listing, a bare search, a bare ``/dl/`` hop, and
+    #: movie posts — the film chain's) — those fall through to
+    #: the generic chain instead of taking the NetNaija chain.
+    NOT_NETNAIJA_URLS = (
+        "https://example.com/music/burna-boy-last-last/",
+        "https://notnetnaija.com/music/x/",
+        "https://netnaija.com.evil.test/music/x/",
+        "https://netnaija.com/",
+        "https://www.netnaija.com/",
+        "https://netnaija.com/music/",
+        "https://thenetnaija.com/music/",
+        "https://netnaija.com/?s=",
+        "https://netnaija.com/dl/",
+        "https://netnaija.com/movies/some-film/",
+        "https://thenetnaija.net/?s=davido",
+        "https://thenetnaija.net/music/x/",
+        # A non-MP3 file off the music path: neither the post
+        # pattern (no /music/ path) nor the file pattern (no
+        # .mp3) claims it.
+        "https://dl.netnaija.com/other/last-last.wav",
+    )
+
+    def test_matches_netnaija_url_shapes_only(self):
+        reg = SiteDescriptorRegistry([NETNAIJA_DESCRIPTOR])
+        for url in self.NETNAIJA_URLS:
+            assert reg.for_url(url) is NETNAIJA_DESCRIPTOR, url
+        for url in self.NOT_NETNAIJA_URLS:
+            assert reg.for_url(url) is None, url
+
+    def test_descriptor_carries_netnaija_behaviour(self):
+        desc = NETNAIJA_DESCRIPTOR
+        assert desc.site == "netnaija"
+        # Canonical ladder minus the connector rung: there is no
+        # NetNaija connector, and yt-dlp has no NetNaija
+        # extractor (supportedsites.md, master, 2026-11-12) — the
+        # kit rung only fetches direct-rule file URLs (the dl. /
+        # files. MP3s) and stays silent on post pages; rendered /
+        # browser land a post in production.
+        assert desc.chain == ("direct", "kit", "proxy", "rendered",
+                              "browser")
+        assert "connector" not in desc.chain
+        assert desc.connector == ""
+        # "region" is evidenced: the whole site geo-blocks
+        # non-NG networks (empty reply / HTTP 521 from this box;
+        # the film host was 403 bot-blocked in the 2026-10-18
+        # verification).  "private" is a removed post.  No login
+        # wall exists on this public WordPress blog — so no login
+        # / preview / drm classes.
+        assert tuple(desc.block_classes) == ("region", "private")
+        # Fully public AND session-less: no accounts exist, so no
+        # session shape is declared — empty on purpose, not missing.
+        assert desc.auth == "none"
+        assert desc.auth_needed is False
+        assert desc.auth_domains == ()
+        assert desc.auth_cookie_names == ()
+        assert desc.downloadable is True
+
+    def test_default_registry_resolves_netnaija_and_keeps_the_others(
+            self):
+        from nomorals.media.site_descriptors import (
+            DEFAULT_SITE_DESCRIPTORS,
+        )
+
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://netnaija.com/music/burna-boy-last-last/"
+            ) is NETNAIJA_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://thenetnaija.com/music/ayra-starr-rush/"
+            ) is NETNAIJA_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://netnaija.com/?s=davido"
+            ) is NETNAIJA_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://dl.netnaija.com/music/last-last.mp3"
+            ) is NETNAIJA_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.get("netnaija") \
+            is NETNAIJA_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://audiomack.com/jstontrapp_/song/kwabena-adu"
+            ) is AUDIOMACK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://mp3.pm/song/170547096/T.I._-_King_Back/"
+            ) is MP3PM_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.tiktok.com/@someuser/video/"
+            "7170520270497680683") is TIKTOK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            ) is YOUTUBE_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://soundcloud.com/a/b") is SOUNDCLOUD_DESCRIPTOR
+
+    def test_netnaija_chain_skips_connector_and_fails_honestly(
+            self, tmp_path):
+        # The descriptor's chain governs the engine for a
+        # NetNaija URL: no rung in this hermetic rig can serve a
+        # post page — the kit rung only fetches direct-rule URLs
+        # (a post page is a page, not a file); there is no
+        # NetNaija connector; the proxy pool is empty; rendered
+        # and browser are unwired — so the report fails honestly,
+        # and the injected connector is never engaged.  In
+        # production the rendered / browser rungs are what land a
+        # post (page extraction); a live landing is NOT proven
+        # here — it needs a Nigerian network and a real track,
+        # and the site is unreachable from this box.
+        from unittest.mock import patch
+
+        connector = SimpleNamespace(
+            stream_url=mock.Mock(
+                side_effect=AssertionError("connector engaged")))
+        registry = SiteDescriptorRegistry([NETNAIJA_DESCRIPTOR])
+        dl = _downloader(tmp_path, connector,
+                         site_descriptors=registry)
+        with patch("nomorals.tools.media.download",
+                   side_effect=_fail_direct):
+            report = dl.download(
+                "https://netnaija.com/music/burna-boy-last-last/",
                 dest_dir=tmp_path, audio_only=True)
         assert report.ok is False
         # Kit silent (page, not a direct-rule file), connector

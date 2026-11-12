@@ -58,6 +58,7 @@ from nomorals.media.site_auth import (
 from nomorals.media.site_descriptors import (
     AUDIOMACK_DESCRIPTOR,
     MP3PM_DESCRIPTOR,
+    NETNAIJA_DESCRIPTOR,
     SOUNDCLOUD_DESCRIPTOR,
     TIKTOK_DESCRIPTOR,
     YOUTUBE_DESCRIPTOR,
@@ -788,4 +789,36 @@ class TestAudiomackSession:
             AUDIOMACK_DESCRIPTOR, require=True)
         assert auth.status == "unavailable"
         assert "audiomack" in auth.reason
+        assert store.gets == 0
+
+
+# ── the NetNaija session (descriptor #6: there is none) ─────────────
+
+
+class TestNetnaijaSession:
+    def test_public_netnaija_needs_no_session(self, tmp_path):
+        # auth "none" without require: the resolver answers ok
+        # without touching vault or estate — public posts need
+        # nothing, and this WordPress blog has no accounts at
+        # all.  The geo-block is a network wall, not a session:
+        # no cookie can open it from outside Nigeria.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            NETNAIJA_DESCRIPTOR)
+        assert auth.ok and auth.source == ""
+        assert store.gets == 0
+
+    def test_require_cannot_resolve_a_session_that_does_not_exist(
+            self, tmp_path):
+        # require=True means "a login block said a session is
+        # needed" — for NetNaija that can never happen (no login
+        # wall on this public blog, no session domain declared),
+        # and the descriptor honestly declares no session domain.
+        # The resolver refuses (unavailable) rather than
+        # inventing a session or answering ok empty.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            NETNAIJA_DESCRIPTOR, require=True)
+        assert auth.status == "unavailable"
+        assert "netnaija" in auth.reason
         assert store.gets == 0

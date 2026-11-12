@@ -22,7 +22,7 @@ rendered stage reports it from the log's license traffic and
 downloads nothing).
 
 Auth: ``auth="none"`` means the public path (SoundCloud, YouTube,
-TikTok, mp3.pm and Audiomack today).
+TikTok, mp3.pm, Audiomack and NetNaija today).
 ``"account"`` / ``"vault"`` name a requirement the authenticated
 rung (B5, :mod:`nomorals.media.site_auth`) honours: a descriptor
 with ``auth != "none"`` resolves its session before the chain
@@ -64,6 +64,7 @@ __all__ = [
     "TIKTOK_DESCRIPTOR",
     "MP3PM_DESCRIPTOR",
     "AUDIOMACK_DESCRIPTOR",
+    "NETNAIJA_DESCRIPTOR",
     "DEFAULT_SITE_DESCRIPTORS",
 ]
 
@@ -589,7 +590,86 @@ AUDIOMACK_DESCRIPTOR = SiteDescriptor(
           "blocks are private only (removed track)",
 )
 
+#: NetNaija — the SIXTH site descriptor: the Nigerian download
+#: blog, in the music chain (``nomorals/media/sources.py``
+#: ``NetNaijaSource``, ``_BASE https://netnaija.com``) but with no
+#: site descriptor until now (sources-abandoned census A4).
+#: WordPress ``?s=`` search, post pages, multi-hop download pages
+#: ending in a direct MP3 link.
+#: URL shapes and their provenance, stated plainly because the
+#: live site could NOT be fetched from this box (see below):
+#: music post ``netnaija.com/music/<slug>/`` — from the in-repo
+#: source and its own tests (``tests/test_audio_sources.py``:
+#: ``/music/burna-boy-last-last/``, ``/music/ayra-starr-rush/``);
+#: the same ``/music/<slug>/`` shape on ``thenetnaija.com`` — the
+#: site's current domain, whose ``/music/`` category is verified
+#: live (cached crawl 2025-06-01; Feedspot lists the music feed
+#: at ``thenetnaija.com/music/``): the post shape is the same
+#: WordPress permalink carried across the domain hop.  Search
+#: ``/?s=<query>`` — ``NetNaijaSource.search_url``.  Download hop
+#: ``/dl/<id>/`` and direct MP3s on ``dl.netnaija.com`` /
+#: ``files.netnaija.com`` — from the source's tests (fixtures
+#: ``dl.netnaija.com/music/last-last.mp3``,
+#: ``files.netnaija.com/x/last-last.mp3``, ``/dl/abc123/``).
+#: Deliberately NOT claimed: the ``/music/`` category and home
+#: (listings, not one playable item); movie / video posts (the
+#: film chain's, ``thenetnaija.net`` — the film seed — is not
+#: claimed here either); ``thenetnaija.net`` at all.
+#: REACHABILITY, honest: from this box on 2026-11-12,
+#: ``netnaija.com`` answers curl with an empty reply (52) and
+#: ``thenetnaija.com`` answers HTTP 521 via Cloudflare — the
+#: live site was NOT fetched, and no post page was re-verified
+#: live in this lane.  This matches the standing caveat (the
+#: source docstring: the site geo-blocks non-Nigerian networks;
+#: ``docs/source-verification-2026-10-18.md``: the film host was
+#: 403 bot-blocked from the verifier network) — the geo-block
+#: stands, unverified end-to-end.  A live NetNaija landing
+#: remains unproven: it needs a Nigerian network and a real
+#: track.  There is no NetNaija connector in
+#: :mod:`nomorals.connectors`, so the chain is the canonical
+#: ladder minus the connector rung — and yt-dlp has NO NetNaija
+#: extractor (supportedsites.md, master, fetched 2026-11-12: no
+#: ``netnaija`` hit), so the kit rung only fetches direct-rule
+#: file URLs (the ``dl.`` / ``files.`` MP3s) and stays silent on
+#: post pages; in production the rendered / browser rungs (page
+#: extraction) are what land a post.  No login wall exists on
+#: this public WordPress blog, so ``auth`` is ``"none"`` with NO
+#: session shape — ``auth_domains`` and ``auth_cookie_names``
+#: are empty ON PURPOSE, not missing (the mp3.pm / Audiomack
+#: shape): a login block can never be classified for NetNaija,
+#: and ``require=True`` answers unavailable rather than
+#: inventing a session.  Blocks: ``region`` (the geo-block — the
+#: whole site answers empty / 521 / 403 from non-NG networks)
+#: and ``private`` (a removed / deleted post).  No ``login`` /
+#: ``preview`` / ``drm`` classes: none is evidenced.
+NETNAIJA_DESCRIPTOR = SiteDescriptor(
+    site="netnaija",
+    url_patterns=(
+        r"https?://([a-z0-9-]+\.)*netnaija\.com/music/[\w-]+",
+        r"https?://([a-z0-9-]+\.)*thenetnaija\.com/music/[\w-]+",
+        r"https?://([a-z0-9-]+\.)*netnaija\.com/\?s=\S+",
+        r"https?://([a-z0-9-]+\.)*thenetnaija\.com/\?s=\S+",
+        r"https?://([a-z0-9-]+\.)*netnaija\.com/dl/[\w-]+",
+        r"https?://(dl|files)\.netnaija\.com/\S*\.mp3\b",
+    ),
+    chain=("direct", "kit", "proxy", "rendered", "browser"),
+    connector="",
+    block_classes=("region", "private"),
+    auth="none",
+    auth_domains=(),
+    auth_cookie_names=(),
+    downloadable=True,
+    notes="NetNaija public music blog: no account, no session "
+          "shape at all; music posts /music/<slug>/ on "
+          "netnaija.com and thenetnaija.com, ?s= search, /dl/ "
+          "hops and dl./files. direct MP3s; no yt-dlp extractor "
+          "and no connector — rendered / browser rungs land a "
+          "post in production; geo-blocked outside Nigeria "
+          "(unreachable from this box: empty reply / HTTP 521); "
+          "blocks are region + private",
+)
+
 #: The descriptors the engine reads by default.
 DEFAULT_SITE_DESCRIPTORS = SiteDescriptorRegistry(
     [SOUNDCLOUD_DESCRIPTOR, YOUTUBE_DESCRIPTOR, TIKTOK_DESCRIPTOR,
-     MP3PM_DESCRIPTOR, AUDIOMACK_DESCRIPTOR])
+     MP3PM_DESCRIPTOR, AUDIOMACK_DESCRIPTOR, NETNAIJA_DESCRIPTOR])
