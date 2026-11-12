@@ -485,9 +485,13 @@ class DJ:
         # ── DJ engine: analyze → energy arc → transition plans ──────────
         from .dj_engine import (
             analyze_track, plan_energy_arc, plan_transition,
-            render_beatmatched_transition, HeuristicTaste,
+            render_beatmatched_transition, select_taste,
         )
-        taste = HeuristicTaste()
+        # Taste rung, via the models-into-classes ladder: the learned
+        # model when the owner's feedback trained it, else the
+        # deterministic heuristic. No feedback exists on a fresh box, so
+        # the heuristic carries the job until the DJ has been used.
+        taste, _taste_rung = select_taste()
         analyses: list = []
         for seg, song, _pick, _style in track_units:
             a = analyze_track(

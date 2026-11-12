@@ -2097,7 +2097,8 @@ class RuntimeGamesMixin:
         keeps everything playable offline)."""
         from ...games.gamemaster import GameMaster
         from ...games.npc import NPCStore
-        return GameMaster(NPCStore(), suggest=self._game_suggest())
+        return GameMaster(NPCStore(),
+                          suggest=self._game_suggest("character_dialogue"))
 
     def _npc_game_id(self, chat_key: str) -> tuple[str | None, str]:
         """(game_id, error). The NPC cast belongs to the live game in
@@ -2217,7 +2218,8 @@ class RuntimeGamesMixin:
             c = store.get_by_name(bits[0])
             if c is None:
                 return f"no character named '{bits[0]}'."
-            suggest = getattr(self.context, "suggest", None)
+            suggest = (self._game_suggest("character_dialogue")
+                       or getattr(self.context, "suggest", None))
             graph = _charagent_graph(store)
             dlg = converse("You are Devon, a warm AI companion.",
                            c, bits[1], suggest, rounds=1, graph=graph)
@@ -2327,7 +2329,8 @@ class RuntimeGamesMixin:
             engine = GameEngine(
                 self.context,
                 send=self._game_send,
-                suggest=self._game_suggest(),
+                suggest=self._game_suggest("character_tactics"),
+                dm_suggest=self._game_suggest("arena_narration"),
                 # §33, unified (groupdup): the engine's autonomous
                 # emissions are gated per chat key, and blocked
                 # rooms are reaped by the sweep — the tick can no
@@ -2349,7 +2352,7 @@ class RuntimeGamesMixin:
                 from ...characters import CharacterStore, register_with_engine
                 register_with_engine(
                     engine, CharacterStore(),
-                    suggest=self._game_suggest())
+                    suggest=self._game_suggest("character_tactics"))
             except Exception as e:
                 record_failure("runtime_games.RuntimeGamesMixin._game_engine", e)
             self._game_engine_obj = engine
@@ -2425,21 +2428,38 @@ class RuntimeGamesMixin:
             return None
         return None
 
-    def _game_suggest(self) -> Callable[[str], str] | None:
+    def _game_suggest(self, job: str = "") -> Callable[[str], str] | None:
         """Optional LLM brain for the game AI — the same router the legacy
         bridge used. Without one the AI plays seeded deterministic moves,
-        which is fully functional on its own."""
+        which is fully functional on its own.
+
+        ``job`` names a models-into-classes ladder job
+        (``character_dialogue`` / ``character_tactics`` /
+        ``arena_narration``). A named job resolves through the ladder
+        (per-device profile + brain availability), so a job whose model
+        rung cannot run here returns None and the code rung carries it.
+        An empty job keeps the exact legacy behaviour (brain if a router
+        exists, else None) for callers that predate the ladder.
+        """
         router = getattr(self.context, "router", None)
         if router is None:
             return None
 
-        def _call(prompt: str) -> str:
+        def _legacy(prompt: str) -> str:
             from ...llm.base import Message
 
-            response = brain_for(self.context).chat([Message(role="user", content=prompt)], task_kind="chat")
+            response = brain_for(self.context).chat(
+                [Message(role="user", content=prompt)], task_kind="chat")
             return getattr(response, "text", "") or ""
 
-        return _call
+        if not job:
+            return _legacy
+        from ...core.profile import detect_profile
+        from ...llm.ladder import resolve
+
+        res = resolve(job, profile=detect_profile(),
+                      brain=brain_for(self.context))
+        return res.suggest
 
     def _game_send(self, chat_key: str, text: str) -> None:
         """Engine output → the same chat it came from, on any platform.

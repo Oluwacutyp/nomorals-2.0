@@ -242,7 +242,9 @@ class GameMind:
     def combat_move(self, self_stats: dict[str, int],
                     foe_stats: dict[str, int],
                     skill: int = 0) -> dict[str, Any]:
-        """Battle arena AI: attack/focus/fury/defend/potion by math.
+        """Battle arena AI: the model may override the math, but the math
+        is the full code rung — a model that cannot run, fails, or names
+        an illegal action never changes the outcome.
 
         Stats use the arena's key names (``atk``/``def``); the old
         ``attack``/``defense`` names are tolerated so external callers
@@ -252,6 +254,57 @@ class GameMind:
         earlier, fury more freely, and guard less panicky — the same brain,
         but the S-rank version fights like it means it.
         """
+        math_move = self._combat_math(self_stats, foe_stats, skill)
+        if not self.model_on:
+            return math_move
+        hp = self_stats.get("hp", 1)
+        foe_hp = foe_stats.get("hp", 1)
+        if hp <= 0 or foe_hp <= 0:
+            return math_move  # fight is over; no model call
+        summary = (
+            "Arena fight. Your HP {hp}/{max_hp}, attack {atk}, defense "
+            "{defense}, potions {potions}, fury ready: {fury}. Foe HP "
+            "{foe_hp}, attack {foe_atk}, defense {foe_def}. The math "
+            "recommends {rec}. Reply with exactly one word: attack, "
+            "focus, fury, defend, or potion."
+        ).format(
+            hp=hp,
+            max_hp=self_stats.get("max_hp", max(hp, 1)),
+            atk=self_stats.get("atk", self_stats.get("attack", 0)),
+            defense=self_stats.get("def", self_stats.get("defense", 0)),
+            potions=self_stats.get("potions", 0),
+            fury="yes" if self_stats.get("fury_cd", 0) <= 0 else "no",
+            foe_hp=foe_hp,
+            foe_atk=foe_stats.get("atk", foe_stats.get("attack", 0)),
+            foe_def=foe_stats.get("def", foe_stats.get("defense", 0)),
+            rec=math_move.get("action", "attack"),
+        )
+        picked = self._parse_combat_action(self.ask(summary))
+        if picked is not None:
+            return {"action": picked}
+        return math_move
+
+    @staticmethod
+    def _parse_combat_action(text: str | None) -> str | None:
+        """One legal combat action from a model reply, else None.
+
+        Tolerant of case, surrounding whitespace, and trailing
+        punctuation ("Focus!", "  potion ") — a reply that does not name
+        exactly one legal action is rejected, never guessed at.
+        """
+        if not text:
+            return None
+        clean = text.strip().lower()
+        if not clean:
+            return None
+        first = clean.split()[0].strip(".,!?:;\"'()[]")
+        legal = {"attack", "focus", "fury", "defend", "potion"}
+        return first if first in legal else None
+
+    def _combat_math(self, self_stats: dict[str, int],
+                     foe_stats: dict[str, int],
+                     skill: int = 0) -> dict[str, Any]:
+        """The deterministic code rung: thresholds by hunter rank."""
         skill = max(0, min(5, int(skill or 0)))
         hp = self_stats.get("hp", 1)
         max_hp = self_stats.get("max_hp", max(hp, 1))

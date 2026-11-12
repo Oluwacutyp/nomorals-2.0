@@ -234,12 +234,19 @@ class GameEngine:
 
     def __init__(self, context: Any, *, send: SendFn | None = None,
                  suggest: Callable[[str], str] | None = None,
+                 dm_suggest: Callable[[str], str] | None = None,
                  blocked: Callable[[str], bool] | None = None
                  ) -> None:
         self.context = context
         self.db = getattr(context, "db", None)
         self._send = send
         self._suggest = suggest
+        #: The arena narrator's own model bridge (ladder job
+        #: "arena_narration"). None = the narrator falls back to
+        #: ``suggest``, and when both are None the template forge
+        #: carries the narration. Tactics and narration resolve as
+        #: separate ladder jobs, so the two bridges stay distinct.
+        self._dm_suggest = dm_suggest
         #: Optional §33 gate: callable(chat_key) -> True when the
         #: room's chat is a group Devon's bot systems must not
         #: play in. Installed by the runtime; None = no gate
@@ -331,12 +338,16 @@ class GameEngine:
         """The table's dungeon master — narrates notable game events in
         each game's DM mood (``/dm mood``). Games push bare events with
         :func:`nomorals.games.gamemaster.feed`; the engine drains the
-        feed after moves and at finish. Created on first use."""
+        feed after moves and at finish. Created on first use. The
+        narrator's model bridge is ``dm_suggest`` (ladder job
+        "arena_narration"), falling back to the tactics bridge, then to
+        the template forge when neither is set."""
         gm = self._dm_obj
         if gm is None:
             from .gamemaster import GameMaster
             from .npc import NPCStore
-            gm = GameMaster(NPCStore(), suggest=self._suggest)
+            gm = GameMaster(NPCStore(),
+                            suggest=self._dm_suggest or self._suggest)
             self._dm_obj = gm
         return gm
 

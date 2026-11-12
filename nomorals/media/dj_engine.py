@@ -64,6 +64,10 @@ __all__ = [
     "render_beatmatched_transition",
     "TasteModel",
     "HeuristicTaste",
+    "LearnedTaste",
+    "MIN_TRAINED_ROWS",
+    "DEFAULT_FEEDBACK_PATH",
+    "select_taste",
     "log_feedback",
     "TASTE_FEATURE_SCHEMA",
 ]
@@ -746,6 +750,9 @@ def render_beatmatched_transition(mix: array, out_samples: array,
 #: Feature schema a future taste model trains on. Every transition the DJ
 #: renders logs one row (see log_feedback); a small model can learn
 #: P(keep | features) from the owner's skip/like/rating events.
+#: NOTE on "same_style": TrackAnalysis carries no style tag today, so
+#: rows log 0 for it until a style source lands. It is a documented gap,
+#: not a silent zero — the learner simply does not use it.
 TASTE_FEATURE_SCHEMA = {
     "bpm_delta_pct": "abs(b.bpm - a.bpm) / a.bpm",
     "harmonic_score": "0..1 Camelot compatibility",
@@ -806,6 +813,9 @@ class HeuristicTaste:
 
 _FEEDBACK_DIR = Path(os.path.expanduser("~")) / ".cache" / "nomorals" / "dj"
 
+#: Default feedback log path (the same file log_feedback appends to).
+DEFAULT_FEEDBACK_PATH = _FEEDBACK_DIR / "taste-feedback.jsonl"
+
 
 def log_feedback(event: str, *, track_id: str = "",
                  out_id: str = "", in_id: str = "",
@@ -824,3 +834,210 @@ def log_feedback(event: str, *, track_id: str = "",
             f.write(json.dumps(row) + "\n")
     except Exception:  # noqa: BLE001
         _log.debug("taste feedback log failed", exc_info=True)
+
+
+#: Rows of labelled feedback needed before the learned model is trusted.
+#: Below this the model answers 0.5 (neutral) and the caller keeps the
+#: heuristic — an untrained model never pretends to know the owner's ear.
+MIN_TRAINED_ROWS = 8
+
+#: Online-learning constants — the SAME update rule as the producer
+#: taste model (nomorals/media/taste_model.py): w += lr * (y - tanh(w.x))
+#: * x, lr 0.35, decay 0.995, weights bounded to +/-3.0. Different job
+#: (DJ transitions vs producer song choice), same mechanism.
+_TASTE_LR = 0.35
+_TASTE_DECAY = 0.995
+_TASTE_W_MAX = 3.0
+
+#: Feature order for the learned ranker (must match TASTE_FEATURE_SCHEMA).
+_FEATURE_ORDER = ("bpm_delta_pct", "harmonic_score", "energy_delta",
+                  "energy_abs_b", "blend", "echo-drop", "break",
+                  "same_style")
+_KIND_KEYS = ("blend", "echo-drop", "break")
+_KEEP_EVENTS = {"kept", "liked", "rated", "played"}
+_SKIP_EVENTS = {"skipped"}
+
+
+def _transition_features(out_trk: TrackAnalysis, in_trk: TrackAnalysis,
+                         plan: TransitionPlan) -> dict[str, Any]:
+    """Canonical TASTE_FEATURE_SCHEMA row for one transition."""
+    a_bpm = out_trk.bpm or 0.0
+    b_bpm = in_trk.bpm or 0.0
+    base = max(a_bpm, 1.0)
+    kind = getattr(plan, "kind", "") or ""
+    one_hot = {k: 1.0 if k == kind else 0.0 for k in _KIND_KEYS}
+    return {
+        "bpm_delta_pct": abs(b_bpm - a_bpm) / base,
+        "harmonic_score": harmonic_score(out_trk, in_trk),
+        "energy_delta": in_trk.energy - out_trk.energy,
+        "energy_abs_b": in_trk.energy,
+        "transition_kind": one_hot,
+        "same_style": 0,  # no style tag on TrackAnalysis yet (see schema)
+    }
+
+
+def _features_to_vector(features: dict[str, Any]) -> list[float]:
+    """TASTE_FEATURE_SCHEMA row -> the 8-dim learner vector."""
+    kind = features.get("transition_kind", {}) or {}
+    if isinstance(kind, str):
+        kind = {k: 1.0 if k == kind else 0.0 for k in _KIND_KEYS}
+    elif isinstance(kind, dict):
+        kind = {k: float(kind.get(k, 0.0) or 0.0) for k in _KIND_KEYS}
+    else:
+        kind = {k: 0.0 for k in _KIND_KEYS}
+    row = {
+        "bpm_delta_pct": float(features.get("bpm_delta_pct", 0.0) or 0.0),
+        "harmonic_score": float(features.get("harmonic_score", 0.0) or 0.0),
+        "energy_delta": float(features.get("energy_delta", 0.0) or 0.0),
+        "energy_abs_b": float(features.get("energy_abs_b", 0.0) or 0.0),
+        "blend": kind["blend"],
+        "echo-drop": kind["echo-drop"],
+        "break": kind["break"],
+        "same_style": float(features.get("same_style", 0.0) or 0.0),
+    }
+    return [max(-2.0, min(2.0, row[k])) for k in _FEATURE_ORDER]
+
+
+def _row_label(row: dict[str, Any]) -> int | None:
+    """1 = the owner kept it, 0 = skipped, None = no usable label."""
+    label = row.get("label")
+    if label is not None:
+        try:
+            return 1 if int(label) == 1 else 0
+        except (TypeError, ValueError):
+            return None
+    event = str(row.get("event", "") or "").strip().lower()
+    if event in _KEEP_EVENTS:
+        return 1
+    if event in _SKIP_EVENTS:
+        return 0
+    return None
+
+
+class LearnedTaste:
+    """The DJ model: an online logistic ranker over transition features.
+
+    Trained on the owner's own feedback — the rows ``log_feedback``
+    appends when a transition is kept or skipped. Same mechanism as the
+    producer taste model (``nomorals/media/taste_model.py``): online
+    logistic update ``w += lr * (y - tanh(w.x)) * x`` per labelled row.
+
+    Honest about its state: until ``MIN_TRAINED_ROWS`` labelled rows
+    have been applied it is ``trained == False`` and scores 0.5
+    (neutral) — the caller then keeps the ``HeuristicTaste`` code rung.
+    No feedback data exists on a fresh box, so the heuristic carries the
+    job until the DJ has actually been used.
+    """
+
+    def __init__(self, weights: list[float] | None = None,
+                 bias: float = 0.0, rows: int = 0) -> None:
+        self._weights = (list(weights) if weights is not None
+                         else [0.0] * len(_FEATURE_ORDER))
+        self._bias = float(bias)
+        self._rows = int(rows)
+
+    @property
+    def trained(self) -> bool:
+        return self._rows >= MIN_TRAINED_ROWS
+
+    @property
+    def rows_seen(self) -> int:
+        return self._rows
+
+    def _update(self, vec: list[float], label: int) -> None:
+        z = self._bias + sum(w * x for w, x in zip(self._weights, vec, strict=True))
+        err = label - math.tanh(z)
+        self._weights = [
+            max(-_TASTE_W_MAX,
+                min(_TASTE_W_MAX,
+                    (w + _TASTE_LR * err * x) * _TASTE_DECAY))
+            for w, x in zip(self._weights, vec, strict=True)]
+        self._bias = max(-_TASTE_W_MAX,
+                         min(_TASTE_W_MAX,
+                             (self._bias + _TASTE_LR * err) * _TASTE_DECAY))
+        self._rows += 1
+
+    def fit(self, rows: list[dict[str, Any]] | None) -> bool:
+        """Apply labelled feedback rows. True if any row was applied."""
+        applied = False
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            label = _row_label(row)
+            if label is None:
+                continue
+            features = row.get("features") or {}
+            if not isinstance(features, dict):
+                continue
+            self._update(_features_to_vector(features), label)
+            applied = True
+        return applied
+
+    def fit_from_log(self, path: str | Path | None = None) -> bool:
+        """Apply the JSONL feedback log. True if any row was applied.
+
+        A missing or unreadable log is False, never an exception — a
+        fresh box simply has no feedback yet.
+        """
+        target = Path(path) if path is not None else DEFAULT_FEEDBACK_PATH
+        try:
+            lines = target.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeDecodeError):
+            return False
+        rows: list[dict[str, Any]] = []
+        for line in lines:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(parsed, dict):
+                rows.append(parsed)
+        return self.fit(rows)
+
+    def _score_vec(self, vec: list[float]) -> float:
+        z = self._bias + sum(w * x for w, x in zip(self._weights, vec, strict=True))
+        return round(0.5 * (1.0 + math.tanh(z)), 3)
+
+    def score_transition(self, out_trk: TrackAnalysis,
+                         in_trk: TrackAnalysis,
+                         plan: TransitionPlan) -> float:
+        if not self.trained:
+            return 0.5
+        return self._score_vec(
+            _features_to_vector(
+                _transition_features(out_trk, in_trk, plan)))
+
+    def score_sequence(self, tracks: list[TrackAnalysis]) -> float:
+        if len(tracks) < 2:
+            return 1.0
+        if not self.trained:
+            return 0.5
+        scores = [self.score_transition(tracks[i], tracks[i + 1],
+                                        plan_transition(tracks[i],
+                                                        tracks[i + 1]))
+                  for i in range(len(tracks) - 1)]
+        return round(sum(scores) / len(scores), 3)
+
+
+def select_taste(feedback_path: str | Path | None = None
+                 ) -> tuple[TasteModel, str]:
+    """Pick the DJ taste rung through the models-into-classes ladder.
+
+    Fits a ``LearnedTaste`` from the feedback log, then asks the ladder
+    (job ``dj_sound_selection``) whether the learned model is available.
+    Returns ``(taste, rung)`` — ``"model"`` with the trained learner, or
+    ``"code"`` with the deterministic ``HeuristicTaste`` when there is
+    no feedback yet (the honest state on a fresh box).
+    """
+    from ..llm.ladder import resolve
+
+    learned = LearnedTaste()
+    learned.fit_from_log(feedback_path)
+    res = resolve("dj_sound_selection",
+                  model_available=lambda: learned.trained)
+    if res.rung == "model":
+        return learned, "model"
+    return HeuristicTaste(), "code"
