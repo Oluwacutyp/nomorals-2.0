@@ -47,6 +47,17 @@ _LOCK_RETRY_ATTEMPTS = 6
 _LOCK_RETRY_BASE_DELAY_S = 0.05
 #: Upper bound (seconds) for a single backoff sleep.
 _LOCK_RETRY_MAX_DELAY_S = 2.0
+#: Bound (seconds) for acquiring the process-wide write lock in
+#: :meth:`Database.transaction`. The lock used to be acquired
+#: unboundedly: a worker abandoned mid-transaction held it forever
+#: and every later transaction() in the process blocked forever
+#: (reproduced: a holder sleeping inside a transaction blocked a
+#: second transaction() past a 60s wall). SQLite's own BEGIN IMMEDIATE
+#: already serializes writers at the file level with a bounded retry,
+#: so the process lock is a fast-path optimization, not correctness —
+#: it must fail fast with the holder named instead of hanging the
+#: process.
+_WRITE_LOCK_TIMEOUT_S = 30.0
 
 
 def _lock_retry_delay(attempt: int) -> float:
@@ -115,6 +126,12 @@ class Database:
 
         self._local = threading.local()
         self._write_lock = threading.RLock()
+        #: Which thread holds _write_lock (ident/name/since), if any.
+        self._write_lock_holder: dict[str, Any] | None = None
+        #: Thread ident -> that thread's live connection (for
+        #: interrupt_thread(): a stuck SQLite step on one thread is
+        #: aborted from another via conn.interrupt()).
+        self._by_thread: dict[int, sqlite3.Connection] = {}
         self._all_connections: list[sqlite3.Connection] = []
         self._all_lock = threading.Lock()
         #: Guards ``stats``: execute()/transaction() run on every worker
@@ -164,6 +181,7 @@ class Database:
         self._local.conn = conn
         with self._all_lock:
             self._all_connections.append(conn)
+            self._by_thread[threading.get_ident()] = conn
         return conn
 
     def _configure(self, conn: sqlite3.Connection) -> None:
@@ -208,6 +226,7 @@ class Database:
         self._closed = True
         with self._all_lock:
             connections, self._all_connections = self._all_connections, []
+            self._by_thread.clear()
         for conn in connections:
             try:
                 conn.close()
@@ -236,10 +255,79 @@ class Database:
         with self._all_lock:
             if conn in self._all_connections:
                 self._all_connections.remove(conn)
+            self._by_thread.pop(threading.get_ident(), None)
         try:
             conn.close()
         except sqlite3.Error:  # pragma: no cover - close is best-effort here
             _log.debug("thread connection close failed", exc_info=True)
+
+    def interrupt_thread(self, ident: int) -> bool:
+        """Abort a pending SQLite step on another thread's connection.
+
+        ``sqlite3.Connection.interrupt()`` is the one safe cross-thread
+        prod: a worker stuck inside a long stepping loop (fetchall over
+        a huge result) aborts at the next step with
+        ``OperationalError("interrupted")`` — measured 0.19s — and its
+        transaction() finally-block then rolls back and releases the
+        write lock, so the abandoned thread unwinds instead of
+        lingering with the lock held. It does NOT abort a step blocked
+        inside a user-defined function (SQLite only checks the flag
+        between VDBE steps) — that limitation is real and named here.
+        Never raises; False when the thread has no live connection.
+        """
+        try:
+            with self._all_lock:
+                conn = self._by_thread.get(int(ident))
+            if conn is None:
+                return False
+            conn.interrupt()
+            return True
+        except Exception:  # noqa: BLE001 - teardown is best-effort
+            _log.debug("interrupt_thread failed", exc_info=True)
+            return False
+
+    def lock_state(self) -> dict[str, Any]:
+        """Snapshot of the DB lock state for a stuck-call report.
+
+        Names the write-lock holder (thread + how long held), the
+        journal mode actually achieved, the WAL sidecar size, and how
+        many connections hold an open transaction — the facts that
+        decide whether a stuck job is lock-blocked, WAL-starved, or
+        elsewhere. Never raises; best-effort reads only.
+        """
+        holder: dict[str, Any] | None = None
+        with self._all_lock:
+            raw = self._write_lock_holder
+            if raw is not None:
+                holder = {
+                    "thread": str(raw.get("name") or raw.get("ident") or "?"),
+                    "ident": raw.get("ident"),
+                    "held_s": round(time.monotonic() - float(
+                        raw.get("since") or time.monotonic()), 1),
+                }
+            open_txns = 0
+            for conn in list(self._all_connections):
+                try:
+                    if conn.in_transaction:
+                        open_txns += 1
+                except Exception:  # noqa: BLE001 - closed conn
+                    pass
+            n_conns = len(self._all_connections)
+        try:
+            journal = self.journal_mode()
+        except Exception:  # noqa: BLE001
+            journal = "unknown"
+        try:
+            wal_bytes = self.wal_size_bytes()
+        except Exception:  # noqa: BLE001
+            wal_bytes = -1
+        return {
+            "write_lock_holder": holder,
+            "journal_mode": journal,
+            "wal_bytes": wal_bytes,
+            "connections": n_conns,
+            "open_transactions": open_txns,
+        }
 
     def __enter__(self) -> "Database":
         return self
@@ -442,7 +530,31 @@ class Database:
                 self._depth.value = depth
             return
 
-        self._write_lock.acquire()
+        if not self._write_lock.acquire(timeout=_WRITE_LOCK_TIMEOUT_S):
+            # Bounded, with the holder named: an abandoned worker
+            # mid-transaction used to hold this lock forever and every
+            # later transaction() in the process blocked forever with
+            # it. Fail fast instead — the caller (a job) fails
+            # honestly and the alert names who holds the lock.
+            holder = self._write_lock_holder
+            if holder is not None:
+                held = time.monotonic() - float(
+                    holder.get("since") or time.monotonic())
+                who = str(holder.get("name") or holder.get("ident") or "?")
+                raise StorageError(
+                    f"database write lock held by thread {who} for "
+                    f"{held:.1f}s (>{_WRITE_LOCK_TIMEOUT_S:g}s wait) — "
+                    "a previous job may have been abandoned "
+                    "mid-transaction")
+            raise StorageError(
+                "database write lock not acquired in "
+                f"{_WRITE_LOCK_TIMEOUT_S:g}s")
+        with self._all_lock:
+            self._write_lock_holder = {
+                "ident": threading.get_ident(),
+                "name": threading.current_thread().name,
+                "since": time.monotonic(),
+            }
         try:
             self.execute("BEGIN IMMEDIATE" if immediate else "BEGIN")
             self._depth.value = 1
@@ -457,6 +569,11 @@ class Database:
             finally:
                 self._depth.value = 0
         finally:
+            with self._all_lock:
+                if self._write_lock_holder is not None and \
+                        self._write_lock_holder.get("ident") == \
+                        threading.get_ident():
+                    self._write_lock_holder = None
             self._write_lock.release()
 
     def _safe(self, sql: str) -> None:

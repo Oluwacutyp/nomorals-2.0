@@ -81,6 +81,7 @@ import random
 import re
 import threading
 import time
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from typing import Any
@@ -1808,8 +1809,13 @@ class Scheduler:
             # Slice the join so the watchdog can sample the worker's
             # stack while it runs — a single join(timeout_s) would
             # only learn the thread was alive, never WHAT it was in.
+            # The samples are ALSO histogrammed: a timeout that only
+            # reports the last sample cannot tell whether the stuck
+            # call owned the whole wall or was merely where the
+            # thread happened to be when the wall hit.
             deadline = time.monotonic() + float(timeout_s)
             last_stack = ""
+            samples: Counter[str] = Counter()
             while True:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1818,6 +1824,8 @@ class Scheduler:
                 if not worker.is_alive():
                     break
                 last_stack = self._sample_worker_stack(worker)
+                if last_stack:
+                    samples[last_stack] += 1
             if worker.is_alive():
                 job_id = str(row.get("id") or "")
                 job_name = str(row.get("name") or "")
@@ -1825,16 +1833,41 @@ class Scheduler:
                 self._record_abandoned(job_id, worker, last_stack,
                                        timeout_s)
                 outstanding = self.abandoned_count(job_id)
+                # Teardown, not just a record: an abandoned worker is
+                # never stopped by Python, but its SQLite step CAN be
+                # aborted — interrupt its thread-local connection so
+                # a stuck fetchall unwinds, its transaction rolls
+                # back, and the process-wide write lock is released
+                # instead of being held forever by a thread nobody
+                # waits on anymore. Best-effort: a worker stuck in a
+                # network call (not a SQLite step) is unaffected.
+                interrupted = self._interrupt_worker_db(worker)
+                detail = ""
+                if samples:
+                    top = "; ".join(
+                        f"{frame} ~{n * self._WATCHDOG_SLICE_S:.0f}s"
+                        for frame, n in samples.most_common(3))
+                    detail += f" — where the time went: {top}"
+                lock_summary, lock_info = self._db_lock_summary()
+                if lock_summary:
+                    detail += f" — db: {lock_summary}"
+                detail += (" — db interrupt sent to the stuck worker"
+                           if interrupted else
+                           " — db interrupt not sent "
+                           "(no live db connection for the worker)")
                 self._last_guard_timeout = {
                     "stuck": stuck, "abandoned": outstanding,
                     "timeout_s": float(timeout_s),
+                    "samples": dict(samples),
+                    "interrupted": interrupted,
+                    "db_lock": lock_info,
                 }
                 return (False,
                         f"job failed: timed out after {timeout_s:g}s "
                         f"in {stuck} (worker abandoned; "
                         f"{outstanding} abandoned worker(s) "
                         f"outstanding for {job_name!r}; the stuck "
-                        "call may still be running)",
+                        f"call may still be running){detail}",
                         True, False, None, None)
         if "error" in box:
             return (False, f"job failed: {box['error']}", False,
@@ -1891,6 +1924,61 @@ class Scheduler:
                 "timeout_s": float(timeout_s),
             })
             self._abandoned[job_id] = entries
+
+    def _interrupt_worker_db(self, worker: threading.Thread) -> bool:
+        """Abort the abandoned worker's pending SQLite step, if any.
+
+        The worker thread itself cannot be stopped, but its
+        thread-local DB connection can be interrupted from here
+        (``Database.interrupt_thread``): a stuck fetchall aborts at
+        the next step and the worker unwinds — its transaction rolls
+        back and the write lock is released — instead of lingering
+        with the lock held. Never raises; False when there is no db
+        or no live connection for the worker.
+        """
+        try:
+            db = getattr(self, "db", None)
+            interrupt = getattr(db, "interrupt_thread", None) \
+                if db is not None else None
+            if interrupt is None or not worker.ident:
+                return False
+            return bool(interrupt(worker.ident))
+        except Exception:  # noqa: BLE001 - teardown is best-effort
+            return False
+
+    def _db_lock_summary(self) -> tuple[str, dict[str, Any]]:
+        """One-line DB lock state for a stuck-call report.
+
+        Returns (summary, raw lock_state dict). The summary names the
+        write-lock holder + hold time, the journal mode actually
+        achieved, the WAL size, and open transactions — the facts
+        that decide whether a stuck job is lock-blocked, WAL-starved,
+        or elsewhere. ("", {}) when there is no db or no lock_state.
+        """
+        try:
+            db = getattr(self, "db", None)
+            state_fn = getattr(db, "lock_state", None) \
+                if db is not None else None
+            if state_fn is None:
+                return "", {}
+            info = state_fn()
+            if not isinstance(info, dict):
+                return "", {}
+        except Exception:  # noqa: BLE001 - diagnostics never break alerts
+            return "", {}
+        holder = info.get("write_lock_holder") or {}
+        if holder:
+            held = f"write-lock held by {holder.get('thread', '?')} " \
+                   f"{holder.get('held_s', '?')}s"
+        else:
+            held = "write-lock free"
+        wal = info.get("wal_bytes")
+        wal_s = f"{wal / 1048576:.1f}MB" \
+            if isinstance(wal, (int, float)) and wal >= 0 else "?"
+        summary = (f"{held}; journal {info.get('journal_mode', '?')}; "
+                   f"wal {wal_s}; open txns "
+                   f"{info.get('open_transactions', '?')}")
+        return summary, info
 
     def abandoned_count(self, job_id: str) -> int:
         """Live abandoned workers outstanding for this job (pruned)."""
