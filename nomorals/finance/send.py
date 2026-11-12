@@ -162,6 +162,14 @@ def resolve_recipient(
     Unknown recipients are asked about — never guessed.
     """
     store = store or RecipientStore()
+    if not (name or "").strip():
+        # No name at all: ask WHO, never probe for bank details
+        # of an unnamed person.
+        return {
+            "ok": False,
+            "needs": "recipient",
+            "ask": "who should I send it to?",
+        }
     rec = store.get(name)
     if rec is not None:
         return {"ok": True, "recipient": rec}

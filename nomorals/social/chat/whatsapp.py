@@ -1496,6 +1496,18 @@ class WhatsAppAdapter(ChatAdapter):
             chat_id = str(chat.get("id") or "")
             if not chat_id:
                 return
+            # Cross-branch dedupe (ownmsg fix): the same platform
+            # message id delivered as a turn through the "message"
+            # branch must not deliver a second turn here, and vice
+            # versa — _seen_inbound_redelivery records the id on
+            # first sight and both branches consult the one set.
+            # One platform message, one turn.
+            _mid = str(obj.get("id") or "")
+            if _mid and self._seen_inbound_redelivery(_mid):
+                _log.info(
+                    "whatsapp: dropping redelivered own_message %s",
+                    _mid)
+                return
             ts = obj.get("ts") or 0
             try:
                 ts = float(ts) / 1000.0
@@ -1831,6 +1843,29 @@ class WhatsAppAdapter(ChatAdapter):
                 # person into one identity instead of minting a
                 # second one per form (register #29).
                 wa_msg.meta["sender_alt_id"] = _alt
+            # Own-account recognition (ownmsg fix): the bridge
+            # delivers the paired account's own messages in
+            # groups as ordinary "message" events (Baileys
+            # fromMe) as well as own_message events, and this
+            # branch used to stamp nothing for them — so the
+            # runtime's _is_operator fell through (the sender
+            # allowlist is Telegram ids; a group chat is not an
+            # owner chat) and the §33 gate fired on the owner's
+            # own /game quit. The sender is the paired account
+            # when from.id — or its reported alt form — matches
+            # the account's phone JID or LID: stamp from_owner,
+            # and owner_command when the text parses as a
+            # registered command (the same stamps the
+            # own_message carve-out applies). Plain own text
+            # stays as-him conversation — commands only.
+            _from_id = str((obj.get("from") or {}).get("id") or "")
+            _own_ids = {v for v in (self.user_jid, self.user_lid)
+                        if v}
+            if _from_id and (_from_id in _own_ids
+                             or (_alt and _alt in _own_ids)):
+                wa_msg.meta["from_owner"] = True
+                if _is_command_text(wa_msg.text):
+                    wa_msg.meta["owner_command"] = True
             if ts and (time.time() - ts) > STALE_INBOUND_S:
                 # Offline-delivered / history-replayed on (re)connect:
                 # observed by the runtime, never answered or executed

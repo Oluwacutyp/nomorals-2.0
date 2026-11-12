@@ -250,6 +250,15 @@ _CATEGORY_WORDS: frozenset[str] = frozenset(
 )
 
 
+#: An instruction verb as the first word of a "recipient" capture
+#: is a misparse, not a person ("send 5k for memorize these" —
+#: the user is instructing, not naming someone). Refused here so
+#: the send flow never asks for that "person's" bank details.
+_INSTRUCTION_FIRST_WORDS: frozenset[str] = frozenset(
+    {"memorize", "memorise", "remember", "save", "note", "store",
+     "record"})
+
+
 def _extract_recipient(text: str) -> str | None:
     """Recipient after to/fún/sí/give/for/zuwa/nye, or 'me' for 'send me'.
 
@@ -268,6 +277,8 @@ def _extract_recipient(text: str) -> str | None:
         if not parts:
             return None
         if parts[0].lower() in _CATEGORY_WORDS:
+            return None
+        if parts[0].lower() in _INSTRUCTION_FIRST_WORDS:
             return None
         return " ".join(parts)
     return None
