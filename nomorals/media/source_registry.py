@@ -2729,6 +2729,7 @@ def _seed(store: Any = None) -> SourceRegistry:
         ("GLOBAL", "en", "commons.wikimedia.org", "Wikimedia Commons", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "Freely licensed audio files via the MediaWiki API", 10),
         ("US", "en", "itunes.apple.com", "iTunes Search API", ("music", "music-search"), Licence.LICENSED, TrustTier.VERIFIED, "30-second previews only — last-resort in the chain", 10),
         ("FR", "en", "api.deezer.com", "Deezer API", ("music", "music-search"), Licence.LICENSED, TrustTier.VERIFIED, "30-second previews only — last-resort in the chain", 10),
+        ("GLOBAL", "en", "api.jamendo.com", "Jamendo", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "CC catalogue; v3.0 tracks API needs a free client_id (NM_JAMENDO_CLIENT_ID) — without it the chain skips Jamendo honestly; the API root answers HTTP 200, so the health loop's root probe is honest", 10),
         # ── film chain hosts not already seeded (Pass #93) ──
         # archive.org and thenetnaija.net above already carry the
         # film class (their kinds were extended — one host, one
@@ -2799,6 +2800,7 @@ def _seed(store: Any = None) -> SourceRegistry:
         "commons.wikimedia.org": ("", (r"wikimedia\.org",), (), True),
         "itunes.apple.com": ("", (r"itunes\.apple\.com",), (), True),
         "api.deezer.com": ("", (r"deezer\.com",), (), True),
+        "api.jamendo.com": ("", (r"jamendo\.com",), (), True),
     }
     # Real search endpoints the health loop probes through (Pass
     # #93, film class): a root page proves nothing about search

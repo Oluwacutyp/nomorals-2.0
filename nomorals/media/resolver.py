@@ -542,6 +542,7 @@ class SourceResolver:
             ("youtube-search", self._youtube_search_many),
             ("youtube-music-search", self._youtube_music_search_many),
             ("archiveorg-search", self._archiveorg_search_many),
+            ("jamendo-search", self._jamendo_search_many),
             ("musicbrainz-search", self._musicbrainz_search_many),
             ("openverse-search", self._openverse_search_many),
             ("wikimedia-search", self._wikimedia_search_many),
@@ -794,6 +795,12 @@ class SourceResolver:
                 source_name="Internet Archive search"))
         return out
 
+    def _jamendo_search_many(self, query: str,
+                             limit: int) -> list[ResolvedAudio]:
+        return self._api_source_search_many(
+            query, limit, "JamendoSource", "jamendo",
+            "Jamendo search", downloadable=True)
+
     def _preview_search_many(self, query: str, limit: int,
                              cls_name: str, kind: str,
                              label: str) -> list[ResolvedAudio]:
@@ -1017,6 +1024,8 @@ class SourceResolver:
             ("youtube-music-search",
              lambda: self._s_youtube_music_search(query)),
             ("archiveorg-search", lambda: self._s_archiveorg_search(query)),
+            ("jamendo-search", lambda: self._s_blog_search(
+                query, "JamendoSource", "jamendo")),
             ("boomplay-search", lambda: self._s_boomplay_search(query)),
             ("musicbrainz-search", lambda: self._s_metadata_search(
                 query, "MusicBrainzSource", "musicbrainz",

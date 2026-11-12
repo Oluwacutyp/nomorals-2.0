@@ -121,6 +121,7 @@ SEARCH_ATTEMPTS = [
     "youtube-search — ok (1)",
     "youtube-music-search — no results",
     "archiveorg-search — no results",
+    "jamendo-search — no results",
     "musicbrainz-search — no results",
     "openverse-search — no results",
     "wikimedia-search — no results",
@@ -348,6 +349,7 @@ def test_search_candidates_detailed_reports_all_sources():
             mock.patch.object(r, "_notjustok_search_many", return_value=[]), \
             mock.patch.object(r, "_tooxclusive_search_many", return_value=[]), \
             mock.patch.object(r, "_archiveorg_search_many", return_value=[]), \
+            mock.patch.object(r, "_jamendo_search_many", return_value=[]), \
             mock.patch.object(r, "_musicbrainz_search_many", return_value=[]), \
             mock.patch.object(r, "_openverse_search_many", return_value=[]), \
             mock.patch.object(r, "_wikimedia_search_many", return_value=[]), \
@@ -360,7 +362,8 @@ def test_search_candidates_detailed_reports_all_sources():
                  "tooxclusive-search", "soundcloud-search",
                  "bandcamp-search", "youtube-search",
                  "youtube-music-search",
-                 "archiveorg-search", "musicbrainz-search",
+                 "archiveorg-search", "jamendo-search",
+                 "musicbrainz-search",
                  "openverse-search", "wikimedia-search",
                  "itunes-search", "deezer-search"):
         assert name in joined, joined
@@ -431,6 +434,7 @@ def test_control_play_chat_falls_through_to_youtube():
         "youtube-search — ok (1)",
         "youtube-music-search — no results",
         "archiveorg-search — no results",
+        "jamendo-search — no results",
         "musicbrainz-search — no results",
         "openverse-search — no results",
         "wikimedia-search — no results",

@@ -364,12 +364,17 @@ MUSIC_REGISTRY: List[MusicSource] = [
        licence="CC per-track (see track page)", volatility="institutional",
        bulk=False, api=True, bot_wall=False, etiquette=PER_TRACK,
        notes="Curated free archive; check the per-track licence before use."),
-    _M(id="jamendo", name="Jamendo", source_class="open", auth="none",
+    _M(id="jamendo", name="Jamendo", source_class="open", auth="api_key",
        formats=["MP3", "FLAC"], quality_ceiling="varies by track",
        licence="CC per-track; paid commercial tier separate",
        volatility="commercial", bulk=False, api=True, bot_wall=False,
        etiquette=PER_TRACK,
-       notes="Creative Commons catalogue plus a separate paid commercial tier."),
+       notes="Creative Commons catalogue plus a separate paid commercial "
+             "tier. The v3.0 API needs a free client_id (register at "
+             "devportal.jamendo.com; set NM_JAMENDO_CLIENT_ID) — "
+             "verified live 2026-11-12: a no-key call fails with "
+             "'Invalid Client Id'. Without it the /play chain skips "
+             "Jamendo honestly."),
     _M(id="ccmixter", name="ccMixter", source_class="open", auth="none",
        formats=["MP3", "FLAC", "WAV"], quality_ceiling="varies by track",
        licence="CC per-track (remix-friendly)", volatility="indie",

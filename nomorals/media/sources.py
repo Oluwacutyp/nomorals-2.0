@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import abc
 import html as html_mod
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -51,6 +52,7 @@ __all__ = [
     "ITunesSource",
     "DeezerSource",
     "ArchiveOrgSource",
+    "JamendoSource",
     "BandcampSource",
     "NotJustOkSource",
     "TooXclusiveSource",
@@ -890,6 +892,71 @@ class ArchiveOrgSource(AudioSource):
         return ""
 
 
+class JamendoSource(_JsonApiSource):
+    """Jamendo — Creative Commons catalogue, full downloadable tracks.
+
+    The v3.0 tracks API is free but NOT keyless: every request needs
+    a ``client_id`` (verified live 2026-11-12 — a no-key call fails
+    with "Jamendo Api Invalid Client Id Error").  Register a free
+    application at devportal.jamendo.com and set
+    ``NM_JAMENDO_CLIENT_ID``; without it ``search()`` returns []
+    immediately (no wasted round-trip, no invented key — the chain
+    moves on and the registry records a no-result, never a failure).
+    The ``audio`` / ``audiodownload`` fields are the FULL track as
+    MP3 — Jamendo serves whole CC songs, never 30-second previews —
+    so candidates are FULL-class (``candidate_asset_class`` == "full").
+    """
+
+    name = "jamendo"
+    _API = "https://api.jamendo.com/v3.0/tracks/"
+
+    @staticmethod
+    def _client_id() -> str:
+        return os.environ.get("NM_JAMENDO_CLIENT_ID", "").strip()
+
+    def search_url(self, query: str) -> str:
+        """The tracks URL this source fetches (registry probe)."""
+        params = ("format=json&search="
+                  + urllib.parse.quote_plus((query or "").strip())
+                  + "&limit=8")
+        cid = self._client_id()
+        if cid:
+            params = ("client_id=" + urllib.parse.quote_plus(cid)
+                      + "&" + params)
+        return self._API + "?" + params
+
+    def search(self, query: str, limit: int = 8) -> list[SourceCandidate]:
+        if not self._client_id():
+            _log.info("jamendo: no NM_JAMENDO_CLIENT_ID set — register a "
+                      "free app at devportal.jamendo.com and set it; "
+                      "skipping text search for %r", (query or "")[:60])
+            return []
+        return super().search(query, limit=limit)
+
+    def parse(self, payload: Any, query: str) -> list[SourceCandidate]:
+        out: list[SourceCandidate] = []
+        for row in (payload or {}).get("results") or []:
+            if not isinstance(row, dict):
+                continue
+            direct = (str(row.get("audiodownload") or "")
+                      or str(row.get("audio") or ""))
+            if not direct:
+                continue  # no audio field = not a candidate, never metadata
+            title = str(row.get("name") or "")
+            artist = str(row.get("artist_name") or "")
+            page = str(row.get("shareurl") or "")
+            out.append(SourceCandidate(
+                source=self.name, title=title or query, artist=artist,
+                url=direct, direct_url=direct,
+                duration=float(row.get("duration") or 0),
+                downloadable=True,
+                extra={"page": page,
+                       "album": str(row.get("album_name") or ""),
+                       "license": str(row.get("license_ccurl") or ""),
+                       "note": "Jamendo — full track, CC-licensed"}))
+        return out
+
+
 class BandcampSource(AudioSource):
     """Bandcamp search — HTML, keyless.  Full-track streams via yt-dlp.
 
@@ -981,6 +1048,7 @@ SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("tooxclusive-search", TooXclusiveSource()),
     ("bandcamp-search", BandcampSource()),
     ("archiveorg-search", ArchiveOrgSource()),
+    ("jamendo-search", JamendoSource()),
     ("musicbrainz-search", MusicBrainzSource()),
     ("openverse-search", OpenverseSource()),
     ("wikimedia-search", WikimediaSource()),
@@ -1006,6 +1074,7 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "youtube-search",
     "youtube-music-search",
     "archiveorg-search",
+    "jamendo-search",
     "boomplay-search",
     "musicbrainz-search",
     "openverse-search",
@@ -1038,6 +1107,7 @@ MUSIC_SOURCE_DOMAINS: dict[str, str | None] = {
     "youtube-search": "youtube.com",
     "youtube-music-search": "youtube.com",
     "archiveorg-search": "archive.org",
+    "jamendo-search": "api.jamendo.com",
     "boomplay-search": "boomplay.com",
     "musicbrainz-search": "musicbrainz.org",
     "openverse-search": "api.openverse.org",
@@ -1068,6 +1138,7 @@ MUSIC_SOURCE_REGIONS: dict[str, str] = {
     "youtube-search": "global",
     "youtube-music-search": "global",
     "archiveorg-search": "global",
+    "jamendo-search": "global",
     "boomplay-search": "africa",
     "musicbrainz-search": "global",
     "openverse-search": "global",

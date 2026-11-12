@@ -22,8 +22,10 @@ from nomorals.media.sources import (
     AudiomackSource,
     BaseScrapeSource,
     BoomplaySource,
+    JamendoSource,
     NetNaijaSource,
     SourceCandidate,
+    candidate_asset_class,
 )
 
 # ── fixtures: mocked HTML ─────────────────────────────────────────────
@@ -264,6 +266,98 @@ class TestBoomplaySource:
 # ── BaseScrapeSource helpers ──────────────────────────────────────────
 
 
+#: Realistic Jamendo v3.0 tracks payload (envelope + track rows as
+#: the API returns them — verified live 2026-11-12 that a no-key call
+#: fails with "Invalid Client Id", so the request shape below is the
+#: keyed shape the client id unlocks).
+_JAMENDO_PAYLOAD = """{"headers": {"status": "success", "code": 0,
+"error_message": "", "warnings": "", "results_count": 3},
+"results": [
+{"id": "1234567", "name": "Summer Breeze", "duration": 214,
+"artist_id": "76543", "artist_name": "Coastal Lines",
+"album_name": "Salt Air", "album_id": "98765",
+"license_ccurl": "https://creativecommons.org/licenses/by/3.0/",
+"releasedate": "2021-06-01",
+"audio": "https://mp3d.jamendo.com/download/track/1234567/mp32/x.mp3",
+"audiodownload": "https://mp3d.jamendo.com/download/track/1234567/mp32/x.mp3",
+"shareurl": "https://www.jamendo.com/track/1234567/summer-breeze",
+"image": "https://usercontent.jamendo.com?type=album&id=98765&width=300"},
+{"id": "1234568", "name": "Night Drive", "duration": 187,
+"artist_id": "76544", "artist_name": "Neon Coast",
+"album_name": "After Dark", "album_id": "98766",
+"license_ccurl": "https://creativecommons.org/licenses/by-nc-sa/3.0/",
+"audio": "https://mp3d.jamendo.com/download/track/1234568/mp32/y.mp3",
+"shareurl": "https://www.jamendo.com/track/1234568/night-drive"},
+{"id": "1234569", "name": "Silent Row", "duration": 150,
+"artist_id": "76545", "artist_name": "No Audio",
+"album_name": "Blank", "album_id": "98767",
+"license_ccurl": "https://creativecommons.org/licenses/by/3.0/",
+"shareurl": "https://www.jamendo.com/track/1234569/silent-row"}]}"""
+
+
+# ── JamendoSource ─────────────────────────────────────────────────────
+
+
+class TestJamendoSource:
+    def test_search_url_with_client_id(self, monkeypatch):
+        monkeypatch.setenv("NM_JAMENDO_CLIENT_ID", "abc123")
+        url = JamendoSource().search_url("summer breeze")
+        assert url.startswith("https://api.jamendo.com/v3.0/tracks/?")
+        assert "client_id=abc123" in url
+        assert "format=json" in url
+        assert "search=summer+breeze" in url
+
+    def test_search_url_without_client_id_omits_param(self, monkeypatch):
+        monkeypatch.delenv("NM_JAMENDO_CLIENT_ID", raising=False)
+        url = JamendoSource().search_url("summer breeze")
+        assert "client_id" not in url
+        assert "format=json" in url
+
+    def test_search_without_client_id_returns_empty_without_network(
+            self, monkeypatch):
+        monkeypatch.delenv("NM_JAMENDO_CLIENT_ID", raising=False)
+        with patch.object(JamendoSource, "_get") as get:
+            assert JamendoSource().search("summer breeze") == []
+            get.assert_not_called()
+
+    def test_search_with_client_id_returns_full_candidates(
+            self, monkeypatch):
+        monkeypatch.setenv("NM_JAMENDO_CLIENT_ID", "abc123")
+        with patch.object(JamendoSource, "_get",
+                          return_value=_JAMENDO_PAYLOAD):
+            cands = JamendoSource().search("summer breeze")
+        assert [c.title for c in cands] == ["Summer Breeze", "Night Drive"]
+        first = cands[0]
+        assert first.artist == "Coastal Lines"
+        assert first.duration == pytest.approx(214.0)
+        assert first.direct_url.endswith(".mp3")
+        assert first.downloadable is True
+        assert candidate_asset_class(first) == "full"
+        assert first.extra["page"].startswith(
+            "https://www.jamendo.com/track/")
+        assert "creativecommons.org" in first.extra["license"]
+        # audio-only row falls back to the stream URL
+        assert cands[1].direct_url.endswith("y.mp3")
+        # the row with no audio field is skipped, never metadata
+        assert all(c.title != "Silent Row" for c in cands)
+
+    def test_parse_failed_envelope_returns_empty(self):
+        failed = {"headers": {"status": "failed", "code": 5,
+                              "error_message": "Jamendo Api Invalid Client "
+                              "Id Error: Your credential is not "
+                              "authorized..", "warnings": "",
+                              "results_count": 0}, "results": []}
+        assert JamendoSource().parse(failed, "x") == []
+        assert JamendoSource().parse({}, "x") == []
+        assert JamendoSource().parse(None, "x") == []
+
+    def test_empty_query_returns_empty(self, monkeypatch):
+        monkeypatch.setenv("NM_JAMENDO_CLIENT_ID", "abc123")
+        with patch.object(JamendoSource, "_get") as get:
+            assert JamendoSource().search("   ") == []
+            get.assert_not_called()
+
+
 class TestScrapeHelpers:
     def test_direct_media_links(self):
         html = ('<a href="/music/a.mp3">x</a>'
@@ -331,6 +425,39 @@ class TestResolverWiring:
             out = r._s_boomplay_search("last last")
         assert out.ok and out.kind == "boomplay"
         assert out.downloadable is False
+
+    def test_jamendo_search_hit_is_full_track(self):
+        r = self._resolver()
+        cands = [SourceCandidate(source="jamendo", title="Summer Breeze",
+                                 artist="Coastal Lines",
+                                 url="https://mp3d.jamendo.com/download/"
+                                     "track/1234567/mp32/x.mp3",
+                                 direct_url="https://mp3d.jamendo.com/"
+                                            "download/track/1234567/mp32/"
+                                            "x.mp3")]
+        with patch.object(JamendoSource, "search", return_value=cands):
+            out = r._s_blog_search("summer breeze", "JamendoSource",
+                                   "jamendo")
+        assert out.ok and out.kind == "jamendo"
+        assert out.title == "Summer Breeze"
+        assert out.path_or_url.endswith(".mp3")
+        assert out.downloadable is True
+
+    def test_text_chain_places_jamendo_after_archiveorg(self):
+        # Global full-track CC catalogue, grouped with the other open
+        # archive (archive.org), before the metadata-only block — and
+        # before the Openverse aggregator, which already indexes
+        # Jamendo: the direct catalogue beats the aggregator.
+        import inspect
+
+        from nomorals.media import resolver as res_mod
+        src = inspect.getsource(res_mod.SourceResolver._resolve_text)
+        ao = src.index("archiveorg-search")
+        ja = src.index("jamendo-search")
+        bp = src.index("boomplay-search")
+        ov = src.index("openverse-search")
+        assert ao < ja < bp
+        assert ja < ov
 
     def test_text_chain_includes_new_sources(self):
         # The chain tries netnaija before the proven globals.
