@@ -22,7 +22,7 @@ rendered stage reports it from the log's license traffic and
 downloads nothing).
 
 Auth: ``auth="none"`` means the public path (SoundCloud, YouTube,
-TikTok, mp3.pm, Audiomack, NetNaija and Boomplay today).
+TikTok, mp3.pm, Audiomack, NetNaija, Boomplay and MP3Juices today).
 ``"account"`` / ``"vault"`` name a requirement the authenticated
 rung (B5, :mod:`nomorals.media.site_auth`) honours: a descriptor
 with ``auth != "none"`` resolves its session before the chain
@@ -66,6 +66,7 @@ __all__ = [
     "AUDIOMACK_DESCRIPTOR",
     "NETNAIJA_DESCRIPTOR",
     "BOOMPLAY_DESCRIPTOR",
+    "MP3JUICES_DESCRIPTOR",
     "DEFAULT_SITE_DESCRIPTORS",
 ]
 
@@ -745,8 +746,76 @@ BOOMPLAY_DESCRIPTOR = SiteDescriptor(
           "downloads",
 )
 
+#: MP3Juices — the EIGHTH site descriptor: a converter front-end
+#: over YouTube / SoundCloud (sources-abandoned census B1), not a
+#: new catalogue — its value is as a NAMED search / download
+#: surface, same class as mp3.pm.  A free MP3 search engine with
+#: a built-in downloader: type a song or paste a YouTube link,
+#: get a result list, download as MP3 or MP4 — free, and "does
+#: not require any sign-up" (homepage, fetched live 2026-11-12;
+#: the mp3juice.co homepage says the same, "No sign-up, no
+#: subscription").  URL shapes, verified live 2026-11-12: the
+#: site is a single-page search form — there are NO per-track
+#: pages and no navigable search / result / download path was
+#: evidenced (the crawled homepage carries no links at all
+#: except Terms of Use), so ONLY the homepage root is claimed,
+#: on the two hosts that serve the same service: ``mp3juices.cc``
+#: (the official mirror per a 2026 hands-on review, fetched
+#: live) and ``mp3juice.co`` (fetched live — identical service
+#: copy, same flow).  ``mp3juices.click`` is NOT claimed: fetched
+#: live 2026-11-12 it serves different content (a trending-
+#: listings clone with its own copy), so it is an unverified
+#: lookalike, excluded on purpose.  The domain changes
+#: frequently and copycats abound — only the two verified hosts
+#: are named, never a pattern that would sweep in clones.
+#: There is no MP3Juices connector in
+#: :mod:`nomorals.connectors`, so the chain is the canonical
+#: ladder minus the connector rung — and yt-dlp has NO mp3juices
+#: extractor (supportedsites.md, master, fetched 2026-11-12: no
+#: ``mp3juices`` hit), so the kit rung only fetches direct-rule
+#: file URLs and stays silent on the homepage; in production
+#: the rendered / browser rungs (driving the search form) are
+#: what land a track.  A live landing is NOT proven here — it
+#: needs network and a real track, driven through the browser
+#: rung.  No login wall exists on this site at all: ``auth`` is
+#: ``"none"`` with NO session shape — ``auth_domains`` and
+#: ``auth_cookie_names`` are empty ON PURPOSE, not missing.  A
+#: login block can never be classified for MP3Juices, and
+#: ``require=True`` answers unavailable rather than inventing a
+#: session.  Honest quality note (2026 hands-on review): audio
+#: is 128–192 kbps, often upscaled 128, with occasional
+#: "Conversion Error" / endless loading and dead links — the
+#: descriptor claims the surface, never the quality.  Blocks:
+#: ``region`` (the review's accessibility test: blocked in
+#: some countries, e.g. Germany and India) and ``private`` (a
+#: dead / removed result — dead links are a known failure
+#: mode).  No ``login`` / ``preview`` / ``drm`` classes: none
+#: is evidenced — the site serves full tracks to anyone, with
+#: no sign-up and no DRM on standard conversions.
+MP3JUICES_DESCRIPTOR = SiteDescriptor(
+    site="mp3juices",
+    url_patterns=(
+        r"https?://([a-z0-9-]+\.)*mp3juices\.cc/?$",
+        r"https?://([a-z0-9-]+\.)*mp3juice\.co/?$",
+    ),
+    chain=("direct", "kit", "proxy", "rendered", "browser"),
+    connector="",
+    block_classes=("region", "private"),
+    auth="none",
+    auth_domains=(),
+    auth_cookie_names=(),
+    downloadable=True,
+    notes="MP3Juices converter front-end over YouTube / "
+          "SoundCloud: no account, no session shape at all; "
+          "homepage search surface only (no per-track pages "
+          "exist); no yt-dlp extractor and no connector — "
+          "rendered / browser rungs drive the search form in "
+          "production; mp3juices.click is an unverified clone "
+          "and is not claimed; blocks are region / private",
+)
+
 #: The descriptors the engine reads by default.
 DEFAULT_SITE_DESCRIPTORS = SiteDescriptorRegistry(
     [SOUNDCLOUD_DESCRIPTOR, YOUTUBE_DESCRIPTOR, TIKTOK_DESCRIPTOR,
      MP3PM_DESCRIPTOR, AUDIOMACK_DESCRIPTOR, NETNAIJA_DESCRIPTOR,
-     BOOMPLAY_DESCRIPTOR])
+     BOOMPLAY_DESCRIPTOR, MP3JUICES_DESCRIPTOR])

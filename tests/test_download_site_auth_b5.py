@@ -58,6 +58,7 @@ from nomorals.media.site_auth import (
 from nomorals.media.site_descriptors import (
     AUDIOMACK_DESCRIPTOR,
     BOOMPLAY_DESCRIPTOR,
+    MP3JUICES_DESCRIPTOR,
     MP3PM_DESCRIPTOR,
     NETNAIJA_DESCRIPTOR,
     SOUNDCLOUD_DESCRIPTOR,
@@ -594,6 +595,17 @@ class TestDescriptorAuthFields:
         assert MP3PM_DESCRIPTOR.auth_domains == ()
         assert MP3PM_DESCRIPTOR.auth_cookie_names == ()
 
+    def test_mp3juices_descriptor_declares_no_session_shape(self):
+        # MP3Juices has no accounts at all — no login wall, no
+        # sign-up, no session to resolve (homepage, fetched live
+        # 2026-11-12).  The empty auth_domains /
+        # auth_cookie_names are the honest declaration, not a
+        # missing field: a login block can never be classified
+        # for this site.
+        assert MP3JUICES_DESCRIPTOR.auth == "none"
+        assert MP3JUICES_DESCRIPTOR.auth_domains == ()
+        assert MP3JUICES_DESCRIPTOR.auth_cookie_names == ()
+
     def test_audiomack_descriptor_declares_no_session_shape(self):
         # Audiomack has accounts (and Audiomack+ premium), but
         # no login wall on public playback and yt-dlp's
@@ -871,4 +883,34 @@ class TestBoomplaySession:
             BOOMPLAY_DESCRIPTOR, require=True)
         assert auth.status == "unavailable"
         assert "boomplay" in auth.reason
+        assert store.gets == 0
+
+
+# ── the MP3Juices session (descriptor #8: there is none) ─────────────
+
+
+class TestMp3juicesSession:
+    def test_public_mp3juices_needs_no_session(self, tmp_path):
+        # auth "none" without require: the resolver answers ok
+        # without touching vault or estate — the search surface
+        # needs nothing, and this site has no accounts at all.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            MP3JUICES_DESCRIPTOR)
+        assert auth.ok and auth.source == ""
+        assert store.gets == 0
+
+    def test_require_cannot_resolve_a_session_that_does_not_exist(
+            self, tmp_path):
+        # require=True means "a login block said a session is
+        # needed" — for MP3Juices that can never happen (no
+        # accounts, no login wall), and the descriptor honestly
+        # declares no session domain.  The resolver refuses
+        # (unavailable) rather than inventing a session or
+        # answering ok empty.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            MP3JUICES_DESCRIPTOR, require=True)
+        assert auth.status == "unavailable"
+        assert "mp3juices" in auth.reason
         assert store.gets == 0

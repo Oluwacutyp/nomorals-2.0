@@ -39,6 +39,7 @@ from nomorals.media.site_descriptors import (
     BLOCK_CLASSES,
     BOOMPLAY_DESCRIPTOR,
     CHAIN_STAGES,
+    MP3JUICES_DESCRIPTOR,
     MP3PM_DESCRIPTOR,
     NETNAIJA_DESCRIPTOR,
     SOUNDCLOUD_DESCRIPTOR,
@@ -988,6 +989,132 @@ class TestBoomplayDescriptor:
         assert "Boomplay app" in report.likely_cause
         assert report.tried() == ["extractor"]
         assert "downloadable source" in report.hint
+
+
+class TestMp3juicesDescriptor:
+    #: The only URL shapes the descriptor claims: the homepage
+    #: roots of the two verified hosts.  Both verified live
+    #: 2026-11-12 (mp3juices.cc is the official mirror; mp3juice.co
+    #: serves the identical service copy).  The site is a
+    #: single-page search form — no per-track pages and no
+    #: navigable search / result / download path was evidenced —
+    #: so no path shape is claimed at all.
+    MP3JUICES_URLS = (
+        "https://mp3juices.cc/",
+        "https://mp3juices.cc",
+        "http://mp3juices.cc/",
+        "https://www.mp3juices.cc/",
+        "https://mp3juice.co/",
+        "https://mp3juice.co",
+        "http://www.mp3juice.co/",
+    )
+
+    #: URLs the descriptor must NOT claim: other hosts,
+    #: look-alikes, the unverified clone, and any path under the
+    #: verified hosts — no path shape was evidenced, so paths
+    #: fall through to the generic chain instead of taking the
+    #: mp3juices chain.
+    NOT_MP3JUICES_URLS = (
+        "https://example.com/",
+        "https://notmp3juices.cc/",
+        "https://mp3juices.cc.evil.test/",
+        "https://mp3juices.click/",
+        "https://www.mp3juices.click/",
+        "https://mp3juices.cc/search",
+        "https://mp3juices.cc/download/xyz",
+        "https://mp3juice.co/search?q=drake",
+    )
+
+    def test_matches_mp3juices_url_shapes_only(self):
+        reg = SiteDescriptorRegistry([MP3JUICES_DESCRIPTOR])
+        for url in self.MP3JUICES_URLS:
+            assert reg.for_url(url) is MP3JUICES_DESCRIPTOR, url
+        for url in self.NOT_MP3JUICES_URLS:
+            assert reg.for_url(url) is None, url
+
+    def test_descriptor_carries_mp3juices_behaviour(self):
+        desc = MP3JUICES_DESCRIPTOR
+        assert desc.site == "mp3juices"
+        # Canonical ladder minus the connector rung: there is no
+        # MP3Juices connector, and yt-dlp has no mp3juices
+        # extractor (supportedsites.md, master, 2026-11-12) — the
+        # kit rung only fetches direct-rule file URLs and stays
+        # silent on the homepage; rendered / browser drive the
+        # search form in production.
+        assert desc.chain == ("direct", "kit", "proxy", "rendered",
+                              "browser")
+        assert "connector" not in desc.chain
+        assert desc.connector == ""
+        # "region" is evidenced (2026 hands-on review: blocked in
+        # some countries, e.g. Germany and India); "private" for
+        # dead / removed results.  No login wall exists on this
+        # site at all — no login / preview / drm classes.
+        assert tuple(desc.block_classes) == ("region", "private")
+        # Fully public AND session-less: no accounts exist, so no
+        # session shape is declared — empty on purpose, not missing.
+        assert desc.auth == "none"
+        assert desc.auth_needed is False
+        assert desc.auth_domains == ()
+        assert desc.auth_cookie_names == ()
+        assert desc.downloadable is True
+
+    def test_default_registry_resolves_mp3juices_and_keeps_the_others(
+            self):
+        from nomorals.media.site_descriptors import (
+            DEFAULT_SITE_DESCRIPTORS,
+        )
+
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://mp3juices.cc/") is MP3JUICES_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://mp3juice.co/") is MP3JUICES_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.get("mp3juices") \
+            is MP3JUICES_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://mp3.pm/song/170547096/T.I._-_King_Back/"
+            ) is MP3PM_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.tiktok.com/@someuser/video/"
+            "7170520270497680683") is TIKTOK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            ) is YOUTUBE_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://soundcloud.com/a/b") is SOUNDCLOUD_DESCRIPTOR
+
+    def test_mp3juices_chain_skips_connector_and_fails_honestly(
+            self, tmp_path):
+        # The descriptor's chain governs the engine for an
+        # mp3juices URL: no rung in this hermetic rig can serve
+        # the homepage — the kit rung only fetches direct-rule
+        # URLs (a homepage is a page, not a file); there is no
+        # MP3Juices connector; the proxy pool is empty; rendered
+        # and browser are unwired — so the report fails honestly,
+        # and the injected connector is never engaged.  In
+        # production the rendered / browser rungs are what drive
+        # the search form; a live landing is NOT proven here — it
+        # needs network and a real track, driven through the
+        # browser rung.
+        from unittest.mock import patch
+
+        connector = SimpleNamespace(
+            stream_url=mock.Mock(
+                side_effect=AssertionError("connector engaged")))
+        registry = SiteDescriptorRegistry([MP3JUICES_DESCRIPTOR])
+        dl = _downloader(tmp_path, connector,
+                         site_descriptors=registry)
+        with patch("nomorals.tools.media.download",
+                   side_effect=_fail_direct):
+            report = dl.download(
+                "https://mp3juices.cc/",
+                dest_dir=tmp_path, audio_only=True)
+        assert report.ok is False
+        # Kit silent (page, not a direct-rule file), connector
+        # skipped.
+        assert report.tried() == ["direct", "proxy", "rendered",
+                                  "browser"]
+        assert "connector" not in report.tried()
+        connector.stream_url.assert_not_called()
 
 
 # ── validation: malformed fails at LOAD, naming site + field ─────────
