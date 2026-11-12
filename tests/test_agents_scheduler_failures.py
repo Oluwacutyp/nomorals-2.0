@@ -30,6 +30,8 @@ from pathlib import Path
 import pytest
 from unittest.mock import patch
 
+from nomorals.storage.db import Database
+
 ROOT = Path(__file__).resolve().parents[1]
 
 from nomorals.core import failure_store as fs
@@ -534,3 +536,62 @@ def test_excl_ensure_persona_jobs_list(monkeypatch):
     out = sch.ensure_persona_jobs(types.SimpleNamespace())
     assert all(v.get("scheduled") is True for v in out.values())
     assert _sites() == []
+
+
+# ---- Dedupe pin (Pass 3 guard, 8ff32b1; register §3.3 row 1.7) -----------
+
+# Scheduler.add() is idempotent by exact replay: same name, kind, spec,
+# payload and timezone as an enabled job already in the table returns
+# that job with deduped=True instead of minting a second row. The
+# ensure_* registrars promise "idempotent by name", but their existence
+# check is a separate query — when it fails (or two contexts share one
+# db) an unconditional insert used to mint a duplicate. These pins use
+# a real migrated in-memory database and a real Scheduler, exactly the
+# shape the census-B probe replays (burndown-verify/census-b/
+# probe_scheduler_dedupe.py). No bare-except swallowing anywhere here.
+
+
+def _live_sched():
+    db = Database(":memory:")
+    db.migrate()
+    tools = types.SimpleNamespace(
+        call=lambda tool, capabilities=None, **kw: types.SimpleNamespace(
+            ok=True, value="ok", error=None))
+    ctx = types.SimpleNamespace(db=db, tools=tools,
+                                settings=types.SimpleNamespace(), extras={})
+    return Scheduler(ctx)
+
+
+def _dedupe_kw(**over):
+    kw = dict(name="pin-dedupe", spec="every 1h", payload_kind="message",
+              payload={"text": "hello"})
+    kw.update(over)
+    return kw
+
+
+def test_add_exact_replay_returns_existing_job_deduped():
+    sched = _live_sched()
+    first = sched.add(**_dedupe_kw())
+    assert "deduped" not in first
+    second = sched.add(**_dedupe_kw())
+    assert second.get("deduped") is True
+    assert second["id"] == first["id"]
+    assert second["next_run"] == first["next_run"]
+    rows = sched.db.query(
+        "SELECT id FROM schedule_jobs WHERE name = 'pin-dedupe'")
+    assert len(rows) == 1
+    assert rows[0]["id"] == first["id"]
+
+
+def test_add_same_name_different_payload_is_not_deduped():
+    # Control: the guard is selective, not "add always returns the
+    # same thing". A job that merely shares a name (different payload)
+    # inserts a second row and is never marked deduped.
+    sched = _live_sched()
+    first = sched.add(**_dedupe_kw())
+    other = sched.add(**_dedupe_kw(payload={"text": "different"}))
+    assert other.get("deduped") is not True
+    assert other["id"] != first["id"]
+    rows = sched.db.query(
+        "SELECT id FROM schedule_jobs WHERE name = 'pin-dedupe'")
+    assert len(rows) == 2
