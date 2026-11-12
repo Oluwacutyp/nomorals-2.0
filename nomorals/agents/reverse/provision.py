@@ -27,6 +27,18 @@ Pinned here:
   venv — a wheel that matches no published digest installs
   nothing. Linux profiles only: unblob's native dependencies
   publish no Windows wheels.
+* **Frida 17.26.2** (dynamic rung) — the same pip-venv discipline
+  as unblob (``pins/frida_17.26.2.txt``): one self-contained abi3
+  wheel per platform, no dependencies except typing_extensions
+  on Python < 3.11 (pinned alongside it, since --require-hashes
+  holds on every package pip installs).
+* **GDB** (dynamic rung) — a system debugger, so the channel is
+  the distro package manager (apt on Debian/Ubuntu): the drive
+  runs ``apt-get update`` + ``apt-get install -y gdb`` as root
+  and trusts the install only after the version probe answers;
+  the exact installed version is recorded in the state ledger,
+  which is the pin for a distro package. No apt channel (Windows,
+  non-Debian Linux without apt) → unavailable with the reason.
 
 Installs live under the managed tools root (``~/workspace/tools``
 by house convention, ``NM_RE_TOOLS_DIR`` overrides) in ``re/`` —
@@ -57,8 +69,8 @@ from .failures import record_failure
 __all__ = [
     "ProvisionError", "DESCRIPTORS", "tools_root", "re_root",
     "platform_key", "jdk_state", "ghidra_state", "unblob_state",
-    "engine_states", "provision_engine", "provision_all",
-    "unblob_pins_path",
+    "frida_state", "gdb_state", "engine_states", "provision_engine",
+    "provision_all", "unblob_pins_path", "frida_pins_path",
 ]
 
 #: Download budget for one engine archive (the Ghidra zip is
@@ -142,6 +154,18 @@ DESCRIPTORS: dict[str, dict[str, Any]] = {
         "kind": "pip-venv",
         "package": "unblob",
         "pins_file": "unblob_26.6.4.txt",
+        "platforms": ("linux-x64", "linux-aarch64"),
+    },
+    "frida": {
+        "version": "17.26.2",
+        "kind": "pip-venv",
+        "package": "frida",
+        "pins_file": "frida_17.26.2.txt",
+        "platforms": ("linux-x64", "linux-aarch64", "windows-x64"),
+    },
+    "gdb": {
+        "kind": "apt",
+        "package": "gdb",
         "platforms": ("linux-x64", "linux-aarch64"),
     },
 }
@@ -468,17 +492,27 @@ def ghidra_state(root: Path | None = None, *,
 
 # ── unblob: the pip-venv engine (Pass 3) ────────────────────────────
 
+def _pins_path(engine: str) -> Path:
+    """The pinned install set for a ``pip-venv`` engine."""
+    return (Path(__file__).parent / "pins"
+            / DESCRIPTORS[engine]["pins_file"])
+
+
 def unblob_pins_path() -> Path:
     """The pinned install set for the pip-venv engine."""
-    return (Path(__file__).parent / "pins"
-            / DESCRIPTORS["unblob"]["pins_file"])
+    return _pins_path("unblob")
 
 
-def _pins_sha() -> str:
+def frida_pins_path() -> Path:
+    """The pinned install set for the Frida dynamic rung."""
+    return _pins_path("frida")
+
+
+def _pins_sha(engine: str) -> str:
     """The pin identity of a pip-venv engine: the sha256 of its
     pinned requirements file — the hash set IS the pin."""
     try:
-        return _sha256(unblob_pins_path())
+        return _sha256(_pins_path(engine))
     except OSError:
         return ""
 
@@ -520,7 +554,7 @@ def unblob_state(root: Path | None = None, *,
     exe = bindir / ("unblob.exe" if os.name == "nt" else "unblob")
     attempts: list[str] = []
     if exe.is_file():
-        if _installed_sha(base) != _pins_sha():
+        if _installed_sha(base) != _pins_sha("unblob"):
             attempts.append(
                 "pinned unblob venv present but its install marker "
                 "does not match the pinned requirements — "
@@ -574,6 +608,159 @@ def unblob_state(root: Path | None = None, *,
                        "rung is Linux-profile")}
 
 
+def _frida_probe(exe: Path, bindir: Path,
+                  runner: Runner | None) -> str:
+    """Probe one frida python → its version, or "".
+
+    The probe imports frida in the candidate interpreter — an
+    install whose import fails (or answers no version) is not
+    trusted, however the venv looks on disk.
+    """
+    run = runner or _run
+    env = dict(os.environ)
+    env["PATH"] = str(bindir) + os.pathsep + env.get("PATH", "")
+    try:
+        _rc, out = run(
+            [str(exe), "-c",
+             "import frida; print(frida.__version__)"],
+            timeout=PROBE_TIMEOUT_S, env=env)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    for line in (out or "").splitlines():
+        line = line.strip()
+        if line and line[0].isdigit():
+            return line
+    return ""
+
+
+def frida_state(root: Path | None = None, *,
+                runner: Runner | None = None) -> dict[str, Any]:
+    """Probe the Frida dynamic rung: pinned venv → system → none.
+
+    Ready requires the install marker to match the pinned
+    requirements file's own sha256 AND the interpreter to answer
+    the frida import probe — an install whose pin set changed
+    under it is reported provisionable, never trusted.
+    """
+    version = DESCRIPTORS["frida"]["version"]
+    base = re_root(root) / "frida"
+    bindir = _venv_bin(base)
+    exe = bindir / ("python.exe" if os.name == "nt" else "python")
+    attempts: list[str] = []
+    if exe.is_file():
+        if _installed_sha(base) != _pins_sha("frida"):
+            attempts.append(
+                "pinned frida venv present but its install marker "
+                "does not match the pinned requirements — "
+                "re-provision replaces it")
+        else:
+            probed = _frida_probe(exe, bindir, runner)
+            if probed:
+                return {"engine": "frida", "state": "ready",
+                        "available": True, "source": "provisioned",
+                        "version": probed, "path": str(exe),
+                        "attempts": attempts,
+                        "detail": f"pinned frida {probed} at {exe} "
+                                  "(pip --require-hashes venv)"}
+            attempts.append(
+                f"pinned frida at {exe} did not answer its "
+                "import probe — the install is not trusted")
+            return {"engine": "frida", "state": "unavailable",
+                    "available": False, "source": "provisioned",
+                    "version": version, "path": str(exe),
+                    "attempts": attempts
+                    + recorded_attempts(root, "frida"),
+                    "detail": attempts[0]}
+    probed = _frida_probe(Path(sys.executable), Path(sys.executable).parent,
+                          runner)
+    if probed:
+        return {"engine": "frida", "state": "ready",
+                "available": True, "source": "system",
+                "version": probed, "path": sys.executable,
+                "attempts": attempts,
+                "detail": f"system python already imports frida "
+                          f"({probed})"}
+    key = platform_key()
+    provisionable = key in DESCRIPTORS["frida"]["platforms"]
+    return {"engine": "frida",
+            "state": "provisionable" if provisionable
+                     else "unavailable",
+            "available": False, "source": "", "version": version,
+            "path": "",
+            "attempts": attempts + recorded_attempts(root, "frida"),
+            "detail": ("frida is not provisioned on this machine "
+                       "yet — the pinned frida " + version
+                       + " (pip --require-hashes, PyPI digests) "
+                         "provisions on demand"
+                       if provisionable else
+                       "frida publishes no wheel for "
+                       f"{key} — the Frida rung cannot land here")}
+
+
+def _gdb_version(exe: str, runner: Runner | None) -> str:
+    """Probe one gdb binary → its version number, or ""."""
+    run = runner or _run
+    try:
+        _rc, out = run([exe, "--version"], timeout=PROBE_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    first = ((out or "").splitlines() or [""])[0]
+    match = re.search(r"(\d+\.\d+(?:\.\d+)?)", first)
+    return match.group(1) if match else ""
+
+
+def _apt_available() -> bool:
+    """Is there an apt channel on this machine at all?"""
+    return (platform.system().lower() == "linux"
+            and shutil.which("apt-get") is not None)
+
+
+def gdb_state(root: Path | None = None, *,
+              runner: Runner | None = None) -> dict[str, Any]:
+    """Probe the GDB dynamic rung: the system gdb, or none.
+
+    GDB is a system debugger, not a downloadable archive — the
+    probe is the binary on PATH answering ``--version``. There is
+    no provisioned-venv form; the provision drive installs it
+    through apt (see :func:`provision_engine`).
+    """
+    exe = shutil.which("gdb")
+    attempts: list[str] = []
+    if exe:
+        version = _gdb_version(exe, runner)
+        if version:
+            return {"engine": "gdb", "state": "ready",
+                    "available": True, "source": "system",
+                    "version": version, "path": exe,
+                    "attempts": attempts,
+                    "detail": f"system gdb {version} at {exe}"}
+        attempts.append(
+            f"a gdb binary is present at {exe} but it did not "
+            "answer its version probe — the install is not trusted")
+        return {"engine": "gdb", "state": "unavailable",
+                "available": False, "source": "system",
+                "version": "", "path": exe,
+                "attempts": attempts
+                + recorded_attempts(root, "gdb"),
+                "detail": attempts[0]}
+    key = platform_key()
+    provisionable = (key in DESCRIPTORS["gdb"]["platforms"]
+                     and _apt_available())
+    return {"engine": "gdb",
+            "state": "provisionable" if provisionable
+                     else "unavailable",
+            "available": False, "source": "", "version": "",
+            "path": "",
+            "attempts": attempts + recorded_attempts(root, "gdb"),
+            "detail": ("gdb is not installed on this machine yet — "
+                       "it provisions on demand through apt "
+                       "(Debian/Ubuntu)"
+                       if provisionable else
+                       "no gdb on this machine and no apt channel "
+                       f"to install it from ({key}) — install GDB "
+                       "via MSYS2 (pacman -S gdb) or MinGW")}
+
+
 def _provision_pip_venv(engine: str, *, root: Path | None,
                         force: bool,
                         runner: Runner | None) -> dict[str, Any]:
@@ -586,9 +773,10 @@ def _provision_pip_venv(engine: str, *, root: Path | None,
     installed by a step whose verification failed.
     """
     descriptor = DESCRIPTORS[engine]
+    state_fn = {"unblob": unblob_state, "frida": frida_state}[engine]
     attempts: list[str] = []
     if not force:
-        current = unblob_state(root, runner=runner)
+        current = state_fn(root, runner=runner)
         if current["available"]:
             attempts.append(f"{engine} already provisioned "
                             f"({current['detail']})")
@@ -603,7 +791,7 @@ def _provision_pip_venv(engine: str, *, root: Path | None,
                         f"platform {key} (Linux-profile engine)")
         _record_attempts(root, engine, attempts)
         raise ProvisionError(engine, attempts)
-    pins = unblob_pins_path()
+    pins = _pins_path(engine)
     if not pins.is_file():
         attempts.append(f"pinned requirements file missing: {pins}")
         _record_attempts(root, engine, attempts)
@@ -652,10 +840,10 @@ def _provision_pip_venv(engine: str, *, root: Path | None,
     attempts.append(
         "pip installed the pinned set under --require-hashes "
         "(every wheel matched a PyPI-published digest)")
-    _mark_installed(base, _pins_sha())
+    _mark_installed(base, _pins_sha(engine))
     attempts.append(f"installed {engine} {descriptor['version']} "
                     f"under {base}")
-    state = unblob_state(root, runner=runner)
+    state = state_fn(root, runner=runner)
     if not state["available"]:
         attempts.append("post-install probe failed: "
                         + state["detail"])
@@ -664,7 +852,92 @@ def _provision_pip_venv(engine: str, *, root: Path | None,
     attempts.append("post-install probe passed")
     _record_attempts(root, engine, attempts,
                      version=descriptor["version"],
-                     sha256=_pins_sha(), source="provisioned")
+                     sha256=_pins_sha(engine), source="provisioned")
+    return {**state, "attempts": attempts}
+
+
+def _provision_apt(engine: str, *, root: Path | None,
+                   force: bool,
+                   runner: Runner | None) -> dict[str, Any]:
+    """The provisioning drive for an ``apt`` descriptor (GDB).
+
+    GDB is a system debugger: the channel is the distro package
+    manager, not a pinned archive. The drive checks root (apt
+    needs it), runs ``apt-get update`` then ``apt-get install -y
+    <package>``, and trusts the install only after the version
+    probe answers — the exact installed version is recorded in
+    the state ledger, which is the pin for a distro package.
+    Every failure is a named attempt.
+    """
+    descriptor = DESCRIPTORS[engine]
+    state_fn = {"gdb": gdb_state}[engine]
+    attempts: list[str] = []
+    if not force:
+        current = state_fn(root, runner=runner)
+        if current["available"]:
+            attempts.append(f"{engine} already provisioned "
+                            f"({current['detail']})")
+            _record_attempts(root, engine, attempts,
+                             version=current["version"],
+                             source=current["source"])
+            return {**current, "attempts":
+                    attempts + list(current.get("attempts") or [])}
+    key = platform_key()
+    if key not in descriptor["platforms"] or not _apt_available():
+        attempts.append(
+            f"no apt channel for {engine} on {key} — install GDB "
+            "via MSYS2 (pacman -S gdb) or MinGW")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts)
+    try:
+        euid = os.geteuid()
+    except AttributeError:  # pragma: no cover - no geteuid on Windows
+        euid = -1
+    if euid != 0:
+        attempts.append(
+            "apt install needs root (this process runs as uid "
+            f"{euid}) — run the provision as root or install gdb "
+            "through the system package manager")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts)
+    run = runner or _run
+    try:
+        rc, out = run(["apt-get", "update"], timeout=600.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        attempts.append(f"apt-get update failed: {exc}")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts) from exc
+    if rc != 0:
+        tail = " · ".join((out or "").strip().splitlines()[-3:])
+        attempts.append(f"apt-get update failed (exit {rc}): {tail}")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts)
+    attempts.append("apt-get update succeeded")
+    try:
+        rc, out = run(["apt-get", "install", "-y",
+                       descriptor["package"]], timeout=DOWNLOAD_TIMEOUT_S)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        attempts.append(f"apt-get install failed: {exc}")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts) from exc
+    if rc != 0:
+        tail = " · ".join((out or "").strip().splitlines()[-3:])
+        attempts.append(
+            f"apt-get install -y {descriptor['package']} failed "
+            f"(exit {rc}): {tail}")
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts)
+    attempts.append(
+        f"apt-get install -y {descriptor['package']} succeeded")
+    state = state_fn(root, runner=runner)
+    if not state["available"]:
+        attempts.append("post-install probe failed: "
+                        + state["detail"])
+        _record_attempts(root, engine, attempts)
+        raise ProvisionError(engine, attempts)
+    attempts.append("post-install probe passed")
+    _record_attempts(root, engine, attempts,
+                     version=state["version"], source="system")
     return {**state, "attempts": attempts}
 
 
@@ -672,7 +945,9 @@ def engine_states(root: Path | None = None, *,
                   runner: Runner | None = None) -> dict[str, Any]:
     return {"jdk": jdk_state(root, runner=runner),
             "ghidra": ghidra_state(root, runner=runner),
-            "unblob": unblob_state(root, runner=runner)}
+            "unblob": unblob_state(root, runner=runner),
+            "frida": frida_state(root, runner=runner),
+            "gdb": gdb_state(root, runner=runner)}
 
 
 # ── the provisioning drive ──────────────────────────────────────────
@@ -739,6 +1014,11 @@ def provision_engine(engine: str, *, root: Path | None = None,
         # ``downloader`` seam does not apply)
         return _provision_pip_venv(engine, root=root, force=force,
                                    runner=runner)
+    if descriptor.get("kind") == "apt":
+        # a system debugger: the distro package manager is the
+        # channel (the ``downloader`` seam does not apply)
+        return _provision_apt(engine, root=root, force=force,
+                              runner=runner)
     state_fn = jdk_state if engine == "jdk" else ghidra_state
     attempts: list[str] = []
     if not force:

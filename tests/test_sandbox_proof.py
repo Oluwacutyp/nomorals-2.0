@@ -72,9 +72,11 @@ class BackendSelectionTests(_ProofCase):
         self.assertEqual(probe["status"], "pass", probe["evidence"])
         # Backend-relative on purpose: on a host where unshare works
         # this selects unshare, on this container (which refuses the
-        # /proc mount unshare needs) it selects the rlimit floor.
-        # Either way the selected backend is the strongest working one
-        # and the reason names why the tiers above it were not chosen.
+        # /proc mount unshare needs) it selects unshare's no-proc
+        # variant — same backend, host /proc stays visible and
+        # proc_confined reads False. Either way the selected backend
+        # is the strongest working one and the reason names why the
+        # tiers above it were (not) chosen.
 
     def test_explicit_backend_request_is_honoured(self):
         probe = probe_backend_selection("rlimit")

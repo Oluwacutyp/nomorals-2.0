@@ -3821,7 +3821,15 @@ class RuntimeGamesMixin:
                                    can answer (Ghidra / light / spine
                                    / unblob / traffic readers)
         /re provision            — self-provision the deep rungs
-                                   (pinned JDK + Ghidra) and report
+                                   (pinned JDK + Ghidra + unblob +
+                                   Frida; GDB via apt) and report
+        /re dynamic <path> [frida|gdb]
+                                 — run one target under the dynamic
+                                   rung (Frida trace or GDB session):
+                                   a copy in a per-run workdir
+                                   under the namespace sandbox,
+                                   network dropped; the run folds
+                                   into Evidence with the rung named
         /re graph <path> [q t]   — Android reference graph over an
                                    APK or jadx tree: census, or
                                    callers|callees|class|search
@@ -3840,10 +3848,12 @@ class RuntimeGamesMixin:
                                  — Pass 4: plan + work a mission
                                    over the rungs; closes with a
                                    verified reconstruction per
-                                   target. Static only — a question
-                                   only running the target could
-                                   answer opens a dynamic_required
-                                   unknown naming the gate
+                                   target. A question only running
+                                   the target could answer gets a
+                                   dynamic step when a dynamic rung
+                                   is available, else a
+                                   dynamic_required unknown naming
+                                   the missing engine
         /re missions             — the mission journal
         /re mstatus <id>         — one mission: plan, steps,
                                    reconstructions
@@ -3872,6 +3882,9 @@ class RuntimeGamesMixin:
                 "/re status — engine matrix + store counts",
                 "/re inspect <path> — static-inspect a binary "
                 "(evidence + unknowns, journaled)",
+                "/re dynamic <path> [frida|gdb] — run a target "
+                "under the dynamic rung (sandboxed copy, network "
+                "dropped; evidence with the rung named)",
                 "/re evidence [id] — recent evidence, or one record "
                 "with its provenance chain",
                 "/re unknowns — open residual unknowns",
@@ -3898,6 +3911,20 @@ class RuntimeGamesMixin:
             if len(parts) < 2:
                 return "usage: /re inspect <path>"
             res = engine.inspect_path(" ".join(parts[1:]))
+            if res.get("error"):
+                return f"⚠️ {res['error']}"
+            return str(res["card_text"])
+        if verb == "dynamic":
+            if len(parts) < 2:
+                return "usage: /re dynamic <path> [frida|gdb]"
+            rung = "auto"
+            path_parts = parts[1:]
+            if path_parts[-1].lower() in ("frida", "gdb", "auto"):
+                rung = path_parts[-1].lower()
+                path_parts = path_parts[:-1]
+            if not path_parts:
+                return "usage: /re dynamic <path> [frida|gdb]"
+            res = engine.run_dynamic(" ".join(path_parts), rung=rung)
             if res.get("error"):
                 return f"⚠️ {res['error']}"
             return str(res["card_text"])

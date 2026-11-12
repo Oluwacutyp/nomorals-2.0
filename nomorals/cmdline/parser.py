@@ -2112,7 +2112,9 @@ def _parser() -> argparse.ArgumentParser:
                      "nm re mission <question> -- <targets...>\n"
                      "nm re missions\n"
                      "nm re mission-status <id>\n"
-                     "nm re mission-resume <id>"),
+                     "nm re mission-resume <id>\n"
+                     "nm re dynamic <path> [--rung frida|gdb] "
+                     "[--args ...] [--timeout N] [--provision]"),
     )
     re_sub = re_p.add_subparsers(dest="re_action", required=True)
     re_sub.add_parser("status", help="engine capability matrix + store counts")
@@ -2150,7 +2152,7 @@ def _parser() -> argparse.ArgumentParser:
     r_cl.add_argument("--confidence", default="inferred",
                       choices=["observed", "derived", "inferred"],
                       help="confidence the close states")
-    r_mis = re_sub.add_parser("mission", help="plan + work a brain-directed RE mission over the rungs: question + targets -> journaled steps -> verified reconstruction per target (static only; run-only questions open dynamic_required unknowns naming the owner's sandbox-posture gate)")
+    r_mis = re_sub.add_parser("mission", help="plan + work a brain-directed RE mission over the rungs: question + targets -> journaled steps -> verified reconstruction per target (run-only questions get a dynamic step when a dynamic rung is available, else a dynamic_required unknown naming the missing engine)")
     r_mis.add_argument("question",
                        help="the question the mission answers, in words")
     r_mis.add_argument("targets", nargs="+",
@@ -2160,6 +2162,22 @@ def _parser() -> argparse.ArgumentParser:
     r_mst.add_argument("mission_id")
     r_mre = re_sub.add_parser("mission-resume", help="resume a mission from its journal — pending steps work, finished steps stand")
     r_mre.add_argument("mission_id")
+    r_dyn = re_sub.add_parser("dynamic", help="run one binary under the dynamic rung (Frida trace or GDB session): a copy in a per-run workdir under the namespace sandbox, network dropped; the run folds into Evidence with the rung named")
+    r_dyn.add_argument("path")
+    r_dyn.add_argument("--rung", default="auto",
+                       choices=["auto", "frida", "gdb"],
+                       help="which dynamic engine runs the target "
+                            "(default auto: Frida when ready, else "
+                            "GDB)")
+    r_dyn.add_argument("--script", default="",
+                       help="Frida JS file for the trace")
+    r_dyn.add_argument("--args", nargs="*", default=[],
+                       help="target argv (e.g. --args sleep 5)")
+    r_dyn.add_argument("--timeout", type=float, default=0,
+                       help="the run budget in seconds (default 120)")
+    r_dyn.add_argument("--provision", action="store_true",
+                       help="provision a missing dynamic engine "
+                            "first")
     a_bi = apk_sub.add_parser("bisect", help="find the version where a dossier property flipped (git-bisect contract over the version series)")
     a_bi.add_argument("series", nargs="+",
                       help="project refs of ONE app (sorted by versionCode)")

@@ -20,14 +20,15 @@ The discipline, in code:
   can close gets that rung scheduled (provision, then re-inspect);
   one no static rung can close is parked *in the mission record*
   with the reason, not silently dropped.
-* **The dynamic boundary.** A question that only running the
-  target could answer (what it does *when it runs*) classifies
-  as a ``dynamic_required`` unknown naming the gate: the dynamic
-  rung (Frida/GDB/process capture) is gated on the owner's
-  sandbox/consent posture for executing targets, which has not
-  been given. The planner opens that unknown, the mission still
-  works every static rung — and nothing, anywhere in this pass,
-  executes a target.
+* **The dynamic rung is built.** A question that only running
+  the target could answer (what it does *when it runs*) gets a
+  dynamic step — the target runs as a copy, in a per-run
+  workdir, under the namespace sandbox with the network dropped
+  (:mod:`.dynamic`). When no dynamic rung can run on this
+  device, the question opens a ``dynamic_required`` unknown
+  naming the concrete missing engine (Frida, GDB, or the
+  sandbox), never a gate — and the mission still works every
+  static rung.
 * **Journaled end-to-end.** Mission and step state live in
   organ-local tables (the EvidenceStore pattern) on the shared
   database: planned → per-step results → closed, inspectable and
@@ -45,28 +46,34 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import provision, verify
+from . import dynamic, provision, verify
 from .failures import record_failure
 
 __all__ = [
-    "PROVIDER_ID", "DYNAMIC_GATE", "MissionStore", "MissionRunner",
+    "PROVIDER_ID", "MissionStore", "MissionRunner",
     "classify_question", "closer_for", "mission_status",
     "list_missions", "render_mission", "render_mission_list",
-    "render_mission_status",
+    "render_mission_status", "dynamic_unavailable_reason",
 ]
 
 PROVIDER_ID = "devon.re-missions"
 PROVIDER_NAME = "Devon RE missions (Pass 4)"
 
-#: The capability-matrix name of the dynamic rung — and the gate
-#: every dynamic_required unknown names. The rung is not built:
-#: no provisioning, no probing, no stub. Its absence in the plan
-#: is the honest state, and the gate is the owner's word.
-DYNAMIC_GATE = "frida-gdb (dynamic rung)"
-DYNAMIC_GATE_TEXT = (
-    "the dynamic rung (Frida/GDB/process capture) is gated on "
-    "the owner's sandbox/consent posture for executing targets, "
-    "which has not been given — nothing was executed")
+#: The dynamic rung's engines, in the order the rung prefers
+#: them (Frida traces calls; GDB stops and inspects).
+DYNAMIC_ENGINES = ("frida", "gdb")
+
+
+def dynamic_unavailable_reason(root: Any = None) -> str:
+    """Why no dynamic rung can run on this device, probe-true —
+    the concrete missing engines and the sandbox, named, so a
+    ``dynamic_required`` unknown (or a parked reason) says what
+    would close it instead of naming a gate."""
+    state = dynamic.dynamic_state(root)
+    return ("no dynamic rung can run on this device: frida — "
+            + state["frida"]["detail"] + "; gdb — "
+            + state["gdb"]["detail"] + "; sandbox — "
+            + state["sandbox"]["detail"])
 
 #: Question-shape signals → intents. Each intent maps to rungs in
 #: the capability matrix (see ``plan_steps``); the table is the
@@ -109,9 +116,9 @@ def closer_for(unknown: Any) -> tuple[str, str]:
     Returns (disposition, detail): ``ghidra`` / ``unblob`` when the
     unknown names that self-provisioned rung (the organ's gap
     unknowns name their closer verbatim); ``dynamic`` when closing
-    demands a controlled replay — running something — which is
-    gated territory; ``none`` when no rung in the matrix answers
-    it statically.
+    demands a controlled replay — running something — which the
+    dynamic rung (Frida/GDB, sandboxed) answers; ``none`` when no
+    rung in the matrix answers it statically.
     """
     text = (unknown.question or "").lower()
     if "ghidra" in text:
@@ -120,7 +127,8 @@ def closer_for(unknown: Any) -> tuple[str, str]:
         return ("unblob", "the self-provisioned unblob rung")
     if unknown.required_authority == "controlled-replay":
         return ("dynamic", "closing takes a controlled replay — "
-                           + DYNAMIC_GATE_TEXT)
+                           "the dynamic rung (Frida/GDB, sandboxed) "
+                           "answers it")
     return ("none", "no rung in the capability matrix closes this "
                     "statically")
 
@@ -372,15 +380,29 @@ def plan_steps(question: str, targets: list[str], *,
         " ".join([question, *(extra_questions or ())]))
     notes: list[str] = []
     steps: list[dict[str, Any]] = []
-    dynamic = "dynamic" in intents
+    wants_dynamic = "dynamic" in intents
     if tools_root is not None and not isinstance(tools_root, Path):
         tools_root = Path(tools_root)
-    if dynamic:
-        notes.append(
-            "part of this question is dynamic_required — it asks "
-            "what the target does when it runs; " + DYNAMIC_GATE_TEXT
-            + ". A dynamic_required unknown is opened per target; "
-            "every static rung still runs")
+    dyn_state: dict[str, Any] | None = None
+    if wants_dynamic:
+        # The dynamic intent is a rung intent now: a dynamic step
+        # per file target when a dynamic rung is available, and
+        # the concrete missing engines named when none is.
+        dyn_state = dynamic.dynamic_state(tools_root)
+        if dyn_state["available"]:
+            notes.append(
+                "part of this question is dynamic — it asks what "
+                "the target does when it runs; a dynamic step "
+                f"({dyn_state['rung']}) runs each file target as "
+                "a copy under the namespace sandbox, network "
+                "dropped")
+        else:
+            notes.append(
+                "part of this question is dynamic_required — it "
+                "asks what the target does when it runs; "
+                + dynamic_unavailable_reason(tools_root)
+                + ". A dynamic_required unknown is opened per "
+                  "target; every static rung still runs")
     gh = provision.ghidra_state(tools_root)
     if "deep" in intents:
         if gh["state"] == "provisionable":
@@ -441,6 +463,15 @@ def plan_steps(question: str, targets: list[str], *,
                      "jadx tree, so no graph step is planned — "
                      "the Android graph rung answers over "
                      "decompiled sources only")
+    if wants_dynamic and dyn_state and dyn_state["available"]:
+        # the dynamic step runs after the inspect step identified
+        # the target and before the reconstruction reads the
+        # chain — its evidence lands in the same chain
+        for target in file_targets:
+            steps.append({
+                "rung": "dynamic", "action": "run",
+                "target": target,
+                "detail": {"rung": dyn_state["rung"]}})
     for target in targets:
         steps.append({
             "rung": "reconstruct", "action": "reconstruct",
@@ -450,8 +481,10 @@ def plan_steps(question: str, targets: list[str], *,
                      "intents over the signal table — census rungs "
                      "only (inspect + reconstruct); the brain may "
                      "add sub-questions to focus a later mission")
-    return {"intents": intents, "dynamic": dynamic, "notes": notes,
-            "steps": steps}
+    return {"intents": intents, "dynamic": wants_dynamic,
+            "dynamic_available": bool(
+                dyn_state and dyn_state["available"]),
+            "notes": notes, "steps": steps}
 
 
 # ── the runner ───────────────────────────────────────────────────────
@@ -601,14 +634,22 @@ class MissionRunner:
                            for u in res.get("unknowns") or []]
             mission = self.missions.get(mission_id)
             plan = (mission or {}).get("plan") or {}
-            if plan.get("dynamic"):
+            has_dynamic_step = any(
+                s["rung"] == "dynamic" and s["target"] == target
+                for s in self.missions.steps(mission_id))
+            if plan.get("dynamic") and not has_dynamic_step:
+                # no dynamic rung could run for this target, so
+                # the question opens a dynamic_required unknown
+                # naming the concrete missing engines — never a
+                # gate, and never a silent drop
                 unk = self.store.open_unknown(
                     f"what does {res['subject']['name']} do when "
                     "it runs — its runtime behavior, side effects "
                     "and network actions in motion — is "
-                    "unestablished by any static rung; only "
-                    f"{DYNAMIC_GATE} could answer it, and "
-                    + DYNAMIC_GATE_TEXT,
+                    "unestablished by any static rung; only a "
+                    "dynamic run could answer it, and "
+                    + dynamic_unavailable_reason(
+                        self.engine._tools_root),
                     subject_sha256=res["subject"]["sha256"],
                     raised_by=res["evidence_ids"][0],
                     supporting=[res["evidence_ids"][0]],
@@ -619,6 +660,20 @@ class MissionRunner:
                     f"{res['format']} via {res['rung']}",
                     {"sha256": res["subject"]["sha256"],
                      "format": res["format"], "rung": res["rung"]})
+        if rung == "dynamic":
+            res = engine.run_dynamic(
+                target, rung=detail.get("rung", "auto"))
+            if res.get("error"):
+                raise RuntimeError(str(res["error"]))
+            unknown_ids = [u["unknown_id"]
+                           for u in res.get("unknowns") or []]
+            return (list(res["evidence_ids"]), unknown_ids,
+                    f"dynamic run via {res['rung']}: exit "
+                    f"{res.get('exit_code')}"
+                    + (" (timed out)" if res.get("timed_out")
+                       else ""),
+                    {"sha256": res["subject"]["sha256"],
+                     "rung": res["rung"]})
         if rung == "graph":
             if step["action"] == "query":
                 res = engine.android_query(
@@ -747,6 +802,42 @@ class MissionRunner:
                             "reason": f"{why} is {state['state']} "
                                       f"on this device "
                                       f"({state['detail']})"})
+                        seen_parked.add(unk.unknown_id)
+                    continue
+                if disposition == "dynamic":
+                    state = dynamic.dynamic_state(
+                        self.engine._tools_root)
+                    already = any(
+                        s["rung"] == "dynamic"
+                        and s["target"] == target
+                        for s in steps)
+                    if (state["available"] and not already
+                            and (target, "dynamic") not in scheduled):
+                        scheduled.add((target, "dynamic"))
+                        self.missions.add_step(
+                            mission_id, rung="dynamic",
+                            action="run", target=target,
+                            detail={"rung": state["rung"],
+                                    "reason": "unknown-driven: "
+                                              + unk.unknown_id})
+                        self.missions.add_step(
+                            mission_id, rung="reconstruct",
+                            action="reconstruct", target=target,
+                            detail={"reason": "after unknown-driven "
+                                              "dynamic run"})
+                        appended += 2
+                    elif unk.unknown_id not in seen_parked:
+                        if state["available"]:
+                            reason = (
+                                "a dynamic step already ran for "
+                                "this target and the question "
+                                "stands — the run answered what "
+                                "it could")
+                        else:
+                            reason = dynamic_unavailable_reason(
+                                self.engine._tools_root)
+                        parked.append({"unknown_id": unk.unknown_id,
+                                       "reason": reason})
                         seen_parked.add(unk.unknown_id)
                     continue
                 if unk.unknown_id not in seen_parked:

@@ -1,0 +1,30 @@
+# frida 17.26.2 — pinned install set for the RE dynamic rung (Frida).
+# Every hash below is a digest PyPI itself publishes for the
+# pinned version (read from the PyPI JSON API on 2026-11-12);
+# pip installs with --require-hashes, so a wheel that does not
+# match a published digest installs NOTHING. Frida ships one
+# self-contained abi3 wheel per platform (no dependencies), so
+# the pin is the single package; all platform wheels + the sdist
+# are listed so pip can pick the one for this device.
+frida==17.26.2 \
+    --hash=sha256:4dd10e9ff4d7b473e588f970a56c1f32fc83035a3b9d3ae7f82d9f02d0b06c9b \
+    --hash=sha256:e7db18bd88ed92aae425c9d964000dc9b4db9f521f27d9a4b96a6e788cd45576 \
+    --hash=sha256:bb520ddece9252e1f167446caec69e8c4341ebd12218dbae6ccb1320db952215 \
+    --hash=sha256:81bf85d0657eefb9ae5ef932a7618e460534a6bafc1bde0a6aa77d7f5752eb5a \
+    --hash=sha256:f6c51a6ab1038f54bc37c00faa5fb6e97ebba7cc4384d7a5c949e946fc307132 \
+    --hash=sha256:4d0abd33905db108bbc5a8e886f1d9ba200d5c6d8b5501101e28c54a71a50909 \
+    --hash=sha256:de073034166c78d0f51ce89670e2bca1de3e8f66e8f95a5a25d2a0c2064221c4 \
+    --hash=sha256:f4bed3bc4fa55424c280c0bca964edf443b6750245d5eeecf515bd72399c3653 \
+    --hash=sha256:0196d0f7b8fd7774d74b41da4737a2ee493e04c10f4a0e3ff577e1ed3deeeb26 \
+    --hash=sha256:2f72a9b03580e94c296d81e94e2b51dffa40f3e04ffce2ae97ef1d9dd2afa3e2 \
+    --hash=sha256:3312fa209616b199d1725fbd9fd74296407654a1a112a8ab758405ce16e2dddb \
+    --hash=sha256:60a77e5ff364cee68ee627fe1833bf872e28cb8bff966b62208ca7828fdaa34f \
+    --hash=sha256:ff6d6a30924018cee23536477a1215359567fc231c2fe423ddd4d1f975f2da81 \
+    --hash=sha256:6347d42a8d1ff8ac329e4c4d06cb6e3ca7507875165cfdf01313d2a60055f843
+
+# typing_extensions — frida needs it only on Python < 3.11
+# (EC2 runs <= 3.11); pinned here so --require-hashes still
+# holds there. Pure-Python package, all published files listed.
+typing_extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
+    --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5

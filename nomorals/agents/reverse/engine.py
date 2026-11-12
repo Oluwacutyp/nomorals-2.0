@@ -39,9 +39,14 @@ capability matrix, work the rungs in dependency order under a
 journaled plan, let the residual unknowns re-drive the plan, and
 close with a reconstruction whose every claim is evidence-tied
 and cross-rung verified — contradictions demoted to unknowns,
-never smoothed. Questions only running a target could answer
-classify as ``dynamic_required`` unknowns naming the owner's
-sandbox-posture gate; nothing here executes a target.
+never smoothed.
+
+The dynamic rung (:mod:`.dynamic`, Frida + GDB) dissolves the
+Pass 4 gate: questions only running a target could answer are
+answered by running it — as a copy, in a per-run workdir, under
+the namespace sandbox with the network dropped. The sandbox is
+part of the rung, not a posture question: with no namespace
+backend the rung refuses rather than running unsandboxed.
 """
 
 from __future__ import annotations
@@ -52,7 +57,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from . import android_graph, firmware, ghidra, lightbin, provision, traffic
+from . import android_graph, dynamic, firmware, ghidra, lightbin, provision, traffic
 from .evidence import EvidenceStore, UnknownCloseError
 from .failures import failure_count, record_failure
 from .inspectors import PROVIDER_ID, PROVIDER_NAME, PROVIDER_VERSION, elf_info, inspect_bytes
@@ -62,7 +67,7 @@ __all__ = [
     "render_status", "render_inspect_card", "render_evidence_card",
     "render_unknowns", "render_audit", "render_provision",
     "render_graph_answer", "render_firmware_card",
-    "render_traffic_card",
+    "render_traffic_card", "render_dynamic_card",
 ]
 
 #: Refuse to slurp an unbounded file into memory for a static parse.
@@ -211,14 +216,28 @@ def capability_matrix(root: Any = None) -> list[dict[str, Any]]:
                 "rung steps → reconstruction verify), journaled "
                 "end-to-end in re_missions/re_mission_steps; "
                 "unknowns re-drive the plan"})
+    # ── the dynamic rung (Frida + GDB), probe-true ─────────────
+    dyn = dynamic.dynamic_state(root)
     rows.append({
-        "engine": "frida-gdb", "kind": "external",
-        "available": False,
-        "note": "dynamic rung — gated on the owner's "
-                "sandbox/consent posture for executing targets; "
-                "not built, not provisioned, not probed: mission "
-                "questions that need it classify as "
-                "dynamic_required unknowns naming the gate"})
+        "engine": "frida", "kind": "provisioned",
+        "available": dyn["frida"]["available"],
+        "state": dyn["frida"]["state"],
+        "note": "dynamic trace rung (spawn, intercept the main "
+                "module's functions, report the calls) — "
+                + dyn["frida"]["detail"]})
+    rows.append({
+        "engine": "gdb", "kind": "provisioned",
+        "available": dyn["gdb"]["available"],
+        "state": dyn["gdb"]["state"],
+        "note": "dynamic session rung (breakpoints, frames, "
+                "registers, exit code) — " + dyn["gdb"]["detail"]})
+    rows.append({
+        "engine": "dynamic-sandbox", "kind": "built-in",
+        "available": dyn["sandbox"]["available"],
+        "state": ("ready" if dyn["sandbox"]["available"]
+                  else "unavailable"),
+        "note": "the namespace sandbox dynamic runs stand on — "
+                + dyn["sandbox"]["detail"]})
     return rows
 
 
@@ -764,7 +783,76 @@ class ReEngine:
         report["engines"]["unblob"] = row
         if not row.get("available"):
             report["ok"] = False
+        for engine in ("frida", "gdb"):
+            try:
+                row = provision.provision_engine(
+                    engine, root=self._tools_root)
+            except provision.ProvisionError as exc:
+                row = {"engine": engine, "state": "unavailable",
+                       "available": False, "source": "",
+                       "version":
+                           provision.DESCRIPTORS[engine]["version"],
+                       "path": "", "attempts": exc.attempts,
+                       "detail": str(exc)}
+                record_failure(f"reverse.provision.{engine}", exc)
+            report["engines"][engine] = row
+            if not row.get("available"):
+                report["ok"] = False
         return report
+
+    # ── the dynamic rung (Frida + GDB, sandboxed) ─────────────────
+    def run_dynamic(self, path: str, *, rung: str = "auto",
+                    script: str | None = None,
+                    args: tuple[str, ...] | list[str] = (),
+                    timeout: float | None = None,
+                    provision_missing: bool = False,
+                    root: Any = None) -> dict[str, Any]:
+        """Run one target under the dynamic rung and fold the run
+        into Evidence.
+
+        ``rung`` is ``auto`` (Frida when ready, else GDB), ``frida``
+        or ``gdb``. The run executes a COPY of the target in a
+        per-run workdir under the namespace sandbox, network
+        dropped; with no namespace backend this returns an error
+        naming the sandbox, never an unsandboxed run. The result
+        carries the rung, the folded evidence ids, the residual
+        unknowns, and the card text — or ``error`` naming what
+        failed.
+        """
+        target = Path(path or "").expanduser()
+        if not target.is_file():
+            return {"error": f"no readable file at {path}"}
+        effective_root = root if root is not None else self._tools_root
+        try:
+            result = dynamic.run_dynamic(
+                target, root=effective_root, rung=rung, args=args,
+                script=script,
+                timeout=(timeout if timeout is not None
+                         else dynamic.RUN_TIMEOUT_S),
+                provision_missing=provision_missing)
+        except dynamic.DynamicError as exc:
+            return {"error": str(exc)}
+        folded = dynamic.fold_evidence(
+            self.store, subject_sha256=result["sha256"],
+            subject_name=target.name,
+            subject_size=result["size"], subject_path=str(target),
+            result=result)
+        out: dict[str, Any] = {
+            "subject": {"name": target.name, "path": str(target),
+                        "sha256": result["sha256"],
+                        "size": result["size"]},
+            "rung": result["rung"],
+            "engine_version": result.get("engine_version") or "",
+            "exit_code": result.get("exit_code"),
+            "timed_out": bool(result.get("timed_out")),
+            "duration_s": result.get("duration_s"),
+            "sandbox": result.get("sandbox") or {},
+            "evidence_ids": folded["evidence_ids"],
+            "unknowns": folded["unknowns"],
+            "result": result,
+        }
+        out["card_text"] = render_dynamic_card(out)
+        return out
 
     # ── Pass 2: Android reference graph ──────────────────────────────
     def android_sources(self, path: str) -> dict[str, Any]:
@@ -1008,7 +1096,7 @@ class ReEngine:
 def render_status(status: dict[str, Any]) -> str:
     lines = ["reverse engineering — evidence core + static spine "
              "+ self-provisioned deep rungs + firmware/traffic "
-             "+ missions/reconstruction (Passes 1–4)"]
+             "+ missions/reconstruction + dynamic rung (Frida/GDB)"]
     for row in status["engines"]:
         mark = "yes" if row["available"] else "no"
         state = f" [{row['state']}]" if row.get("state") else ""
@@ -1080,6 +1168,56 @@ def render_inspect_card(result: dict[str, Any]) -> str:
                  + ("yes" if result["journaled"] else "no")
                  + " · remembered: "
                  + ("yes" if result["remembered"] else "no"))
+    return "\n".join(lines)
+
+
+def render_dynamic_card(result: dict[str, Any]) -> str:
+    if result.get("error"):
+        return f"⚠️ {result['error']}"
+    subj = result["subject"]
+    res = result.get("result") or {}
+    lines = [
+        f"▶️ {subj['name']} — dynamic run ({result['rung']})",
+        f"sha256 {subj['sha256'][:16]}… · {subj['size']} bytes",
+        f"exit code: {result.get('exit_code')}"
+        + (" · timed out" if result.get("timed_out") else ""),
+    ]
+    if result["rung"] == "frida":
+        lines.append(
+            f"frida: {res.get('event_count', 0)} call(s) observed "
+            f"across {len(res.get('hooked') or [])} intercepted "
+            "function(s)")
+        unique = sorted({str(e.get("function") or "")
+                         for e in (res.get("events") or [])
+                         if e.get("function")})
+        if unique:
+            lines.append("called: " + ", ".join(unique[:20]))
+    else:
+        lines.append(
+            f"gdb: {res.get('stop_count', 0)} breakpoint stop(s)")
+        for stop in (res.get("stops") or [])[:5]:
+            frames = [f["function"] for f in stop.get("frames") or []]
+            lines.append(f"  stop in {stop.get('function')}"
+                         + (f" — frames: {', '.join(frames[:6])}"
+                            if frames else ""))
+        if res.get("signal"):
+            lines.append(f"signal: {res['signal']}")
+        if res.get("entry_fallback"):
+            lines.append("main had no symbol — stopped at the entry "
+                         "point instead")
+    sb = result.get("sandbox") or {}
+    lines.append(
+        f"sandbox: {sb.get('backend')} · network dropped: "
+        f"{'yes' if sb.get('network_enforced') else 'no'} · "
+        "target ran as a copy in its own workdir")
+    lines.append(f"evidence: {len(result['evidence_ids'])} record(s) — "
+                 f"root {result['evidence_ids'][0]}")
+    if result["unknowns"]:
+        lines.append(f"residual unknowns: {len(result['unknowns'])}")
+        for unk in result["unknowns"]:
+            lines.append(f"  ? {unk['question']} [{unk['unknown_id']}]")
+    else:
+        lines.append("residual unknowns: none raised by this run")
     return "\n".join(lines)
 
 

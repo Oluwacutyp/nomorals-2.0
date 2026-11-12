@@ -18,10 +18,11 @@ observation is a LIE and fails the proof, even if the probe itself
 "passed" — the verdict is about the correspondence, not the tier.
 
 Run it anywhere with ``nm sandbox proof``. On a host where no
-namespace backend works (this container: unshare's probe fails on
-the ``/proc`` mount; EC2/Windows: no POSIX ``/bin/sh`` at all) the
-proof reports the tier as unavailable with the reason, and proves
-whatever the floor below it does provide.
+namespace backend works (this container: unshare runs its no-proc
+variant — the ``/proc`` mount is refused, so host PIDs stay visible
+and ``proc_confined`` reads False; EC2/Windows: no POSIX ``/bin/sh``
+at all) the proof reports the tier as it is, and proves whatever
+the tier below it does provide.
 """
 
 from __future__ import annotations
@@ -39,9 +40,11 @@ from typing import Any
 
 from .shell import (
     _PROBE_ARGV,
-    _PROBE_TIMEOUT,
+    _PROBE_ARGV_NOPROC,
     SandboxLimits,
+    _run_probe_argv,
     detect_backend,
+    proc_confined,
     run_sandboxed,
 )
 
@@ -85,30 +88,30 @@ def backend_evidence(requested: str = "auto") -> dict[str, Any]:
         ok = False
         detail = "not installed"
         if installed:
-            try:
-                probe = subprocess.run(
-                    _PROBE_ARGV[name],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.PIPE,
-                    timeout=_PROBE_TIMEOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                )
-                ok = probe.returncode == 0
-                if ok:
-                    detail = "probe passed"
-                else:
-                    err = (probe.stderr or "").strip()
-                    # The tool prefixes its own name ("unshare: ...");
-                    # drop it so the reason reads once, not twice.
-                    prefix = name + ": "
-                    if err.startswith(prefix):
-                        err = err[len(prefix):]
-                    detail = "probe failed: " + err
-            except (OSError, subprocess.SubprocessError) as exc:
-                detail = "probe error: " + str(exc)
+            ok, raw = _run_probe_argv(_PROBE_ARGV[name])
+            if ok:
+                detail = "probe passed"
+            else:
+                err = raw
+                # The tool prefixes its own name ("unshare: ...");
+                # drop it so the reason reads once, not twice.
+                prefix = name + ": "
+                if err.startswith(prefix):
+                    err = err[len(prefix):]
+                detail = "probe failed: " + err
+                if name == "unshare":
+                    # the proc mount is the only failing piece on
+                    # some containers — the no-proc variant is the
+                    # same backend, one weaker tier
+                    ok2, _raw2 = _run_probe_argv(
+                        _PROBE_ARGV_NOPROC[name])
+                    if ok2:
+                        ok = True
+                        detail += ("; no-proc variant passed — runs "
+                                   "without a fresh /proc (host "
+                                   "/proc stays visible)")
+                    else:
+                        detail += "; no-proc variant also failed"
         candidates[name] = {
             "installed": installed,
             "probe_ok": ok,
@@ -299,13 +302,20 @@ def probe_fs_escape(
 
 
 def probe_pid_namespace(workdir: str | os.PathLike[str]) -> dict[str, Any]:
-    """The child must see only its own PIDs under a namespace backend.
+    """The child must see only its own PIDs under a namespace backend
+    with a fresh /proc — and the observation must match the flags
+    that ran, not the tier wished for.
 
-    Under bwrap/unshare the child is PID 1 in a fresh PID namespace
-    with a fresh /proc, so the parent's PID is invisible. Under the
-    rlimit floor the child shares the host PID namespace, so its PID
-    is a host PID and the parent stays visible. Either way the
-    observation must match the backend that ran.
+    Under bwrap / unshare-with-proc the child is PID 1 in a fresh
+    PID namespace with a fresh /proc, so the parent's PID is
+    invisible. Under unshare's no-proc variant (the container
+    refuses the proc mount) the child is still PID 1 in its own
+    PID namespace — it cannot signal host PIDs — but the host's
+    /proc stays mounted, so the parent stays VISIBLE and
+    ``proc_confined`` reads False. Under the rlimit floor the
+    child shares the host PID namespace, so its PID is a host PID
+    and the parent stays visible. Either way the observation must
+    match the backend and the flag that ran.
     """
     parent_pid = os.getpid()
     command = (
@@ -338,24 +348,21 @@ def probe_pid_namespace(workdir: str | os.PathLike[str]) -> dict[str, Any]:
         )
     parent_visible = lines[2].strip() == "PARENT-VISIBLE"
     backend = result["backend"]
+    confined = bool(result.get("proc_confined"))
     evidence = (
         "child PID=" + str(child_pid) + ", /proc shows " + str(proc_count)
         + " processes, parent PID " + str(parent_pid) + " is "
         + ("VISIBLE" if parent_visible else "HIDDEN")
-        + " inside (backend " + backend + ")"
+        + " inside (backend " + backend
+        + ", proc_confined=" + str(confined) + ")"
     )
-    if backend in ("bwrap", "unshare"):
-        if child_pid == 1 and not parent_visible:
-            return _probe_result("pid-namespace", "pass", evidence)
-        return _probe_result(
-            "pid-namespace", "fail",
-            "namespace backend but the child is NOT isolated: " + evidence,
-        )
-    if child_pid != 1 and parent_visible:
+    pid_ok = (child_pid == 1) == (backend in ("bwrap", "unshare"))
+    proc_ok = (not parent_visible) == confined
+    if pid_ok and proc_ok:
         return _probe_result("pid-namespace", "pass", evidence)
     return _probe_result(
         "pid-namespace", "fail",
-        "rlimit floor but the child looks isolated: " + evidence,
+        "isolation does not match the flags that ran: " + evidence,
     )
 
 
@@ -563,6 +570,7 @@ def run_proof(
             ),
             "network_enforced": False,
             "fs_confined": False,
+            "proc_confined": False,
             "probes": [],
             "verdict": "not-applicable",
             "failures": ["platform cannot run sandboxed probes"],
@@ -576,6 +584,7 @@ def run_proof(
             "backend_reason": "backend selection failed: " + str(exc),
             "network_enforced": False,
             "fs_confined": False,
+            "proc_confined": False,
             "probes": [],
             "verdict": "fail",
             "failures": ["backend selection failed: " + str(exc)],
@@ -609,6 +618,7 @@ def run_proof(
         "backend_reason": evidence["reason"],
         "network_enforced": selected in ("bwrap", "unshare"),
         "fs_confined": selected == "bwrap",
+        "proc_confined": proc_confined(selected),
         "probes": probes,
         "verdict": verdict,
         "failures": failures,
@@ -629,5 +639,6 @@ def render_proof(report: dict[str, Any]) -> str:
         "VERDICT: " + verdict + " — backend " + str(report["backend"])
         + ", network_enforced=" + str(report["network_enforced"])
         + ", fs_confined=" + str(report["fs_confined"])
+        + ", proc_confined=" + str(report.get("proc_confined"))
     )
     return "\n".join(lines)

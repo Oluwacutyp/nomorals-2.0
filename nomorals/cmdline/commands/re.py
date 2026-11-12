@@ -19,7 +19,10 @@ mitmproxy-flow readers + a probed TShark second voice), and
 Pass 4: ``mission`` plans + works a brain-directed mission over
 the rungs and closes with a verified reconstruction per target;
 ``missions`` / ``mission-status`` / ``mission-resume`` read and
-resume the mission journal.
+resume the mission journal. The dynamic rung: ``dynamic <path>``
+runs one target under Frida or GDB — a copy in a per-run
+workdir under the namespace sandbox, network dropped — and folds
+the run into Evidence with the rung named.
 """
 
 from __future__ import annotations
@@ -76,6 +79,22 @@ def _cmd_re(args: Any, context: Any) -> int:
             print(res["error"])
             return 2
         print(render_mission(res))
+        return 0
+
+    if action == "dynamic":
+        timeout = getattr(args, "timeout", 0) or 0
+        res = engine.run_dynamic(
+            args.path,
+            rung=getattr(args, "rung", "auto") or "auto",
+            script=getattr(args, "script", "") or None,
+            args=tuple(getattr(args, "args", []) or ()),
+            timeout=(float(timeout) if timeout else None),
+            provision_missing=bool(
+                getattr(args, "provision", False)))
+        if res.get("error"):
+            print(res["error"])
+            return 2
+        print(res["card_text"])
         return 0
 
     if action == "inspect":

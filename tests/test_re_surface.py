@@ -253,16 +253,20 @@ class DoctorRowsTest(unittest.TestCase):
         # Pass 3 supersedes the Pass 1 placeholder rows: the
         # "binwalk-unblob" and "tshark" not-built rows are replaced
         # by the real firmware/traffic rows with probe-true states
-        # (frida-gdb stays an unbuilt gated row — Pass 4).
+        # — and the dynamic gate is dissolved: the frida-gdb row
+        # is replaced by the real frida / gdb / dynamic-sandbox
+        # rows with probe-true states.
         self.assertNotIn("binwalk-unblob", rows)
+        self.assertNotIn("frida-gdb", rows)
         for name in ("firmware-census", "traffic-native",
                      "mitm-addon"):
             self.assertTrue(rows[name]["available"], name)
             self.assertTrue(rows[name]["note"], name)
-        for name in ("unblob", "binwalk", "tshark", "frida-gdb"):
+        for name in ("unblob", "binwalk", "tshark", "frida", "gdb",
+                     "dynamic-sandbox"):
             self.assertIn(name, rows)
             self.assertTrue(rows[name]["note"], name)
-            if name in ("binwalk", "frida-gdb"):
+            if name == "binwalk":
                 self.assertFalse(rows[name]["available"], name)
             else:
                 # probe-true: available exactly when the engine

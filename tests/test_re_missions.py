@@ -1,6 +1,6 @@
 """RE Pass 4 — missions: deterministic planning over the
 capability matrix, the journaled runner, unknown-driven
-replanning, resume-from-journal, the dynamic boundary, and the
+replanning, resume-from-journal, the dynamic rung, and the
 mission surfaces (registry tools, chat verbs, nm re).
 
 The provisioning drive is stubbed at the engine seam in these
@@ -194,13 +194,34 @@ class MissionRunTest(unittest.TestCase):
             self.assertEqual(got["status"], "closed")
             self.assertIn(target, got["report"]["targets"])
 
-    def test_dynamic_question_opens_gated_unknown(self):
+    def test_dynamic_question_opens_unknown_naming_missing_engines(self):
+        # the gate is dissolved: with no dynamic rung available
+        # on this device, the question opens a dynamic_required
+        # unknown naming the CONCRETE missing engines — never a
+        # gate — and the mission still works every static rung
         with _TmpHome() as home:
             engine, _, _ = _engine(home)
             target = _write(home, "sample", build_elf64())
-            res = engine.run_mission(
-                "what does it do when run, and what side effects "
-                "does it have?", [target])
+            unavailable = {
+                "frida": {"available": False,
+                          "state": "unavailable",
+                          "detail": "frida is not provisioned on "
+                                    "this machine yet"},
+                "gdb": {"available": False,
+                        "state": "unavailable",
+                        "detail": "gdb is not installed on this "
+                                  "machine yet"},
+                "sandbox": {"available": False,
+                            "state": "unavailable",
+                            "detail": "no namespace sandbox works "
+                                      "on this device"},
+                "available": False, "rung": ""}
+            with mock.patch(
+                    "nomorals.agents.reverse.dynamic.dynamic_state",
+                    return_value=unavailable):
+                res = engine.run_mission(
+                    "what does it do when run, and what side "
+                    "effects does it have?", [target])
             self.assertEqual(res["status"], "closed", res)
             # no rung that executes anything was ever planned
             self.assertTrue(all(
@@ -216,16 +237,50 @@ class MissionRunTest(unittest.TestCase):
                        and u.required_confidence == "observed"]
             self.assertEqual(len(dynamic), 1)
             self.assertIn("when it runs", dynamic[0].question)
-            self.assertIn("sandbox/consent", dynamic[0].question)
-            # the mission report parks it with the gate named
+            self.assertIn("frida", dynamic[0].question)
+            self.assertIn("gdb", dynamic[0].question)
+            self.assertNotIn("sandbox/consent",
+                             dynamic[0].question)
+            # the mission report parks it with the concrete
+            # missing engines named, not a gate
             parked = res["report"].get("parked_unknowns") or []
             self.assertTrue(any(
                 p["unknown_id"] == dynamic[0].unknown_id
+                and "frida" in p["reason"]
                 for p in parked), parked)
-            # static claims still landed — the gate blocks the
-            # dynamic answer, not the mission
+            # static claims still landed — the missing rung
+            # blocks the dynamic answer, not the mission
             report = res["report"]["targets"][target]
             self.assertTrue(report["claims"])
+
+    def test_dynamic_question_plans_a_dynamic_step_when_available(self):
+        # the plan is a function of the matrix (the
+        # test_plan_matches_live_ghidra_state pattern): with a
+        # dynamic rung available, the question plans a dynamic
+        # step — the execution itself is proven in
+        # test_re_dynamic.py, so the engine seam is mocked here
+        with _TmpHome() as home:
+            engine, _, _ = _engine(home)
+            target = _write(home, "sample", build_elf64())
+            fake = {"rung": "gdb", "exit_code": 0,
+                    "timed_out": False, "duration_s": 0.1,
+                    "sandbox": {"backend": "unshare",
+                                "network_enforced": True},
+                    "subject": {"sha256": "ab" * 32},
+                    "evidence_ids": ["ev-dynamic"],
+                    "unknowns": [], "card_text": "dynamic card"}
+            with mock.patch.object(ReEngine, "run_dynamic",
+                                   return_value=fake):
+                res = engine.run_mission(
+                    "what does it do when run?", [target])
+            self.assertEqual(res["status"], "closed", res)
+            dynamic_steps = [s for s in res["steps"]
+                             if s["rung"] == "dynamic"]
+            self.assertTrue(dynamic_steps, res["steps"])
+            self.assertTrue(all(
+                s["status"] == "done" for s in dynamic_steps))
+            self.assertIn("ev-dynamic",
+                          dynamic_steps[0]["evidence_ids"])
 
     def test_interruption_and_resume_from_journal(self):
         with _TmpHome() as home:

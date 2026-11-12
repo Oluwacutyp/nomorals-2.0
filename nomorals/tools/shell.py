@@ -20,9 +20,24 @@ the net namespace, unshare adds ``--net``. Under the rlimit fallback
 ``network=False`` only strips proxy variables — the network stays
 reachable. A code-execution tool with open network access is a
 remote-access trojan the moment an agent is prompt-injected by a page
-it fetched, so results carry ``network_enforced`` / ``fs_confined``:
-which of the requested guarantees the backend that actually ran could
-and did provide.
+it fetched, so results carry ``network_enforced`` / ``fs_confined`` /
+``proc_confined``: which of the requested guarantees the backend that
+actually ran could and did provide.
+
+One container wall, named rather than worked around: the unshare
+backend's ``--mount-proc`` (a fresh ``/proc`` hiding host PIDs)
+fails on containers that refuse the proc mount (``mount /proc
+failed: Operation not permitted``) — the PID and net namespaces
+still work there, only the proc remount is refused. The probe
+tries the full invocation, then the same invocation without
+``--mount-proc``; when the no-proc variant is what runs, the
+backend stays ``unshare`` and ``proc_confined`` reads False, so
+callers know the child can see host PIDs in ``/proc`` (it still
+cannot signal them — the PID namespace and the user mapping hold —
+and the filesystem was never jailed under unshare in the first
+place). A flag that disagrees with its observation is a lie; the
+no-proc variant is a weaker tier of the same backend, not a
+silent downgrade to rlimit.
 """
 
 from __future__ import annotations
@@ -145,8 +160,37 @@ _PROBE_ARGV: dict[str, list[str]] = {
     "bwrap": ["bwrap", "--ro-bind", "/usr", "/usr", "--proc", "/proc", "--dev", "/dev", "/bin/true"],
     "unshare": ["unshare", "--map-root-user", "--fork", "--pid", "--mount-proc", "/bin/true"],
 }
+#: The unshare invocation without the proc remount, for containers
+#: that refuse the ``/proc`` mount while the PID/net namespaces
+#: still work — the same backend, one weaker tier (see the module
+#: docstring). Only unshare has a no-proc variant.
+_PROBE_ARGV_NOPROC: dict[str, list[str]] = {
+    "unshare": ["unshare", "--map-root-user", "--fork", "--pid", "/bin/true"],
+}
 _PROBE_TIMEOUT = 5.0
 _PROBE_CACHE: dict[str, bool] = {}
+#: Which unshare invocation the probe proved: "proc" (fresh /proc)
+#: or "noproc" (host /proc stays visible). Populated by
+#: :func:`_probe_backend`; absent until unshare is probed.
+_PROBE_VARIANT: dict[str, str] = {}
+
+
+def _run_probe_argv(argv: list[str]) -> tuple[bool, str]:
+    """Run one probe argv → (passed, stderr text)."""
+    try:
+        probe = subprocess.run(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=_PROBE_TIMEOUT,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"probe error: {exc}"
+    if probe.returncode == 0:
+        return True, "probe passed"
+    return False, (probe.stderr or b"").decode(
+        "utf-8", errors="replace").strip()
 
 
 def _probe_backend(name: str) -> bool:
@@ -156,6 +200,10 @@ def _probe_backend(name: str) -> bool:
     ``unshare`` while refusing the ``/proc`` mount it needs, failing at runtime
     with ``mount /proc failed: Operation not permitted``. The probe result is
     cached at module level, so each backend is probed at most once per process.
+    For unshare the full invocation is tried first; when the proc remount is
+    what fails, the no-proc invocation is tried, and the variant that worked
+    is recorded in :data:`_PROBE_VARIANT` — the backend is usable either way,
+    and the variant says which tier of it ran.
     """
     if name in _PROBE_CACHE:
         return _PROBE_CACHE[name]
@@ -163,26 +211,54 @@ def _probe_backend(name: str) -> bool:
     if shutil.which(name) is None:
         _log.debug("sandbox backend %s is not installed", name)
     else:
-        try:
-            probe = subprocess.run(
-                _PROBE_ARGV[name],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
-                timeout=_PROBE_TIMEOUT,
-            )
-            usable = probe.returncode == 0
-            if not usable:
-                _log.debug(
-                    "sandbox backend %s probe exited %s: %s",
-                    name,
-                    probe.returncode,
-                    (probe.stderr or "").strip(),
-                )
-        except (OSError, subprocess.SubprocessError) as exc:
-            _log.debug("sandbox backend %s probe failed: %s", name, exc)
+        usable, detail = _run_probe_argv(_PROBE_ARGV[name])
+        if not usable:
+            _log.debug("sandbox backend %s probe exited: %s", name, detail)
+        if name == "unshare":
+            if usable:
+                _PROBE_VARIANT[name] = "proc"
+            else:
+                noproc_ok, noproc_detail = _run_probe_argv(
+                    _PROBE_ARGV_NOPROC[name])
+                if noproc_ok:
+                    usable = True
+                    _PROBE_VARIANT[name] = "noproc"
+                    _log.debug(
+                        "sandbox backend unshare runs without a fresh "
+                        "/proc (full probe failed: %s)", detail)
+                else:
+                    _log.debug(
+                        "sandbox backend unshare no-proc probe failed: %s",
+                        noproc_detail)
     _PROBE_CACHE[name] = usable
     return usable
+
+
+def unshare_mounts_proc() -> bool:
+    """Does the unshare backend mount a fresh ``/proc`` here?
+
+    True on a host where the full probe passed; False where the
+    no-proc variant is what runs (the container refuses the proc
+    mount) or where unshare does not work at all. Probes once,
+    cached — the same probe ``detect_backend`` runs.
+    """
+    _probe_backend("unshare")
+    return _PROBE_VARIANT.get("unshare") == "proc"
+
+
+def proc_confined(backend: str) -> bool:
+    """Does ``backend`` hide host PIDs behind a fresh ``/proc``?
+
+    bwrap always does (its ``--proc`` bind); unshare does when its
+    proc variant runs and does not on the no-proc variant; the
+    rlimit floor never does. This is the flag ``run_sandboxed``
+    reports, so a caller never has to re-derive it.
+    """
+    if backend == "bwrap":
+        return True
+    if backend == "unshare":
+        return unshare_mounts_proc()
+    return False
 
 
 def detect_backend(preferred: str = "auto") -> str:
@@ -259,7 +335,9 @@ def run_sandboxed(
             "--die-with-parent", "/bin/sh", "-c", command,
         ]
     elif chosen == "unshare":
-        flags = ["--map-root-user", "--fork", "--pid", "--mount-proc"]
+        flags = ["--map-root-user", "--fork", "--pid"]
+        if proc_confined("unshare"):
+            flags.append("--mount-proc")
         if not network:
             flags.append("--net")
         argv = ["unshare", *flags, "/bin/sh", "-c", f"cd {workdir} && {command}"]
@@ -314,8 +392,13 @@ def run_sandboxed(
         # ran enforces. "network" above is the *request*; under the
         # rlimit fallback network=False blocks nothing (no namespace),
         # and only bwrap confines the filesystem to the workdir.
+        # proc_confined names the third guarantee: a fresh /proc
+        # hiding host PIDs — true under bwrap and under unshare's
+        # proc variant, false on unshare's no-proc variant (the
+        # container refuses the proc mount) and on the rlimit floor.
         "network_enforced": chosen in ("bwrap", "unshare"),
         "fs_confined": chosen == "bwrap",
+        "proc_confined": proc_confined(chosen),
         "cwd": str(workdir),
     }
 

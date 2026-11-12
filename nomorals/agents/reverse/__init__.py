@@ -45,10 +45,17 @@ order under a journal she can resume, lets the residual
 unknowns re-drive the plan, and closes with a reconstruction
 (:mod:`.verify`) — claims tied to evidence ids, cross-rung
 checks that corroborate or demote, contradictions opened as
-unknowns rather than smoothed. Questions only running a target
-could answer classify as ``dynamic_required`` unknowns naming
-the owner's sandbox-posture gate; the dynamic rung is not
-built, and nothing in this organ executes a target.
+unknowns rather than smoothed.
+
+The dynamic rung (:mod:`.dynamic`, Frida + GDB) dissolves the
+Pass 4 gate: questions only running a target could answer are
+answered by running it — as a copy, in a per-run workdir,
+under the namespace sandbox with the network dropped. The
+sandbox is part of the rung, not a posture question: with no
+namespace backend the rung refuses rather than running
+unsandboxed. The dynamic rung is built, and the mission planner
+schedules dynamic steps when a dynamic rung is available;
+when none is, the unknown names the missing engine.
 """
 
 from __future__ import annotations
@@ -57,6 +64,7 @@ from typing import Any
 
 from . import (
     android_graph,
+    dynamic,
     firmware,
     ghidra,
     lightbin,
@@ -69,6 +77,7 @@ from .engine import (
     ReEngine,
     capability_matrix,
     render_audit,
+    render_dynamic_card,
     render_evidence_card,
     render_firmware_card,
     render_graph_answer,
@@ -87,13 +96,14 @@ __all__ = [
     "Evidence", "EvidenceStore", "Unknown", "UnknownCloseError",
     "AUTHORITIES", "CONFIDENCES",
     "provision", "ghidra", "lightbin", "android_graph",
-    "firmware", "traffic", "missions", "verify",
+    "firmware", "traffic", "missions", "verify", "dynamic",
     "Claim", "ReconstructionError",
     "render_status", "render_inspect_card", "render_evidence_card",
     "render_unknowns", "render_audit", "render_provision",
     "render_graph_answer", "render_firmware_card",
     "render_traffic_card", "render_mission", "render_mission_list",
     "render_mission_status", "render_reconstruction",
+    "render_dynamic_card",
     "register",
 ]
 
@@ -221,12 +231,23 @@ def register(registry: Any) -> None:
             "its residual unknowns, and names the rung that "
             "answered; deep = auto (deepest available now) | "
             "provision (provision missing engines first, then "
-            "route) | off (built-in rungs only); static only, "
-            "nothing is executed) | provision (run the "
+            "route) | off (built-in rungs only)) | dynamic (path = "
+            "a local binary to RUN under the dynamic rung — "
+            "Frida trace or GDB session — as a copy in a per-run "
+            "workdir under the namespace sandbox, network "
+            "dropped; rung = auto (Frida when ready, else GDB) | "
+            "frida | gdb; script = a Frida JS file for the trace; "
+            "args = comma-separated target argv; timeout_s = the "
+            "run budget; provision = true provisions a missing "
+            "engine first. The run folds into Evidence with the "
+            "rung named on the record; with no namespace sandbox "
+            "the rung refuses rather than running unsandboxed) | "
+            "provision (run the "
             "self-provisioning drive — pinned Temurin JDK, "
             "pinned Ghidra, pinned unblob (PyPI digests, "
-            "--require-hashes) — and report each engine's state "
-            "with its attempts) | "
+            "--require-hashes), pinned Frida (PyPI digests, "
+            "--require-hashes), GDB through apt — and report each "
+            "engine's state with its attempts) | "
             "graph (path = an APK or jadx output dir: build the "
             "Android class/method/reference graph and record its "
             "census as Evidence) | mission (Pass 4: run a "
@@ -241,10 +262,12 @@ def register(registry: Any) -> None:
             "same planner; graph_target names the class/method "
             "for a graph-intent query step; with mission_id set "
             "instead of a question, the mission RESUMES from its "
-            "journal. Static only: a question only running a "
-            "target could answer opens a dynamic_required unknown "
-            "naming the owner's sandbox-posture gate — nothing "
-            "is executed) | close (unknown_id + status="
+            "journal. A question only running a target could "
+            "answer is answered by the dynamic rung (action="
+            "dynamic) — the target runs as a copy under the "
+            "namespace sandbox, network dropped — and when no "
+            "dynamic rung can run, it opens a dynamic_required "
+            "unknown naming the missing engine, not a gate) | close (unknown_id + status="
             "resolved|contradicted: resolved takes a resolution "
             "text, contradicted takes at least one contradicting "
             "evidence id in evidence_ids, and the stated "
@@ -254,9 +277,21 @@ def register(registry: Any) -> None:
         ),
         capability=Capability.DB_WRITE,
         parameters={
-            "action": "str — inspect|provision|graph|mission|close",
+            "action": "str — inspect|provision|graph|mission|close|"
+                      "dynamic",
             "path": "str — file to inspect (action=inspect), or "
-                    "APK / jadx output dir (action=graph)",
+                    "APK / jadx output dir (action=graph), or "
+                    "binary to run (action=dynamic)",
+            "rung": "str — auto|frida|gdb (action=dynamic, "
+                    "default auto)",
+            "script": "str — Frida JS file for the trace "
+                      "(action=dynamic)",
+            "args": "str — comma-separated target argv "
+                    "(action=dynamic)",
+            "timeout_s": "str — the run budget in seconds "
+                         "(action=dynamic)",
+            "provision": "str — true provisions a missing dynamic "
+                         "engine first (action=dynamic)",
             "deep": "str — auto|provision|off (action=inspect, "
                     "default auto)",
             "question": "str — the mission question "
@@ -292,7 +327,10 @@ def register(registry: Any) -> None:
                         unknown_id: str = "", status: str = "",
                         resolution: str = "", evidence_ids: str = "",
                         resolution_authority: str = "",
-                        resolution_confidence: str = ""
+                        resolution_confidence: str = "",
+                        rung: str = "auto", script: str = "",
+                        args: str = "", timeout_s: str = "",
+                        provision: str = ""
                         ) -> dict[str, Any]:
         act = (action or "inspect").strip().lower()
         engine = ReEngine(context)
@@ -301,6 +339,20 @@ def register(registry: Any) -> None:
             if mode not in ("auto", "provision", "off"):
                 mode = "auto"
             return engine.inspect_path(path, deep=mode)
+        if act == "dynamic":
+            argv = tuple(a.strip() for a in (args or "").split(",")
+                         if a.strip())
+            try:
+                timeout = float(timeout_s) if timeout_s else None
+            except ValueError:
+                return {"error": f"timeout_s {timeout_s!r} is not "
+                                 "a number"}
+            return engine.run_dynamic(
+                path, rung=(rung or "auto").strip().lower(),
+                script=(script or "").strip() or None,
+                args=argv, timeout=timeout,
+                provision_missing=(provision or "").strip().lower()
+                in ("true", "1", "yes"))
         if act == "provision":
             return engine.provision_engines()
         if act == "graph":
@@ -327,4 +379,5 @@ def register(registry: Any) -> None:
                                        or "inferred"),
                 evidence_ids=ids)
         return {"error": f"unknown re_inspect action {act!r} — "
-                         "inspect|provision|graph|mission|close"}
+                         "inspect|provision|graph|mission|close|"
+                         "dynamic"}
