@@ -23,7 +23,10 @@ MVT decoder (:mod:`nomorals.maps.mvt`), the Devon Style document
 same boundary (:mod:`nomorals.maps.vector_render`).  M4 adds the
 local geocoder (:mod:`nomorals.maps.gazetteer`): a gazetteer
 indexed from the packs themselves, forward/reverse queries, and
-the owner-policy federation seam.  M5 adds the routing plane
+the owner-policy federation seam.  The federation rungs land in
+:mod:`nomorals.maps.providers` (census B9): Nominatim, then
+Overpass, both keyless and fallback-only, wired into every
+Gazetteer the agent and chat surfaces construct.  M5 adds the routing plane
 (:mod:`nomorals.maps.routing`): a corridor-scoped road graph
 extracted from a pack's own tiles, Dijkstra over it, route
 receipts, and the same federation posture for the router; the
@@ -138,6 +141,13 @@ from .overlays import (
 )
 from .packs import render_pack_preview, verify_pack_dir
 from .pipeline import BuildReport, PipelineError, run_build
+from .providers import (
+    LiveGeocodeError,
+    LiveGeocodeProvider,
+    NominatimProvider,
+    OverpassProvider,
+    live_geocode_provider,
+)
 from .receipts import OPERATIONS, MapReceipt, MapReceiptStore, new_receipt_id
 from .registry import ReleaseEntry, ReleaseRegistry
 from .render import FixtureRenderer, MapRenderer, RenderResult, StdlibPngBackend
@@ -188,11 +198,13 @@ __all__ = [
     "FixtureRenderer", "Gazetteer", "GazetteerEntry", "GeoValidation",
     "GeocodeCandidate", "GeocodeProvider", "GeocodeResult",
     "GraphStats", "INDEX_BUILD_COMMAND", "IndexBuildResult",
-    "LabelSpec", "MapOverlay", "OverlayPaint", "OverlayPolygon",
+    "LabelSpec", "LiveGeocodeError", "LiveGeocodeProvider",
+    "MapOverlay", "OverlayPaint", "OverlayPolygon",
     "MapReceipt", "MapRenderer", "MapReceiptStore", "MapSettings",
     "MapSource", "MapStyle", "Mark", "MarkError", "MarkStore",
     "MvtError", "MvtFeature", "MvtLayer",
-    "MvtPath", "MvtTile", "PackDefinition", "PackError",
+    "MvtPath", "MvtTile", "NominatimProvider", "OverpassProvider",
+    "PackDefinition", "PackError",
     "PackIndexResult", "PackIndexStatus", "PackManifest", "PackMember",
     "PackVerification", "PendingMark", "PilTextBackend",
     "PipelineError",
@@ -206,7 +218,7 @@ __all__ = [
     "get_pack", "get_source", "hash_bytes", "lat_to_tile_y",
     "lat_to_y_float", "load_manifest", "lon_to_tile_x",
     "index_status_line", "lon_to_x_float", "map_settings",
-    "match_rank", "new_receipt_id",
+    "live_geocode_provider", "match_rank", "new_receipt_id",
     "normalize_label", "normalize_name", "overlay_bbox",
     "overlay_to_map_overlay", "pending_key", "polygon_defects",
     "render_pack_preview", "run_build", "style_hash",

@@ -444,7 +444,16 @@ class TestSettingsAndOffline:
 
     def test_no_network_imports_in_package(self):
         banned = ("socket", "urllib", "http.client", "requests")
+        # Census B9: providers.py is the package's ONE sanctioned
+        # network home — the federation rungs (Nominatim, then
+        # Overpass), keyless and fallback-only, gated by the
+        # owner's NM_MAPS_GEOCODE_FEDERATION policy.  Every other
+        # module stays offline; the gazetteer itself never opens
+        # a socket (see TestNoNetworkPinCoversGazetteer in m4).
+        allowed = {"providers.py"}
         for path in sorted(MAPS_DIR.glob("*.py")):
+            if path.name in allowed:
+                continue
             tree = ast.parse(path.read_text(encoding="utf-8"))
             for node in ast.walk(tree):
                 if isinstance(node, ast.Import):

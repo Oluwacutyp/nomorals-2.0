@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import ast
 import gzip
+import json
 import os
 import socket
 import tempfile
@@ -811,14 +812,81 @@ class TestMapFindNearSurface(unittest.TestCase):
         self.assertIn("local-first", out)
         self.assertEqual(self.rt.gateway.sent, [])
 
-    def test_find_federation_on_names_missing_provider(self):
+    def test_find_federation_on_reaches_nominatim_and_names_it(self):
+        # Census B9: a provider IS wired now, so federation on +
+        # local miss consults Nominatim — stubbed here, the suite
+        # never touches the network — and the answer names its
+        # rung instead of wearing the local label.
         _surface_pack(self.packs)
         self._build_index()
+        payload = json.dumps([{
+            "place_id": 262099875,
+            "lat": "51.5225853", "lon": "-0.1567431",
+            "category": "railway", "type": "station",
+            "addresstype": "railway", "name": "Baker Street",
+            "display_name": "Baker Street, London, United Kingdom",
+        }]).encode("utf-8")
+
+        class _Response:
+            def read(self):
+                return payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def _fake_urlopen(request, timeout=None):
+            return _Response()
+
         with mock.patch.dict(os.environ,
-                             {"NM_MAPS_GEOCODE_FEDERATION": "1"}):
-            out = self.rt._control_map("find atlantis",
+                             {"NM_MAPS_GEOCODE_FEDERATION": "1"}), \
+                mock.patch("urllib.request.urlopen", _fake_urlopen):
+            out = self.rt._control_map("find baker street",
                                        message=_msg())
-        self.assertIn("no geocode provider is configured", out)
+        self.assertIn("Baker Street", out)
+        self.assertIn("via provider nominatim", out)
+        self.assertIn("provider nominatim", out)
+        # A provider hit earns no map photo: there are no local
+        # tiles for it, and the winner rule only crowns local
+        # exact/prefix matches.
+        self.assertEqual(self.rt.gateway.sent, [])
+
+    def test_near_federation_on_reaches_nominatim_and_names_it(self):
+        # The reverse surface names its rung the same way the
+        # forward one does (census B9).
+        _surface_pack(self.packs)
+        self._build_index()
+        payload = json.dumps({
+            "place_id": "134140761",
+            "lat": "51.5225853", "lon": "-0.1567431",
+            "category": "railway", "type": "station",
+            "addresstype": "railway", "name": "Baker Street",
+            "display_name": "Baker Street, London, United Kingdom",
+        }).encode("utf-8")
+
+        class _Response:
+            def read(self):
+                return payload
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *exc):
+                return False
+
+        def _fake_urlopen(request, timeout=None):
+            return _Response()
+
+        with mock.patch.dict(os.environ,
+                             {"NM_MAPS_GEOCODE_FEDERATION": "1"}), \
+                mock.patch("urllib.request.urlopen", _fake_urlopen):
+            out = self.rt._control_map("near 51.5226,-0.1567",
+                                       message=_msg())
+        self.assertIn("Baker Street", out)
+        self.assertIn("via provider nominatim", out)
+        self.assertIn("provider nominatim", out)
 
     def test_find_without_packs_names_the_empty_shelf(self):
         out = self.rt._control_map("find ado", message=_msg())

@@ -130,9 +130,16 @@ class MapAgent:
 
     def _gazetteer(self):
         from ..maps.gazetteer import Gazetteer
+        from ..maps.providers import live_geocode_provider
 
+        # The live rungs are wired, not just permitted: when
+        # federation is on and the local index misses, the
+        # gazetteer falls to Nominatim, then Overpass (census B9).
+        # Federation off (the default) never calls the provider,
+        # so the wiring is inert until the owner permits it.
         return Gazetteer(
             self.packs_dir(), store=self.receipt_store(),
+            provider=live_geocode_provider(),
             federation=map_settings().geocode_federation)
 
     def _router(self):

@@ -148,19 +148,31 @@ def _sources(args: argparse.Namespace, context: Any) -> int:
     rows: list[dict[str, Any]] = []
     lines = ["map sources — registered inputs + hash discipline"]
     for source in SOURCES:
-        discipline = "sha256 pinned" if source.sha256 else (
-            "publisher md5 + pin-after-fetch" if source.md5_url
-            else "pin-after-fetch")
-        lines.append(
-            "  " + source.source_id + " — " + source.name
-            + " · " + discipline + " · " + source.license
-            + " · credit: " + source.attribution)
+        # A row with notes is a live service, not a downloadable
+        # input (census B9 geocoder rungs): there is no artifact
+        # to pin, so the hash discipline does not apply — the
+        # notes carry its honest limits instead.
+        if source.notes:
+            discipline = "live service — no artifact"
+        elif source.sha256:
+            discipline = "sha256 pinned"
+        elif source.md5_url:
+            discipline = "publisher md5 + pin-after-fetch"
+        else:
+            discipline = "pin-after-fetch"
+        line = ("  " + source.source_id + " — " + source.name
+                + " · " + discipline + " · " + source.license
+                + " · credit: " + source.attribution)
+        if source.notes:
+            line += " · " + source.notes
+        lines.append(line)
         rows.append({"source_id": source.source_id,
                      "name": source.name, "url": source.url,
                      "sha256": source.sha256,
                      "md5_url": source.md5_url,
                      "attribution": source.attribution,
-                     "license": source.license})
+                     "license": source.license,
+                     "notes": source.notes})
     _emit(args, {"sources": rows}, "\n".join(lines))
     return 0
 

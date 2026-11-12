@@ -8,6 +8,12 @@ source, which builder, which extent and zooms) — as **data**, so
 the pipeline in :mod:`nomorals.maps.pipeline` stays generic over
 them and a new pack is a new row, never new code.
 
+Two rows are live services, not downloadable inputs: the
+Nominatim + Overpass geocoder rungs (census B9) — keyless,
+fallback-only, recorded here so the registry names every
+outside dependency, with their honest limits in ``notes``.  No
+pack build ever acquires them.
+
 Hash discipline, stated honestly: a source whose publisher ships
 a stable checksum gets ``sha256`` pinned here and the pipeline
 refuses a mismatch by name.  Rolling extracts (Geofabrik's
@@ -51,7 +57,9 @@ PLANETILER_AUX_SOURCE_IDS = (
 
 @dataclass(frozen=True)
 class MapSource:
-    """One downloadable input: where, whose, under what terms."""
+    """One registered input: where, whose, under what terms — a
+    downloadable artifact, or (census B9) a live service recorded
+    with its honest limits in ``notes``."""
 
     source_id: str
     name: str
@@ -65,6 +73,10 @@ class MapSource:
     #: verifies when the artifact itself is unpinned.
     md5_url: str = ""
     filename: str = ""
+    #: Honest limits, in the registry's own words (census B9):
+    #: keyless/rate-limited/fallback-only for the live geocoder
+    #: rows, which no pack build ever acquires.
+    notes: str = ""
 
     def artifact_name(self) -> str:
         """The local filename this source's download lands as."""
@@ -178,6 +190,32 @@ SOURCES: tuple[MapSource, ...] = (
         attribution="© OpenStreetMap contributors",
         license="ODbL 1.0",
         filename="tile_weights.tsv.gz"),
+    MapSource(
+        source_id="nominatim-search",
+        name="Nominatim geocoder (OpenStreetMap)",
+        url="https://nominatim.openstreetmap.org/search",
+        attribution="© OpenStreetMap contributors",
+        license="ODbL 1.0",
+        notes=("Fallback-only live geocoder (census B9): keyless "
+               "under the usage policy — at most 1 request/second "
+               "with an identifying User-Agent, attribution "
+               "required; never runs when the local Atlas index "
+               "answers, and only when NM_MAPS_GEOCODE_FEDERATION "
+               "permits.")),
+    MapSource(
+        source_id="overpass-search",
+        name="Overpass API (OpenStreetMap)",
+        url="https://overpass-api.de/api/interpreter",
+        attribution="© OpenStreetMap contributors",
+        license="ODbL 1.0",
+        notes=("Fallback-only second geocode rung (census B9): "
+               "keyless; a global name search is a planet scan "
+               "the public server will not answer in time, so "
+               "forward search uses exact-name match only and "
+               "may 502 at capacity — the reliable shape is the "
+               "scoped reverse/around query.  Never runs when "
+               "the local Atlas index answers, and only when "
+               "NM_MAPS_GEOCODE_FEDERATION permits.")),
 )
 
 PACKS: tuple[PackDefinition, ...] = (

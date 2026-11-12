@@ -260,10 +260,15 @@ class RuntimeLiveMixin:
         """(gazetteer, installed) — the local geocoder (M4) over
         the shelf, federation posture from settings."""
         from ...maps.gazetteer import Gazetteer
+        from ...maps.providers import live_geocode_provider
         from ...maps.settings import map_settings
 
+        # The live rungs are wired, not just permitted (census
+        # B9): federation on + local miss falls to Nominatim,
+        # then Overpass.  Federation off never calls the provider.
         gazetteer = Gazetteer(
             self._map_packs_dir(), store=self._map_receipt_store(),
+            provider=live_geocode_provider(),
             federation=map_settings().geocode_federation)
         installed = [(d, m) for d, m, err in self._map_installed()
                      if m is not None]
@@ -632,6 +637,27 @@ class RuntimeLiveMixin:
         return {"continent": 4, "country": 5, "state": 7,
                 "city": 12, "town": 13, "village": 14}.get(kind, 13)
 
+    @staticmethod
+    def _map_result_source(result) -> str:
+        """The honest source label for a gazetteer result: the
+        local index, or the live provider that answered (census
+        B9 — a federated answer must never wear the local
+        label)."""
+        if result.posture == "federated":
+            return "via provider " + result.provider
+        return "local Atlas index"
+
+    @staticmethod
+    def _map_candidate_source(names: dict, cand,
+                              provider: str) -> str:
+        """Where one listed candidate came from: its pack's name,
+        or the live provider for a federated hit — a provider
+        candidate carries no pack_id, so the pack lookup would
+        leave a dangling separator."""
+        if cand.pack_id:
+            return names.get(cand.pack_id, cand.pack_id)
+        return "provider " + provider
+
     def _map_find(self, query: str, chat_key: str = "") -> str:
         if not query:
             return "usage: /map find <place name>"
@@ -659,20 +685,28 @@ class RuntimeLiveMixin:
         if not result.candidates:
             if mark is not None:
                 lines.append(self._map_mark_line(mark))
-            lines.append(
-                f"no place named {query!r} in the local Atlas "
-                "index — " + result.note + ".")
+            if result.posture == "federated":
+                # The miss is the provider's answer (or failure),
+                # not a local-index claim — the note says which.
+                lines.append("no place named " + repr(query)
+                             + " — " + result.note + ".")
+            else:
+                lines.append(
+                    f"no place named {query!r} in the local Atlas "
+                    "index — " + result.note + ".")
             return "\n".join(lines)
         if mark is not None:
             lines.append(self._map_mark_line(mark))
         lines.append(
             f"🔎 {len(result.candidates)} place(s) matching "
-            f"{query!r} (local Atlas index):")
+            f"{query!r} (" + self._map_result_source(result)
+            + "):")
         for cand in result.candidates:
             lines.append(
                 f"  • {cand.name} — {cand.kind} · "
                 f"{cand.lat:.4f},{cand.lon:.4f} · "
-                + names.get(cand.pack_id, cand.pack_id))
+                + self._map_candidate_source(
+                    names, cand, result.provider))
         if mark is not None:
             # His own place is the winner when he named it: its
             # photo is the mark's view, not a gazetteer hit's.
@@ -724,7 +758,7 @@ class RuntimeLiveMixin:
             return "\n".join(lines)
         lines.append(
             f"📍 named places near {lat:.4f},{lon:.4f} "
-            "(local Atlas index):")
+            "(" + self._map_result_source(result) + "):")
         for cand in result.candidates:
             if cand.distance_km >= 1.0:
                 dist = f"{cand.distance_km:.1f} km"
@@ -732,7 +766,8 @@ class RuntimeLiveMixin:
                 dist = f"{cand.distance_km * 1000:.0f} m"
             lines.append(
                 f"  • {cand.name} — {cand.kind} · {dist} · "
-                + names.get(cand.pack_id, cand.pack_id))
+                + self._map_candidate_source(
+                    names, cand, result.provider))
         return "\n".join(lines)
 
     @staticmethod
