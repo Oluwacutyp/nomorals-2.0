@@ -74,6 +74,38 @@ def looks_complex(text: str) -> bool:
         return True
     return False
 
+
+def _recent_summary_failures(db: Any, head: str, *,
+                             window_s: float = 3600.0) -> int:
+    """Failures in the last ``window_s`` whose summary contains ``head``.
+
+    The seam has no LIKE: the windowed fetch runs through the failures
+    ledger's port when a store is attached (the window bounds the
+    fetch), and the substring match runs in Python. ``head`` is already
+    lowercased alphanumerics, so ``head in summary.lower()`` is exactly
+    SQLite LIKE's ASCII case-insensitive substring match. Native SQL
+    otherwise. Raises on the native path exactly as the inline query
+    did (callers guard pre-migration databases).
+    """
+    if not head:
+        return 0
+    from ..storage.rowstore import attached_rows
+    try:
+        table = attached_rows(db, "failures")
+    except Exception:  # noqa: BLE001 - missing table / unusable handle
+        table = None
+    if table is not None:
+        rows = table.find({"ts": {"$gt": time.time() - window_s}})
+        needle = head[:24]
+        return sum(1 for r in rows
+                   if needle in (r.get("summary") or "").lower())
+    rows = db.query(
+        "SELECT COUNT(*) AS n FROM failures WHERE ts > ? "
+        "AND summary LIKE ?",
+        (time.time() - window_s, f"%{head[:24]}%"))
+    return int(rows[0]["n"]) if rows else 0
+
+
 _MAX_BRANCHES = 3
 _MAX_HYPOTHESES = 4
 _MAX_CRITIQUE_ROUNDS = 2
@@ -1203,11 +1235,7 @@ class ReasoningAgent:
                 head = re.sub(r"[^a-z0-9]+", " ",
                               action.lower())[:40].strip()
                 if head:
-                    rows = db.query(
-                        "SELECT COUNT(*) AS n FROM failures WHERE ts > ? "
-                        "AND summary LIKE ?",
-                        (time.time() - 3600.0, f"%{head[:24]}%"))
-                    n = rows[0]["n"] if rows else 0
+                    n = _recent_summary_failures(db, head)
                     if n:
                         risks.append(f"same action family failed {n}x in "
                                      "the last hour")
@@ -1468,11 +1496,7 @@ class ReasoningAgent:
                 head = re.sub(r"[^a-z0-9]+", " ", outcome.lower())
                 head = " ".join(head.split())[:40].strip()
                 if head:
-                    rows = db.query(
-                        "SELECT COUNT(*) AS n FROM failures WHERE ts > ? "
-                        "AND summary LIKE ?",
-                        (time.time() - 3600.0, f"%{head[:24]}%"))
-                    family_hits = rows[0]["n"] if rows else 0
+                    family_hits = _recent_summary_failures(db, head)
         except Exception as exc:  # noqa: BLE001
             record_failure("reasoning.course_family", exc)
             family_hits = 0

@@ -286,9 +286,23 @@ class SkillEvolutionLoop:
         ``[{skill, count, failures}]`` for skills at/above the threshold."""
         cutoff = time.time() - self.window_days * 86400.0
         try:
-            rows = self.db.query(
-                "SELECT * FROM failures WHERE ts > ? AND skill<>'' "
-                "ORDER BY ts DESC", (cutoff,))
+            from ..storage.rowstore import attached_rows
+            try:
+                table = attached_rows(self.db, "failures")
+            except Exception:  # noqa: BLE001 - missing table / unusable handle
+                table = None
+            if table is not None:
+                # The seam's find is _id-ordered by contract and failure
+                # ids are random — ORDER BY ts DESC is the caller's job
+                # (rowstore), same as the failures ledger's own port.
+                rows = table.find({"ts": {"$gt": cutoff},
+                                   "skill": {"$ne": ""}})
+                rows = sorted(rows, key=lambda r: float(r.get("ts") or 0),
+                              reverse=True)
+            else:
+                rows = self.db.query(
+                    "SELECT * FROM failures WHERE ts > ? AND skill<>'' "
+                    "ORDER BY ts DESC", (cutoff,))
         except Exception as exc:  # noqa: BLE001 — pre-migration-52 databases
             record_failure("skill_evolution.detect", exc)
             rows = []

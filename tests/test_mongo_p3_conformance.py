@@ -484,6 +484,127 @@ def test_news_conformance(rung: Rung):
         assert pdoc is not None and "gold" in pdoc["value"]
 
 
+# ── failures ledger (agents/failure.py + satellites) ──────────────────────────
+
+def test_failures_conformance(rung: Rung):
+    """The failures ledger on all three rungs: the owner module plus
+    every satellite reader/writer, through their public entry points.
+
+    On the seam rungs one raw read-back proves the stored documents
+    are the carry-v1 shape for the same rows (``_id`` is the string
+    primary key; omitted columns arrive at their SQLite defaults).
+    The lesson write inside record(learn=True) stays native SQL on
+    every rung — the mixed-method proof that residue tables keep
+    working when the ledger itself rides the seam.
+    """
+    import time
+
+    from nomorals.agents.evolution import _failures_table
+    from nomorals.agents.failure import FailureAnalyzer
+    from nomorals.agents.reasoning import _recent_summary_failures
+    from nomorals.agents.role_specs import record_tool_denial
+    from nomorals.agents.skill_evolution import SkillEvolutionLoop
+    from nomorals.agents.toolmaker import _repeated_families
+    from nomorals.immune.feeds import read_failure_rows
+    from nomorals.tools.registry import ToolRegistry
+
+    analyzer = FailureAnalyzer(_ctx(rung.db))
+    # Two distinct failures + one repeat of the first (learn=False:
+    # pure ledger behavior; the lesson path is exercised below).
+    # Families are derived by core.errors.categorize: "timed out"
+    # maps to "network", "KeyError" to "missing_key".
+    analyzer.record("tool", "alpha tool blew up", "timed out after 30s",
+                    skill="gold", learn=False)
+    analyzer.record("tool", "beta tool blew up", "KeyError: 'gold'",
+                    skill="", learn=False)
+    analyzer.record("tool", "alpha tool blew up", "timed out after 45s",
+                    skill="gold", learn=False)
+    # A tool_denied row is invisible to collect() but visible to the
+    # raw ledger readers — written by the role_specs satellite, the
+    # only writer of that family.
+    record_tool_denial(_ctx(rung.db), "scout", "probe_tool",
+                       "test reason")
+
+    cases = analyzer.collect(limit=10)
+    # collect() returns every ledger row, newest first — no dedup
+    # (the repeat count lives in record()'s lesson path, not here).
+    assert [c.summary for c in cases] == [
+        "alpha tool blew up", "beta tool blew up", "alpha tool blew up"]
+    assert cases[0].error == "timed out after 45s"
+    assert cases[0].skill == "gold"
+    assert cases[2].error == "timed out after 30s"
+
+    recent = analyzer.recent_failures(limit=10)
+    assert len(recent) == 4
+    assert recent[0]["family"] == "tool_denied"  # newest first, no filter
+    denied = analyzer.recent_failures(limit=10, family="tool_denied")
+    assert len(denied) == 1
+
+    stats = analyzer.stats()
+    assert stats["failures"] == 4
+    assert stats["by_family"] == {"network": 2, "missing_key": 1,
+                                  "tool_denied": 1}
+    assert stats["by_source"] == {"tool": 3, "role": 1}
+    assert stats["failures_24h"] == 4
+
+    # ── satellites, same rows, same answers on every rung ──
+    assert _recent_summary_failures(rung.db, "alpha tool blew up") == 2
+    fams = _repeated_families(rung.db, time.time() - 7 * 86400.0, 5)
+    assert [f["family"] for f in fams] == ["network"]
+    assert fams[0]["n"] == 2
+    assert fams[0]["sample"] == "alpha tool blew up"
+    table = _failures_table(rung.db)
+    if table is not None:
+        assert table.count({"ts": {"$gt": time.time() - 86400.0}}) == 4
+    loop = SkillEvolutionLoop(_ctx(rung.db), min_failures=2)
+    found = loop.detect()
+    assert [c["skill"] for c in found] == ["gold"]
+    assert found[0]["count"] == 2
+    rows, err = read_failure_rows(rung.db)
+    assert err == ""
+    assert rows is not None and len(rows) == 3
+    assert {r["tool"] for r in rows} == {"gold", ""}
+
+    # ── satellite writers ──
+    ToolRegistry(_ctx(rung.db))._record_failure_ledger(
+        "probe_tool", "blew up", "boom detail")
+    record_tool_denial(_ctx(rung.db), "scout", "probe_tool",
+                       "test reason")
+    assert analyzer.stats()["failures"] == 6
+    assert len(analyzer.recent_failures(limit=10,
+                                        family="tool_denied")) == 2
+    assert analyzer.stats()["by_source"] == {"tool": 4, "role": 2}
+
+    # ── the lesson path stays native SQL on every rung ──
+    result = analyzer.record(
+        "tool", "gamma tool blew up", "timed out after 60s",
+        skill="", learn=True)
+    assert result["times_seen"] == 1 and result["lesson_id"]
+    assert rung.db.query_one(
+        "SELECT * FROM lessons WHERE id=?",
+        (result["lesson_id"],)) is not None
+    assert analyzer.stats()["failures"] == 7
+    fid = result["id"]
+
+    if rung.seam:
+        alpha_id = next(r["id"] for r in
+                        analyzer.recent_failures(limit=10)
+                        if r["summary"] == "alpha tool blew up")
+        doc = rung.raw("failures", alpha_id)
+        assert doc is not None and doc["_id"] == alpha_id
+        assert doc["summary"] == "alpha tool blew up"
+        assert doc["family"] == "network"
+        assert doc["skill"] == "gold"
+        # omitted columns arrive at their SQLite defaults
+        assert doc["times_seen"] == 1
+        assert doc["resolved"] == 0
+        assert doc["lesson"] == ""
+        gdoc = rung.raw("failures", fid)
+        assert gdoc is not None and gdoc["_id"] == fid
+        assert gdoc["summary"] == "gamma tool blew up"
+        assert gdoc["family"] == "network"
+
+
 # ── research jobs (agents/search/jobs.py) ────────────────────────────────────
 
 def test_research_jobs_conformance(rung: Rung):

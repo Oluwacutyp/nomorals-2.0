@@ -275,10 +275,18 @@ def test_scan_remainder_is_exactly_exclusions():
     # exception is deliberately neither recorded nor logged (during
     # boot the ledger it would record into may be the thing being
     # wired). The site is adjudicated deliberate and pinned here.
+    # _record_failure_ledger is the cutover-readiness seam fallback:
+    # the ledger is best-effort and must never sink the tool result,
+    # so when the seam handle is missing or unusable (attached_rows
+    # raises) it falls back to the native SQL insert — the failure is
+    # still recorded either way, and the outer handler records any
+    # insert failure itself. The site is adjudicated deliberate and
+    # pinned here.
     assert found == sorted([
         ("E104", "_args_digest"),
         ("E104", "_args_digest"),
         ("E104", "_invoke_tool_fn"),
+        ("E104", "_record_failure_ledger"),
     ])
     # Each debug-honest body carries exc_info=True (Call-keyword walk,
     # not an ast.dump string grep — the #125 classifier lesson).

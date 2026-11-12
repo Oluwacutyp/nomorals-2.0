@@ -43,6 +43,42 @@ __all__ = ["ToolMaker", "ToolSpec", "register", "register_custom"]
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _CUSTOM_DIR = Path(__file__).resolve().parent.parent / "tools" / "custom"
 
+
+def _repeated_families(db: Any, week_ago: float, limit: int) -> list[dict[str, Any]]:
+    """Failure families with >= 2 hits since ``week_ago``, most-hit first.
+
+    The seam has no GROUP BY / MAX: the windowed fetch runs through
+    the failures ledger's port when a store is attached and the grouping
+    runs in Python — ``MAX(substr(summary, 1, 120))`` is the max of the
+    truncated summaries per family, so the Python ``max`` of the same
+    truncations is the same value. Native SQL otherwise. (The native
+    query's tie order among equal counts is unspecified in both shapes;
+    the seam branch keeps first-seen family order.) Raises on the
+    native path exactly as the inline query did (callers guard
+    pre-migration ledgers).
+    """
+    from ..storage.rowstore import attached_rows
+    try:
+        table = attached_rows(db, "failures")
+    except Exception:  # noqa: BLE001 - missing table / unusable handle
+        table = None
+    if table is not None:
+        groups: dict[str, list[str]] = {}
+        for r in table.find({"ts": {"$gt": week_ago}}):
+            fam = r.get("family") or "other"
+            groups.setdefault(fam, []).append((r.get("summary") or "")[:120])
+        agg = [{"family": fam, "n": len(samples), "sample": max(samples)}
+               for fam, samples in groups.items() if len(samples) >= 2]
+        agg.sort(key=lambda row: -row["n"])
+        return agg[:limit]
+    rows = db.query(
+        "SELECT family, COUNT(*) AS n, "
+        "MAX(substr(summary, 1, 120)) AS sample FROM failures "
+        "WHERE ts > ? GROUP BY family HAVING n >= 2 "
+        "ORDER BY n DESC LIMIT ?", (week_ago, limit))
+    return [dict(r) for r in rows]
+
+
 # The contract every generated module must satisfy, shown to the model.
 _MODULE_TEMPLATE = '''"""Custom tool: {name}. {description}"""
 from __future__ import annotations
@@ -380,11 +416,7 @@ class ToolMaker:
         week_ago = time.time() - 7 * 86400.0
         # 1. repeated failure families
         try:
-            rows = db.query(
-                "SELECT family, COUNT(*) AS n, "
-                "MAX(substr(summary, 1, 120)) AS sample FROM failures "
-                "WHERE ts > ? GROUP BY family HAVING n >= 2 "
-                "ORDER BY n DESC LIMIT ?", (week_ago, limit))
+            rows = _repeated_families(db, week_ago, limit)
             for r in rows:
                 fam = r["family"] or "other"
                 out.append({

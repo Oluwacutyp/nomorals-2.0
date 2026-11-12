@@ -1459,14 +1459,31 @@ class ToolRegistry:
             # in memory only; nothing raw is persisted).
             from ..core.errors import redact_secrets
 
-            db.execute(
-                "INSERT INTO failures (id, source, summary, error, family, "
-                "lesson, ts, fingerprint, skill) VALUES (?,?,?,?,?,?,?,?,?)",
-                (f"tool-{int(time.time_ns())}", "tool",
-                 redact_secrets(f"{tool} failed {message}")[:500],
-                 redact_secrets(detail)[:500],
-                 self._failure_family(detail or message), "", time.time(),
-                 fingerprint, tool))
+            summary = redact_secrets(f"{tool} failed {message}")[:500]
+            error = redact_secrets(detail)[:500]
+            try:
+                from ..storage.rowstore import attached_rows
+                table = attached_rows(db, "failures")
+            except Exception:  # noqa: BLE001 - missing table / unusable handle
+                table = None
+            if table is not None:
+                # put is an upsert; the id is fresh, so this is an
+                # insert — the row is the carry-v1 document for the
+                # same values (defaults filled as SQLite would).
+                table.put({"id": f"tool-{int(time.time_ns())}",
+                           "source": "tool", "summary": summary,
+                           "error": error,
+                           "family": self._failure_family(detail or message),
+                           "lesson": "", "ts": time.time(),
+                           "fingerprint": fingerprint, "skill": tool})
+            else:
+                db.execute(
+                    "INSERT INTO failures (id, source, summary, error, family, "
+                    "lesson, ts, fingerprint, skill) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (f"tool-{int(time.time_ns())}", "tool",
+                     summary, error,
+                     self._failure_family(detail or message), "", time.time(),
+                     fingerprint, tool))
         except Exception as e:  # noqa: BLE001 — the ledger never sinks the result
             record_failure("ToolRegistry._record_failure_ledger:insert", e)
         finally:

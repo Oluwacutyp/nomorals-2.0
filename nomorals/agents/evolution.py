@@ -68,11 +68,27 @@ _log = get_logger(__name__)
 def _outcomes_table(db: Any):
     """The seam-backed evolution_outcomes table (Mongo P3), or None on
     the SQLite default, where the native statements run unchanged. Only
-    the outcomes ledger is ported; the agent's cross-domain count reads
-    (skills / kg / failures tables) stay SQL — they are other organs'
-    tables, outside this domain's port."""
+    the outcomes ledger is ported; the agent's other cross-domain count
+    reads (skills / kg tables) stay SQL — they are other organs'
+    tables, outside this domain's port. (The failures count routes
+    through the failures ledger's own port — see _failures_table.)"""
     from ..storage.rowstore import attached_rows
     return attached_rows(db, "evolution_outcomes")
+
+
+def _failures_table(db: Any):
+    """The seam-backed failures table, or None on the SQLite default.
+
+    The failures ledger's own port lives in agents/failure.py; this
+    cross-domain count read routes through the same table when a store
+    is attached, native SQL otherwise. A missing table (pre-migration
+    databases) also yields None.
+    """
+    from ..storage.rowstore import attached_rows
+    try:
+        return attached_rows(db, "failures")
+    except Exception:  # noqa: BLE001 - missing table / unusable handle
+        return None
 
 
 __all__ = ["EvolutionAgent", "EvolutionGitController",
@@ -434,9 +450,14 @@ class EvolutionAgent:
                 pass
         failures_24h = 0
         try:
-            failures_24h = db.query_one(
-                "SELECT COUNT(*) AS n FROM failures WHERE ts > ?",
-                (time.time() - 86400.0,))["n"]
+            table = _failures_table(db)
+            if table is not None:
+                failures_24h = table.count(
+                    {"ts": {"$gt": time.time() - 86400.0}})
+            else:
+                failures_24h = db.query_one(
+                    "SELECT COUNT(*) AS n FROM failures WHERE ts > ?",
+                    (time.time() - 86400.0,))["n"]
         except Exception as exc:  # noqa: BLE001
             record_failure("evolution.measure.failures_24h", exc)
             pass

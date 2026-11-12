@@ -312,10 +312,26 @@ def read_failure_rows(db: Any, *, now: float | None = None,
     window = default_window if window_s is None else float(window_s)
     now = time.time() if now is None else float(now)
     try:
-        cursor = db.execute(
-            "SELECT id, skill, fingerprint, error, ts, created_at "
-            "FROM failures WHERE source = 'tool'")
-        raw_rows = cursor.fetchall()
+        store = getattr(db, "document_store", None)
+        if store is not None:
+            # The seam, reached through the Database handle — immune/
+            # is the shared layer (L0) and may not import the L2
+            # rowstore, so the table lookup happens here instead of
+            # via attached_rows. The store's own find returns carry-v1
+            # documents; the failures table has no _id/expires_at
+            # column (migrations frozen), so the reverse mapping is
+            # the PK rename only. Dict rows already — _row_field
+            # takes the dict branch.
+            raw_rows = [
+                {"id": d.get("_id", ""),
+                 **{k: v for k, v in d.items()
+                    if k not in ("_id", "expires_at")}}
+                for d in store.find("failures", {"source": "tool"})]
+        else:
+            cursor = db.execute(
+                "SELECT id, skill, fingerprint, error, ts, created_at "
+                "FROM failures WHERE source = 'tool'")
+            raw_rows = cursor.fetchall()
     except Exception as exc:  # noqa: BLE001 — UNAVAILABLE, never a crash
         return None, f"failure ledger unreadable: {exc}"
     rows: list[dict[str, Any]] = []

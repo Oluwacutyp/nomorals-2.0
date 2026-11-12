@@ -141,14 +141,29 @@ def record_tool_denial(context: Any, role: str, tool_name: str,
     if db is None:
         return
     try:
-        db.execute(
-            "INSERT INTO failures (id, source, summary, error, family,"
-            " lesson, ts) VALUES (?,?,?,?,?,?,?)",
-            (f"deny-{int(time.time_ns())}", "role",
-             redact_secrets(
-                 f"role {role!r} denied {tool_name!r} ({reason})")[:500],
-             redact_secrets(message or reason)[:500],
-             "tool_denied", "", time.time()))
+        from ..storage.rowstore import attached_rows
+        try:
+            table = attached_rows(db, "failures")
+        except Exception:  # noqa: BLE001 - missing table / unusable handle
+            table = None
+        if table is not None:
+            # put is an upsert; the id is fresh, so this is an insert —
+            # the row is the carry-v1 document for the same values.
+            table.put({"id": f"deny-{int(time.time_ns())}", "source": "role",
+                       "summary": redact_secrets(
+                           f"role {role!r} denied {tool_name!r} ({reason})")[:500],
+                       "error": redact_secrets(message or reason)[:500],
+                       "family": "tool_denied", "lesson": "",
+                       "ts": time.time()})
+        else:
+            db.execute(
+                "INSERT INTO failures (id, source, summary, error, family,"
+                " lesson, ts) VALUES (?,?,?,?,?,?,?)",
+                (f"deny-{int(time.time_ns())}", "role",
+                 redact_secrets(
+                     f"role {role!r} denied {tool_name!r} ({reason})")[:500],
+                 redact_secrets(message or reason)[:500],
+                 "tool_denied", "", time.time()))
     except Exception:  # noqa: BLE001 - the ledger never sinks the result
         pass
 

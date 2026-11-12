@@ -461,6 +461,13 @@ PORTED_TABLES: dict[str, str] = {
     # operation runs over the seam when a store is attached, the
     # claim a single cas on the job document (storage/queue.py).
     "work_queue": "storage/queue.py (WorkQueue seam path, P4)",
+    # Cross-organ ledger (cutover readiness, 2026-11-12): the failures
+    # ledger — agents/failure.py owns it, and the seven other readers/
+    # writers (agents/evolution.py, agents/reasoning.py,
+    # agents/toolmaker.py, agents/skill_evolution.py, immune/feeds.py,
+    # tools/registry.py, agents/role_specs.py) route through the same
+    # table when a store is attached, native SQL otherwise.
+    "failures": "agents/failure.py (failures ledger seam port, cutover readiness)",
 }
 
 #: P3-domain tables whose live path stays on native SQL, with reasons.
@@ -496,10 +503,13 @@ PORT_RESIDUE: dict[str, str] = {
         "schedule_runs documents, proven on both rungs); the live "
         "agents/scheduler.py path stays on native SQL in P4 — its "
         "claim is single-process by design (in-process active set + "
-        "per-tick pool) and five other modules read/write these "
-        "tables natively, so a claim-only seam wiring would fork the "
-        "record between two stores; the wholesale scheduler domain "
-        "port is a later pass"),
+        "per-tick pool) and seven other modules read/write these "
+        "tables natively (agents/job_reports.py, agents/motivation.py, "
+        "agents/outcome_steward.py, agents/skill_evolution.py, "
+        "agents/autonomy/presence.py, cmdline/commands/schedule.py, "
+        "agents/scheduler/facade.py), so a claim-only seam wiring "
+        "would fork the record between two stores; the wholesale "
+        "scheduler domain port is a later pass"),
     "schedule_runs": "the claim book's history collection (same disposition as schedule_jobs)",
     "cards": "games-domain table with no live writer at this commit; data carries via P2 — nothing to port until a writer exists",
     # ── Research & web: no live path exists at this commit.
@@ -512,6 +522,46 @@ PORT_RESIDUE: dict[str, str] = {
     # ── Trading & finance: no live path exists at this commit.
     "finance_accounts": "no live code path at this commit; data carries via P2 — nothing to port",
     "price_watches": "no live code path at this commit; data carries via P2 — nothing to port",
+    # ── Cutover-readiness census (2026-11-12): the 32 mapped tables
+    # with live raw-SQL users that no phase had classified yet. Each
+    # ports with its own domain in a later pass; live paths stay native
+    # and data carries via P2 until then. (The failures ledger left
+    # this list in the same commit — it is ported; see PORTED_TABLES.)
+    # Goals & projects.
+    "agent_goal_steps": "ports with the goals domain (agents/goals.py, agents/projects.py, goals/providers.py); goal steps move with their goal rows in composed transactions",
+    "agent_goals": "ports with the goals domain (agents/arena/core.py, agents/goals.py, agents/projects.py, goals/providers.py); goal rows move with their step/subgoal children in composed transactions",
+    "goal_steps": "ports with the goals domain (agents/cognition.py); goal steps move with their goal rows in composed transactions",
+    "goals": "ports with the goals domain (agents/cognition.py, agents/mission.py, goals/__init__.py, media/explore/beats.py); the goals core, read/written by several modules natively — a wholesale domain port, not a single-table wiring",
+    "subgoals": "ports with the goals domain (goals/__init__.py, goals/providers.py); subgoal rows move with their goal rows in composed transactions",
+    "projects": "ports with the goals/projects domain (agents/mission.py, agents/projects.py); project rows move with their task/goal children in composed transactions",
+    # Briefings.
+    "briefing_engagement": "ports with the briefings domain (agents/morning_briefing.py); engagement rows move with their briefing rows",
+    "briefings": "ports with the briefings domain (agents/morning_briefing.py)",
+    # Artifacts, audit, autonomy, vault.
+    "artifacts": "ports with the artifacts/craft domain (storage/artifacts.py, craft/graph.py); artifact rows describe file-backed blobs — the metadata port follows the blob-store story",
+    "audit_log": "ports with the accounts/audit domain (accounts/vault.py, agents/power.py); append-only audit rows written on every unlock/lock/activation",
+    "autonomy_ledger": "ports with the autonomy domain (agents/autonomy_ledger.py); the autonomy loop's own ledger, written inside its composed turn transactions",
+    "cipher_vault": "stays on SQLite until the vault has an encryption-at-rest story for the Mongo rung (agents/cipher.py): the table holds encrypted vault blobs + key_scheme — moving ciphertext without that story changes the threat model; a later pass owns the port",
+    "coding_log": "ports with the coding domain (agents/coding.py, agents/projects.py); the coding ledger, written inside composed coding transactions",
+    "corpus_words": "ports with the corpus domain (core/corpus.py); the learned lexicon layer, written by the corpus learner",
+    "directives": "ports with the directives domain (agents/directives.py)",
+    "lexicon_terms": "ports with the lexicon domain (agents/research_lexicon.py, partner/lexicon_feed.py)",
+    "lexicon_versions": "ports with the lexicon domain (same reason as lexicon_terms)",
+    "macros": "ports with the macros domain (tools/macros.py)",
+    "mission_checkpoints": "ports with the missions domain (missions/mission.py); checkpoints move with their mission rows in composed transactions",
+    "missions": "ports with the missions domain (missions/mission.py, missions/progress.py)",
+    "models": "ports with the model-registry domain (llm/registry.py); the persistent model registry (eval_scores + metadata JSON columns)",
+    "notification_deliveries": "ports with the notifier domain (agents/notifier.py); delivery rows move with their notification rows",
+    "notifications": "ports with the notifier domain (agents/notifier.py)",
+    "proactive_log": "ports with the proactivity domain (agents/autonomy.py, agents/morning_pulse.py, agents/partner/approvals.py, agents/partner/runtime.py); four modules write the proactive ledger natively — a wholesale domain port, not a single-table wiring",
+    "room_links": "ports with the rooms domain (workspace/rooms.py); link rows move with their room rows",
+    "rooms": "ports with the rooms domain (workspace/rooms.py)",
+    "skill_edits": "ports with the skills domain (agents/morning_briefing.py, agents/skill_evolution.py); skill-library tables move with the skill-evolution domain",
+    "skill_uses": "ports with the skills domain (agents/skills.py); the skill library's usage ledger",
+    "skills": "ports with the skills domain (agents/evolution.py, agents/skill_synthesis.py, agents/skills.py); the skill library's core table",
+    "social_posts": "ports with the social content domain (social/content_pipeline.py, social/manager.py, social/engagement.py, social/metrics.py, agents/content_cell.py, agents/partner/runtime_system.py); six modules read/write natively — a wholesale domain port",
+    "tool_calls": "ports with the tool-call ledger domain (agents/toolmaker.py, agents/skill_synthesis.py, training/collect.py)",
+    "upgrade_proposals": "ports with the upgrade-queue domain (agents/research_loop.py, agents/upgrade_queue.py)",
 }
 
 

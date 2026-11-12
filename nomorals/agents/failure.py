@@ -132,6 +132,33 @@ class FailureAnalyzer:
         self.db = context.db
         self.skills = SkillLibrary(context.db)
 
+    def _failures(self):
+        """The seam-backed failures table, or None on the SQLite default.
+
+        The KV pickup rule (rowstore): when boot attached a document
+        store the ledger routes through the seam; otherwise — and on a
+        pre-migration database whose table is missing — the caller runs
+        its native SQL path byte-for-byte as before. The ledger's rows
+        are the same documents the P2 carry writes for the same rows
+        (one mapping, owned by storage.carry).
+        """
+        try:
+            from ..storage.rowstore import attached_rows
+            return attached_rows(self.db, "failures")
+        except Exception:  # noqa: BLE001 - missing table / unusable handle
+            return None
+
+    def _newest_first(self, rows: list[dict[str, Any]],
+                      limit: int) -> list[dict[str, Any]]:
+        """Newest-first slice of ledger rows: the seam's ``find`` is
+        ``_id``-ordered by contract and failure ids are random, so the
+        ``ORDER BY ts DESC`` the native path gets from SQLite is the
+        caller's job here (rowstore). The native path already scans
+        (no index on ``ts``), so this is the same cost class."""
+        ordered = sorted(rows, key=lambda r: float(r.get("ts") or 0),
+                         reverse=True)
+        return ordered[:limit]
+
     # ── collect ─────────────────────────────────────────────────────────────
     def collect(self, *, limit: int = 20) -> list[FailureCase]:
         """Gather recent failures from every source the system tracks."""
@@ -168,10 +195,15 @@ class FailureAnalyzer:
         # Denial telemetry (family='tool_denied') is a policy event, not
         # a failure to learn a lesson from — excluded.
         try:
-            rows = self.db.query(
-                "SELECT source, summary, error, ts, skill FROM failures "
-                "WHERE family<>'tool_denied' ORDER BY ts DESC LIMIT ?",
-                (limit,))
+            table = self._failures()
+            if table is not None:
+                rows = table.find({"family": {"$ne": "tool_denied"}})
+                rows = self._newest_first(rows, limit)
+            else:
+                rows = self.db.query(
+                    "SELECT source, summary, error, ts, skill FROM failures "
+                    "WHERE family<>'tool_denied' ORDER BY ts DESC LIMIT ?",
+                    (limit,))
             for r in rows:
                 cases.append(FailureCase(
                     source=r["source"] or "tool",
@@ -212,17 +244,33 @@ class FailureAnalyzer:
         fingerprint = failure_fingerprint(source, error, operation, skill)
         try:
             fid = new_short_id("fail")
-            self.db.execute(
-                "INSERT INTO failures (id, source, summary, error, family, "
-                "lesson, ts, fingerprint, skill) VALUES (?,?,?,?,?,?,?,?,?)",
-                (fid, source, summary, error, family, "", time.time(),
-                 fingerprint, skill))
+            now = time.time()
+            table = self._failures()
+            if table is not None:
+                # put is an upsert; the id is fresh, so this is an
+                # insert — and the row is the carry-v1 document for
+                # the same values (defaults filled as SQLite would).
+                table.put({"id": fid, "source": source, "summary": summary,
+                           "error": error, "family": family, "lesson": "",
+                           "ts": now, "fingerprint": fingerprint,
+                           "skill": skill})
+            else:
+                self.db.execute(
+                    "INSERT INTO failures (id, source, summary, error, family, "
+                    "lesson, ts, fingerprint, skill) VALUES (?,?,?,?,?,?,?,?,?)",
+                    (fid, source, summary, error, family, "", now,
+                     fingerprint, skill))
             times_seen = 1
             lesson_id = ""
             if learn:
-                repeat = self.db.query_one(
-                    "SELECT COUNT(*) AS n FROM failures WHERE source=? AND "
-                    "summary=? AND id<>?", (source, summary, fid))["n"]
+                if table is not None:
+                    repeat = table.count(
+                        {"source": source, "summary": summary,
+                         "id": {"$ne": fid}})
+                else:
+                    repeat = self.db.query_one(
+                        "SELECT COUNT(*) AS n FROM failures WHERE source=? AND "
+                        "summary=? AND id<>?", (source, summary, fid))["n"]
                 if family != "other" or repeat:
                     case = FailureCase(source=source, summary=summary,
                                        error=error, ts=time.time(),
@@ -263,6 +311,10 @@ class FailureAnalyzer:
 
     def recent_failures(self, *, limit: int = 10,
                         family: str = "") -> list[dict[str, Any]]:
+        table = self._failures()
+        if table is not None:
+            rows = table.find({"family": family} if family else None)
+            return [dict(r) for r in self._newest_first(rows, limit)]
         q = ("SELECT * FROM failures"
              + (" WHERE family=?" if family else "")
              + " ORDER BY ts DESC LIMIT ?")
@@ -489,9 +541,15 @@ class FailureAnalyzer:
             return {"evaluated": 0, "demoted": 0, "archived": 0}
         for s in pending:
             try:
-                recurred = self.db.query_one(
-                    "SELECT 1 FROM failures WHERE fingerprint=? AND ts > ? "
-                    "LIMIT 1", (s["fingerprint"], s["surfaced_at"]))
+                table = self._failures()
+                if table is not None:
+                    recurred = table.find_one(
+                        {"fingerprint": s["fingerprint"],
+                         "ts": {"$gt": s["surfaced_at"]}})
+                else:
+                    recurred = self.db.query_one(
+                        "SELECT 1 FROM failures WHERE fingerprint=? AND ts > ? "
+                        "LIMIT 1", (s["fingerprint"], s["surfaced_at"]))
                 if not recurred and s["fingerprint"]:
                     self.db.execute(
                         "UPDATE lessons SET times_prevented=times_prevented+1 "
@@ -589,19 +647,39 @@ class FailureAnalyzer:
             pass
         # the raw ledger: what the system actually hit, by family/source
         try:
-            hits = self.db.query_one(
-                "SELECT COUNT(*) AS n FROM failures")["n"]
-            by_family = {r["family"]: r["n"] for r in self.db.query(
-                "SELECT family, COUNT(*) AS n FROM failures "
-                "GROUP BY family ORDER BY n DESC")}
-            by_source = {r["source"]: r["n"] for r in self.db.query(
-                "SELECT source, COUNT(*) AS n FROM failures "
-                "GROUP BY source ORDER BY n DESC")}
-            recent = self.db.query_one(
-                "SELECT COUNT(*) AS n FROM failures WHERE ts > ?",
-                (time.time() - 86400.0,))["n"]
-            out.update({"failures": hits, "by_family": by_family,
-                        "by_source": by_source, "failures_24h": recent})
+            table = self._failures()
+            if table is not None:
+                # One fetch serves all four aggregates — the native
+                # GROUP BYs already scan (no index on family/source),
+                # so this is the same cost class, not a new one.
+                rows = table.find()
+                by_family: dict[str, int] = {}
+                by_source: dict[str, int] = {}
+                cutoff = time.time() - 86400.0
+                recent = 0
+                for r in rows:
+                    fam = r.get("family") or ""
+                    by_family[fam] = by_family.get(fam, 0) + 1
+                    src = r.get("source") or ""
+                    by_source[src] = by_source.get(src, 0) + 1
+                    if float(r.get("ts") or 0) > cutoff:
+                        recent += 1
+                out.update({"failures": len(rows), "by_family": by_family,
+                            "by_source": by_source, "failures_24h": recent})
+            else:
+                hits = self.db.query_one(
+                    "SELECT COUNT(*) AS n FROM failures")["n"]
+                by_family = {r["family"]: r["n"] for r in self.db.query(
+                    "SELECT family, COUNT(*) AS n FROM failures "
+                    "GROUP BY family ORDER BY n DESC")}
+                by_source = {r["source"]: r["n"] for r in self.db.query(
+                    "SELECT source, COUNT(*) AS n FROM failures "
+                    "GROUP BY source ORDER BY n DESC")}
+                recent = self.db.query_one(
+                    "SELECT COUNT(*) AS n FROM failures WHERE ts > ?",
+                    (time.time() - 86400.0,))["n"]
+                out.update({"failures": hits, "by_family": by_family,
+                            "by_source": by_source, "failures_24h": recent})
         except Exception:  # noqa: BLE001 - pre-migration-27 databases
             pass
         return out
