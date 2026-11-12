@@ -37,6 +37,7 @@ from nomorals.connectors.soundcloud import SoundCloudError
 from nomorals.media.site_descriptors import (
     BLOCK_CLASSES,
     CHAIN_STAGES,
+    MP3PM_DESCRIPTOR,
     SOUNDCLOUD_DESCRIPTOR,
     TIKTOK_DESCRIPTOR,
     YOUTUBE_DESCRIPTOR,
@@ -373,6 +374,143 @@ class TestTikTokDescriptor:
                 dest_dir=tmp_path, audio_only=True)
         assert report.ok is False
         # Kit silent (ytdlp rule, not direct), connector skipped.
+        assert report.tried() == ["direct", "proxy", "rendered",
+                                  "browser"]
+        assert "connector" not in report.tried()
+        connector.stream_url.assert_not_called()
+
+
+# ── the mp3.pm descriptor (descriptor #4) ─────────────────────────
+
+
+class TestMp3pmDescriptor:
+    #: Real mp3.pm URL shapes, one per form the descriptor claims.
+    #: Every shape verified live 2026-11-12: the track page
+    #: (``/song/170547096/T.I._-_King_Back/``), the search page
+    #: (``/search/s/f/king+back+t+i/``), the genre chart
+    #: (``/top/rock/``), and the per-artist subdomains
+    #: (``9545933-dua-lipa.mp3.pm``, ``131-t-i.mp3.pm``,
+    #: ``60437-c.mp3.pm``) — all served by the live site.
+    MP3PM_URLS = (
+        "https://mp3.pm/song/170547096/T.I._-_King_Back/",
+        "https://mp3.pm/song/170547096/T.I._-_King_Back",
+        "http://mp3.pm/song/12345/Artist_-_Title/",
+        "https://www.mp3.pm/song/12345/A_-_B/",
+        "https://mp3.pm/search/s/f/king+back+t+i/",
+        "https://mp3.pm/search/s/f/drake",
+        "https://mp3.pm/top/rock/",
+        "https://mp3.pm/top/rap-hip-hop/",
+        "https://9545933-dua-lipa.mp3.pm/",
+        "https://131-t-i.mp3.pm/",
+        "https://60437-c.mp3.pm/",
+        "http://9545933-dua-lipa.mp3.pm/",
+    )
+
+    #: URLs the descriptor must NOT claim: non-mp3.pm hosts,
+    #: look-alikes, the CDN-ish host, and mp3.pm pages that are
+    #: not one playable item (home, bare search / genre / song,
+    #: and online radio — streaming-only, no download option) —
+    #: those fall through to the generic chain instead of taking
+    #: the mp3.pm chain.
+    NOT_MP3PM_URLS = (
+        "https://example.com/song/170547096/T.I._-_King_Back/",
+        "https://notmp3.pm/song/170547096/X/",
+        "https://mp3.pm.evil.test/song/170547096/X/",
+        "https://cs1.mp3.pm/",
+        "https://mp3.pm/",
+        "https://www.mp3.pm/",
+        "https://mp3.pm/radio/pop/",
+        "https://mp3.pm/top/",
+        "https://mp3.pm/search/",
+        "https://mp3.pm/search/s/f/",
+        "https://mp3.pm/song/",
+        "https://mp3.pm/song/abc/",
+    )
+
+    def test_matches_mp3pm_url_shapes_only(self):
+        reg = SiteDescriptorRegistry([MP3PM_DESCRIPTOR])
+        for url in self.MP3PM_URLS:
+            assert reg.for_url(url) is MP3PM_DESCRIPTOR, url
+        for url in self.NOT_MP3PM_URLS:
+            assert reg.for_url(url) is None, url
+
+    def test_descriptor_carries_mp3pm_behaviour(self):
+        desc = MP3PM_DESCRIPTOR
+        assert desc.site == "mp3pm"
+        # Canonical ladder minus the connector rung: there is no
+        # mp3.pm connector, and yt-dlp has no mp3.pm extractor
+        # (supportedsites.md, master, 2026-11-12) — the kit rung
+        # only fetches direct-rule file URLs and stays silent on
+        # track pages; rendered / browser land a track.
+        assert desc.chain == ("direct", "kit", "proxy", "rendered",
+                              "browser")
+        assert "connector" not in desc.chain
+        assert desc.connector == ""
+        # Only "private" is evidenced: a removed track.  No login
+        # wall exists on this site at all — no region / login /
+        # preview / drm classes.
+        assert tuple(desc.block_classes) == ("private",)
+        # Fully public AND session-less: no accounts exist, so no
+        # session shape is declared — empty on purpose, not missing.
+        assert desc.auth == "none"
+        assert desc.auth_needed is False
+        assert desc.auth_domains == ()
+        assert desc.auth_cookie_names == ()
+        assert desc.downloadable is True
+
+    def test_default_registry_resolves_mp3pm_and_keeps_the_others(
+            self):
+        from nomorals.media.site_descriptors import (
+            DEFAULT_SITE_DESCRIPTORS,
+        )
+
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://mp3.pm/song/170547096/T.I._-_King_Back/"
+            ) is MP3PM_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://9545933-dua-lipa.mp3.pm/") is MP3PM_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://mp3.pm/search/s/f/king+back+t+i/"
+            ) is MP3PM_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.get("mp3pm") \
+            is MP3PM_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.tiktok.com/@someuser/video/"
+            "7170520270497680683") is TIKTOK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            ) is YOUTUBE_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://soundcloud.com/a/b") is SOUNDCLOUD_DESCRIPTOR
+
+    def test_mp3pm_chain_skips_connector_and_fails_honestly(
+            self, tmp_path):
+        # The descriptor's chain governs the engine for an mp3.pm
+        # URL: no rung in this hermetic rig can serve a track page
+        # — the kit rung only fetches direct-rule URLs (a track
+        # page is a page, not a file); there is no mp3.pm
+        # connector; the proxy pool is empty; rendered and browser
+        # are unwired — so the report fails honestly, and the
+        # injected connector is never engaged.  In production the
+        # rendered / browser rungs are what land a track (page
+        # extraction); a live landing is NOT proven here — it needs
+        # network and a real track.
+        from unittest.mock import patch
+
+        connector = SimpleNamespace(
+            stream_url=mock.Mock(
+                side_effect=AssertionError("connector engaged")))
+        registry = SiteDescriptorRegistry([MP3PM_DESCRIPTOR])
+        dl = _downloader(tmp_path, connector,
+                         site_descriptors=registry)
+        with patch("nomorals.tools.media.download",
+                   side_effect=_fail_direct):
+            report = dl.download(
+                "https://mp3.pm/song/170547096/T.I._-_King_Back/",
+                dest_dir=tmp_path, audio_only=True)
+        assert report.ok is False
+        # Kit silent (page, not a direct-rule file), connector
+        # skipped.
         assert report.tried() == ["direct", "proxy", "rendered",
                                   "browser"]
         assert "connector" not in report.tried()

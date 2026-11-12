@@ -21,8 +21,8 @@ download never raises.  True DRM is named, never chased (the
 rendered stage reports it from the log's license traffic and
 downloads nothing).
 
-Auth: ``auth="none"`` means the public path (SoundCloud, YouTube
-and TikTok today).
+Auth: ``auth="none"`` means the public path (SoundCloud, YouTube,
+TikTok and mp3.pm today).
 ``"account"`` / ``"vault"`` name a requirement the authenticated
 rung (B5, :mod:`nomorals.media.site_auth`) honours: a descriptor
 with ``auth != "none"`` resolves its session before the chain
@@ -62,6 +62,7 @@ __all__ = [
     "SOUNDCLOUD_DESCRIPTOR",
     "YOUTUBE_DESCRIPTOR",
     "TIKTOK_DESCRIPTOR",
+    "MP3PM_DESCRIPTOR",
     "DEFAULT_SITE_DESCRIPTORS",
 ]
 
@@ -459,6 +460,61 @@ TIKTOK_DESCRIPTOR = SiteDescriptor(
           "region/login/private; no connector rung",
 )
 
+#: mp3.pm — the FOURTH site descriptor: the largest mobile music
+#: archive, fully public — no accounts, no registration, no
+#: payment (verified live 2026-11-12: the homepage, an artist
+#: page, a genre chart, a search page and a track page all serve
+#: without any login surface; tuko.co.ke independently records
+#: "without registration").  URL shapes, all verified live
+#: 2026-11-12: track pages ``mp3.pm/song/<id>/<Artist_-_Title>/``,
+#: search ``mp3.pm/search/s/f/<query with +>/``, genre charts
+#: ``mp3.pm/top/<genre>/``, and per-artist subdomains
+#: ``<id>-<slug>.mp3.pm/`` (e.g. ``9545933-dua-lipa.mp3.pm``).
+#: Online radio (``mp3.pm/radio/<genre>/``) is streaming-only —
+#: no download option — and is NOT claimed (same exclusion rule
+#: as the other descriptors' home pages: a listing is not one
+#: playable item).
+#: There is no mp3.pm connector in :mod:`nomorals.connectors`,
+#: so the chain is the canonical ladder minus the connector
+#: rung — and yt-dlp has NO mp3.pm extractor (supportedsites.md,
+#: master, fetched 2026-11-12: no ``mp3.pm`` hit), so the kit
+#: rung only fetches direct-rule file URLs and stays silent on
+#: track pages; in production the rendered / browser rungs (page
+#: extraction) are what land a track.  A live landing is NOT
+#: proven here — it needs network and a real track.
+#: No login wall exists on this site at all: ``auth`` is
+#: ``"none"`` with NO session shape — ``auth_domains`` and
+#: ``auth_cookie_names`` are empty ON PURPOSE, not missing.  A
+#: login block can never be classified for mp3.pm, and
+#: ``require=True`` answers unavailable rather than inventing a
+#: session.  Blocks: only ``private`` (a removed / deleted
+#: track — the page is gone).  No ``region`` / ``login`` /
+#: ``preview`` / ``drm`` classes: none is evidenced — the site
+#: streams full tracks to anyone, with no geo wall seen.
+MP3PM_DESCRIPTOR = SiteDescriptor(
+    site="mp3pm",
+    url_patterns=(
+        r"https?://([a-z0-9-]+\.)*mp3\.pm/song/\d+\b",
+        r"https?://([a-z0-9-]+\.)*mp3\.pm/search/s/f/\S+",
+        r"https?://([a-z0-9-]+\.)*mp3\.pm/top/[a-z-]+",
+        r"https?://\d+-[a-z0-9-]+\.mp3\.pm/",
+    ),
+    chain=("direct", "kit", "proxy", "rendered", "browser"),
+    connector="",
+    block_classes=("private",),
+    auth="none",
+    auth_domains=(),
+    auth_cookie_names=(),
+    downloadable=True,
+    notes="mp3.pm public music archive: no account, no session "
+          "shape at all; track / search / genre / artist pages; "
+          "no yt-dlp extractor and no connector — rendered / "
+          "browser rungs land a track in production; radio is "
+          "streaming-only and not claimed; blocks are private "
+          "only (removed track)",
+)
+
 #: The descriptors the engine reads by default.
 DEFAULT_SITE_DESCRIPTORS = SiteDescriptorRegistry(
-    [SOUNDCLOUD_DESCRIPTOR, YOUTUBE_DESCRIPTOR, TIKTOK_DESCRIPTOR])
+    [SOUNDCLOUD_DESCRIPTOR, YOUTUBE_DESCRIPTOR, TIKTOK_DESCRIPTOR,
+     MP3PM_DESCRIPTOR])

@@ -56,6 +56,7 @@ from nomorals.media.site_auth import (
     vault_key,
 )
 from nomorals.media.site_descriptors import (
+    MP3PM_DESCRIPTOR,
     SOUNDCLOUD_DESCRIPTOR,
     TIKTOK_DESCRIPTOR,
     YOUTUBE_DESCRIPTOR,
@@ -580,6 +581,16 @@ class TestDescriptorAuthFields:
         assert TIKTOK_DESCRIPTOR.auth_domains == ("tiktok.com",)
         assert TIKTOK_DESCRIPTOR.auth_cookie_names == ("sid_tt",)
 
+    def test_mp3pm_descriptor_declares_no_session_shape(self):
+        # mp3.pm has no accounts at all — no login wall, no
+        # registration, no session to resolve.  The empty
+        # auth_domains / auth_cookie_names are the honest
+        # declaration, not a missing field: a login block can
+        # never be classified for this site.
+        assert MP3PM_DESCRIPTOR.auth == "none"
+        assert MP3PM_DESCRIPTOR.auth_domains == ()
+        assert MP3PM_DESCRIPTOR.auth_cookie_names == ()
+
 
 # ── the YouTube session (descriptor #2, B5 shape) ───────────────────
 
@@ -705,3 +716,32 @@ class TestTikTokSession:
         assert auth.status == "missing"
         assert "tiktok" in auth.owner_action
         assert "/cookies import" in auth.owner_action
+
+
+# ── the mp3.pm session (descriptor #4: there is none) ───────────────
+
+
+class TestMp3pmSession:
+    def test_public_mp3pm_needs_no_session(self, tmp_path):
+        # auth "none" without require: the resolver answers ok
+        # without touching vault or estate — public tracks need
+        # nothing, and this site has no accounts at all.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            MP3PM_DESCRIPTOR)
+        assert auth.ok and auth.source == ""
+        assert store.gets == 0
+
+    def test_require_cannot_resolve_a_session_that_does_not_exist(
+            self, tmp_path):
+        # require=True means "a login block said a session is
+        # needed" — for mp3.pm that can never happen (no accounts,
+        # no login wall), and the descriptor honestly declares no
+        # session domain.  The resolver refuses (unavailable)
+        # rather than inventing a session or answering ok empty.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            MP3PM_DESCRIPTOR, require=True)
+        assert auth.status == "unavailable"
+        assert "mp3pm" in auth.reason
+        assert store.gets == 0
