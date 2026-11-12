@@ -47,6 +47,7 @@ class PlayManySourcesTests(unittest.TestCase):
              mock.patch("nomorals.media.sources.NetNaijaSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.NotJustOkSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.TooXclusiveSource.search", return_value=[]), \
+             mock.patch("nomorals.media.sources.MdundoSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.BandcampSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.ArchiveOrgSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.MusicBrainzSource.search", return_value=[]), \
@@ -74,6 +75,8 @@ class PlayManySourcesTests(unittest.TestCase):
              mock.patch("nomorals.media.sources.NotJustOkSource.search",
                         return_value=[]), \
              mock.patch("nomorals.media.sources.TooXclusiveSource.search",
+                        return_value=[]), \
+             mock.patch("nomorals.media.sources.MdundoSource.search",
                         return_value=[]):
             out = SourceResolver(ctx, soundcloud=fake_sc).resolve("goodbye")
         self.assertTrue(out.ok)

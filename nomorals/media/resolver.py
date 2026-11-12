@@ -537,6 +537,7 @@ class SourceResolver:
             ("netnaija-search", self._netnaija_search_many),
             ("notjustok-search", self._notjustok_search_many),
             ("tooxclusive-search", self._tooxclusive_search_many),
+            ("mdundo-search", self._mdundo_search_many),
             ("soundcloud-search", self._soundcloud_search_many),
             ("bandcamp-search", self._bandcamp_search_many),
             ("youtube-search", self._youtube_search_many),
@@ -812,6 +813,16 @@ class SourceResolver:
             query, limit, "FMASource", "fma",
             "Free Music Archive search", downloadable=False)
 
+    def _mdundo_search_many(self, query: str,
+                            limit: int) -> list[ResolvedAudio]:
+        # Mdundo is HTML-scraped like FMA, but FULL-track (the
+        # /stream/<id> redirector serves a whole MP3, verified live
+        # 2026-11-12) — the shared helper only needs a class with
+        # .search(), and downloadable=True marks the win as audio.
+        return self._api_source_search_many(
+            query, limit, "MdundoSource", "mdundo",
+            "Mdundo search", downloadable=True)
+
     def _preview_search_many(self, query: str, limit: int,
                              cls_name: str, kind: str,
                              label: str) -> list[ResolvedAudio]:
@@ -1028,6 +1039,8 @@ class SourceResolver:
                 query, "NotJustOkSource", "notjustok")),
             ("tooxclusive-search", lambda: self._s_blog_search(
                 query, "TooXclusiveSource", "tooxclusive")),
+            ("mdundo-search", lambda: self._s_blog_search(
+                query, "MdundoSource", "mdundo")),
             ("soundcloud-search",
              lambda: self._s_soundcloud_search(query)),
             ("bandcamp-search", lambda: self._s_bandcamp_search(query)),

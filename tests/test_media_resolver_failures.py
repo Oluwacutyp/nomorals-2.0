@@ -459,7 +459,8 @@ def test_pin_extra_note_candidate_not_recorded(monkeypatch):
     reg = _FakeReg(note_candidate=RuntimeError("boom"))
     r = SourceResolver(source_registry=reg)
     for attr in ("_netnaija_search_many", "_notjustok_search_many",
-                 "_tooxclusive_search_many", "_soundcloud_search_many",
+                 "_tooxclusive_search_many", "_mdundo_search_many",
+                 "_soundcloud_search_many",
                  "_bandcamp_search_many", "_youtube_search_many",
                  "_youtube_music_search_many", "_archiveorg_search_many",
                  "_musicbrainz_search_many", "_openverse_search_many",

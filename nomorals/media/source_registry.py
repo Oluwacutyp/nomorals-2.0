@@ -2731,6 +2731,7 @@ def _seed(store: Any = None) -> SourceRegistry:
         ("FR", "en", "api.deezer.com", "Deezer API", ("music", "music-search"), Licence.LICENSED, TrustTier.VERIFIED, "30-second previews only — last-resort in the chain", 10),
         ("GLOBAL", "en", "api.jamendo.com", "Jamendo", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "CC catalogue; v3.0 tracks API needs a free client_id (NM_JAMENDO_CLIENT_ID) — without it the chain skips Jamendo honestly; the API root answers HTTP 200, so the health loop's root probe is honest", 10),
         ("GLOBAL", "en", "freemusicarchive.org", "Free Music Archive", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "CC catalogue; the WFMU-era JSON API is dead (verified 2026-11-12: /api, /api/trackSearch, /recent.json all 404) — the chain reads the live site search (/search?quicksearch=), keyless, as metadata-class (track page, no audio) until a live-browser probe pins the download href; the site root answers HTTP 200, so the health loop's root probe is honest", 10),
+        ("KE", "en", "play.mdundo.com", "Mdundo", ("music", "music-search"), Licence.LICENSED, TrustTier.COMMUNITY, "East African music downloads; chain reads the live search page (/search-results?term=), keyless, as full-track — /stream/<id> 302s to a signed mdundosound.com MP3 (audio/mpeg, verified 2026-11-12; the signature is minutes-lived, so the chain stores the /stream/<id> redirector, never the signed URL); /dl/ is a page flow, not a direct file; mdundo.com geo-redirects here, so the health loop's root probe is honest", 10),
         # ── film chain hosts not already seeded (Pass #93) ──
         # archive.org and thenetnaija.net above already carry the
         # film class (their kinds were extended — one host, one
@@ -2803,6 +2804,7 @@ def _seed(store: Any = None) -> SourceRegistry:
         "api.deezer.com": ("", (r"deezer\.com",), (), True),
         "api.jamendo.com": ("", (r"jamendo\.com",), (), True),
         "freemusicarchive.org": ("", (r"freemusicarchive\.org",), (), True),
+        "play.mdundo.com": ("", (r"mdundo\.com",), (), True),
     }
     # Real search endpoints the health loop probes through (Pass
     # #93, film class): a root page proves nothing about search

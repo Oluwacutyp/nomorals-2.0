@@ -24,6 +24,7 @@ from nomorals.media.sources import (
     BoomplaySource,
     FMASource,
     JamendoSource,
+    MdundoSource,
     NetNaijaSource,
     SourceCandidate,
     candidate_asset_class,
@@ -433,6 +434,75 @@ class TestFMASource:
             assert FMASource().search("zzz") == []
 
 
+#: Realistic Mdundo search-page rows — titles, artists, durations
+#: and /stream/ URL shapes copied from the LIVE search page fetched
+#: 2026-11-12 (play.mdundo.com/search-results?term=diamond+platnumz,
+#: 32 songs), with the markup in the ESCAPED form the page actually
+#: serves (\/, \&quot;, \u0022) — the parser must decode it before
+#: matching.  The /stream/<id> URL is the stable redirector to a
+#: signed mdundosound.com MP3 (verified: HTTP 200, audio/mpeg);
+#: /dl/ is a page flow, not a direct file.
+_MDUNDO_SEARCH_HTML = r"""
+<div id=\&quot;songlist-page-search-results-738a0856c16af35c4ac1ad513afd07a5-id--song-1571564\&quot; class=\&quot;md-playlist-song-item\&quot; data-url-play=\&quot;https:\/\/mdundo.com\/stream\/1571564\&quot; data-url-download=\&quot;https:\/\/mdundo.com\/dl\/1571564?pwa=1\&quot; data-duration-seconds=\&quot;233\&quot; data-duration=\&quot;3:53\&quot; data-title=\&quot;Sikomi\&quot; data-artist=\&quot;Diamond Platnumz\&quot; data-artist-url=\&quot;\/artist\/175073\/Diamond-Platnumz\&quot; data-id=\&quot;1571564\&quot; data-is-premium=\&quot;0\&quot;>
+<div id=\&quot;songlist-page-search-results-738a0856c16af35c4ac1ad513afd07a5-id--song-1571566\&quot; class=\&quot;md-playlist-song-item\&quot; data-url-play=\&quot;https:\/\/mdundo.com\/stream\/1571566\&quot; data-url-download=\&quot;https:\/\/mdundo.com\/dl\/1571566?pwa=1\&quot; data-duration-seconds=\&quot;234\&quot; data-duration=\&quot;3:54\&quot; data-title=\&quot;Ukimuona\&quot; data-artist=\&quot;Diamond Platnumz\&quot; data-artist-url=\&quot;\/artist\/175073\/Diamond-Platnumz\&quot; data-id=\&quot;1571566\&quot; data-is-premium=\&quot;0\&quot;>
+<div id=\&quot;songlist-page-search-results-738a0856c16af35c4ac1ad513afd07a5-id--song-1579085\&quot; class=\&quot;md-playlist-song-item\&quot; data-url-play=\&quot;https:\/\/mdundo.com\/stream\/1579085\&quot; data-url-download=\&quot;https:\/\/mdundo.com\/dl\/1579085?pwa=1\&quot; data-duration-seconds=\&quot;251\&quot; data-duration=\&quot;4:11\&quot; data-title=\&quot;Mbagala\&quot; data-artist=\&quot;Diamond Platnumz\&quot; data-artist-url=\&quot;\/artist\/175073\/Diamond-Platnumz\&quot; data-id=\&quot;1579085\&quot; data-is-premium=\&quot;0\&quot;>
+<div id=\&quot;songlist-page-search-results-738a0856c16af35c4ac1ad513afd07a5-id--song-9999999\&quot; class=\&quot;md-playlist-song-item\&quot; data-url-play=\&quot;https:\/\/mdundo.com\/stream\/9999999\&quot; data-url-download=\&quot;https:\/\/mdundo.com\/dl\/9999999?pwa=1\&quot; data-duration-seconds=\&quot;200\&quot; data-duration=\&quot;3:20\&quot; data-title=\&quot;Premium Only\&quot; data-artist=\&quot;Diamond Platnumz\&quot; data-artist-url=\&quot;\/artist\/175073\/Diamond-Platnumz\&quot; data-id=\&quot;9999999\&quot; data-is-premium=\&quot;1\&quot;>
+<div id=\&quot;songlist-page-search-results-738a0856c16af35c4ac1ad513afd07a5-id--song-1571564\&quot; class=\&quot;md-playlist-song-item\&quot; data-url-play=\&quot;https:\/\/mdundo.com\/stream\/1571564\&quot; data-url-download=\&quot;https:\/\/mdundo.com\/dl\/1571564?pwa=1\&quot; data-duration-seconds=\&quot;233\&quot; data-duration=\&quot;3:53\&quot; data-title=\&quot;Sikomi\&quot; data-artist=\&quot;Diamond Platnumz\&quot; data-artist-url=\&quot;\/artist\/175073\/Diamond-Platnumz\&quot; data-id=\&quot;1571564\&quot; data-is-premium=\&quot;0\&quot;>
+<div id=\&quot;songlist-page-search-results-738a0856c16af35c4ac1ad513afd07a5-id--song-1571521\&quot; class=\&quot;md-playlist-song-item\&quot; data-url-play=\&quot;https:\/\/mdundo.com\/stream\/1571521\&quot; data-url-download=\&quot;https:\/\/mdundo.com\/dl\/1571521?pwa=1\&quot; data-title=\&quot;No Duration Song\&quot; data-artist=\&quot;Diamond Platnumz\&quot; data-artist-url=\&quot;\/artist\/175073\/Diamond-Platnumz\&quot; data-id=\&quot;1571521\&quot; data-is-premium=\&quot;0\&quot;>
+<a href=\&quot;/artist\/175073\/Diamond-Platnumz\&quot;>Diamond Platnumz</a>
+"""
+
+
+# ── MdundoSource ──────────────────────────────────────────────────────
+
+
+class TestMdundoSource:
+    def test_search_url_shape(self):
+        url = MdundoSource().search_url("diamond platnumz")
+        assert url == ("https://play.mdundo.com/search-results"
+                       "?term=diamond+platnumz")
+
+    def test_search_parses_live_shaped_rows(self):
+        with patch.object(MdundoSource, "_get",
+                          return_value=_MDUNDO_SEARCH_HTML):
+            cands = MdundoSource().search("diamond platnumz")
+        assert [c.title for c in cands] == [
+            "Sikomi", "Ukimuona", "Mbagala", "No Duration Song"]
+        first = cands[0]
+        assert first.artist == "Diamond Platnumz"
+        assert first.duration == pytest.approx(233.0)
+        assert first.url == "https://mdundo.com/stream/1571564"
+        assert first.direct_url == first.url
+        # full-track: the /stream/<id> redirector serves a whole MP3
+        assert first.downloadable is True
+        assert candidate_asset_class(first) == "full"
+        assert first.extra["download_page"] == (
+            "https://mdundo.com/dl/1571564?pwa=1")
+        assert "redirector" in first.extra["note"]
+        # duplicate row deduped; premium row skipped, never a hit
+        assert len({c.url for c in cands}) == len(cands)
+        assert all(c.title != "Premium Only" for c in cands)
+        # a row with no duration still yields its track
+        assert cands[3].duration == pytest.approx(0.0)
+
+    def test_search_empty_and_garbage(self):
+        with patch.object(MdundoSource, "_get") as get:
+            assert MdundoSource().search("   ") == []
+            get.assert_not_called()
+        with patch.object(MdundoSource, "_get",
+                          return_value="<html><body>no results</body></html>"):
+            assert MdundoSource().search("zzz") == []
+        with patch.object(MdundoSource, "_get", return_value=""):
+            assert MdundoSource().search("zzz") == []
+
+    def test_unescape_handles_live_escapes(self):
+        raw = (r'data-url-play=\&quot;https:\/\/mdundo.com\/stream\/1'
+               r'\&quot; data-title=\u0022X\u0022 &gt;')
+        norm = MdundoSource._unescape(raw)
+        assert norm == ('data-url-play="https://mdundo.com/stream/1"'
+                        ' data-title="X" >')
+
+
 class TestScrapeHelpers:
     def test_direct_media_links(self):
         html = ('<a href="/music/a.mp3">x</a>'
@@ -516,6 +586,20 @@ class TestResolverWiring:
         assert out.ok and out.kind == "jamendo"
         assert out.title == "Summer Breeze"
         assert out.path_or_url.endswith(".mp3")
+        assert out.downloadable is True
+
+    def test_mdundo_search_hit_is_full_track(self):
+        r = self._resolver()
+        cands = [SourceCandidate(source="mdundo", title="Sikomi",
+                                 artist="Diamond Platnumz",
+                                 url="https://mdundo.com/stream/1571564",
+                                 direct_url="https://mdundo.com/stream/"
+                                            "1571564")]
+        with patch.object(MdundoSource, "search", return_value=cands):
+            out = r._s_blog_search("sikomi", "MdundoSource", "mdundo")
+        assert out.ok and out.kind == "mdundo"
+        assert out.title == "Sikomi"
+        assert out.path_or_url == "https://mdundo.com/stream/1571564"
         assert out.downloadable is True
 
     def test_text_chain_places_jamendo_after_archiveorg(self):

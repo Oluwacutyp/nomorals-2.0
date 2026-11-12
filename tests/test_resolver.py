@@ -98,8 +98,13 @@ def test_local_file_wins_without_network(tmp_path):
     assert sc.resolve_calls == [] and sc.search_calls == []
 
 
-def test_path_like_but_missing_falls_through_to_search(tmp_path):
+def test_path_like_but_missing_falls_through_to_search(tmp_path, monkeypatch):
     sc = FakeSoundCloud(tracks=[_track(title="Found It")])
+    # Mdundo must not leak live results here: it sits before SoundCloud
+    # in the chain and its token-lenient search answers most queries.
+    from nomorals.media import sources as _src
+    monkeypatch.setattr(_src.MdundoSource, "search",
+                        lambda self, q, limit=8: [])
     out = SourceResolver(_ctx(str(tmp_path)),
                          soundcloud=sc).resolve("music/missing-song.mp3")
     # not a real file → treated as a title → SoundCloud search hits
@@ -253,7 +258,7 @@ def test_unknown_title_fails_all_strategies_honestly(monkeypatch, tmp_path):
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
                  "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
-                 "DeezerSource", "BoomplaySource"):
+                 "DeezerSource", "BoomplaySource", "MdundoSource"):
         monkeypatch.setattr(getattr(_src, _cls), "search",
                             lambda self, q, limit=8: [])
     out = SourceResolver(_ctx(str(tmp_path)),
@@ -286,7 +291,7 @@ def test_spotify_search_only_when_linked(monkeypatch):
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
                  "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
-                 "DeezerSource", "BoomplaySource"):
+                 "DeezerSource", "BoomplaySource", "MdundoSource"):
         monkeypatch.setattr(getattr(_src, _cls), "search",
                             lambda self, q, limit=8: [])
     monkeypatch.setattr(
@@ -314,7 +319,7 @@ def test_spotify_search_works_when_linked(monkeypatch, tmp_path):
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
                  "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
-                 "DeezerSource", "BoomplaySource"):
+                 "DeezerSource", "BoomplaySource", "MdundoSource"):
         monkeypatch.setattr(getattr(_src, _cls), "search",
                             lambda self, q, limit=8: [])
     monkeypatch.setattr(

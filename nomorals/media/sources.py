@@ -54,6 +54,7 @@ __all__ = [
     "ArchiveOrgSource",
     "JamendoSource",
     "FMASource",
+    "MdundoSource",
     "BandcampSource",
     "NotJustOkSource",
     "TooXclusiveSource",
@@ -1081,6 +1082,143 @@ class FMASource(AudioSource):
         return out
 
 
+class MdundoSource(AudioSource):
+    """Mdundo — East African music downloads, HTML search, full-track.
+
+    The live site (verified 2026-11-12, NOT assumed) is
+    ``play.mdundo.com`` — ``mdundo.com`` geo-redirects there — and
+    there is NO public search API: ``/api/search`` answers 404 and
+    the app JS exposes only ``/api/songlist/<type>/<id>`` (artist /
+    playlist / genre, no search), so this source reads the live,
+    server-rendered search page (``/search-results?term=<q>``,
+    32 songs on a real results page for "diamond platnumz") the
+    way FMASource reads FMA.  Each song item carries
+    ``data-url-play="https://mdundo.com/stream/<id>"``,
+    ``data-url-download="https://mdundo.com/dl/<id>?pwa=1"``,
+    ``data-title`` / ``data-artist`` / ``data-duration-seconds`` /
+    ``data-is-premium`` on one element.
+
+    Honest classification: FULL-class (``candidate_asset_class``
+    == "full", ``downloadable=True``).  The stream URL is a REAL
+    full-track MP3, verified end to end 2026-11-12:
+    ``/stream/1571564`` 302s to a signed
+    ``mdundosound.com/song_get/?...&t=Diamond-Platnumz-Sikomi.mp3``
+    answering HTTP 200, ``Content-Type: audio/mpeg``,
+    ``Content-Length: 1872715``, ``Accept-Ranges: bytes`` — a whole
+    file, not a preview.  The candidate URL is the STABLE
+    ``/stream/<id>`` redirector, never the signed URL: the
+    signature is fresh per request and minutes-lived (``e=`` is a
+    Unix timestamp ~now), so a stored signed URL would rot.
+    The ``/dl/<id>`` link is NOT a direct file — it 302s through
+    ``/dl/<id>/high/go`` to the artist page with ``#autoplay`` —
+    so it is recorded in ``extra`` as the download page, never
+    claimed as the audio URL.  No login wall exists (every fetch
+    above was anonymous, no cookies); auth is none, no key, no
+    account.  Premium rows (``data-is-premium="1"``) are skipped:
+    they cannot stream without a subscription.  Search is
+    TOKEN-LENIENT — a nonsense query still returns token-matched
+    songs (verified 2026-11-12: "xyqz totally unknown 999" returns
+    43 rows, incl. songs titled "TOTALLY" and "unknown"), the same
+    class as the WordPress blogs' ?s= search — so hermetic tests
+    must neutralize this source like the other live ones, and the
+    chain's first-hit-wins order is what bounds it.  Changed markup
+    degrades to [] and the chain moves on (Bandcamp contract).
+    """
+
+    name = "mdundo"
+    _SEARCH = "https://play.mdundo.com/search-results"
+    _SITE = "https://play.mdundo.com"
+
+    _PLAY_RE = re.compile(
+        r'data-url-play="(https://mdundo\.com/stream/(\d+))"')
+    _TITLE_RE = re.compile(r'data-title="([^"]*)"')
+    _ARTIST_RE = re.compile(r'data-artist="([^"]*)"')
+    _DURATION_RE = re.compile(r'data-duration-seconds="(\d+)"')
+    _PREMIUM_RE = re.compile(r'data-is-premium="(\d+)"')
+    _DOWNLOAD_RE = re.compile(r'data-url-download="([^"]*)"')
+
+    def search_url(self, query: str) -> str:
+        """The search URL this source fetches (registry probe)."""
+        return (f"{self._SEARCH}?term="
+                + urllib.parse.quote_plus((query or "").strip()))
+
+    def search(self, query: str, limit: int = 8) -> list[SourceCandidate]:
+        q = (query or "").strip()
+        if not q:
+            return []
+        html = self._get(self.search_url(q))
+        if not html:
+            return []
+        try:
+            out = self._parse_rows(html, q)
+        except Exception as exc:  # noqa: BLE001 — never raises
+            _log.info("mdundo: parse failed for %r: %s", q, exc)
+            return []
+        _log.info("mdundo: %d candidates for %r", len(out), q)
+        return out[:limit]
+
+    @staticmethod
+    def _unescape(html: str) -> str:
+        """Decode the song list's escaped markup to plain HTML.
+
+        The search page embeds the song list as an escaped payload
+        (``\\/``, ``\\&quot;``, ``\\u0022``, ``&gt;``/``&lt;``/
+        ``&amp;`` — verified against the live page 2026-11-12).
+        Plain HTML passes through unchanged, so this is safe on
+        either rendering.
+        """
+        norm = re.sub(r"\\+/", "/", html)
+        norm = re.sub(r"\\+&quot;", '"', norm)
+        norm = re.sub(r"\\+u0022", '"', norm)
+        return (norm.replace("&quot;", '"').replace("&gt;", ">")
+                    .replace("&lt;", "<").replace("&amp;", "&"))
+
+    def _parse_rows(self, html: str,
+                    query: str) -> list[SourceCandidate]:
+        norm = self._unescape(html)
+        out: list[SourceCandidate] = []
+        seen: set[str] = set()
+        # One song item = one element tag; every attribute of the
+        # song sits in that tag, so split on ">" and read each tag.
+        for chunk in norm.split(">"):
+            m = self._PLAY_RE.search(chunk)
+            if not m:
+                continue
+            url = m.group(1)
+            if url in seen:
+                continue
+            seen.add(url)
+            premium = self._PREMIUM_RE.search(chunk)
+            if premium and premium.group(1) == "1":
+                continue  # subscription-only: cannot stream, never a hit
+            title_m = self._TITLE_RE.search(chunk)
+            title = BaseScrapeSource._clean(
+                title_m.group(1)) if title_m else ""
+            if len(title) < 2:
+                continue
+            artist_m = self._ARTIST_RE.search(chunk)
+            artist = BaseScrapeSource._clean(
+                artist_m.group(1)) if artist_m else ""
+            duration = 0.0
+            dur_m = self._DURATION_RE.search(chunk)
+            if dur_m:
+                duration = float(int(dur_m.group(1)))
+            dl_m = self._DOWNLOAD_RE.search(chunk)
+            download = dl_m.group(1) if dl_m else ""
+            out.append(SourceCandidate(
+                source=self.name, title=title or query, artist=artist,
+                url=url, direct_url=url, duration=duration,
+                downloadable=True,
+                extra={"download_page": download,
+                       "note": "Mdundo — full track MP3 via the "
+                               "stable /stream/<id> redirector "
+                               "(signed mdundosound.com URL, "
+                               "minutes-lived — never stored); the "
+                               "/dl/ link is a page flow, not a "
+                               "direct file"}))
+        return out
+
+
 class BandcampSource(AudioSource):
     """Bandcamp search — HTML, keyless.  Full-track streams via yt-dlp.
 
@@ -1170,6 +1308,7 @@ SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("netnaija-search", NetNaijaSource()),
     ("notjustok-search", NotJustOkSource()),
     ("tooxclusive-search", TooXclusiveSource()),
+    ("mdundo-search", MdundoSource()),
     ("bandcamp-search", BandcampSource()),
     ("archiveorg-search", ArchiveOrgSource()),
     ("jamendo-search", JamendoSource()),
@@ -1194,6 +1333,7 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "netnaija-search",
     "notjustok-search",
     "tooxclusive-search",
+    "mdundo-search",
     "soundcloud-search",
     "bandcamp-search",
     "youtube-search",
@@ -1228,6 +1368,7 @@ MUSIC_SOURCE_DOMAINS: dict[str, str | None] = {
     "netnaija-search": "netnaija.com",
     "notjustok-search": "notjustok.com",
     "tooxclusive-search": "tooxclusive.com",
+    "mdundo-search": "play.mdundo.com",
     "soundcloud-search": "soundcloud.com",
     "bandcamp-search": "bandcamp.com",
     "youtube-search": "youtube.com",
@@ -1260,6 +1401,7 @@ MUSIC_SOURCE_REGIONS: dict[str, str] = {
     "netnaija-search": "africa",
     "notjustok-search": "africa",
     "tooxclusive-search": "africa",
+    "mdundo-search": "africa",
     "soundcloud-search": "global",
     "bandcamp-search": "global",
     "youtube-search": "global",

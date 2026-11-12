@@ -116,6 +116,7 @@ SEARCH_ATTEMPTS = [
     "netnaija-search — no results",
     "notjustok-search — no results",
     "tooxclusive-search — no results",
+    "mdundo-search — no results",
     "soundcloud-search — ok (1)",
     "bandcamp-search — ok (1)",
     "youtube-search — ok (1)",
@@ -352,6 +353,7 @@ def test_search_candidates_detailed_reports_all_sources():
             mock.patch.object(r, "_archiveorg_search_many", return_value=[]), \
             mock.patch.object(r, "_jamendo_search_many", return_value=[]), \
             mock.patch.object(r, "_fma_search_many", return_value=[]), \
+            mock.patch.object(r, "_mdundo_search_many", return_value=[]), \
             mock.patch.object(r, "_musicbrainz_search_many", return_value=[]), \
             mock.patch.object(r, "_openverse_search_many", return_value=[]), \
             mock.patch.object(r, "_wikimedia_search_many", return_value=[]), \
@@ -361,7 +363,7 @@ def test_search_candidates_detailed_reports_all_sources():
     assert [c.title for c in cands] == ["Lifestyle"]
     joined = " | ".join(attempts)
     for name in ("netnaija-search", "notjustok-search",
-                 "tooxclusive-search", "soundcloud-search",
+                 "tooxclusive-search", "mdundo-search", "soundcloud-search",
                  "bandcamp-search", "youtube-search",
                  "youtube-music-search",
                  "archiveorg-search", "jamendo-search",
@@ -389,6 +391,7 @@ def test_search_candidates_still_returns_candidates_only():
             mock.patch.object(r, "_notjustok_search_many", return_value=[]), \
             mock.patch.object(r, "_tooxclusive_search_many", return_value=[]), \
             mock.patch.object(r, "_archiveorg_search_many", return_value=[]), \
+            mock.patch.object(r, "_mdundo_search_many", return_value=[]), \
             mock.patch.object(r, "_musicbrainz_search_many", return_value=[]), \
             mock.patch.object(r, "_openverse_search_many", return_value=[]), \
             mock.patch.object(r, "_wikimedia_search_many", return_value=[]), \
@@ -431,6 +434,7 @@ def test_control_play_chat_falls_through_to_youtube():
         "netnaija-search — no results",
         "notjustok-search — no results",
         "tooxclusive-search — no results",
+        "mdundo-search — no results",
         "soundcloud-search — ok (1)",
         "bandcamp-search — no results",
         "youtube-search — ok (1)",
