@@ -698,6 +698,18 @@ class Scheduler:
         self._lock = threading.Lock()
         #: job ids with a run in flight right now (overlap policies).
         self._active: set[str] = set()
+        #: Abandoned workers, by job id — daemon threads a timed-out
+        #: run left behind (2026-11-11 scheduler incident: repeated
+        #: timeouts silently piled them up while each kept holding
+        #: locks/CPU).  Each entry: {"thread", "started_at",
+        #: "last_stack", "timeout_s"}.  Pruned on access — an entry
+        #: whose thread has since died is history, not a live pile-up.
+        self._abandoned: dict[str, list[dict[str, Any]]] = {}
+        #: Detail of the most recent guarded-run timeout (stuck call
+        #: + outstanding abandoned count), for the failure alert's
+        #: reason line.  Set only by _run_payload_guarded on a
+        #: timeout; _execute reads it right after the call.
+        self._last_guard_timeout: dict[str, Any] | None = None
         #: job id -> consecutive deferrals under resource pressure.
         self._deferrals: dict[str, int] = {}
         #: jitter source for backoff (seedable in tests).
@@ -1756,6 +1768,17 @@ class Scheduler:
         otherwise it runs on a daemon worker thread and a join past
         the cap abandons the worker — the tick loop is never blocked
         forever by a stuck tool or command.
+
+        Watchdog (2026-11-11 scheduler incident): the join runs in
+        short slices and each slice samples the worker thread's
+        stack, so a timeout names the stuck call instead of the
+        wall — a job must never reach the wall without saying what
+        hung.  The abandoned worker is RECORDED (see
+        :attr:`_abandoned` / :meth:`abandoned_count`): repeated
+        timeouts of one job no longer pile up daemon threads in
+        silence, and the failure alert carries the outstanding
+        count.  The timeout detail also lands on
+        :attr:`_last_guard_timeout` for the alert's reason line.
         """
         box: dict[str, Any] = {}
 
@@ -1782,18 +1805,110 @@ class Scheduler:
                 target=_target, daemon=True,
                 name=f"sched-job-{str(row.get('id') or '?')[:8]}")
             worker.start()
-            worker.join(timeout_s)
+            # Slice the join so the watchdog can sample the worker's
+            # stack while it runs — a single join(timeout_s) would
+            # only learn the thread was alive, never WHAT it was in.
+            deadline = time.monotonic() + float(timeout_s)
+            last_stack = ""
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                worker.join(min(self._WATCHDOG_SLICE_S, remaining))
+                if not worker.is_alive():
+                    break
+                last_stack = self._sample_worker_stack(worker)
             if worker.is_alive():
+                job_id = str(row.get("id") or "")
+                job_name = str(row.get("name") or "")
+                stuck = last_stack or "unknown (no stack sample)"
+                self._record_abandoned(job_id, worker, last_stack,
+                                       timeout_s)
+                outstanding = self.abandoned_count(job_id)
+                self._last_guard_timeout = {
+                    "stuck": stuck, "abandoned": outstanding,
+                    "timeout_s": float(timeout_s),
+                }
                 return (False,
                         f"job failed: timed out after {timeout_s:g}s "
-                        "(worker abandoned; the job is marked failed but the "
-                        "stuck call may still be running)",
+                        f"in {stuck} (worker abandoned; "
+                        f"{outstanding} abandoned worker(s) "
+                        f"outstanding for {job_name!r}; the stuck "
+                        "call may still be running)",
                         True, False, None, None)
         if "error" in box:
             return (False, f"job failed: {box['error']}", False,
                     isinstance(box["error"], _DeclaredFailure), None, None)
         return True, str(box.get("result") or ""), False, False, \
             box.get("doc"), box.get("silent")
+
+    #: Watchdog slice: how often the guarded join samples the
+    #: worker thread's stack while waiting out the wall.
+    _WATCHDOG_SLICE_S = 5.0
+
+    @staticmethod
+    def _sample_worker_stack(worker: threading.Thread) -> str:
+        """The worker thread's current call, innermost-first.
+
+        ``"evolution.py:1070:EvolutionAgent.verify → subprocess.py:…:run"``
+        — the stuck call first, so a timeout names it.  Empty when
+        the thread has no live frame (not started / just returned).
+        Never raises: sampling must not break the join.
+        """
+        try:
+            import sys as _sys
+
+            frames = _sys._current_frames()
+            frame = frames.get(worker.ident or 0)
+            if frame is None:
+                return ""
+            parts: list[str] = []
+            depth = 0
+            while frame is not None and depth < 3:
+                code = frame.f_code
+                fname = str(code.co_filename or "?").rsplit("/", 1)[-1]
+                parts.append(
+                    f"{fname}:{frame.f_lineno}:{code.co_qualname}")
+                frame = frame.f_back
+                depth += 1
+            return " → ".join(parts)
+        except Exception:  # noqa: BLE001 - sampling is best-effort
+            return ""
+
+    def _record_abandoned(self, job_id: str, worker: threading.Thread,
+                          last_stack: str, timeout_s: float) -> None:
+        """File one abandoned worker under its job, pruning the dead."""
+        if not job_id:
+            return
+        with self._lock:
+            entries = [e for e in self._abandoned.get(job_id, [])
+                       if e.get("thread") is not None
+                       and e["thread"].is_alive()]
+            entries.append({
+                "thread": worker,
+                "started_at": time.time(),
+                "last_stack": last_stack,
+                "timeout_s": float(timeout_s),
+            })
+            self._abandoned[job_id] = entries
+
+    def abandoned_count(self, job_id: str) -> int:
+        """Live abandoned workers outstanding for this job (pruned)."""
+        with self._lock:
+            entries = [e for e in self._abandoned.get(str(job_id), [])
+                       if e.get("thread") is not None
+                       and e["thread"].is_alive()]
+            self._abandoned[str(job_id)] = entries
+            return len(entries)
+
+    def abandoned_workers(self, job_id: str) -> list[dict[str, Any]]:
+        """Live abandoned-worker records for this job (pruned)."""
+        with self._lock:
+            entries = [e for e in self._abandoned.get(str(job_id), [])
+                       if e.get("thread") is not None
+                       and e["thread"].is_alive()]
+            self._abandoned[str(job_id)] = entries
+            return [dict(e) for e in entries]
 
     def _execute(self, row: dict[str, Any], *,
                  trigger_source: str = "tick") -> dict[str, Any]:
@@ -1813,6 +1928,9 @@ class Scheduler:
         try:
             # the per-job cap wins; 0 falls back to the scheduler default
             timeout_s = float(row.get("run_timeout_s") or 0.0) or self.wall_seconds
+            # Fresh watchdog detail for this run only: a stale timeout
+            # from an earlier run must never name this run's failure.
+            self._last_guard_timeout = None
             ok, summary, timed_out, declared, report_doc, \
                 silent_reason = self._run_payload_guarded(row, timeout_s)
         finally:
@@ -1968,12 +2086,30 @@ class Scheduler:
                         if _cmd:
                             _fail_doc = command_failure_doc(
                                 job_name, _cmd, summary)
+                    # The alert names the ONE failure mode that
+                    # actually happened (2026-11-11 scheduler
+                    # incident: the policy line used to list three
+                    # possible modes without saying which): a timeout
+                    # names the stuck call + the outstanding
+                    # abandoned count; any other failure names its
+                    # own first line.
+                    if timed_out and self._last_guard_timeout:
+                        _detail = self._last_guard_timeout
+                        _reason = (
+                            f"timed out after "
+                            f"{float(_detail.get('timeout_s') or 0):g}s "
+                            f"in {_detail.get('stuck') or 'unknown'} — "
+                            f"{int(_detail.get('abandoned') or 0)} "
+                            "abandoned worker(s) outstanding")
+                    else:
+                        _reason = (summary.splitlines() or ["job failed"])[0][:500]
                     self.notifier.publish(
                         "schedule", title, "",
                         doc=_fail_doc,
                         output_kind="scheduled",
                         output_meta=alert_meta,
-                        alert_hints={"failed": True, "subject": job_name},
+                        alert_hints={"failed": True, "subject": job_name,
+                                     "reason": _reason},
                     )
                 else:
                     body_lines = summary.splitlines()

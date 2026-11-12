@@ -28,6 +28,7 @@ waits for the owner; ``autonomous`` applies (always through the gate);
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Optional
@@ -38,6 +39,12 @@ from ..storage.kv import KVStore
 from .benchmark import measurable, run_benchmark
 
 _log = get_logger(__name__)
+
+#: Minimum budget a plan step needs: one model call's provider
+#: timeout (60s) plus margin.  A cycle with less than this left
+#: records "budget exceeded before planning" instead of starting
+#: a call it cannot finish inside its wall.
+_PLAN_BUDGET_S = 75.0
 
 __all__ = ["ImprovementLoop", "CycleRecord", "LEVERS", "register"]
 
@@ -175,11 +182,26 @@ class ImprovementLoop:
         return self.context.settings.improvement
 
     # ── core cycle ──────────────────────────────────────────────────────────
-    def run_cycle(self, mode: str = "", *, dimension: str = "") -> CycleRecord:
+    def run_cycle(self, mode: str = "", *, dimension: str = "",
+                  deadline_s: float = 180.0) -> CycleRecord:
         """Run one closed-loop cycle. ``mode`` defaults to the configured
-        mode; ``dimension`` optionally forces which dimension to target."""
+        mode; ``dimension`` optionally forces which dimension to target.
+
+        ``deadline_s`` bounds the whole cycle well under the
+        scheduler's 300s wall (2026-11-11 scheduler incident: the
+        benchmark aggregate + plan had no bound, so the improvement
+        tick hung to the wall).  The benchmark enforces it per
+        dimension; the plan step checks the remaining budget before
+        calling the model; the autonomous apply NEVER runs its
+        1500s test gate inside the cycle — it launches detached
+        (see :meth:`_launch_detached_apply`) and the cycle returns
+        with the proposal staged.
+        """
+        import time as _time
+
         mode = (mode or self.settings.mode or "off").strip().lower()
         cycle_id = new_short_id("improve")
+        deadline = _time.monotonic() + max(10.0, float(deadline_s))
         if mode == "off":
             return self._record(cycle_id, dimension, None, None, None, "",
                                 "off", "improvement is off", "",
@@ -194,7 +216,23 @@ class ImprovementLoop:
 
         # 1. benchmark (bounded) — or measure just the forced dimension
         dims = [dimension] if dimension and dimension in LEVERS else None
-        report = run_benchmark(self.context, dimensions=dims, limit=2)
+        report = run_benchmark(self.context, dimensions=dims, limit=2,
+                               deadline=deadline)
+        # getattr: a duck-typed report (tests patch run_benchmark with
+        # a SimpleNamespace) predates the deadline fields; only the
+        # real BenchmarkReport carries them, defaulting to False/"".
+        exceeded = bool(getattr(report, "deadline_exceeded", False))
+        dead_dim = getattr(report, "deadline_dimension", "") or ""
+        if exceeded:
+            return self._record(
+                cycle_id, dimension or dead_dim,
+                None, None, None, "",
+                "unmeasurable",
+                f"cycle budget exceeded during benchmark "
+                f"(dimension {dead_dim or '?'})",
+                "", "skipped",
+                {"reason": "cycle_deadline",
+                 "dimension": dead_dim})
         # Numeric scores only: DimensionScore defines no ordering
         # (score=None means unmeasurable), so comparing the objects
         # themselves crashes (min -> DimensionScore < DimensionScore).
@@ -241,7 +279,17 @@ class ImprovementLoop:
                 f"{weakest}: a recent edit regressed; cooling down", "",
                 "skipped", {"reason": "recent_regression"})
 
-        # 5. propose via the evolver
+        # 5. propose via the evolver — only with enough budget left
+        # for one model call (the provider's own per-call timeout is
+        # 60s; a plan started with less than that left would eat the
+        # cycle's wall).
+        if _time.monotonic() > deadline - _PLAN_BUDGET_S:
+            return self._record(
+                cycle_id, weakest, before, None, None, "",
+                "unmeasurable",
+                "cycle budget exceeded before planning",
+                "", "skipped",
+                {"reason": "cycle_deadline", "step": "plan"})
         instruction = (
             f"{lever['instruction']}\n\n"
             f"EVIDENCE (benchmark tasks currently failing for "
@@ -304,51 +352,127 @@ class ImprovementLoop:
                 edit_summary, "pending",
                 {"proposal": proposal_id, "lever_file": lever["file"]})
 
-        # 7. autonomous: apply (runs the full gate), then re-benchmark
-        after = before
-        status = "neutral"
-        action = "applied"
+        # 7. autonomous: apply — DETACHED, never inside the cycle.
+        # The apply runs the full test gate (1500s) plus a
+        # re-benchmark; no scheduled tick may wait on that (it is
+        # five times the scheduler's wall — the 2026-11-11
+        # improvement-tick hang, by construction).  The cycle
+        # launches the verify thread and returns with the proposal
+        # staged; the thread records the apply outcome (applied /
+        # reverted / failed) as the cycle's follow-up, and the next
+        # cycle re-measures the dimension.  A restart kills the
+        # thread, never the proposal: it stays "planned" in the
+        # store and the next cycle picks it up again.
         details: dict[str, Any] = {"proposal": proposal_id,
                                    "lever_file": lever["file"]}
-        try:
-            out = evolver.apply(proposal_id)
-            action = out.get("status", "applied")
-            if not out.get("applied"):
-                # the gate reverted it (tests or benchmark regression)
-                return self._record(
-                    cycle_id, weakest, before, None, None, proposal_id,
-                    "reverted", out.get("reason", "gate reverted the edit"),
-                    edit_summary, "regressed", details)
-            # 7b. re-benchmark the same dimension to verify REAL improvement
-            rerun = run_benchmark(self.context, dimensions=[weakest], limit=2)
-            after_dim = rerun.scores.get(weakest)
-            if after_dim is not None and after_dim.score is not None:
-                after = after_dim.score
-            else:
-                after = before
-            delta = after - before
-            if delta > self.settings.tolerance:
-                status = "improved"
-            elif delta < -self.settings.tolerance:
-                status = "regressed"
-            else:
-                status = "neutral"
-            details["after_provider"] = rerun.provider
-        except Exception as exc:  # noqa: BLE001
-            # The edit never landed (dirty tree, model down, gate blew
-            # up before applying): this is a failure, NOT a regression.
-            # Recording "regressed" would trip the 24h regression
-            # cooldown for a dimension whose code was never touched.
+        launched = self._launch_detached_apply(
+            proposal_id, cycle_id, weakest, before, edit_summary)
+        if not launched:
             return self._record(
                 cycle_id, weakest, before, None, None, proposal_id,
-                "apply_failed", f"apply raised: {exc}", edit_summary,
-                "failed", {**details, "error": str(exc)[:200]})
-        return self._record(cycle_id, weakest, before, after,
-                            (after - before) if after is not None else None,
-                            proposal_id, action,
-                            f"{weakest}: {before:.2f} -> "
-                            f"{after if after is not None else '?'}",
-                            edit_summary, status, details)
+                "apply_failed",
+                "an apply for this proposal is already running",
+                edit_summary, "failed",
+                {**details, "error": "duplicate apply refused"})
+        return self._record(
+            cycle_id, weakest, before, None, None, proposal_id,
+            "applying",
+            f"improve {weakest} ({before:.2f}) — apply running "
+            "detached (full test gate); outcome lands as the "
+            "follow-up record",
+            edit_summary, "pending",
+            {**details, "detached": True})
+
+    # ── detached apply (autonomous mode) ───────────────────────────────
+    # The full test gate cannot run inside a scheduled tick (1500s
+    # vs a 300s wall).  One daemon thread per proposal, tracked in
+    # memory so a second cycle never launches a duplicate; the
+    # proposal store is the durable guard (apply() refuses an
+    # already-applied proposal, and a restart leaves the proposal
+    # "planned" for the next cycle to pick up).
+
+    def _launch_detached_apply(self, proposal_id: str, cycle_id: str,
+                               dimension: str, before: float,
+                               edit_summary: str) -> bool:
+        """Start the detached apply thread. False when one is already
+        running for this proposal — the caller records a refusal,
+        never a second apply."""
+        applying = getattr(self, "_applying", None)
+        if applying is None:
+            applying = set()
+            self._applying = applying
+        if proposal_id in applying:
+            return False
+        applying.add(proposal_id)
+        thread = threading.Thread(
+            target=self._detached_apply,
+            args=(proposal_id, cycle_id, dimension, before,
+                  edit_summary),
+            name=f"improve-apply-{proposal_id[:8]}", daemon=True)
+        thread.start()
+        return True
+
+    def _detached_apply(self, proposal_id: str, cycle_id: str,
+                        dimension: str, before: float,
+                        edit_summary: str) -> None:
+        """The apply + re-benchmark, off the scheduler's clock.
+
+        Records its outcome as the follow-up record
+        (``<cycle_id>-apply`` — the tick's own record keeps its id)
+        so the cycle history shows both the staging and the verdict.
+        Never raises: a dead thread must still leave a record.
+        """
+        details: dict[str, Any] = {"proposal": proposal_id,
+                                   "cycle_id": cycle_id}
+        try:
+            from .evolution import EvolutionAgent
+
+            evolver = EvolutionAgent(self.context)
+            out = evolver.apply(proposal_id)
+            if not out.get("applied"):
+                self._record(
+                    f"{cycle_id}-apply", dimension, before, None, None,
+                    proposal_id, "reverted",
+                    out.get("reason", "gate reverted the edit"),
+                    edit_summary, "regressed", details)
+                return
+            # Re-benchmark the same dimension to verify REAL
+            # improvement (no scheduler wall here — the detached
+            # worker may take the time the gate needs).
+            after = before
+            status = "neutral"
+            try:
+                rerun = run_benchmark(self.context,
+                                      dimensions=[dimension], limit=2)
+                after_dim = rerun.scores.get(dimension)
+                if after_dim is not None \
+                        and after_dim.score is not None:
+                    after = after_dim.score
+                delta = after - before
+                if delta > self.settings.tolerance:
+                    status = "improved"
+                elif delta < -self.settings.tolerance:
+                    status = "regressed"
+                details["after_provider"] = rerun.provider
+            except Exception as exc:  # noqa: BLE001 - the apply landed; the re-measure is a bonus
+                details["remeasure_error"] = str(exc)[:200]
+            self._record(
+                f"{cycle_id}-apply", dimension, before, after,
+                (after - before) if after is not None else None,
+                proposal_id, out.get("status", "applied"),
+                f"{dimension}: {before:.2f} -> "
+                f"{after if after is not None else '?'}",
+                edit_summary, status, details)
+        except Exception as exc:  # noqa: BLE001 - the edit never landed: a failure, NOT a regression
+            self._record(
+                f"{cycle_id}-apply", dimension, before, None, None,
+                proposal_id, "apply_failed", f"apply raised: {exc}",
+                edit_summary, "failed",
+                {**details, "error": str(exc)[:200]})
+        finally:
+            applying = getattr(self, "_applying", None)
+            if applying is not None:
+                applying.discard(proposal_id)
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _weakness_evidence(self, report: Any, dimension: str) -> str:

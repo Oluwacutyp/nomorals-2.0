@@ -196,6 +196,12 @@ class AlertHints:
     #: failure to resolve, containment failure, or the alerting
     #: machinery itself failing.  Always pages.
     failed: bool = False
+    #: The ONE failure mode that actually happened, in the caller's
+    #: own words (2026-11-11 scheduler incident: the policy line
+    #: used to list three possible modes without saying which).
+    #: When set on a failed event it IS the decision reason;
+    #: when empty the generic three-way fallback below applies.
+    reason: str = ""
     #: a decision or an act is needed from the owner.  Always pages.
     actionable: bool = False
     #: noteworthy milestone / standing condition — batched, not paged.
@@ -782,8 +788,13 @@ class AlertPolicy:
         force = False
         if hints.failed:
             tier, escalated = TIER_PAGE, True
-            reason = ("failure — the event did not resolve, containment "
-                      "failed, or the alerting machinery itself failed")
+            # A caller-named failure mode beats the generic
+            # three-way fallback — the alert says what happened,
+            # not what might have.
+            reason = (str(hints.reason or "").strip()
+                      or ("failure — the event did not resolve, "
+                          "containment failed, or the alerting "
+                          "machinery itself failed"))
         elif hints.actionable:
             tier, escalated = TIER_PAGE, True
             reason = "owner action or decision is needed"

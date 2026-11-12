@@ -5427,6 +5427,17 @@ class TelegramBotAdapter(ChatAdapter):
         poll_timeout: int = 30,
         session: Any = None,
         lock_path: str = "data/telegram-bot.lock",
+        # Durable getUpdates offset (2026-11-11 scheduler incident):
+        # the in-memory ``_offset`` + the startup stale-skip only
+        # protect a loop that starts cleanly — when the stale-skip's
+        # own getUpdates fails at startup, ``_offset`` stays 0 and
+        # the loop re-fetches (and re-handles) recent updates: one
+        # input, two replies.  The offset file survives restarts
+        # next to the lock file; pass an ABSOLUTE path (the
+        # production builder resolves it against the data home —
+        # a relative path here inherits the same CWD trap as the
+        # lock path it derives from when omitted).
+        offset_path: str | None = None,
         # ── two-bot support ──────────────────────────────────────────
         # ``adapter_name`` is the adapter's identity (``"telegram-bot"``
         # for the gated bot, ``"telegram-personal"`` for the personal
@@ -5501,6 +5512,16 @@ class TelegramBotAdapter(ChatAdapter):
         self._business_connections: dict[str, dict[str, Any]] = {}
         # Single getUpdates consumer: lockfile path (see single_consumer).
         self._lock_path = lock_path
+        # Durable offset file: alongside the lock file when the
+        # caller did not pass one explicitly.
+        if offset_path:
+            self._offset_path = str(offset_path)
+        else:
+            _lock_p = str(lock_path or "")
+            self._offset_path = (
+                _lock_p.rsplit(".", 1)[0] + ".offset.json"
+                if "." in _lock_p.rsplit("/", 1)[-1] else
+                _lock_p + ".offset.json")
         # Last inbound /command per chat — the origin command for
         # origin-derived buttons on a command result (Retry re-runs
         # it). Only trusted when the last inbound message in the chat
@@ -5658,11 +5679,63 @@ class TelegramBotAdapter(ChatAdapter):
         finally:
             lock.release()
 
+    def _load_offset(self) -> int:
+        """The getUpdates fetch offset from durable memory, or 0.
+
+        The file stores the last SEEN update id; the fetch offset
+        is one past it.  Never raises: a missing/corrupt offset
+        file means "no memory", and the startup stale-skip still
+        bounds the re-fetch — the durable file only closes the
+        hole where that skip itself fails.
+        """
+        try:
+            import json as _json
+
+            with open(self._offset_path, encoding="utf-8") as fh:
+                data = _json.load(fh)
+            value = int(data.get("update_id", 0) or 0)
+            return value + 1 if value > 0 else 0
+        except Exception:  # noqa: BLE001 - no memory is a valid state
+            return 0
+
+    def _persist_offset(self, update_id: int) -> None:
+        """Record that updates through ``update_id`` were seen.
+
+        Best-effort and atomic-ish (write-then-replace): a crash
+        mid-write must never leave a half-written offset behind.
+        Never raises.
+        """
+        import json as _json
+        import os as _os
+
+        value = int(update_id)
+        if value <= 0:
+            return
+        path = str(self._offset_path or "")
+        if not path:
+            return
+        parent = path.rsplit("/", 1)[0] or "."
+        with contextlib.suppress(OSError):
+            _os.makedirs(parent, exist_ok=True)
+        tmp = path + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as fh:
+                fh.write(_json.dumps({"update_id": value}))
+            _os.replace(tmp, path)
+        except Exception:  # noqa: BLE001 - the offset is a guard, not the delivery
+            with contextlib.suppress(OSError):
+                _os.unlink(tmp)
+
     def _run_locked(self, handler: IncomingHandler) -> None:
         try:
             self.preflight()
         except Exception as exc:  # noqa: BLE001 - fail fast, gateway logs the skip
             raise ValueError(f"telegram-bot unavailable: {exc}") from exc
+        # Durable offset first: a restart must never re-handle an
+        # update a previous loop already answered, even when the
+        # stale-skip below fails outright.  _load_offset never
+        # raises, so this cannot kill startup.
+        self._offset = max(int(self._offset or 0), self._load_offset())
         # Drop whatever piled up while we were away; only fresh mail.
         try:
             pending = self._api("getUpdates", offset=-1, timeout=1)
@@ -5682,6 +5755,8 @@ class TelegramBotAdapter(ChatAdapter):
                 _log.info("telegram-bot: skipped %d stale updates", len(pending))
         except Exception as exc:  # noqa: BLE001 - non-fatal, polling continues
             _log.debug("telegram-bot: stale-skip failed: %s", exc)
+        if self._offset:
+            self._persist_offset(self._offset - 1)
         poll_fail_delay = 5.0
         while not self._stopped.is_set():
             try:
@@ -5735,6 +5810,10 @@ class TelegramBotAdapter(ChatAdapter):
             uid = update.get("update_id")
             if isinstance(uid, int) and not isinstance(uid, bool):
                 self._offset = max(self._offset, uid + 1)
+                # Durable intake: an update once seen is never
+                # re-handled after a restart, even if the next
+                # loop's stale-skip fails outright.
+                self._persist_offset(uid)
             # Business connections (parity bundle #12): adapter
             # state, never chat traffic — the poll loop records
             # them here so post_story can post through the

@@ -273,6 +273,28 @@ def proactive_gate(context: Any, kind: str) -> str | None:
     return None
 
 
+def _insert_before_stamp(text: str, line: str) -> str:
+    """Append ``line`` to ``text`` keeping a trailing stamp last.
+
+    The stamp is the footer (owner law): a policy line appended
+    AFTER it breaks apply_stamp's idempotence — the text no longer
+    closes with the stamp, so delivery appends a second one (the
+    2026-11-11 double-stamp: the failure alert carried "Powered by
+    peacethefirst" twice).  Insert before the stamp when one closes
+    the text, else append plainly.
+    """
+    from ..social.chat.typography import DEFAULT_STAMP_TEXT, STAMP_HTML
+
+    body = str(text or "")
+    tail = body.rstrip()
+    for form in (STAMP_HTML, f"_{DEFAULT_STAMP_TEXT}_",
+                 DEFAULT_STAMP_TEXT):
+        if tail == form or tail.endswith("\n" + form):
+            head = tail[: -len(form)].rstrip("\n")
+            return f"{head}\n{line}\n{form}" if head else f"{line}\n{form}"
+    return f"{body}\n{line}" if body else line
+
+
 class Notifier:
     def __init__(self, context: Any, gateway: Any = None) -> None:
         self.context = context
@@ -486,15 +508,18 @@ class Notifier:
                 force = True
             if decision.annotate:
                 _line = decision.body_line()
-                body = (f"{body}\n{_line}" if body else _line)
+                # Stamp-last: the policy line rides BEFORE a trailing
+                # stamp, never after it — appending after the stamp
+                # makes delivery stamp the text a second time.
+                body = _insert_before_stamp(body, _line)
                 if doc is not None:
                     # The Doc render is what the owner reads — the
                     # escalation line rides its footer too.
                     from dataclasses import replace as _dc_replace
 
                     doc = _dc_replace(
-                        doc, footer=(f"{doc.footer}\n{_line}"
-                                     if doc.footer else _line))
+                        doc, footer=_insert_before_stamp(
+                            doc.footer or "", _line))
                     # the stored form must be the Doc actually
                     # delivered (decision line included)
                     doc_json = self._serialize_doc(doc)

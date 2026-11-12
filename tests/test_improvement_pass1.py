@@ -19,6 +19,9 @@ Each test below failed on the pre-fix tree (verified) and pins the fix:
 """
 from __future__ import annotations
 
+import os
+import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from unittest import mock
@@ -31,16 +34,40 @@ from nomorals.core.config import ImprovementSettings
 from nomorals.storage.db import Database
 
 
-def _migrated_db() -> Database:
-    db = Database(":memory:")
+def _migrated_db(path: str | None = None) -> Database:
+    db = Database(path if path is not None else ":memory:")
     db.migrate()
     return db
 
 
-def _ctx(*, mode: str = "approval", target: float = 0.8) -> SimpleNamespace:
+def _ctx(*, mode: str = "approval", target: float = 0.8,
+         db: Database | None = None) -> SimpleNamespace:
     settings = SimpleNamespace(
         improvement=ImprovementSettings(mode=mode, target=target))
-    return SimpleNamespace(settings=settings, db=_migrated_db(), router=None)
+    return SimpleNamespace(
+        settings=settings,
+        db=db if db is not None else _migrated_db(), router=None)
+
+
+def _wait_for_cycle(loop: ImprovementLoop, cycle_id: str,
+                    timeout_s: float = 10.0):
+    """Poll history until the record for *cycle_id* lands.
+
+    The autonomous apply runs on a detached thread (2026-11-11
+    scheduler incident: the 1500s gate must never run inside the
+    tick), so the follow-up record arrives after run_cycle returns.
+    The db must be file-backed — Database connections are
+    thread-local, so an in-memory db is empty on the worker thread.
+    """
+    deadline = time.monotonic() + timeout_s
+    while True:
+        for rec in loop.history(limit=10):
+            if rec.id == cycle_id:
+                return rec
+        if time.monotonic() >= deadline:
+            raise AssertionError(
+                f"no record for cycle {cycle_id!r} within {timeout_s}s")
+        time.sleep(0.05)
 
 
 def _report(scores: dict[str, DimensionScore | None]) -> SimpleNamespace:
@@ -95,20 +122,31 @@ class TestApprovalFilesUpgradeQueue(unittest.TestCase):
 class TestApplyFailureIsNotRegression(unittest.TestCase):
     def test_apply_error_records_failed_and_no_cooldown(self):
         """Pre-fix: status came back "regressed" and _recently_regressed
-        tripped the 24h cooldown — for an edit that never landed."""
+        tripped the 24h cooldown — for an edit that never landed.
+
+        2026-11-11: the autonomous apply runs detached (the tick
+        must never wait on the 1500s gate), so the cycle returns
+        "applying" at once and the failure lands on the follow-up
+        record — still "failed", never "regressed", no cooldown.
+        """
         class BoomEvolver(_FakeEvolver):
             def apply(self, proposal_id):
                 raise RuntimeError("working tree is dirty")
 
-        ctx = _ctx(mode="autonomous", target=0.8)
-        p1, p2 = _patch_cycle(_report(_scores(reasoning=0.9, planning=0.3)))
-        loop = ImprovementLoop(ctx)
-        with p1, p2, mock.patch("nomorals.agents.evolution.EvolutionAgent",
-                                BoomEvolver):
-            rec = loop.run_cycle()
-        self.assertEqual(rec.action, "apply_failed")
-        self.assertEqual(rec.status, "failed")
-        self.assertFalse(loop._recently_regressed("planning"))
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _migrated_db(os.path.join(tmp, "imp.db"))
+            ctx = _ctx(mode="autonomous", target=0.8, db=db)
+            p1, p2 = _patch_cycle(_report(_scores(reasoning=0.9, planning=0.3)))
+            loop = ImprovementLoop(ctx)
+            with p1, p2, mock.patch("nomorals.agents.evolution.EvolutionAgent",
+                                    BoomEvolver):
+                rec = loop.run_cycle()
+                self.assertEqual(rec.action, "applying")
+                self.assertEqual(rec.status, "pending")
+                follow = _wait_for_cycle(loop, rec.id + "-apply")
+            self.assertEqual(follow.action, "apply_failed")
+            self.assertEqual(follow.status, "failed")
+            self.assertFalse(loop._recently_regressed("planning"))
 
 
 class TestFromRowSentinelScores(unittest.TestCase):
@@ -195,7 +233,15 @@ class TestEndToEndApprovalFlow(unittest.TestCase):
 class TestEndToEndAutonomousFlow(unittest.TestCase):
     def test_autonomous_apply_records_improvement(self):
         """The autonomous path — benchmark -> propose -> apply (gate) ->
-        re-benchmark -> record — completing with a real improvement."""
+        re-benchmark -> record — completing with a real improvement.
+
+        2026-11-11: the apply + re-benchmark run detached (the tick
+        must never wait on the 1500s gate), so the cycle returns
+        "applying" at once and the verdict lands on the follow-up
+        record.  The poll stays inside the patch context: the
+        detached worker re-benchmarks through the patched
+        run_benchmark.
+        """
         before = _report(_scores(reasoning=0.9, planning=0.3))
         after = _report(_scores(reasoning=0.9, planning=0.9))
 
@@ -203,22 +249,29 @@ class TestEndToEndAutonomousFlow(unittest.TestCase):
             def apply(self, proposal_id):
                 return {"applied": True, "status": "applied"}
 
-        ctx = _ctx(mode="autonomous", target=0.8)
-        with mock.patch.object(improv_mod, "measurable",
-                               return_value=True), \
-             mock.patch.object(improv_mod, "run_benchmark",
-                               side_effect=[before, after]), \
-             mock.patch("nomorals.agents.evolution.EvolutionAgent",
-                        ApplyEvolver):
-            rec = ImprovementLoop(ctx).run_cycle()
-        self.assertEqual(rec.action, "applied")
-        self.assertEqual(rec.status, "improved")
-        self.assertAlmostEqual(rec.delta, 0.6)
-        self.assertFalse(
-            ImprovementLoop(ctx)._recently_regressed("planning"))
-        back = ImprovementLoop(ctx).history(limit=1)[0]
-        self.assertEqual((back.before_score, back.after_score),
-                         (0.3, 0.9))
+        with tempfile.TemporaryDirectory() as tmp:
+            db = _migrated_db(os.path.join(tmp, "imp.db"))
+            ctx = _ctx(mode="autonomous", target=0.8, db=db)
+            loop = ImprovementLoop(ctx)
+            with mock.patch.object(improv_mod, "measurable",
+                                   return_value=True), \
+                 mock.patch.object(improv_mod, "run_benchmark",
+                                   side_effect=[before, after]), \
+                 mock.patch("nomorals.agents.evolution.EvolutionAgent",
+                            ApplyEvolver):
+                rec = loop.run_cycle()
+                self.assertEqual(rec.action, "applying")
+                self.assertEqual(rec.status, "pending")
+                follow = _wait_for_cycle(loop, rec.id + "-apply")
+            self.assertEqual(follow.action, "applied")
+            self.assertEqual(follow.status, "improved")
+            self.assertAlmostEqual(follow.delta, 0.6)
+            self.assertFalse(
+                ImprovementLoop(ctx)._recently_regressed("planning"))
+            back = next(r for r in ImprovementLoop(ctx).history(limit=10)
+                        if r.id == rec.id + "-apply")
+            self.assertEqual((back.before_score, back.after_score),
+                             (0.3, 0.9))
 
 
 if __name__ == "__main__":

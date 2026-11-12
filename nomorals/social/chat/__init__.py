@@ -166,7 +166,15 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
                 partner_context=bool(getattr(
                     chat, "telegram_bot_partner_context", False)),
                 owner_only=False,
-                lock_path="data/telegram-bot.lock",
+                # Home-anchored, never CWD-relative (2026-11-11
+                # scheduler incident: a bare relative lock path
+                # resolves under the process's CWD, so a restart
+                # launched from another directory holds a
+                # DIFFERENT lock file and polls the same token
+                # beside the survivor — one input, two replies).
+                lock_path=str(settings.resolve("data/telegram-bot.lock")),
+                offset_path=str(settings.resolve(
+                    "data/telegram-bot.offset.json")),
             )
         except Exception as exc:  # noqa: BLE001 - bad token or no requests
             raise ValueError(f"telegram-bot unavailable: {exc}") from exc
@@ -191,7 +199,13 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
                     getattr(partner, "owner_sender_ids", "") or ""),
                 owner_chat_keys=_split_ids(
                     getattr(partner, "owner_chats", "") or ""),
-                lock_path="data/telegram-personal.lock",
+                # Home-anchored, never CWD-relative — see the
+                # telegram-bot branch above (2026-11-11: a second
+                # poller on the same token doubles every reply).
+                lock_path=str(settings.resolve(
+                    "data/telegram-personal.lock")),
+                offset_path=str(settings.resolve(
+                    "data/telegram-personal.offset.json")),
             )
         except Exception as exc:  # noqa: BLE001 - bad token or no requests
             raise ValueError(f"telegram-personal unavailable: {exc}") from exc

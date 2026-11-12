@@ -27,6 +27,7 @@ does with the verdict.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -68,6 +69,19 @@ def bot_id_from_token(token: str | None) -> int | None:
         return None
 
 
+def _offset_for(lock_path: str) -> str:
+    """The durable-offset path beside a lock path.
+
+    ``data/telegram-bot.lock`` → ``data/telegram-bot.offset.json``.
+    """
+    raw = str(lock_path or "")
+    if raw.endswith(".lock"):
+        return raw[: -len(".lock")] + ".offset.json"
+    if "." in raw.rsplit("/", 1)[-1]:
+        return raw.rsplit(".", 1)[0] + ".offset.json"
+    return raw + ".offset.json"
+
+
 @dataclass
 class TwoBotConfig:
     """Per-bot config for both BotFather bots. Data, not code."""
@@ -93,6 +107,13 @@ class TwoBotConfig:
     # Shared Bot API knobs.
     media_in_groups: bool = False
     media_max_mb: float = 25.0
+    # Data-home root for resolving relative lock/offset paths
+    # (2026-11-11 scheduler incident: a bare relative lock path
+    # resolves under the process's CWD, so a restart launched
+    # from another directory polls the same token beside the
+    # survivor).  Empty = leave paths as configured (the caller
+    # owns them); set it and build_both anchors them here.
+    home_dir: str = ""
 
     @classmethod
     def from_settings(cls, settings: Any) -> "TwoBotConfig":
@@ -154,6 +175,18 @@ def build_both(config: TwoBotConfig) -> dict[str, Any]:
     """
     from .telegram import TelegramBotAdapter
 
+    def _anchor(path: str) -> str:
+        # A relative lock/offset path anchors to the data home,
+        # never to the process CWD — two processes of one home
+        # must contend for the SAME lock file.
+        home = str(getattr(config, "home_dir", "") or "").strip()
+        if not home:
+            return path
+        from pathlib import Path as _Path
+
+        p = _Path(os.path.expanduser(path))
+        return str(p if p.is_absolute() else (_Path(home) / p))
+
     out: dict[str, Any] = {}
     if config.gated_enabled and config.gated_token.strip():
         out["telegram-bot"] = TelegramBotAdapter(
@@ -165,7 +198,8 @@ def build_both(config: TwoBotConfig) -> dict[str, Any]:
             adapter_name="telegram-bot",
             partner_context=config.gated_partner_context,
             owner_only=False,
-            lock_path=config.gated_lock_path,
+            lock_path=_anchor(config.gated_lock_path),
+            offset_path=_anchor(_offset_for(config.gated_lock_path)),
         )
     else:
         out["telegram-bot"] = None
@@ -182,7 +216,8 @@ def build_both(config: TwoBotConfig) -> dict[str, Any]:
             owner_sender_ids=set(config.owner_sender_ids),
             owner_chat_keys=set(config.owner_chat_keys),
             deny_text=config.personal_deny_text,
-            lock_path=config.personal_lock_path,
+            lock_path=_anchor(config.personal_lock_path),
+            offset_path=_anchor(_offset_for(config.personal_lock_path)),
         )
     else:
         out["telegram-personal"] = None

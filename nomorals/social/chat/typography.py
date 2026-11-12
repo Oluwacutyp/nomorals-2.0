@@ -121,6 +121,13 @@ def _closes_with_stamp(body: str) -> bool:
     the ``_…_`` dialect line, or the bare line).  The stamp text
     quoted, mentioned or argued about anywhere else in the body
     is content, not a footer, and never suppresses the real one.
+    A Doc footer renders as ONE italic wrapper around its whole
+    text (html ``<i>…</i>``, whatsapp/markdown ``_…_``): the stamp
+    is then the last content INSIDE the wrapper rather than a
+    standalone block — that still closes with the stamp (2026-11-11:
+    the annotate branch keeps the stamp last in the footer VALUE,
+    so the render closes with it inside the wrapper; without this
+    the delivery appends a second stamp after the wrapper).
     """
     tail = body.rstrip()
     if not tail:
@@ -129,6 +136,11 @@ def _closes_with_stamp(body: str) -> bool:
                  DEFAULT_STAMP_TEXT):
         if tail == form or tail.endswith("\n" + form):
             return True
+    for closer in ("</i>", "_"):
+        if tail.endswith(closer):
+            inner = tail[: -len(closer)].rstrip()
+            if inner.endswith(DEFAULT_STAMP_TEXT):
+                return True
     return False
 
 

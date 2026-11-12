@@ -31,6 +31,7 @@ import re
 import secrets
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -83,6 +84,12 @@ class BenchmarkReport:
     measurable: bool
     provider: str
     seconds: float = 0.0
+    #: Set when a caller-supplied deadline cut the run short: the
+    #: remaining dimensions are unmeasured (score None), not failed
+    #: — the cycle that asked for the deadline names the dimension
+    #: it stopped at instead of treating silence as a score.
+    deadline_exceeded: bool = False
+    deadline_dimension: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -493,11 +500,19 @@ _DIMENSIONS: dict[str, Callable[[Any, int], DimensionScore]] = {
 
 def run_benchmark(context: Any, *,
                   dimensions: list[str] | None = None,
-                  limit: int = 0) -> BenchmarkReport:
+                  limit: int = 0,
+                  deadline: float | None = None) -> BenchmarkReport:
     """Run the agent benchmark against the live system.
 
     ``dimensions``: subset to run (default: all four). ``limit``: cap
     tasks per dimension (default: MAX_TASKS_PER_DIMENSION).
+    ``deadline``: a ``time.monotonic()`` timestamp — when it passes,
+    the run stops between dimensions and reports the remainder as
+    unmeasured with ``deadline_exceeded`` set (2026-11-11 scheduler
+    incident: the improvement tick's benchmark aggregate had no
+    bound at all, so the job hung to the 300s wall).  Each
+    dimension's own tasks still carry their own timeouts; the
+    deadline bounds the AGGREGATE.
     """
     started = time.monotonic()
     provider = _provider_name(context)
@@ -505,11 +520,26 @@ def run_benchmark(context: Any, *,
     names = [d for d in (dimensions or list(_DIMENSIONS))
              if d in _DIMENSIONS]
     scores: dict[str, DimensionScore] = {}
+    deadline_exceeded = False
+    deadline_dimension = ""
     for name in names:
         if not is_measurable:
             scores[name] = DimensionScore(name, None)
             continue
-        scores[name] = _DIMENSIONS[name](context, limit)
+        if deadline is not None and time.monotonic() >= deadline:
+            # Out of budget: the rest is unmeasured, never faked.
+            deadline_exceeded = True
+            deadline_dimension = deadline_dimension or name
+            scores[name] = DimensionScore(name, None)
+            continue
+        scores[name] = _run_dimension_bounded(
+            name, _DIMENSIONS[name], context, limit, deadline)
+        if deadline is not None and scores[name].score is None \
+                and time.monotonic() >= deadline:
+            # The dimension itself hit the deadline mid-run (its
+            # thread was abandoned — see _run_dimension_bounded).
+            deadline_exceeded = True
+            deadline_dimension = deadline_dimension or name
     measured = [s.score for s in scores.values() if s.score is not None]
     overall = sum(measured) / len(measured) if measured else None
     return BenchmarkReport(
@@ -518,7 +548,47 @@ def run_benchmark(context: Any, *,
         measurable=is_measurable,
         provider=provider,
         seconds=time.monotonic() - started,
+        deadline_exceeded=deadline_exceeded,
+        deadline_dimension=deadline_dimension,
     )
+
+
+def _run_dimension_bounded(name: str, fn: Any, context: Any, limit: int,
+                           deadline: float | None) -> DimensionScore:
+    """One dimension, bounded by ``deadline`` when one is given.
+
+    Without a deadline the dimension runs inline, exactly as
+    before.  With one, it runs on a daemon thread joined to the
+    deadline: a dimension whose tasks hang (model calls stack up
+    — the aggregate that hung the 2026-11-11 improvement tick)
+    is abandoned and scores unmeasured instead of eating the
+    caller's wall.  The abandoned thread is read-only
+    benchmarking (model calls + local checks); the run's own
+    save happens on the calling thread, never inside it.
+    """
+    if deadline is None:
+        return fn(context, limit)
+    box: dict[str, Any] = {}
+
+    def _target() -> None:
+        try:
+            box["score"] = fn(context, limit)
+        except Exception as exc:  # noqa: BLE001 - a dimension failure is a score
+            box["error"] = exc
+
+    worker = threading.Thread(target=_target, daemon=True,
+                              name="benchmark-dimension")
+    worker.start()
+    worker.join(max(0.0, deadline - time.monotonic()))
+    if worker.is_alive():
+        return DimensionScore(
+            name, None,
+            details=[{"detail": "dimension exceeded its budget"}])
+    if "error" in box:
+        return DimensionScore(
+            name, None,
+            details=[{"detail": str(box["error"])[:200]}])
+    return box["score"]
 
 
 # ── K3 scoreboard ("beat K3") ───────────────────────────────────────────────
