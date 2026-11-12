@@ -143,10 +143,17 @@ class MapAgent:
             federation=map_settings().geocode_federation)
 
     def _router(self):
+        from ..maps.providers import live_route_provider
         from ..maps.routing import Router
 
+        # The live rungs are wired, not just permitted: when
+        # federation is on and the local graph has no route, the
+        # router falls to OSRM, then Valhalla (census C3).
+        # Federation off (the default) never calls the provider,
+        # so the wiring is inert until the owner permits it.
         return Router(
             self.packs_dir(), store=self.receipt_store(),
+            provider=live_route_provider(),
             federation=map_settings().routing_federation)
 
     # ── packs ────────────────────────────────────────────────
@@ -480,8 +487,9 @@ class MapAgent:
         if not shelf:
             ticket["detail"] = (
                 "no map packs installed — routing runs on "
-                "installed packs only; there is no provider "
-                "fallback")
+                "installed packs only; a provider fallback needs "
+                "at least one installed vector pack as its "
+                "local-attempt vehicle")
             return ticket
         gazetteer = self._gazetteer()
         start, from_label = self._resolve_endpoint(from_text,
@@ -506,32 +514,45 @@ class MapAgent:
                   if m.tile_format == "mvt"]
         both = [(d, m) for d, m in vector
                 if _covers(m, start) and _covers(m, end)]
-        if not both:
-            if not vector:
-                ticket["detail"] = (
-                    "routing needs a vector (mvt) pack — the "
-                    "installed packs are raster, which carry no "
-                    "road graph. Nothing was fetched from a "
-                    "provider.")
-            else:
-                covering = [m.name for _d, m in vector
-                            if _covers(m, start) or _covers(m, end)]
-                if covering:
-                    ticket["detail"] = (
-                        "no single installed vector pack covers "
-                        "both ends — " + ", ".join(covering)
-                        + " cover one end only. Routing is "
-                        "per-pack and local; nothing was fetched "
-                        "from a provider.")
-                else:
-                    ticket["detail"] = (
-                        "no installed vector pack covers both "
-                        "ends of this route. Routing is per-pack "
-                        "and local; nothing was fetched from a "
-                        "provider.")
+        if both:
+            entry, manifest = sorted(
+                both, key=lambda dm: (-dm[1].zoom_max,
+                                      dm[1].name))[0]
+        elif not vector:
+            ticket["detail"] = (
+                "routing needs a vector (mvt) pack — the "
+                "installed packs are raster, which carry no "
+                "road graph. Nothing was fetched from a "
+                "provider.")
             return ticket
-        entry, manifest = sorted(
-            both, key=lambda dm: (-dm[1].zoom_max, dm[1].name))[0]
+        elif not map_settings().routing_federation:
+            covering = [m.name for _d, m in vector
+                        if _covers(m, start) or _covers(m, end)]
+            if covering:
+                ticket["detail"] = (
+                    "no single installed vector pack covers "
+                    "both ends — " + ", ".join(covering)
+                    + " cover one end only. Routing is "
+                    "per-pack and local; nothing was fetched "
+                    "from a provider.")
+            else:
+                ticket["detail"] = (
+                    "no installed vector pack covers both "
+                    "ends of this route. Routing is per-pack "
+                    "and local; nothing was fetched from a "
+                    "provider.")
+            return ticket
+        else:
+            # Federation on: the best vector pack is the
+            # local-attempt vehicle — its corridor holds no
+            # tiles for this route, so the local attempt
+            # answers no-road-data and the Router falls to
+            # the wired provider (census C3).  The local
+            # answer is still tried first; the provider only
+            # runs on its miss.
+            entry, manifest = sorted(
+                vector, key=lambda dm: (-dm[1].zoom_max,
+                                        dm[1].name))[0]
         result = self._router().route(
             entry, manifest, start, end,
             from_label=from_label, to_label=to_label)
@@ -551,7 +572,7 @@ class MapAgent:
             "to_snap_m": result.to_snap_m,
             "seam_joins": result.seam_joins,
             "reason": result.reason, "detail": result.detail,
-            "pack_id": manifest.pack_id,
+            "pack_id": result.pack_id,
             "posture": result.posture, "provider": result.provider,
             "receipt_id": (result.receipt.receipt_id
                            if result.receipt else "")})

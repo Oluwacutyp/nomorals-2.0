@@ -5,9 +5,9 @@ it superseded the hosted geocoder (M4): the router is **local
 first** — a graph Devon extracts from the packs she already
 holds — and federation to an outside routing provider happens
 only when owner policy permits (``MapSettings.routing_federation``,
-default OFF).  No provider ships in this pass; the seam, the
-setting, and the honest "no provider configured" answer are the
-deliverable, exactly as the geocoder's federation landed in M4.
+default OFF).  Census C3 wires the providers behind this seam:
+OSRM, then Valhalla (``nomorals.maps.providers``) — a provider
+route carries ``pack_id`` empty, because no pack served it.
 
 **The graph.**  A pack's vector tiles carry the road network in
 the ``transportation`` layer (the style's own vocabulary, aliases
@@ -422,7 +422,9 @@ class RouteProvider(Protocol):
 
     Implementations answer with a :class:`RouteResult` of their
     own (its receipt left None — the Router mints the receipt for
-    whichever plane answered).  No provider ships in this pass.
+    whichever plane answered).  Census C3 ships
+    :class:`~nomorals.maps.providers.LiveRouteProvider` (OSRM,
+    then Valhalla) behind it.
     """
 
     name: str
@@ -1480,7 +1482,11 @@ class Router:
                 found, from_label=base.from_label,
                 to_label=base.to_label,
                 from_point=base.from_point, to_point=base.to_point,
-                pack_id=manifest.pack_id,
+                # A provider route is over no pack (census C3):
+                # the pack_id stays empty, the way a provider
+                # geocode candidate's does — the receipt still
+                # records the local-attempt vehicle pack.
+                pack_id="",
                 posture=POSTURE_FEDERATED,
                 provider=str(self._provider.name),
                 detail=found.detail + " " + note + ".")

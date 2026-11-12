@@ -147,6 +147,7 @@ from .providers import (
     NominatimProvider,
     OverpassProvider,
     live_geocode_provider,
+    live_route_provider,
 )
 from .receipts import OPERATIONS, MapReceipt, MapReceiptStore, new_receipt_id
 from .registry import ReleaseEntry, ReleaseRegistry
@@ -218,7 +219,8 @@ __all__ = [
     "get_pack", "get_source", "hash_bytes", "lat_to_tile_y",
     "lat_to_y_float", "load_manifest", "lon_to_tile_x",
     "index_status_line", "lon_to_x_float", "map_settings",
-    "live_geocode_provider", "match_rank", "new_receipt_id",
+    "live_geocode_provider", "live_route_provider", "match_rank",
+    "new_receipt_id",
     "normalize_label", "normalize_name", "overlay_bbox",
     "overlay_to_map_overlay", "pending_key", "polygon_defects",
     "render_pack_preview", "run_build", "style_hash",

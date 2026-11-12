@@ -127,9 +127,11 @@ class RuntimeLiveMixin:
         a text summary plus the route drawn gold on the pack's
         map as a photo, and a no-route is answered honestly with
         its reason (snap failure, disconnected graph, corridor
-        bound) — never a provider substitute; routing federation
-        is the same owner policy (NM_MAPS_ROUTING_FEDERATION),
-        off by default, and no provider ships.
+        bound) — unless routing federation is on, in which case
+        the no-route falls to a live router (OSRM, then Valhalla;
+        census C3) and the answer names its rung.  Routing
+        federation is the same owner policy
+        (NM_MAPS_ROUTING_FEDERATION), off by default.
 
         /map share (M6) runs the LiveLocationBroker over
         location/'s ConsentStore: the owner's command IS the
@@ -289,11 +291,16 @@ class RuntimeLiveMixin:
     def _map_router(self):
         """The local router (M5) over the shelf, federation
         posture from settings."""
+        from ...maps.providers import live_route_provider
         from ...maps.routing import Router
         from ...maps.settings import map_settings
 
+        # The live rungs are wired, not just permitted (census
+        # C3): federation on + local no-route falls to OSRM,
+        # then Valhalla.  Federation off never calls the provider.
         return Router(
             self._map_packs_dir(), store=self._map_receipt_store(),
+            provider=live_route_provider(),
             federation=map_settings().routing_federation)
 
     def _map_agent(self):
@@ -831,6 +838,8 @@ class RuntimeLiveMixin:
     def _map_route(self, spec: str, chat_key: str = "") -> str:
         import re
 
+        from ...maps.settings import map_settings
+
         usage = ("usage: /map route <place or lat,lon> to "
                  "<place or lat,lon>")
         parts = re.split(r"\s+to\s+", (spec or "").strip(),
@@ -844,8 +853,9 @@ class RuntimeLiveMixin:
         if not installed:
             return ("no map packs installed — /map packs shows the "
                     "shelf, and it is empty. Routing runs on "
-                    "installed packs only; there is no provider "
-                    "fallback.")
+                    "installed packs only; no provider fallback "
+                    "without at least one installed vector pack as "
+                    "its local-attempt vehicle.")
         lines: list[str] = []
         index_line = self._map_index_line(gazetteer, installed)
         if index_line:
@@ -872,31 +882,44 @@ class RuntimeLiveMixin:
                   if m.tile_format == "mvt"]
         both = [(d, m) for d, m in vector
                 if _covers(m, start) and _covers(m, end)]
-        if not both:
-            if not vector:
+        if both:
+            entry, manifest = sorted(
+                both, key=lambda dm: (-dm[1].zoom_max,
+                                      dm[1].name))[0]
+        elif not vector:
+            lines.append(
+                "routing needs a vector (mvt) pack — the "
+                "installed packs are raster, which carry no "
+                "road graph. Nothing was fetched from a "
+                "provider.")
+            return "\n".join(lines)
+        elif not map_settings().routing_federation:
+            covering = [m.name for _d, m in vector
+                        if _covers(m, start) or _covers(m, end)]
+            if covering:
                 lines.append(
-                    "routing needs a vector (mvt) pack — the "
-                    "installed packs are raster, which carry no "
-                    "road graph. Nothing was fetched from a "
+                    "no single installed vector pack covers "
+                    "both ends — " + ", ".join(covering)
+                    + " cover one end only. Routing is per-pack "
+                    "and local; nothing was fetched from a "
                     "provider.")
             else:
-                covering = [m.name for _d, m in vector
-                            if _covers(m, start) or _covers(m, end)]
-                if covering:
-                    lines.append(
-                        "no single installed vector pack covers "
-                        "both ends — " + ", ".join(covering)
-                        + " cover one end only. Routing is per-pack "
-                        "and local; nothing was fetched from a "
-                        "provider.")
-                else:
-                    lines.append(
-                        "no installed vector pack covers both ends "
-                        "of this route. Routing is per-pack and "
-                        "local; nothing was fetched from a provider.")
+                lines.append(
+                    "no installed vector pack covers both ends "
+                    "of this route. Routing is per-pack and "
+                    "local; nothing was fetched from a provider.")
             return "\n".join(lines)
-        entry, manifest = sorted(
-            both, key=lambda dm: (-dm[1].zoom_max, dm[1].name))[0]
+        else:
+            # Federation on: the best vector pack is the
+            # local-attempt vehicle — its corridor holds no
+            # tiles for this route, so the local attempt
+            # answers no-road-data and the Router falls to
+            # the wired provider (census C3).  The local
+            # answer is still tried first; the provider only
+            # runs on its miss.
+            entry, manifest = sorted(
+                vector, key=lambda dm: (-dm[1].zoom_max,
+                                        dm[1].name))[0]
         result = self._map_router().route(
             entry, manifest, start, end,
             from_label=from_label, to_label=to_label)
@@ -905,11 +928,19 @@ class RuntimeLiveMixin:
                 f"🧭 no route {from_label} → {to_label} — "
                 + result.detail)
             return "\n".join(lines)
+        if result.provider == "local":
+            via = f"(local Atlas routing · {manifest.name})"
+        else:
+            # A federated answer never wears the local label
+            # (census C3): the rung and its attribution ride
+            # the line instead.
+            via = (f"(via provider {result.provider} · "
+                   "© OpenStreetMap contributors)")
         lines.append(
             f"🧭 {from_label} → {to_label} — "
             f"{self._map_distance_text(result.distance_m)} · "
             f"{self._map_duration_text(result.duration_s)} by road "
-            f"(local Atlas routing · {manifest.name})")
+            f"{via}")
         for step in result.steps:
             lines.append(
                 f"  • {step.name} — "
@@ -926,11 +957,19 @@ class RuntimeLiveMixin:
                 "road")
         if snaps:
             lines.append("  (" + "; ".join(snaps) + ")")
-        if not self._map_route_photo(entry, manifest, result,
-                                     chat_key):
+        if result.provider == "local":
+            if not self._map_route_photo(entry, manifest, result,
+                                         chat_key):
+                lines.append(
+                    "(route found; its map photo couldn't be rendered "
+                    "or sent on this surface.)")
+        else:
+            # No installed pack covers a federated route, so
+            # there is no map photo for it — the text summary
+            # above is the answer, and the line says so.
             lines.append(
-                "(route found; its map photo couldn't be rendered "
-                "or sent on this surface.)")
+                "(no installed pack covers this route, so there "
+                "is no map photo for it.)")
         return "\n".join(lines)
 
     def _map_route_photo(self, entry, manifest, result,

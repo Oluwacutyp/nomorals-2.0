@@ -229,6 +229,35 @@ SOURCES: tuple[MapSource, ...] = (
                "scoped reverse/around query.  Never runs when "
                "the local Atlas index answers, and only when "
                "NM_MAPS_GEOCODE_FEDERATION permits.")),
+    MapSource(
+        source_id="osrm-route",
+        name="OSRM demo server (OpenStreetMap)",
+        url="https://router.project-osrm.org/route/v1/driving/",
+        attribution="© OpenStreetMap contributors",
+        license="ODbL 1.0",
+        notes=("Fallback-only live router (census C3): keyless "
+               "demo server — the OSRM demo is for light/demo "
+               "use, not production traffic; snap radius 500 m, "
+               "the local plane's bound, so a point with no road "
+               "inside the radius answers NoSegment and a "
+               "disconnected pair answers NoRoute, both empty "
+               "answers, never a fake route.  Never runs when "
+               "the local road graph answers, and only when "
+               "NM_MAPS_ROUTING_FEDERATION permits.")),
+    MapSource(
+        source_id="valhalla-route",
+        name="Valhalla demo instance (OpenStreetMap)",
+        url="https://valhalla1.openstreetmap.de/route",
+        attribution="© OpenStreetMap contributors",
+        license="ODbL 1.0",
+        notes=("Fallback-only second routing rung (census C3): "
+               "keyless public demo instance, costing auto "
+               "(driving); slow — 14 s observed for a Lagos hop "
+               "against OSRM's 2 s; no-route HTTP 400 codes "
+               "170/171/441/442 are empty answers, anything else "
+               "a rung failure.  Never runs when the local road "
+               "graph answers, and only when "
+               "NM_MAPS_ROUTING_FEDERATION permits.")),
 )
 
 PACKS: tuple[PackDefinition, ...] = (
