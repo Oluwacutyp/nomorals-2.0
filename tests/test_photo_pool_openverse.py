@@ -59,8 +59,9 @@ COUPLE_ROWS = [
 ]
 
 # The same row shape with the mature flag flipped — the API
-# serves mature rows the same way, and the pool's own
-# re-check is what keeps them out.
+# serves mature rows the same way, and the pool serves them
+# the same way: no mature filtering on this path (uncensored,
+# per the owner's rule).
 MATURE_ROW = dict(COUPLE_ROWS[0], mature=True)
 
 
@@ -182,9 +183,12 @@ def test_openverse_query_reaches_the_api():
     assert "key" not in params and "api_key" not in params
 
 
-def test_openverse_mature_rows_are_never_served():
+def test_openverse_mature_rows_are_served():
     # A mature row on top, clean rows below: the walk serves
-    # the first CLEAN row, never the mature one.
+    # the mature row exactly like any other — no mature
+    # filtering on this path (uncensored, per the owner's
+    # rule).  This pins the behaviour so no future lane
+    # re-adds the filter silently.
     transport = _Transport({
         "api.openverse.org": _json(
             _payload([MATURE_ROW] + COUPLE_ROWS[1:])),
@@ -193,18 +197,20 @@ def test_openverse_mature_rows_are_never_served():
         transport,
         pools=_one_source_pool([_openverse("couple")]))
     hit = client.fetch_media("test", rng=_ScriptedRng())
-    assert hit.url == COUPLE_ROWS[1]["url"]
+    assert hit.url == MATURE_ROW["url"]
 
 
-def test_openverse_only_mature_rows_is_no_answer():
+def test_openverse_only_mature_rows_is_an_answer():
+    # An only-mature result set returns the mature row —
+    # never "no answer" for being mature.
     transport = _Transport({
         "api.openverse.org": _json(_payload([MATURE_ROW])),
     })
     client = ImagePoolClient(
         transport,
         pools=_one_source_pool([_openverse("couple")]))
-    with pytest.raises(SourceFailure):
-        client.fetch_media("test", rng=_ScriptedRng())
+    hit = client.fetch_media("test", rng=_ScriptedRng())
+    assert hit.url == MATURE_ROW["url"]
 
 
 def test_openverse_rows_without_a_url_are_skipped():

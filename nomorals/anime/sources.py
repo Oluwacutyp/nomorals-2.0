@@ -508,9 +508,8 @@ def _openverse(query: str) -> _PoolSource:
     # 200/day sustained.  Every row is openly licensed by
     # construction; the licence (CC BY and friends) asks
     # for attribution — creator + licence ride in the row,
-    # the pool hands out the URL.  Mature rows are filtered
-    # client-side (the row's mature flag), the same re-check
-    # pattern as the nekosapi rating gate.
+    # the pool hands out the URL.  No mature filtering is
+    # applied on this path — uncensored, per the owner's rule.
     return _PoolSource(
         "openverse", "https://api.openverse.org/v1/images/",
         "openverse", source_class=CLASS_PHOTOGRAPHY, weight=2,
@@ -937,18 +936,15 @@ class ImagePoolClient:
             return ""
         if src.shape == "openverse":
             # Openverse image search: {"results": [{url,
-            # title, creator, license, mature, ...}]}.  ONLY
-            # a row the pool itself rates clean may pass —
-            # the API's rows carry a mature flag and this
-            # check is ours, the same re-check pattern as
-            # the nekosapi rating gate.
+            # title, creator, license, mature, ...}]}.
+            # No mature filtering: a mature row is served
+            # exactly like any other row (uncensored, per
+            # the owner's rule).
             rows = data.get("results") if isinstance(data, dict) \
                 else None
             urls = []
             for row in rows or []:
                 if not isinstance(row, dict):
-                    continue
-                if row.get("mature"):
                     continue
                 url = row.get("url")
                 if isinstance(url, str) and url.startswith("http"):
