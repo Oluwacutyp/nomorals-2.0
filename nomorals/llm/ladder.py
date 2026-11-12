@@ -190,6 +190,30 @@ register_job(JobSpec(
 ))
 
 register_job(JobSpec(
+    name="dj_beat_grid",
+    description="The DJ desk beat grid: beat times for a track, from the "
+                "onset grid anchored to its detected BPM.",
+    model_rung="madmom RNN beat tracker (RNNBeatProcessor + DBN) — "
+               "self-provisioned venv, honestly unavailable until "
+               "provisioned (/dj desk provision)",
+    code_rung="onset-grid DSP — phase search over the flux envelope "
+              "with sample-level peak refinement (dj_desk)",
+    model_needs_brain=False,
+))
+
+register_job(JobSpec(
+    name="dj_cue_suggest",
+    description="The DJ desk cue suggester: which bars of a track are "
+                "worth a hot cue (drops, set starts, build bars).",
+    model_rung="sklearn logistic classifier over per-bar structure "
+               "features, trained on synthetic labeled structure rows "
+               "via the specialists gate (must beat the code rule)",
+    code_rung="energy-jump rule — cue on the set start and any bar "
+              "whose energy jumps >= 0.4 (dj_desk)",
+    model_needs_brain=False,
+))
+
+register_job(JobSpec(
     name="arena_narration",
     description="Dynamic arena battle narration illustrating the actual "
                 "battle, in the table's DM mood — like a movie.",

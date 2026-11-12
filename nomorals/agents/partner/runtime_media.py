@@ -3805,6 +3805,14 @@ class RuntimeMediaMixin:
                              set (energy arc, drop-aware transitions) and
                              render it as resumable real-audio segments
                              on disk; the chat gets the tracklist.
+        /dj desk [fetch <song>|live [genre|songs…]|eq <A|B> <band> <0..2>
+                             |fx <A|B> <filter|echo|reverb|flanger> …
+                             |fader|keylock|jog|crate|wave|record|provision]
+                             → the DESK you play: real fetched tracks on
+                             two decks with beat grid, hot cues, pads,
+                             loops, crossfader and tempo sync — plus
+                             3-band EQ, FX, jog/scratch, key lock,
+                             crates, waveforms and recording.
         """
         from ...media.dj import DJ
 
@@ -3857,6 +3865,26 @@ class RuntimeMediaMixin:
                              f"{chat.platform}:{chat.chat_id}", text)
             return control_dj_live(tail[4:].strip(), chat_key=chat_key,
                                    deliver_audio=_da, deliver_text=_dt,
+                                   context=self.context)
+        if tail.lower().startswith("desk"):
+            from ...media.dj_desk import control_dj_desk
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is None:
+                return ("run /dj desk from a chat — the live set drops "
+                        "there.")
+            gateway = self.gateway
+
+            def _da_desk(path: str, caption: str) -> None:
+                gateway.send_file(chat.platform,
+                                  f"{chat.platform}:{chat.chat_id}",
+                                  path, caption=caption[:1024], kind="audio")
+
+            def _dt_desk(text: str) -> None:
+                gateway.send(chat.platform,
+                             f"{chat.platform}:{chat.chat_id}", text)
+            return control_dj_desk(tail[4:].strip(), chat_key=chat_key,
+                                   deliver_audio=_da_desk,
+                                   deliver_text=_dt_desk,
                                    context=self.context)
         dj = DJ(self.context)
         if tail.lower() == "trending":

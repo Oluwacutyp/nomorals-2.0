@@ -911,7 +911,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # wave 73: media orchestrator + CI loop
     "hub": (0, None),        # /hub [song <topic…> [style]|video <q…>|podcast <q…>|status]
     "podcast": (1, None),    # /podcast <query…> — find→download→transcribe→chapters
-    "dj": (0, 1),           # /dj [trending|<genre>] — radio show w/ voice breaks
+    "dj": (0, 1),           # /dj [trending|<genre>|desk …] — radio show w/ voice breaks + the playable DJ desk (grid, cues, pads, loops, EQ, FX, crates, recording)
     "produce": (0, None),   # /produce [spotify-url|vibe words…] — compose original music (taste-aware)
     "like": (0, None),       # /like [notes…] — last production was good
     "dislike": (0, None),    # /dislike [notes…] — last production missed
@@ -4446,8 +4446,12 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "related": "/hub podcast (same pipeline) · /stt · nm hub on the console"},
     "dj": {"what": "Radio DJ: builds a Devon FM show from today's trending charts "
                    "plus your own generated tracks — DJ voice breaks, chart "
-                   "shoutouts, crossfades and filter-sweep transitions, one WAV.",
-            "usage": "/dj [trending|<genre>]",
+                   "shoutouts, crossfades and filter-sweep transitions, one WAV. "
+                   "/dj desk is the playable desk: two decks with beat grids, "
+                   "hot cues, pads, loops, EQ, FX, jog, key lock, crates, "
+                   "waveforms and recording — /dj desk fetch <song> loads a "
+                   "real track, /dj desk live plays a set through it.",
+            "usage": "/dj [trending|<genre>] · /dj desk [fetch|live|eq|fx|fader|keylock|jog|crate|wave|record|provision]",
             "example": "/dj uk-drill",
             "related": "/music · /play · /podcast"},
     "produce": {"what": "Producer: analyzes a Spotify track's musical DNA "
@@ -5347,7 +5351,7 @@ LIST_ONELINERS: dict[str, str] = {
     "clonevoice": "clone a voice from a voice note: /clonevoice <name> (attach the note)",
     "dislike": "last production missed — with notes: /dislike [notes…]",
     "distribute": "release walk-through: /distribute [song.wav] | legal",
-    "dj": "radio show with voice breaks: /dj [trending|<genre>]",
+    "dj": "radio show with voice breaks + the playable DJ desk: /dj [trending|<genre>] · /dj desk fetch|live|eq|fx|crate|record",
     "download": "any-URL media downloader: /download <url> [audio]",
     "tiktok": "TikTok downloader (no-watermark route first, labeled honestly): /tiktok <url> [audio]",
     "ttdl": "alias of /tiktok: /ttdl <url> [audio]",

@@ -403,19 +403,26 @@ class DJ:
     # ── show ──────────────────────────────────────────────────
     def build_show(self, genre: str = "", n_tracks: int = 4,
                    workdir: str = "dj",
-                   include_breaks: bool = True) -> dict[str, Any]:
+                   include_breaks: bool = True,
+                   real: bool = False) -> dict[str, Any]:
         """Compose a full radio show -> {"ok", "path", "tracklist", ...}.
 
-        Never raises — returns {"ok": False, "reason"} on failure.
+        ``real`` fetches REAL songs through the music chain for each
+        slot (BPM/key detected from the audio); a slot whose fetch
+        fails falls back to a composed track, named as such in the
+        tracklist. Default is composed. Never raises — returns
+        {"ok": False, "reason"} on failure.
         """
         try:
-            return self._build_show(genre, n_tracks, workdir, include_breaks)
+            return self._build_show(genre, n_tracks, workdir,
+                                    include_breaks, real=real)
         except Exception as exc:  # noqa: BLE001
             _log.warning("DJ show build failed: %s", exc)
             return {"ok": False, "reason": str(exc)}
 
     def _build_show(self, genre: str, n_tracks: int,
-                    workdir: str, include_breaks: bool) -> dict[str, Any]:
+                    workdir: str, include_breaks: bool,
+                    real: bool = False) -> dict[str, Any]:
         from .music import MusicCreator
 
         n_tracks = max(1, min(8, int(n_tracks or 4)))
@@ -455,20 +462,55 @@ class DJ:
                 topic = f"Devon FM original {i + 1} in {style}"
                 label = f"Devon FM original ({style})"
 
-            # compose our own track in a matching style (short: no score pdf)
-            try:
-                song = creator.compose(
-                    topic, style=style, with_midi=False,
-                    with_score=False, with_vocals=False, workdir=str(wd))
-                audio = song.audio_path or ""
-            except Exception as exc:  # noqa: BLE001
-                _log.warning("DJ track compose failed: %s", exc)
-                audio = ""
+            song = None
+            audio = ""
+            source = "composed"
+            if real:
+                # real-song input rung: fetch the chart pick through
+                # the music chain; a failed fetch falls back to
+                # composing the slot, NAMED as composed in the list.
+                from .dj_desk import resolve_show_track
+                slot_song: dict[str, Any] = {}
+
+                def _compose(p, wd, _topic=topic, _style=style,
+                             _slot=slot_song):
+                    try:
+                        s = creator.compose(
+                            _topic, style=_style, with_midi=False,
+                            with_score=False, with_vocals=False,
+                            workdir=str(wd))
+                        _slot["song"] = s
+                        return s.audio_path or ""
+                    except Exception as exc:  # noqa: BLE001
+                        _log.warning("DJ track compose failed: %s", exc)
+                        return ""
+
+                resolved = resolve_show_track(pick, str(wd), self.context,
+                                              compose_fn=_compose)
+                audio = resolved["path"]
+                source = resolved["source"]
+                song = slot_song.get("song")
+                if source == "none":
+                    tracklist.append({"label": label, "status": "skipped",
+                                      "reason": resolved["reason"],
+                                      "source": "none"})
+                    continue
+            else:
+                # compose our own track in a matching style (short: no score pdf)
+                try:
+                    song = creator.compose(
+                        topic, style=style, with_midi=False,
+                        with_score=False, with_vocals=False, workdir=str(wd))
+                    audio = song.audio_path or ""
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("DJ track compose failed: %s", exc)
+                    audio = ""
 
             if not audio or not os.path.isfile(audio):
                 # honest skip — keep the show moving
                 tracklist.append({"label": label, "status": "skipped",
-                                  "reason": "compose failed"})
+                                  "reason": "compose failed",
+                                  "source": source})
                 continue
             seg = ShowSegment(
                 kind="track", label=label, path=audio,
@@ -477,7 +519,7 @@ class DJ:
                 rank=pick.get("rank", 0) if pick else 0)
             track_units.append((seg, song, pick, style))
             tracklist.append({"label": label, "status": "played",
-                              "style": style,
+                              "style": style, "source": source,
                               "chart_rank": pick.get("rank") if pick else None})
 
         # ── DJ engine: analyze → energy arc → transition plans ──────────
@@ -610,6 +652,51 @@ class DJ:
                 tracklist[j]["taste_score"] = taste.score_transition(
                     a, ordered_analyses[j + 1], plans[j])
 
+        # The desk plan: the show builder PLACES cues and grids, it
+        # does not just narrate them. Each track gets a beat grid +
+        # suggested cue bars, persisted in the desk store so the live
+        # desk can jump straight to them. Best-effort: a plan failure
+        # never kills a show.
+        desk_plan: list[dict[str, Any]] = []
+        try:
+            from .dj_desk import CueBank, DeskStore, attach_desk_plan
+            _plan_samples: dict[str, Any] = {}
+            for (seg, _song, _pick, _style), _a in zip(
+                    ordered_units, ordered_analyses, strict=True):
+                # _read_wav_mono never raises (empty on failure)
+                _s, _sr = _read_wav_mono(seg.path)
+                if len(_s) >= 100:
+                    if _sr != SAMPLE_RATE:
+                        _s = _resample(_s, _sr, SAMPLE_RATE)
+                    _plan_samples[_a.path] = _s
+            _plans = attach_desk_plan(ordered_analyses, _plan_samples)
+            _store = DeskStore()
+            _store.load()
+            for (seg, _song, _pick, _style), _a, _p in zip(
+                    ordered_units, ordered_analyses, _plans, strict=True):
+                _grid = _p["grid"]
+                _bank = CueBank()
+                for _i, (_bar, _score) in enumerate(_p["cues"][:4]):
+                    _beat = _bar * 4
+                    # guarded: known grid + in-range beat, so set_cue
+                    # cannot raise here
+                    if _grid.known and _beat < len(_grid.beat_times):
+                        _bank.set_cue(f"cue{_i + 1}", _beat, _grid)
+                if _grid.known:
+                    _store.put_track(seg.path, _grid, _bank,
+                                     waveform=_p.get("waveform"))
+                desk_plan.append({
+                    "label": seg.label,
+                    "bpm": _a.bpm,
+                    "grid_beats": len(_grid.beat_times),
+                    "grid_confidence": _grid.confidence,
+                    "downbeat": _grid.downbeat_index,
+                    "cues": [{"name": n, "beat": b, "time": round(t, 3)}
+                             for n, b, t in _bank.list_cues()]})
+            _store.save()
+        except Exception:  # noqa: BLE001
+            _log.debug("dj show desk plan failed", exc_info=True)
+
         # Phase 2: the feedback loop — the show's keep/skip outcomes
         # land in the taste log, so the LearnedTaste model trains from
         # real rows. Played transitions carry real transition features;
@@ -645,6 +732,7 @@ class DJ:
 
         dur_s = len(mix) / SAMPLE_RATE
         return {"ok": True, "path": out_path, "tracklist": tracklist,
+                "desk_plan": desk_plan,
                 "duration_s": round(dur_s, 1),
                 "segments": len(segments),
                 "voice_notes": notes,
