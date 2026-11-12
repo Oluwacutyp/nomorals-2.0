@@ -334,6 +334,11 @@ class FactStore:
                     confidence=max(0.0, min(1.0, confidence)),
                     source_ts=source_ts if source_ts is not None else now,
                     created_at=now, valid_from=now)
+        # Embedding is slow (model server / router round-trip) and must NOT
+        # run inside the transaction: with the single-writer actor an open
+        # transaction serializes every other writer. Embed first; if it
+        # raises, nothing is stored — the same outcome as a rollback.
+        vector = self.embedder.embed(text)
         with self.db.transaction():
             self.db.execute(
                 """INSERT INTO tier_facts
@@ -342,7 +347,7 @@ class FactStore:
                    VALUES (?,?,?,?,?,1,?,?,NULL)""",
                 (fact.id, fact.text, fact.confidence, fact.source_ts,
                  None, fact.created_at, now))
-            self.vectors.put(self.embedder.embed(text), fact.id)
+            self.vectors.put(vector, fact.id)
         return fact
 
     def get_fact(self, fact_id: str) -> Fact | None:

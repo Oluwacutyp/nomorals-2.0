@@ -509,6 +509,11 @@ class SessionManager:
 
     def _save_session(self, session: Session) -> None:
         """Persist session to database (session_data encrypted at rest)."""
+        # Encryption is a PBKDF2 KDF (~40ms) and must NOT run inside the
+        # transaction: with the single-writer actor an open transaction
+        # serializes every other writer. Encrypt first, then a short
+        # transaction for the write.
+        encrypted = self._encrypt_session_data(json.dumps(session.to_dict()))
         with self.vault.db.transaction():
             self.vault.db.execute("""
                 INSERT OR REPLACE INTO sessions (service, username, session_data, created_at, last_used)
@@ -516,7 +521,7 @@ class SessionManager:
             """, (
                 session.service,
                 session.username,
-                self._encrypt_session_data(json.dumps(session.to_dict())),
+                encrypted,
                 session.created_at,
                 session.last_used,
             ))

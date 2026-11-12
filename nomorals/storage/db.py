@@ -16,16 +16,33 @@ wrong:
    through a statement batch.
 3. **Savepoints for nesting.** ``transaction()`` is re-entrant: an inner call
    becomes a ``SAVEPOINT`` so composed repository methods behave correctly.
+4. **One writer *thread* (the actor).** SQLite allows exactly one writer at a
+   time — that is the format, not this code — so concurrent workers used to
+   serialize on a process-wide lock and fail at a 30s bound. Instead, every
+   write is handed to a queue (:class:`_WriterActor`): one dedicated thread
+   owns the one write connection and passes the queued writes into SQLite
+   serially, while readers keep reading directly through WAL thread-local
+   connections. A write is acknowledged only after the writer applied it
+   (and, for a transaction, after COMMIT returned), so a write the caller
+   was told succeeded is durable to exactly the degree SQLite's configured
+   ``synchronous`` mode makes it; a write still sitting in the queue when
+   the process dies was never acknowledged and is lost — that is the loss
+   window, and it is bounded by the caller's wait. No acknowledged write is
+   ever lost to the queue.
 """
 
 from __future__ import annotations
 
+import collections
+import itertools
 import os
+import queue
 import random
+import re
 import sqlite3
 import threading
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any, Callable, Iterable, Iterator, Sequence
 
@@ -126,7 +143,10 @@ class Database:
 
         self._local = threading.local()
         self._write_lock = threading.RLock()
-        #: Which thread holds _write_lock (ident/name/since), if any.
+        #: Which thread holds _write_lock (ident/name/since), if any. With
+        #: the writer actor this record is owned by the actor's transaction
+        #: state (see _WriterActor._sync_txn_state); the direct path (readonly
+        #: databases) still sets it itself.
         self._write_lock_holder: dict[str, Any] | None = None
         #: Thread ident -> that thread's live connection (for
         #: interrupt_thread(): a stuck SQLite step on one thread is
@@ -139,6 +159,23 @@ class Database:
         self._stats_lock = threading.Lock()
         self._closed = False
         self._depth = threading.local()
+        #: Per-thread actor generation of the transaction that thread owns
+        #: (set by transaction() after a successful begin). A restart
+        #: between begin and the next routed call is loud, not silent:
+        #: the transaction is gone and the caller is told so.
+        self._txn_gen = threading.local()
+        #: The writer actor (None until the first routed write; readonly
+        #: databases never get one). Guarded by _writer_lock.
+        self._writer_actor: _WriterActor | None = None
+        self._writer_conn: sqlite3.Connection | None = None
+        self._writer_lock = threading.Lock()
+        self._writer_generation = 0
+        #: Shared-cache URI for :memory: databases: one per Database
+        #: instance, fixed at construction (NOT id(self) — ids are reused
+        #: after GC). Every connection of this instance (readers + writer
+        #: actor) shares one in-memory database; two Database instances
+        #: never share. Plain ":memory:" is per-connection.
+        self._memory_uri = f"file:nomorals-mem-{next(_MEMORY_DB_COUNTER)}?mode=memory&cache=shared"
 
         self.stats = {
             "queries": 0,
@@ -162,7 +199,7 @@ class Database:
         conn: sqlite3.Connection | None = getattr(self._local, "conn", None)
         if conn is not None:
             return conn
-        target = ":memory:" if self.path is None else str(self.path)
+        target = self._memory_uri if self.path is None else str(self.path)
         if self.readonly and self.path is not None:
             uri = f"file:{target}?mode=ro"
             conn = sqlite3.connect(uri, uri=True, timeout=self._timeout)
@@ -172,6 +209,7 @@ class Database:
                 Path(target).parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(
                 target,
+                uri=self.path is None,  # :memory: uses the shared-cache URI
                 timeout=self._timeout,
                 isolation_level=None,  # autocommit; we drive transactions ourselves
                 check_same_thread=False,
@@ -224,6 +262,11 @@ class Database:
     def close(self) -> None:
         """Close every connection opened by any thread."""
         self._closed = True
+        actor = self._writer_actor
+        if actor is not None:
+            actor.stop()
+            self._writer_actor = None
+            self._writer_conn = None
         with self._all_lock:
             connections, self._all_connections = self._all_connections, []
             self._by_thread.clear()
@@ -274,14 +317,33 @@ class Database:
         inside a user-defined function (SQLite only checks the flag
         between VDBE steps) — that limitation is real and named here.
         Never raises; False when the thread has no live connection.
+
+        With the writer actor the stuck step usually runs on the WRITER
+        connection, not the worker's own: when *ident* owns the job the
+        writer is currently applying, the writer connection is
+        interrupted (and the owner's queued jobs are cancelled so their
+        waits unwind immediately). A worker's own connection is
+        interrupted first — a stuck read on it is the worker's own step.
+        An idle writer connection is NOT interrupted: a stale interrupt
+        flag would abort the next innocent writer's statement.
         """
         try:
+            interrupted = False
             with self._all_lock:
                 conn = self._by_thread.get(int(ident))
-            if conn is None:
-                return False
-            conn.interrupt()
-            return True
+            if conn is not None:
+                conn.interrupt()
+                interrupted = True
+            actor = self._writer_actor
+            if actor is not None:
+                if actor.current_job_owner() == int(ident):
+                    writer_conn = self._writer_conn
+                    if writer_conn is not None and writer_conn is not conn:
+                        writer_conn.interrupt()
+                        interrupted = True
+                if actor.cancel_pending(int(ident)) > 0:
+                    interrupted = True
+            return interrupted
         except Exception:  # noqa: BLE001 - teardown is best-effort
             _log.debug("interrupt_thread failed", exc_info=True)
             return False
@@ -313,6 +375,15 @@ class Database:
                 except Exception:  # noqa: BLE001 - closed conn
                     pass
             n_conns = len(self._all_connections)
+        # With the writer actor the holder is the transaction's OWNER
+        # thread (its name stays in "thread", as before); the writer
+        # thread + the statement it is applying are extra fields.
+        actor = self._writer_actor
+        if holder is not None and actor is not None:
+            work = actor.current_work()
+            holder["writer_thread"] = "nm-db-writer"
+            holder["writer_ident"] = actor.thread_ident
+            holder["current_sql"] = work.get("sql", "") if work else ""
         try:
             journal = self.journal_mode()
         except Exception:  # noqa: BLE001
@@ -328,6 +399,243 @@ class Database:
             "connections": n_conns,
             "open_transactions": open_txns,
         }
+
+    # ── writer actor ─────────────────────────────────────────────────────
+    def _writer_connection(self) -> sqlite3.Connection:
+        """The writer actor's own connection, created on the actor thread.
+
+        Registered like any other connection (so close() and interrupt()
+        see it), and kept in ``_writer_conn`` so the actor can apply jobs
+        on it. Called once, from the actor thread, before its loop starts.
+        """
+
+        conn = self._connection()
+        self._writer_conn = conn
+        return conn
+
+    def _start_writer_actor(self) -> _WriterActor:
+        """Create + start a fresh actor. Caller must hold _writer_lock."""
+
+        self._writer_generation += 1
+        actor = _WriterActor(self, generation=self._writer_generation)
+        self._writer_actor = actor
+        actor.start()
+        return actor
+
+    def _ensure_writer(self) -> _WriterActor:
+        """The live writer actor, starting one lazily on first write.
+
+        Readonly databases never get one (None is returned by the
+        callers' readonly check, not here). A DEAD actor raises loudly
+        naming it — it is never silently restarted; recovery is the
+        operator's explicit restart_writer_actor().
+        """
+
+        actor = self._writer_actor
+        if actor is not None and actor.is_alive():
+            return actor
+        with self._writer_lock:
+            actor = self._writer_actor
+            if actor is not None and actor.is_alive():
+                return actor
+            if actor is not None:
+                raise StorageError(
+                    "database writer actor is dead"
+                    + (f" ({actor.dead_error})" if actor.dead_error else "")
+                    + " — call restart_writer_actor()")
+            if self._closed:
+                raise StorageError("database is closed")
+            return self._start_writer_actor()
+
+    def restart_writer_actor(self) -> bool:
+        """Restart a DEAD writer actor (explicit operator recovery).
+
+        Closes the old writer connection (rolling back any dangling
+        transaction it held and releasing the file lock) and starts a
+        fresh actor on a new connection. Returns False when the current
+        actor is alive (nothing to restart). Any transaction a caller
+        had open across the restart is GONE — its next routed call
+        raises StorageError naming the lost transaction instead of
+        silently continuing outside one. Raises StorageError when the
+        database is closed.
+        """
+
+        if self._closed:
+            raise StorageError("database is closed")
+        with self._writer_lock:
+            actor = self._writer_actor
+            if actor is not None and actor.is_alive():
+                return False
+            old = self._writer_conn
+            self._writer_conn = None
+            if old is not None:
+                with self._all_lock:
+                    if old in self._all_connections:
+                        self._all_connections.remove(old)
+                    for ident, conn in list(self._by_thread.items()):
+                        if conn is old:
+                            self._by_thread.pop(ident, None)
+                try:
+                    old.close()
+                except sqlite3.Error as exc:
+                    _log.debug("old writer connection close failed: %s", exc)
+            self._start_writer_actor()
+            return True
+
+    def _in_routed_txn(self) -> bool:
+        """True when this thread owns a transaction on the writer actor.
+
+        Covers both shapes: a transaction() block (thread-local depth)
+        and a manual BEGIN issued via execute() (the actor's txn_owner
+        is this thread). While True, every statement — reads included —
+        routes to the writer connection, so the transaction sees its own
+        writes.
+        """
+
+        if getattr(self._depth, "value", 0) > 0:
+            return True
+        actor = self._writer_actor
+        return actor is not None and actor.txn_owner == threading.get_ident()
+
+    def _check_txn_generation(self) -> None:
+        """Fail loudly if the writer actor was restarted mid-transaction."""
+
+        if getattr(self._depth, "value", 0) <= 0:
+            return
+        actor = self._writer_actor
+        gen = getattr(self._txn_gen, "value", None)
+        if actor is not None and gen is not None and gen != actor.generation:
+            raise StorageError(
+                "writer actor was restarted; the transaction was lost")
+
+    def _holder_timeout_error(self, what: str) -> StorageError:
+        """The bounded-acquire error, naming the holder like c5bebb95."""
+
+        actor = self._writer_actor
+        work = actor.current_work() if actor is not None else None
+        if work is not None:
+            who = work.get("thread") or work.get("ident") or "?"
+            held = float(work.get("held_s") or 0.0)
+            return StorageError(
+                f"database write lock held by thread {who} for {held:.1f}s "
+                f"(>{_WRITE_LOCK_TIMEOUT_S:g}s wait) — a previous job may "
+                f"have been abandoned mid-transaction")
+        return StorageError(
+            f"database write for {what} timed out after "
+            f"{_WRITE_LOCK_TIMEOUT_S:g}s (writer actor did not respond)")
+
+    def _convert_execute_error(self, exc: BaseException) -> BaseException:
+        """Map a raw error delivered by the actor onto the public types."""
+
+        if isinstance(exc, (StorageError, ConstraintViolation)):
+            return exc
+        if isinstance(exc, sqlite3.IntegrityError):
+            return ConstraintViolation(str(exc))
+        if isinstance(exc, sqlite3.OperationalError):
+            return StorageError(str(exc), retryable=_is_retryable_sqlite(exc))
+        if isinstance(exc, sqlite3.Error):
+            return StorageError(str(exc))
+        return exc
+
+    def _enqueue_job(self, kind: str, sql: str, params: Any) -> _WriteJob:
+        """Build + enqueue a job for this thread on the live actor."""
+
+        actor = self._ensure_writer()
+        job = _WriteJob(kind, sql, params, threading.get_ident(),
+                        threading.current_thread().name, actor.generation)
+        actor.enqueue(job)
+        return job
+
+    def _wait_job(self, job: _WriteJob, *, what: str,
+                  timeout: float | None = None) -> Any:
+        """Wait for a job, converting its outcome (or a timeout) loudly.
+
+        ``timeout`` defaults to the module constant, resolved at CALL
+        time (never as a def-time default) so a patched
+        ``_WRITE_LOCK_TIMEOUT_S`` — the dbstall suite patches it to 0.5
+        — actually shortens the wait.
+        """
+
+        if timeout is None:
+            timeout = _WRITE_LOCK_TIMEOUT_S
+        if not job.event.wait(timeout):
+            job.cancelled = True
+            raise self._holder_timeout_error(what)
+        if job.error is not None:
+            raise self._convert_execute_error(job.error)
+        return job.result
+
+    def _routed_execute(self, sql: str, params: Any = ()) -> _RoutedCursor:
+        self._check_txn_generation()
+        job = self._enqueue_job("stmt", sql, params)
+        return self._wait_job(job, what=f"statement {sql[:60]!r}")
+
+    def _routed_executemany(self, sql: str, seq: Any) -> _RoutedCursor:
+        self._check_txn_generation()
+        rows = list(seq)
+        job = self._enqueue_job("executemany", sql, rows)
+        return self._wait_job(job, what=f"statement {sql[:60]!r}")
+
+    def _routed_script(self, script: str) -> None:
+        self._check_txn_generation()
+        job = self._enqueue_job("script", script, ())
+        self._wait_job(job, what="script")
+
+    def _routed_txn_control(self, sql: str) -> _RoutedCursor:
+        """BEGIN/COMMIT/ROLLBACK/SAVEPOINT/RELEASE issued via execute()."""
+
+        word = _sql_first_word(sql)
+        if word == "BEGIN":
+            self._check_txn_generation()
+            job = self._enqueue_job("begin", sql, ())
+            return self._wait_job(job, what="transaction begin")
+        if word in ("COMMIT", "ROLLBACK", "END"):
+            job = self._enqueue_job(word.lower() if word != "END" else "commit",
+                                    sql, ())
+            result = self._wait_job(job, what=f"transaction {word.lower()}")
+            return result
+        self._check_txn_generation()
+        job = self._enqueue_job("stmt", sql, ())
+        return self._wait_job(job, what=f"statement {sql[:60]!r}")
+
+    def _actor_begin(self, *, immediate: bool) -> None:
+        """Open a transaction on the writer actor (bounded wait)."""
+
+        sql = "BEGIN IMMEDIATE" if immediate else "BEGIN"
+        job = self._enqueue_job("begin", sql, ())
+        self._wait_job(job, what="transaction begin")
+
+    def _actor_close(self, kind: str) -> None:
+        """Close a transaction on the writer actor; best-effort like _safe.
+
+        Waits in _WRITE_LOCK_TIMEOUT_S slices (3 max) with loud logging,
+        then gives up — the transaction stays open on the writer and the
+        holder naming + the next begin's failure surface it. Never raises
+        out of a transaction() exit path. A close job is never cancelled:
+        a close that never applies wedges the actor forever.
+        """
+
+        actor = self._writer_actor
+        if actor is None or not actor.is_alive():
+            return
+        try:
+            job = _WriteJob(kind, kind.upper(), (),
+                            threading.get_ident(), threading.current_thread().name,
+                            actor.generation)
+            actor.enqueue(job)
+        except StorageError as exc:
+            _log.warning("transaction %s not enqueued: %s", kind, exc)
+            return
+        for _ in range(3):
+            if job.event.wait(_WRITE_LOCK_TIMEOUT_S):
+                if job.error is not None:
+                    _log.warning("transaction %s failed: %s", kind, job.error)
+                return
+            _log.warning("transaction %s close wait exceeded %gs (writer busy?)",
+                         kind, _WRITE_LOCK_TIMEOUT_S)
+        _log.warning(
+            "transaction %s close abandoned after %gs; the writer actor "
+            "still holds the transaction", kind, 3 * _WRITE_LOCK_TIMEOUT_S)
 
     def __enter__(self) -> "Database":
         return self
@@ -369,8 +677,19 @@ class Database:
                 _log.debug("database is locked, retry %d/%d", attempt, _LOCK_RETRY_ATTEMPTS - 1)
                 time.sleep(_lock_retry_delay(attempt))
 
-    def execute(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> sqlite3.Cursor:
-        """Run a single statement. Returns the cursor (use ``.lastrowid``/``.rowcount``)."""
+    def execute(self, sql: str, params: Sequence[Any] | dict[str, Any] = ()) -> sqlite3.Cursor | _RoutedCursor:
+        """Run a single statement. Returns the cursor (use ``.lastrowid``/``.rowcount``).
+
+        Writes — and every statement inside a transaction, or on a
+        :memory: database — route to the writer actor and return a
+        :class:`_RoutedCursor` over the materialized rows; plain reads on
+        a file-backed database run directly on the caller's WAL connection.
+        """
+        if not self.readonly and (
+                self._in_routed_txn() or self.path is None or _is_write_sql(sql)):
+            if _is_txn_control_sql(sql):
+                return self._routed_txn_control(sql)
+            return self._routed_execute(sql, params)
         started = time.perf_counter()
         try:
             cursor = self._with_lock_retry(lambda: self._connection().execute(sql, params))
@@ -401,7 +720,9 @@ class Database:
         preview = " ".join(sql.split())[:160]
         _log.warning("slow query (%.2fs > %.2fs): %s", elapsed, threshold, preview)
 
-    def executemany(self, sql: str, seq: Iterable[Sequence[Any]]) -> sqlite3.Cursor:
+    def executemany(self, sql: str, seq: Iterable[Sequence[Any]]) -> sqlite3.Cursor | _RoutedCursor:
+        if not self.readonly:
+            return self._routed_executemany(sql, seq)
         started = time.perf_counter()
         try:
             cursor = self._with_lock_retry(lambda: self._connection().executemany(sql, list(seq)))
@@ -429,6 +750,9 @@ class Database:
         before running. Never call this inside :meth:`transaction` — use
         :meth:`execute_statements` instead, which keeps atomicity.
         """
+        if not self.readonly:
+            self._routed_script(script)
+            return
         try:
             self._connection().executescript(script)
         except sqlite3.Error as exc:
@@ -511,7 +835,10 @@ class Database:
         """Re-entrant transaction. Nested calls become SAVEPOINTs.
 
         ``immediate=True`` acquires the write lock at BEGIN, so two writers fail
-        fast rather than deadlocking after doing half their work.
+        fast rather than deadlocking after doing half their work. Writes go
+        through the writer actor (see the module docstring): the begin waits
+        on the actor's queue with the same 30s bound, and the holder named
+        on timeout is the transaction's owner thread.
         """
         depth = getattr(self._depth, "value", 0)
         if depth > 0:
@@ -530,6 +857,35 @@ class Database:
                 self._depth.value = depth
             return
 
+        if self.readonly:
+            with self._transaction_direct(immediate=immediate) as handle:
+                yield handle
+            return
+
+        self._actor_begin(immediate=immediate)
+        self._depth.value = 1
+        actor = self._writer_actor
+        self._txn_gen.value = actor.generation if actor is not None else None
+        self._bump_stat("transactions")
+        try:
+            yield self
+        except Exception:
+            self._actor_close("rollback")
+            raise
+        else:
+            self._actor_close("commit")
+        finally:
+            self._depth.value = 0
+            self._txn_gen.value = None
+
+    @contextmanager
+    def _transaction_direct(self, *, immediate: bool = True) -> Iterator[Database]:
+        """The pre-actor transaction body (RLock + own connection).
+
+        Used only by readonly databases, which have no writer actor. The
+        RLock serializes writers the old way; the bounded acquire and the
+        holder naming are unchanged.
+        """
         if not self._write_lock.acquire(timeout=_WRITE_LOCK_TIMEOUT_S):
             # Bounded, with the holder named: an abandoned worker
             # mid-transaction used to hold this lock forever and every
@@ -579,6 +935,38 @@ class Database:
     def _safe(self, sql: str) -> None:
         # A COMMIT that hits SQLITE_BUSY leaves the transaction open, so a
         # blind retry is the correct action (not a fresh BEGIN).
+        #
+        # If this thread owns a transaction that is dangling on the writer
+        # actor (its COMMIT was swallowed, or it was opened by a manual
+        # BEGIN), the COMMIT/ROLLBACK belongs on the writer connection,
+        # not this thread's own connection — route it there. The actor's
+        # own close path calls _safe from the actor thread, where the
+        # owner check below is False, so it runs directly on the writer
+        # connection as before. Never raises.
+        try:
+            actor = self._writer_actor
+            word = _sql_first_word(sql)
+            if (actor is not None and actor.is_alive()
+                    and word in ("COMMIT", "ROLLBACK")
+                    and actor.txn_owner == threading.get_ident()
+                    and threading.get_ident() != actor.thread_ident):
+                job = _WriteJob(word.lower(), sql, (),
+                                threading.get_ident(),
+                                threading.current_thread().name,
+                                actor.generation)
+                try:
+                    actor.enqueue(job)
+                except StorageError as exc:
+                    _log.warning("%s not enqueued: %s", sql, exc)
+                    return
+                if not job.event.wait(_WRITE_LOCK_TIMEOUT_S):
+                    _log.warning("%s close wait exceeded %gs", sql,
+                                 _WRITE_LOCK_TIMEOUT_S)
+                elif job.error is not None:
+                    _log.warning("%s failed: %s", sql, job.error)
+                return
+        except Exception:  # noqa: BLE001 - _safe never raises; direct path below
+            _log.debug("_safe actor routing failed; using direct path", exc_info=True)
         try:
             self._with_lock_retry(lambda: self._connection().execute(sql))
         except sqlite3.Error as exc:  # pragma: no cover - rollback of a broken txn
@@ -598,8 +986,13 @@ class Database:
         (``SQLITE_FULL`` on a full disk is the case that matters) still shows
         up here as a dangling transaction whose work never landed. The
         migration runner checks it to prove a commit actually committed.
+        With the writer actor the transaction lives on the writer
+        connection, so a routed transaction owned by this thread counts
+        here too — the runner's check must see it.
         """
         try:
+            if self._in_routed_txn():
+                return True
             return bool(self._connection().in_transaction)
         except Exception:  # noqa: BLE001 - closed/unopened db has no open txn
             return False
@@ -982,6 +1375,440 @@ class MigrationSummary:
 def _is_retryable_sqlite(exc: sqlite3.Error) -> bool:
     text = str(exc).lower()
     return "locked" in text or "busy" in text
+
+
+#: Shared-cache in-memory databases: one URI per Database instance so every
+#: connection of that instance (reader threads + the writer actor) sees the
+#: SAME database. Plain ":memory:" is per-connection, which made a
+#: multi-thread :memory: use silently read a different empty database.
+_MEMORY_DB_COUNTER = itertools.count(1)
+
+#: First keywords that make a statement a write (routed to the writer actor).
+_WRITE_FIRST = frozenset({
+    "INSERT", "UPDATE", "DELETE", "REPLACE", "CREATE", "DROP", "ALTER",
+    "VACUUM", "ANALYZE", "REINDEX", "ATTACH", "DETACH",
+})
+
+#: Transaction-control keywords. Issued via execute() they open/close a
+#: transaction on the writer connection owned by the calling thread (the
+#: migration runner and its tests use manual BEGIN/ROLLBACK); transaction()
+#: itself uses the same jobs internally.
+_TXN_CONTROL = frozenset({"BEGIN", "COMMIT", "ROLLBACK", "SAVEPOINT", "RELEASE", "END"})
+
+
+def _sql_first_word(sql: str) -> str:
+    """First SQL keyword of *sql*, ignoring leading whitespace/comments."""
+
+    text = sql.lstrip()
+    while text.startswith("--"):
+        newline = text.find("\n")
+        if newline < 0:
+            return ""
+        text = text[newline + 1:].lstrip()
+    while text.startswith("/*"):
+        end = text.find("*/", 2)
+        if end < 0:
+            return ""
+        text = text[end + 2:].lstrip()
+    match = re.match(r"[A-Za-z]+", text)
+    return match.group(0).upper() if match else ""
+
+
+def _is_write_sql(sql: str) -> bool:
+    """True when *sql* writes (so it belongs on the writer actor)."""
+
+    word = _sql_first_word(sql)
+    if not word or word == "EXPLAIN":
+        return False
+    if word == "WITH":
+        return bool(re.search(r"\b(?:INSERT|UPDATE|DELETE|REPLACE)\b", sql, re.IGNORECASE))
+    if word in _WRITE_FIRST:
+        return True
+    if word == "PRAGMA":
+        # wal_checkpoint is maintenance (safe + meaningful from any
+        # connection; the maintenance tick must not queue behind writes).
+        if re.match(r"(?i)pragma\s+wal_checkpoint\b", sql.lstrip()):
+            return False
+        # The set form (PRAGMA x=y) writes; the read form does not.
+        return "=" in sql
+    return False
+
+
+def _is_txn_control_sql(sql: str) -> bool:
+    """True when *sql* opens/closes a transaction (BEGIN/COMMIT/...)."""
+
+    return _sql_first_word(sql) in _TXN_CONTROL
+
+
+class _RoutedCursor:
+    """Cursor-shaped view over rows materialized on the writer thread.
+
+    A live sqlite3.Cursor cannot cross threads, so a routed execute()
+    fetches on the writer actor and hands the caller this shim: the same
+    fetchone/fetchall/fetchmany/close/lastrowid/rowcount/description
+    surface the direct path returns. Iterating it iterates the materialized
+    rows. It cannot be re-executed (call db.execute() again instead).
+    """
+
+    __slots__ = ("_rows", "_pos", "lastrowid", "rowcount", "description")
+
+    def __init__(self, rows: Sequence[Any], lastrowid: Any, rowcount: int,
+                 description: Any) -> None:
+        self._rows = list(rows)
+        self._pos = 0
+        self.lastrowid = lastrowid
+        self.rowcount = rowcount
+        self.description = description
+
+    def fetchall(self) -> list[Any]:
+        rest = self._rows[self._pos:]
+        self._pos = len(self._rows)
+        return rest
+
+    def fetchone(self) -> Any:
+        if self._pos >= len(self._rows):
+            return None
+        row = self._rows[self._pos]
+        self._pos += 1
+        return row
+
+    def fetchmany(self, size: int | None = None) -> list[Any]:
+        if size is None:
+            size = 1
+        end = min(len(self._rows), self._pos + size)
+        chunk = self._rows[self._pos:end]
+        self._pos = end
+        return chunk
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._rows[self._pos:])
+
+    def close(self) -> None:
+        return None
+
+    def execute(self, *args: Any, **kwargs: Any) -> None:
+        raise StorageError("a routed cursor cannot be re-executed; call db.execute() again")
+
+
+class _WriteJob:
+    """One unit of work for the writer actor: a SQL statement (or a
+    transaction boundary) handed over by a caller thread, applied on the
+    writer connection, with the outcome delivered back to the waiter."""
+
+    __slots__ = ("kind", "sql", "params", "owner", "owner_name", "event",
+                 "result", "error", "cancelled", "enqueued_at", "generation")
+
+    def __init__(self, kind: str, sql: str, params: Any, owner: int,
+                 owner_name: str, generation: int) -> None:
+        self.kind = kind
+        self.sql = sql
+        self.params = params
+        self.owner = owner
+        self.owner_name = owner_name
+        self.event = threading.Event()
+        self.result: Any = None
+        self.error: BaseException | None = None
+        self.cancelled = False
+        self.enqueued_at = time.monotonic()
+        self.generation = generation
+
+
+class _WriterActor:
+    """The single-writer actor: one dedicated thread owns the one SQLite
+    write connection and applies queued writes serially.
+
+    Durability contract (stated here, not implied): the queue is a HANDOFF,
+    not storage. A write is acknowledged to its caller only after the
+    writer applied it (and, for a transaction, after COMMIT returned) — so
+    a write the caller was told succeeded is durable to exactly the degree
+    SQLite's configured ``synchronous`` mode makes it (``NORMAL`` by
+    default). A write still sitting in the queue when the process dies was
+    never acknowledged and is lost; that is the loss window, and it is
+    bounded by the caller's wait (a waiter that times out is told the write
+    failed). No acknowledged write is ever lost to the queue.
+
+    Failure contract: the actor loop catches per-job errors and keeps
+    going; a loop-level exception marks the actor dead, fails every pending
+    waiter loudly, and exits. Enqueueing on a dead actor raises
+    StorageError naming the dead writer. Recovery is explicit —
+    :meth:`Database.restart_writer_actor` — never a silent restart.
+    """
+
+    def __init__(self, db: Database, generation: int) -> None:
+        self._db = db
+        self._queue: queue.Queue[_WriteJob] = queue.Queue()
+        self._pending: collections.deque[_WriteJob] = collections.deque()
+        self._thread = threading.Thread(target=self._run, name="nm-db-writer", daemon=True)
+        self._state_lock = threading.Lock()
+        self._txn_owner: int | None = None
+        self._txn_owner_name: str = ""
+        self._txn_since: float = 0.0
+        self._current: tuple[_WriteJob, float] | None = None
+        self._generation = generation
+        self._dead = False
+        self._dead_error: str | None = None
+        self._started = threading.Event()
+
+    # -- lifecycle ------------------------------------------------------
+    def start(self) -> None:
+        self._thread.start()
+        if not self._started.wait(10.0):
+            raise StorageError("database writer actor did not start")
+
+    def is_alive(self) -> bool:
+        return self._thread.is_alive() and not self._dead
+
+    @property
+    def generation(self) -> int:
+        return self._generation
+
+    @property
+    def thread_ident(self) -> int | None:
+        return self._thread.ident
+
+    @property
+    def dead_error(self) -> str | None:
+        return self._dead_error
+
+    def enqueue(self, job: _WriteJob) -> None:
+        if self._dead:
+            raise StorageError(
+                "database writer actor is dead"
+                + (f" ({self._dead_error})" if self._dead_error else "")
+                + " — call restart_writer_actor()")
+        if job.generation != self._generation:
+            raise StorageError("writer actor was restarted; the transaction was lost")
+        self._queue.put(job)
+
+    def stop(self) -> None:
+        """Ask the actor to exit (drain-fail pending waiters) and join it."""
+
+        with suppress(Exception):  # close must never raise
+            self._queue.put(_WriteJob("shutdown", "", (), 0, "", self._generation))
+        self._thread.join(5.0)
+
+    # -- state readers (for lock_state / interrupt / routing) -----------
+    @property
+    def txn_owner(self) -> int | None:
+        with self._state_lock:
+            return self._txn_owner
+
+    def current_work(self) -> dict[str, Any] | None:
+        """Who/what the writer is doing now (holder naming)."""
+
+        now = time.monotonic()
+        with self._state_lock:
+            if self._txn_owner is not None:
+                return {
+                    "thread": self._txn_owner_name,
+                    "ident": self._txn_owner,
+                    "held_s": max(0.0, now - self._txn_since),
+                    "kind": "transaction",
+                    "sql": self._current[0].sql[:120] if self._current else "",
+                }
+            if self._current is not None:
+                job, started = self._current
+                return {
+                    "thread": job.owner_name,
+                    "ident": job.owner,
+                    "held_s": max(0.0, now - started),
+                    "kind": job.kind,
+                    "sql": job.sql[:120],
+                }
+        return None
+
+    def current_job_owner(self) -> int | None:
+        """Owner of the job the writer is applying RIGHT NOW, else None.
+
+        Distinct from current_work(): a transaction can be open while the
+        writer is idle between statements. Only a job in flight has a
+        SQLite step to abort — interrupting an idle writer connection
+        would leave a stale flag that aborts the NEXT innocent writer's
+        statement.
+        """
+
+        with self._state_lock:
+            if self._current is None:
+                return None
+            return self._current[0].owner
+
+    def cancel_pending(self, owner: int) -> int:
+        """Drop + fail every queued job of *owner* (interrupt path)."""
+
+        dropped = 0
+        with self._state_lock:
+            kept: collections.deque[_WriteJob] = collections.deque()
+            while self._pending:
+                job = self._pending.popleft()
+                if job.owner == owner:
+                    job.error = sqlite3.OperationalError("interrupted")
+                    job.event.set()
+                    dropped += 1
+                else:
+                    kept.append(job)
+            self._pending = kept
+        return dropped
+
+    # -- the loop -------------------------------------------------------
+    def _run(self) -> None:
+        try:
+            self._db._writer_connection()
+            self._started.set()
+            while True:
+                job = self._next_job()
+                if job is None:  # shutdown
+                    break
+                if job.cancelled:
+                    continue
+                self._apply(job)
+        except Exception as exc:  # noqa: BLE001 - a dead writer must be loud
+            self._dead = True
+            self._dead_error = str(exc)
+            self._started.set()
+            self._fail_all(StorageError(f"database writer actor died: {exc}"))
+            _log.error("writer actor died: %s", exc, exc_info=True)
+
+    def _next_job(self) -> _WriteJob | None:
+        """Next job to apply, preserving FIFO and transaction ownership.
+
+        While a transaction is open only its owner's jobs apply; everyone
+        else's waits in the pending deque and drains first when the
+        transaction closes. Shutdown is checked before the owner check.
+        """
+
+        while True:
+            with self._state_lock:
+                if self._pending and self._txn_owner is None:
+                    job = self._pending.popleft()
+                    return job
+            job = self._queue.get()
+            if job.kind == "shutdown":
+                self._fail_all(StorageError("database is closed"))
+                return None
+            if job.cancelled:
+                continue
+            with self._state_lock:
+                if self._txn_owner is not None and job.owner != self._txn_owner:
+                    self._pending.append(job)
+                    continue
+                if job.kind == "script" and self._txn_owner is not None:
+                    self._pending.append(job)
+                    continue
+            return job
+
+    def _fail_all(self, error: BaseException) -> None:
+        with self._state_lock:
+            pending, self._pending = self._pending, collections.deque()
+        for job in pending:
+            job.error = error
+            job.event.set()
+        while True:
+            try:
+                job = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            job.error = error
+            job.event.set()
+
+    def _apply(self, job: _WriteJob) -> None:
+        db = self._db
+        # Resolve the writer connection per job (not cached from startup):
+        # _connection() is the seam the retry tests patch, and it returns
+        # the actor thread's cached connection normally — so this is the
+        # same object every time unless the seam was deliberately replaced.
+        try:
+            conn = db._writer_connection()
+        except Exception as exc:  # noqa: BLE001 - delivered to the waiter
+            job.error = exc
+            job.event.set()
+            return
+        with self._state_lock:
+            self._current = (job, time.monotonic())
+        try:
+            if job.kind == "begin":
+                if conn.in_transaction:
+                    raise StorageError("cannot start a transaction within a transaction")
+                db._with_lock_retry(lambda: conn.execute(job.sql))
+            elif job.kind in ("commit", "rollback"):
+                if not conn.in_transaction:
+                    raise StorageError(f"cannot {job.kind} - no transaction is active")
+                # _safe is sabotage-aware and runs on the actor thread, so
+                # _connection() IS the writer connection here.
+                db._safe(job.sql)
+            elif job.kind == "script":
+                conn.executescript(job.sql)
+            else:  # stmt / executemany
+                started = time.perf_counter()
+                in_txn = conn.in_transaction
+                if job.kind == "executemany":
+                    if in_txn:
+                        cur = conn.executemany(job.sql, job.params)
+                    else:
+                        cur = db._with_lock_retry(lambda: conn.executemany(job.sql, job.params))
+                elif in_txn:
+                    cur = conn.execute(job.sql, job.params)
+                else:
+                    cur = db._with_lock_retry(lambda: conn.execute(job.sql, job.params))
+                rows = cur.fetchall() if cur.description is not None else []
+                job.result = _RoutedCursor(rows, cur.lastrowid, cur.rowcount, cur.description)
+                elapsed = time.perf_counter() - started
+                db._bump_stat("queries")
+                db._bump_stat("query_seconds", elapsed)
+                if job.sql.lstrip()[:6].upper() in {"INSERT", "UPDATE", "DELETE", "REPLAC"}:
+                    db._bump_stat("writes")
+                db._note_slow(job.sql, elapsed)
+        except Exception as exc:  # noqa: BLE001 - delivered to the waiter
+            db._bump_stat("errors")
+            if (isinstance(exc, sqlite3.OperationalError)
+                    and "interrupted" in str(exc).lower()
+                    and conn.in_transaction):
+                # An interrupted statement inside a transaction must not
+                # leave the transaction dangling (the caller may be
+                # abandoned) — roll it back now so the queue never wedges.
+                try:
+                    conn.execute("ROLLBACK")
+                except sqlite3.Error as exc:
+                    _log.debug("poison rollback failed: %s", exc)
+            job.error = exc
+        finally:
+            with self._state_lock:
+                self._current = None
+            self._sync_txn_state(job)
+            job.event.set()
+
+    def _sync_txn_state(self, job: _WriteJob) -> None:
+        """Trust SQLite's state, never the actor's assumption.
+
+        After every job, adopt the owner when a transaction opened (covers
+        a manual BEGIN issued via execute()) and clear it when the
+        transaction closed (covers COMMIT/ROLLBACK as statements and
+        implicit commits). The holder record follows the same sync.
+        """
+
+        db = self._db
+        conn = db._writer_conn
+        if conn is None:
+            return
+        try:
+            in_txn = bool(conn.in_transaction)
+        except sqlite3.Error:
+            in_txn = False
+        with self._state_lock:
+            if in_txn and self._txn_owner is None:
+                self._txn_owner = job.owner
+                self._txn_owner_name = job.owner_name
+                self._txn_since = time.monotonic()
+                with db._all_lock:
+                    db._write_lock_holder = {
+                        "ident": job.owner,
+                        "name": job.owner_name,
+                        "since": self._txn_since,
+                    }
+            elif not in_txn and self._txn_owner is not None:
+                self._txn_owner = None
+                self._txn_owner_name = ""
+                with db._all_lock:
+                    db._write_lock_holder = None
 
 
 def split_sql(script: str) -> list[str]:

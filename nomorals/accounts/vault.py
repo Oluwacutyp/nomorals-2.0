@@ -703,19 +703,26 @@ class CredentialVault:
         tags = tags or []
         metadata = metadata or {}
         now = time.time()
-        
-        with self.db.transaction():
-            # Check if credential already exists
-            existing = self.db.query_one(
-                "SELECT id FROM credentials WHERE service = ? AND username = ?",
-                (service, username)
-            )
-            
-            if existing:
-                # Update existing
-                cred_id = existing["id"]
-                encrypted = self._encrypt_password(password, cred_id)
-                self.db.execute("""
+
+        # The existence check + encryption happen OUTSIDE the transaction:
+        # _encrypt_password is a PBKDF2 KDF (~40ms) and must not run while
+        # holding the writer — with the single-writer actor an open
+        # transaction serializes every other writer. (The NEW-credential
+        # path below is a deliberate exception: the key salt is
+        # credential-{cred_id} and the id is only known after the INSERT,
+        # so the encrypt stays inside that one transaction — splitting it
+        # would leave a placeholder row on a crash between the two.)
+        existing = self.db.query_one(
+            "SELECT id FROM credentials WHERE service = ? AND username = ?",
+            (service, username)
+        )
+
+        if existing:
+            # Update existing: encrypt first, then a short transaction.
+            cred_id = existing["id"]
+            encrypted = self._encrypt_password(password, cred_id)
+            with self.db.transaction():
+                cur = self.db.execute("""
                     UPDATE credentials SET
                         password_encrypted = ?,
                         credential_type = ?,
@@ -734,8 +741,13 @@ class CredentialVault:
                     expires_at,
                     cred_id,
                 ))
-                _log.info(f"Updated credential: {service}/{username}")
-            else:
+                if cur.rowcount == 0:
+                    # The credential vanished between the check and the
+                    # update — loud, never a silent no-op.
+                    raise NotFound(f"Credential not found: {service}/{username}")
+            _log.info(f"Updated credential: {service}/{username}")
+        else:
+            with self.db.transaction():
                 # Insert new (with placeholder encryption, we'll update after getting ID)
                 cur = self.db.execute("""
                     INSERT INTO credentials (
@@ -1144,34 +1156,48 @@ class CredentialVault:
                               iterations=_KDF_ITERATIONS).hex()
 
         from ..core.cipher import CipherError as _CipherError
+        # Crypto OUTSIDE the transaction: per-credential decrypt/re-encrypt
+        # is 2x100k PBKDF2 iterations per row and must not run while holding
+        # the writer — with the single-writer actor an open transaction
+        # serializes every other writer. Atomicity is preserved two ways:
+        # crypto failures happen before any write, and the short
+        # transaction below applies conditional UPDATEs (old blob must
+        # still match) — a credential stored concurrently fails LOUD
+        # (rollback, master unchanged, retry) instead of being left
+        # un-rotated under a dead key.
+        rows = self.db.query(
+            "SELECT id, password_encrypted FROM credentials")
+        rotated = []
+        for row in rows:
+            old_key = bytes.fromhex(_old_cred_key(row["id"]))
+            try:
+                from ..core.cipher import aes_decrypt as _dec
+                plain = _dec(row["password_encrypted"],
+                             key=old_key).decode("utf-8")
+            except _CipherError as exc:
+                raise _CipherError(
+                    f"credential {row['id']} failed authentication "
+                    f"during rotation: {exc}") from exc
+            new_key = bytes.fromhex(_new_cred_key(row["id"]))
+            from ..core.cipher import aes_encrypt as _enc
+            rotated.append((_enc(plain.encode("utf-8"), key=new_key),
+                            row["password_encrypted"], row["id"]))
+        session_plan = self._rekey_blobs_plan(
+            old_master, new_master, table="sessions", column="session_data",
+            key_column=("service", "username"), purpose="sessions")
         with self.db.transaction():
-            rows = self.db.query(
-                "SELECT id, password_encrypted FROM credentials")
-            rotated = []
-            for row in rows:
-                old_key = bytes.fromhex(_old_cred_key(row["id"]))
-                try:
-                    from ..core.cipher import aes_decrypt as _dec
-                    plain = _dec(row["password_encrypted"],
-                                 key=old_key).decode("utf-8")
-                except _CipherError as exc:
-                    raise _CipherError(
-                        f"credential {row['id']} failed authentication "
-                        f"during rotation: {exc}") from exc
-                new_key = bytes.fromhex(_new_cred_key(row["id"]))
-                from ..core.cipher import aes_encrypt as _enc
-                rotated.append((_enc(plain.encode("utf-8"), key=new_key),
-                                row["id"]))
-            for blob, cred_id in rotated:
-                self.db.execute(
+            for blob, old_blob, cred_id in rotated:
+                cur = self.db.execute(
                     "UPDATE credentials SET password_encrypted = ?, "
-                    "updated_at = ? WHERE id = ?",
-                    (blob, time.time(), cred_id))
-            # Re-key session blobs (purpose "sessions") the same way.
-            self._rekey_blobs(old_master, new_master,
-                              table="sessions", column="session_data",
-                              key_column=("service", "username"),
-                              purpose="sessions")
+                    "updated_at = ? WHERE id = ? AND password_encrypted = ?",
+                    (blob, time.time(), cred_id, old_blob))
+                if cur.rowcount == 0:
+                    raise StorageError(
+                        "vault changed during rotation; retry "
+                        "change_passphrase")
+            self._apply_rekey_plan(
+                table="sessions", column="session_data",
+                key_column=("service", "username"), plan=session_plan)
         self._master_key = new_master
         if had_wraps:
             with self.db.transaction():
@@ -1182,38 +1208,74 @@ class CredentialVault:
         _log.info("vault master passphrase rotated (%d credential(s))",
                   len(rotated))
 
-    def _rekey_blobs(self, old_master: str, new_master: str, *,
-                     table: str, column: str,
-                     key_column: tuple[str, ...], purpose: str) -> int:
-        """Re-encrypt every blob in ``table.column`` (purpose-scoped)."""
+    def _rekey_blobs_plan(self, old_master: str, new_master: str, *,
+                          table: str, column: str,
+                          key_column: tuple[str, ...], purpose: str) -> list[tuple[Any, ...]]:
+        """Plan a blob re-key WITHOUT writing: [(new_blob, old_blob, *keys)].
+
+        Derives the two purpose keys ONCE (the old code re-derived them
+        per row — 2x100k PBKDF2 iterations per row) and returns the update
+        tuples; the caller applies them in its own short transaction.
+        A row that fails authentication is a legacy plaintext row and is
+        skipped, as before.
+        """
         from ..core.cipher import (CipherError as _CipherError,
                                    aes_decrypt as _dec, aes_encrypt as _enc)
         if not self.db.table_exists(table):
-            return 0  # table may not exist (e.g. no sessions stored yet)
+            return []  # table may not exist (e.g. no sessions stored yet)
         cols = ", ".join(key_column)
         rows = self.db.query(f"SELECT {cols}, {column} FROM {table}")
-        count = 0
+        old_key = derive_key(
+            old_master,
+            salt=f"nomorals-vault-blob:{purpose}".encode(),
+            iterations=_KDF_ITERATIONS)
+        new_key = derive_key(
+            new_master,
+            salt=f"nomorals-vault-blob:{purpose}".encode(),
+            iterations=_KDF_ITERATIONS)
+        plan: list[tuple[Any, ...]] = []
         for row in rows:
             blob = row[column]
-            old_key = derive_key(
-                old_master,
-                salt=f"nomorals-vault-blob:{purpose}".encode(),
-                iterations=_KDF_ITERATIONS)
-            new_key = derive_key(
-                new_master,
-                salt=f"nomorals-vault-blob:{purpose}".encode(),
-                iterations=_KDF_ITERATIONS)
             try:
                 plain = _dec(blob, key=old_key)
             except _CipherError:
                 continue  # legacy plaintext row — leave as-is
             new_blob = _enc(plain, key=new_key)
-            where = " AND ".join(f"{c} = ?" for c in key_column)
-            self.db.execute(
-                f"UPDATE {table} SET {column} = ? WHERE {where}",
-                (new_blob, *[row[c] for c in key_column]))
-            count += 1
-        return count
+            plan.append((new_blob, blob, *[row[c] for c in key_column]))
+        return plan
+
+    def _apply_rekey_plan(self, *, table: str, column: str,
+                          key_column: tuple[str, ...],
+                          plan: list[tuple[Any, ...]]) -> None:
+        """Apply a :meth:`_rekey_blobs_plan` (call inside a transaction).
+
+        Each UPDATE is conditional on the old blob still matching, so a
+        row re-written concurrently fails LOUD (rowcount 0) instead of
+        being clobbered with a re-encrypted stale value.
+        """
+        where = " AND ".join(f"{c} = ?" for c in key_column)
+        for new_blob, old_blob, *keys in plan:
+            cur = self.db.execute(
+                f"UPDATE {table} SET {column} = ? WHERE {where} "
+                f"AND {column} = ?",
+                (new_blob, *keys, old_blob))
+            if cur.rowcount == 0:
+                raise StorageError(
+                    f"re-key target changed concurrently in {table}")
+
+    def _rekey_blobs(self, old_master: str, new_master: str, *,
+                     table: str, column: str,
+                     key_column: tuple[str, ...], purpose: str) -> int:
+        """Re-encrypt every blob in ``table.column`` (purpose-scoped)."""
+        plan = self._rekey_blobs_plan(
+            old_master, new_master, table=table, column=column,
+            key_column=key_column, purpose=purpose)
+        if not plan:
+            return 0
+        with self.db.transaction():
+            self._apply_rekey_plan(
+                table=table, column=column, key_column=key_column, plan=plan)
+        return len(plan)
 
     def export_encrypted(self, path: str, backup_passphrase: str) -> str:
         """Export an encrypted JSON backup of the whole vault.

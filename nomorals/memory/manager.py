@@ -530,6 +530,14 @@ class MemoryManager:
             "expires_at": now + ttl_seconds if ttl_seconds else None,
             "metadata": metadata or {},
         }
+        vector = None
+        if index:
+            # Embedding is slow (model server / router round-trip) and must
+            # NOT run inside the transaction: with the single-writer actor
+            # an open transaction serializes every other writer. Embed
+            # first; if it raises, nothing is stored — the same outcome as
+            # the rollback the old code got.
+            vector = self.embedder.embed(embed_text or content)
         with self.db.transaction():
             # Must go through the Repository: it owns the JSON encoding for the
             # metadata column. A raw db.insert() hands sqlite a dict and blows up.
@@ -538,7 +546,6 @@ class MemoryManager:
                 # Contextual chunking: the vector lane may see a richer
                 # text (e.g. document header + chunk) than the stored
                 # content. Lexical FTS always indexes the raw content.
-                vector = self.embedder.embed(embed_text or content)
                 embedding_id = self.semantic.put(vector, record_id)
                 self.db.execute(
                     "UPDATE memories SET embedding_id = ? WHERE id = ?", (embedding_id, record_id)
