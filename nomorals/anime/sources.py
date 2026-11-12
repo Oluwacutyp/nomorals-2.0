@@ -495,6 +495,28 @@ def _picsum() -> _PoolSource:
         "picsum", source_class=CLASS_PHOTOGRAPHY, weight=1)
 
 
+def _openverse(query: str) -> _PoolSource:
+    # Openverse (api.openverse.org) — searchable real
+    # photography, keyless: the images endpoint answers a
+    # query with CC-licensed photos from across the web
+    # (Flickr et al.), each row carrying its direct image
+    # URL, creator, licence and an attribution string.
+    # Verified live 2026-11-12 from this box, anonymous
+    # (no key): q=couple → 240 results, q=portrait → 240,
+    # a nonsense query → 0 results, honestly.  Anonymous
+    # limits from the live response headers: 20/min burst,
+    # 200/day sustained.  Every row is openly licensed by
+    # construction; the licence (CC BY and friends) asks
+    # for attribution — creator + licence ride in the row,
+    # the pool hands out the URL.  Mature rows are filtered
+    # client-side (the row's mature flag), the same re-check
+    # pattern as the nekosapi rating gate.
+    return _PoolSource(
+        "openverse", "https://api.openverse.org/v1/images/",
+        "openverse", source_class=CLASS_PHOTOGRAPHY, weight=2,
+        query=query)
+
+
 def _studio() -> _PoolSource:
     # Her own generation: resolved by the generator callable
     # injected into the client (the runtime wires the studio);
@@ -575,6 +597,7 @@ IMAGE_POOLS: dict[str, list[_PoolSource]] = {
         _anime_seed("nekos.best", _NEKOS_BEST + "waifu", "nekos.best"),
         _anime_seed("nekosapi", _NEKOSAPI, "nekosapi"),
         _picsum(),
+        _openverse("portrait"),
         *_keyed("anime character"),
         _studio(),
     ],
@@ -583,6 +606,7 @@ IMAGE_POOLS: dict[str, list[_PoolSource]] = {
         _anime_seed("nekos.best", _NEKOS_BEST + "waifu", "nekos.best"),
         _anime_seed("nekosapi", _NEKOSAPI, "nekosapi"),
         _picsum(),
+        _openverse("couple"),
         # Registered so the pool's class span is honest; the
         # makers walk is URL-only (fetch_url), so this rung
         # sits out there — MakerService keeps its own
@@ -827,6 +851,10 @@ class ImagePoolClient:
                           src.key or "giphy", ""),
                       "q": src.query,
                       "limit": 8, "rating": "pg-13"}
+        elif src.shape == "openverse":
+            # Keyless image search: the query rides as q,
+            # page_size 8 matches the other search shapes.
+            params = {"q": src.query, "page_size": 8}
         elif getattr(src, "_registry_name", ""):
             # A registered source: its URL template may carry
             # {query}; its key (when the slot is filled) rides
@@ -907,6 +935,25 @@ class ImagePoolClient:
                          and x["url"]]
                 return rng.choice(urls) if urls else ""
             return ""
+        if src.shape == "openverse":
+            # Openverse image search: {"results": [{url,
+            # title, creator, license, mature, ...}]}.  ONLY
+            # a row the pool itself rates clean may pass —
+            # the API's rows carry a mature flag and this
+            # check is ours, the same re-check pattern as
+            # the nekosapi rating gate.
+            rows = data.get("results") if isinstance(data, dict) \
+                else None
+            urls = []
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                if row.get("mature"):
+                    continue
+                url = row.get("url")
+                if isinstance(url, str) and url.startswith("http"):
+                    urls.append(url)
+            return rng.choice(urls) if urls else ""
         if src.shape == "randomfox":
             if isinstance(data, dict) \
                     and isinstance(data.get("image"), str):
