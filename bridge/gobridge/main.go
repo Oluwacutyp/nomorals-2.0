@@ -71,6 +71,41 @@ const (
 	sessionDBName  = "whatsmeow.db"
 )
 
+// Build stamps, set at build time via -ldflags
+// (-X main.bridgeCommit=<short hash> -X main.bridgeBuilt=<RFC3339 UTC>).
+// A binary built without stamping reports "dev"/"unknown" — never a
+// real release.  The status payload carries this block so the
+// supervisor — and the owner, via /pair and /health — can prove
+// WHICH binary is actually running: the 2026-11-08 unwrapInbound
+// fix is invisible in the program marker alone, because every
+// build since the orphanfix reports the same "gobridge/1.0.0",
+// and the supervisor's orphan-adoption check keys on that same
+// constant — a pre-fix binary verifies exactly like a current
+// one.  The capability flag names the fix itself; the commit and
+// built time name the build.
+var (
+	bridgeCommit = "dev"
+	bridgeBuilt  = "unknown"
+)
+
+// bridgeBuildInfo is the build block the status payload carries.
+func bridgeBuildInfo() map[string]any {
+	return map[string]any{
+		"program":        bridgeVersion,
+		"commit":         bridgeCommit,
+		"built":          bridgeBuilt,
+		"unwrap_inbound": true,
+		"whatsmeow":      whatsmeowPin,
+	}
+}
+
+// versionString is what --version / -version prints (and what the
+// supervisor's probe reads).
+func versionString() string {
+	return fmt.Sprintf("devon-whatsapp-bridge %s (commit %s, built %s, whatsmeow %s)",
+		bridgeVersion, bridgeCommit, bridgeBuilt, whatsmeowPin)
+}
+
 // logf writes one supervisor-visible log line to stdout in the
 // shape the drain has always cleaned: "<ISO> [bridge] <msg>".
 func logf(format string, args ...any) {
@@ -195,7 +230,7 @@ type cachedMsg struct {
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "--version" {
-		fmt.Printf("devon-whatsapp-bridge %s (whatsmeow %s)\n", bridgeVersion, whatsmeowPin)
+		fmt.Println(versionString())
 		return
 	}
 	var (
@@ -206,7 +241,7 @@ func main() {
 	)
 	flag.Parse()
 	if *showVer {
-		fmt.Printf("devon-whatsapp-bridge %s (whatsmeow %s)\n", bridgeVersion, whatsmeowPin)
+		fmt.Println(versionString())
 		return
 	}
 	if *port == 0 {
@@ -355,6 +390,15 @@ func (b *bridge) myPushName() string {
 	return ""
 }
 
+func (b *bridge) autoReconnectErrors() int {
+	// Nil-safe: a bridge with no client yet (tests, pre-connect)
+	// reports zero instead of panicking on the nil client.
+	if b.cli == nil {
+		return 0
+	}
+	return b.cli.AutoReconnectErrors
+}
+
 func (b *bridge) statusPayload() map[string]any {
 	b.stateMu.Lock()
 	defer b.stateMu.Unlock()
@@ -363,18 +407,19 @@ func (b *bridge) statusPayload() map[string]any {
 		code = *b.lastDisconnectCode
 	}
 	return map[string]any{
-		"type":                  "status",
+		"type": "status",
 		// Program identity (orphanfix): the supervisor verifies a
 		// bridge it did not spawn by what the bridge says it is —
 		// program marker + account + the port it serves — never
 		// by spawn parentage alone.
 		"program":               bridgeVersion,
+		"build":                 bridgeBuildInfo(),
 		"port":                  b.port,
 		"state":                 b.connState,
 		"user":                  b.meJID,
 		"user_name":             b.myPushName(),
 		"lid":                   b.myLID(),
-		"reconnect_attempt":     b.cli.AutoReconnectErrors,
+		"reconnect_attempt":     b.autoReconnectErrors(),
 		"next_retry_in_s":       0,
 		"last_disconnect_code":  code,
 		"last_disconnect_label": nilOr(b.lastDisconnectLabel),

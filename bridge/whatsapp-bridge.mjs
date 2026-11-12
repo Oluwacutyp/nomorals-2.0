@@ -10,7 +10,7 @@
  * Protocol (one JSON object per line):
  *
  *   bridge -> python
- *     {"type":"status","program":"nomorals-whatsapp-bridge/1.0.0","port":<n>,"state":"open|closed","user":"<jid>","lid":"<lid>@lid"}
+ *     {"type":"status","program":"nomorals-whatsapp-bridge/1.0.0","build":{"program":"nomorals-whatsapp-bridge/1.0.0","commit":"script","built":"script","unwrap_inbound":true},"port":<n>,"state":"open|closed","user":"<jid>","lid":"<lid>@lid"}
  *     {"type":"qr","data":"<qr string>"}
  *     {"type":"pairing_code","data":"<8-char code>"}   (when WA_PAIRING_CODE=1)
  *     {"type":"message","id":"<wa message id>","chat":{"id","kind","title"},
@@ -241,6 +241,16 @@ function statusPayload(state) {
   return {
     type: 'status',
     program: BRIDGE_PROGRAM,
+    // Build identity (2026-11-12 view-once diagnostic): a script
+    // has no build step, so commit/built read "script" — the
+    // capability flag is the signal, and the block keeps the
+    // Python surface uniform across engines.
+    build: {
+      program: BRIDGE_PROGRAM,
+      commit: 'script',
+      built: 'script',
+      unwrap_inbound: true,
+    },
     port: PORT,
     state,                 // open | closed | reconnecting | parked
     user: meJid,

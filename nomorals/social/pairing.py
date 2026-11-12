@@ -951,6 +951,18 @@ def _live_with_evidence(name: str,
     if ts:
         when = time.strftime("%d %b %H:%M", time.localtime(ts))
         return f"✓ live · {label} {when}"
+    if name == "view_once":
+        # Middle state (2026-11-12 view-once diagnostic):
+        # arrivals were observed but none ever saved — the
+        # organ sees the photos and loses them.  "NO capture
+        # ever recorded" alone reads as "nothing ever arrived",
+        # which is the exact lie the second live failure told.
+        arrival = float(activity.get("view_once_arrival") or 0.0)
+        if arrival:
+            when = time.strftime(
+                "%d %b %H:%M", time.localtime(arrival))
+            return ("on · arrivals seen, none saved — "
+                    f"last arrival {when}")
     return f"on · {none_words} — unproven"
 
 
@@ -1073,6 +1085,12 @@ class BridgeIdentity:
     verified: bool = False
     engine: str = ""
     program: str = ""
+    #: The bridge's build block from its status payload
+    #: (2026-11-12 view-once diagnostic): commit + built time +
+    #: the unwrap_inbound capability flag.  {} when the bridge
+    #: sends none (an older binary) — the age question then
+    #: stays open instead of borrowing the program marker.
+    build: dict = field(default_factory=dict)
     user: str = ""
     pid: int | None = None
     via: tuple[str, ...] = ()
@@ -2221,6 +2239,8 @@ class BridgeSupervisor:
             return ident
         ident.program = str(reply.get("program") or "")
         ident.user = str(reply.get("user") or "")
+        _build = reply.get("build")
+        ident.build = dict(_build) if isinstance(_build, dict) else {}
         program_engine = ""
         for prefix, eng in (("gobridge/", "go"),
                             ("nomorals-whatsapp-bridge/", "node")):

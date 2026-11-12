@@ -2121,7 +2121,12 @@ class PersonalSurfaces:
                         ) -> dict[str, float]:
         """Last-activity timestamps per personal toggle,
         read from the journal: view_once → the newest
-        capture; status_saving → the newest saved status,
+        capture; view_once_arrival → the newest OBSERVED
+        view-once arrival (a view_once_trace row), including
+        arrivals that never saved — the middle state the
+        2026-11-12 diagnostic needs, so /pair can tell
+        "arrivals seen, none saved" from "nothing ever
+        arrived"; status_saving → the newest saved status,
         story or channel post (WhatsApp sweep saves and the
         Telegram archive both answer to the same switch, so
         both are its activity evidence); status_viewing → the
@@ -2144,6 +2149,8 @@ class PersonalSurfaces:
             name: str | None = None
             if kind == "view_once":
                 name = "view_once"
+            elif kind == "view_once_trace":
+                name = "view_once_arrival"
             elif kind == "status_react":
                 name = "status_react"
             elif kind in ("status", "story", "channel_post",

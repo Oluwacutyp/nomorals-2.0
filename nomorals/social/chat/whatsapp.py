@@ -647,6 +647,16 @@ class WhatsAppAdapter(ChatAdapter):
         self.last_pairing_code: str = ""
         self.last_pairing_code_at: float = 0.0
         self.bridge_state: str = "unknown"
+        # Bridge build identity (2026-11-12 view-once
+        # diagnostic): the program marker + build block from the
+        # bridge's status events.  The program string alone
+        # cannot tell a pre-fix binary from a current one
+        # ("gobridge/1.0.0" in every build) — the build block's
+        # commit/built time + unwrap_inbound flag can.  An older
+        # bridge sends no build block: {} reads as unknown, never
+        # as a current binary.
+        self.bridge_program: str = ""
+        self.bridge_build: dict[str, Any] = {}
         # Outbound resilience: sends while the bridge is down are queued to
         # disk and flushed on reconnect, so a bridge restart doesn't eat
         # the reply the brain already composed.
@@ -1292,6 +1302,15 @@ class WhatsAppAdapter(ChatAdapter):
         if kind == "status":
             self.user_jid = str(obj.get("user") or "")
             self.user_lid = str(obj.get("lid") or "")
+            # Bridge build identity (2026-11-12 view-once
+            # diagnostic): record the program marker + build
+            # block the bridge reports, so /health and /pair can
+            # prove which binary is actually running.  A bridge
+            # that sends no build block leaves {} (unknown).
+            self.bridge_program = str(obj.get("program") or "")
+            _build = obj.get("build")
+            self.bridge_build = (
+                dict(_build) if isinstance(_build, dict) else {})
             # An older bridge reports no user_name — never let its
             # empty value clobber a name already learned.
             self.user_name = str(obj.get("user_name") or "") or self.user_name
@@ -4218,6 +4237,8 @@ class WhatsAppAdapter(ChatAdapter):
         return {**super().health(), "connected": self.connected.is_set(),
                 "user": self.user_jid, "bridge": f"{self.host}:{self.port}",
                 "bridge_state": self.bridge_state,
+                "bridge_program": self.bridge_program,
+                "bridge_build": dict(self.bridge_build),
                 "qr_pending": bool(self.last_qr),
                 "qr_age_s": round(time.time() - self.last_qr_at, 1)
                 if self.last_qr else None,

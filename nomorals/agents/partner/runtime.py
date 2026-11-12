@@ -6906,6 +6906,24 @@ class PartnerRuntime(
                         self, "_presence_suffix", None)
                     if callable(presence_suffix):
                         suffix += presence_suffix(name)
+                if name == "whatsapp":
+                    # Bridge build identity (2026-11-12
+                    # view-once diagnostic): the running
+                    # binary's commit + built time, so the owner
+                    # can prove which bridge is live.  An older
+                    # bridge sends no build block: the line says
+                    # the build is unknown instead of borrowing
+                    # the program marker.
+                    build = info.get("bridge_build")
+                    if isinstance(build, dict) and build.get("commit"):
+                        suffix += (
+                            f" — bridge {build.get('program') or ''} "
+                            f"commit {build.get('commit')} "
+                            f"built {build.get('built')}")
+                    elif info.get("bridge_program"):
+                        suffix += (
+                            f" — bridge {info.get('bridge_program')} "
+                            "(build unknown)")
                 lines.append(f"  {name}: {state}{suffix}")
             # Known-but-never-built platforms (not in the boot set,
             # never hot-started) are invisible in gateway.status()

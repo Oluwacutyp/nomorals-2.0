@@ -1088,6 +1088,47 @@ class RuntimeChatOpsMixin:
 
         if not entries:
             _note_reveal("empty", form)
+            # ── arrival truth: what the record actually saw ──
+            # (2026-11-12 diagnostic): an empty vault must say
+            # whether any view-once arrival was ever observed,
+            # and name the last one when arrivals came but none
+            # saved — the second live failure answered "no
+            # captures yet" while the toggle sat ON and a photo
+            # had arrived minutes earlier.  Three states:
+            # (a) zero trace rows — nothing ever observed;
+            # (b) traces, none saved — last trace named;
+            # (b') traces only under another account (the
+            # whatsapp:primary stand-in: the observing runtime
+            # had no registry account) — that account named.
+            traces = [r for r in vault.journal()
+                      if r.get("kind") == "view_once_trace"]
+            mine = ([r for r in traces
+                     if resolved is not None
+                     and str(r.get("account") or "")
+                     == resolved.id]
+                    if resolved is not None else [])
+            if mine:
+                last = mine[-1]
+                arrival_note = (
+                    f" Arrivals WERE observed ({len(mine)}) but "
+                    f"none saved — last {_when(last)}, outcome "
+                    f"{str(last.get('outcome') or 'unknown')}"
+                    + (" (media missing at arrival)"
+                       if last.get("media_missing") else "")
+                    + ".")
+            elif traces:
+                others = sorted({str(r.get("account") or "?")
+                                 for r in traces})
+                arrival_note = (
+                    " Arrivals were observed but traced under "
+                    f"{', '.join(others)} — not this account, "
+                    "so the observing runtime had no registry "
+                    "account for this platform.")
+            else:
+                arrival_note = (
+                    " No view-once arrival has ever been "
+                    "observed on this account (zero trace "
+                    "rows).")
             if multi:
                 state = ("ON" if resolved.toggle("view_once")
                          else "OFF")
@@ -1097,6 +1138,7 @@ class RuntimeChatOpsMixin:
                     f"it's on, view-once media sent to {label} "
                     f"is kept in your vault before it vanishes, "
                     f"and /viewonce shows it back."
+                    + arrival_note
                     + _others()
                     + ("" if state == "ON" else
                        f" Turn it on with /pair toggle "
@@ -1108,13 +1150,20 @@ class RuntimeChatOpsMixin:
                     f"{'ON' if rec.toggle('view_once') else 'OFF'}")
             state = ("; ".join(states) if states else
                      "no paired personal account")
+            # The turn-on pointer names the account and prints
+            # only when its toggle is actually OFF — the old
+            # text told the owner to turn it on while it sat ON.
+            turn_on = ""
+            if (resolved is not None
+                    and not resolved.toggle("view_once")):
+                turn_on = (f" Turn it on with /pair toggle "
+                           f"{resolved.id} view_once on.")
             return ("no view-once captures yet — when the "
                     "view_once toggle is on, view-once media "
                     "sent to your personal accounts is kept in "
                     "your vault before it vanishes, and /viewonce "
-                    f"shows it back. Right now: {state}. "
-                    "Turn it on with /pair toggle ACCOUNT "
-                    "view_once on.")
+                    f"shows it back. Right now: {state}."
+                    + arrival_note + turn_on)
         listing = "\n".join(
             _line(i + 1, r) for i, r in enumerate(entries[:10]))
         more = (f"\n  …and {len(entries) - 10} older (in "
