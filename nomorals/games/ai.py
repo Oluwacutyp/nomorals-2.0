@@ -25,7 +25,8 @@ from __future__ import annotations
 import random
 import re
 import time
-from typing import Any, Callable, Sequence
+from collections.abc import Callable, Sequence
+from typing import Any
 
 from ..core.logging_setup import get_logger
 
@@ -49,13 +50,25 @@ def pick(rng: random.Random, options: tuple | list) -> Any:
 
 
 class GameMind:
-    """The house brain: flavor + model upgrade + built-in fallbacks."""
+    """The house brain: flavor + model upgrade + built-in fallbacks.
+
+    ``suggest`` is the candidate GENERATOR for flavor (``ask`` /
+    ``say`` garnish) — it never decides a combat action. The combat
+    decision is the learned policy (Phase 2: ``games/npc_learn.py``
+    ``TacticsPolicy``, journal → grade → retrain) when one is trained,
+    else the deterministic math. The brain picking actions was the
+    Phase-1 design-down; it is gone.
+    """
 
     def __init__(self, suggest: SuggestFn | None = None,
-                 seed: int | None = None) -> None:
+                 seed: int | None = None,
+                 policy: Any = None) -> None:
         self._suggest = suggest
         self.rng = random.Random(seed)
         self._cache: dict[str, tuple[float, str]] = {}
+        #: Learned combat policy (a callable(state) -> action, or an
+        #: object with .pick_action(state)); None = the math carries.
+        self.policy = policy
 
     # ── model bridge ─────────────────────────────────────────────────────────
     @property
@@ -241,10 +254,22 @@ class GameMind:
 
     def combat_move(self, self_stats: dict[str, int],
                     foe_stats: dict[str, int],
-                    skill: int = 0) -> dict[str, Any]:
-        """Battle arena AI: the model may override the math, but the math
-        is the full code rung — a model that cannot run, fails, or names
-        an illegal action never changes the outcome.
+                    skill: int = 0,
+                    policy: Any = None) -> dict[str, Any]:
+        """Battle arena AI: the learned policy may override the math,
+        but the math is the full code rung — a policy that cannot run,
+        fails, or names an illegal action never changes the outcome.
+
+        Phase 2 (2026-11-12): the DECISION is the learned combat
+        policy (journal → grade → retrain) when one is trained;
+        otherwise the math. The brain NEVER picks an action — the
+        Phase-1 brain pick was the design-down, and it is gone. The
+        brain still garnishes flavor through ask()/say(); that is
+        generation, not a decision.
+
+        ``policy`` (per-call) overrides ``self.policy`` for this one
+        move — the engine's mind is shared across games, so each game
+        passes its own trained policy per call.
 
         Stats use the arena's key names (``atk``/``def``); the old
         ``attack``/``defense`` names are tolerated so external callers
@@ -255,34 +280,48 @@ class GameMind:
         but the S-rank version fights like it means it.
         """
         math_move = self._combat_math(self_stats, foe_stats, skill)
-        if not self.model_on:
+        # per-call policy overrides the mind's own: the engine's mind
+        # is shared across games, so each game passes its own trained
+        # policy per call.
+        active_policy = policy if policy is not None else self.policy
+        if active_policy is None:
             return math_move
         hp = self_stats.get("hp", 1)
         foe_hp = foe_stats.get("hp", 1)
         if hp <= 0 or foe_hp <= 0:
-            return math_move  # fight is over; no model call
-        summary = (
-            "Arena fight. Your HP {hp}/{max_hp}, attack {atk}, defense "
-            "{defense}, potions {potions}, fury ready: {fury}. Foe HP "
-            "{foe_hp}, attack {foe_atk}, defense {foe_def}. The math "
-            "recommends {rec}. Reply with exactly one word: attack, "
-            "focus, fury, defend, or potion."
-        ).format(
-            hp=hp,
-            max_hp=self_stats.get("max_hp", max(hp, 1)),
-            atk=self_stats.get("atk", self_stats.get("attack", 0)),
-            defense=self_stats.get("def", self_stats.get("defense", 0)),
-            potions=self_stats.get("potions", 0),
-            fury="yes" if self_stats.get("fury_cd", 0) <= 0 else "no",
-            foe_hp=foe_hp,
-            foe_atk=foe_stats.get("atk", foe_stats.get("attack", 0)),
-            foe_def=foe_stats.get("def", foe_stats.get("defense", 0)),
-            rec=math_move.get("action", "attack"),
-        )
-        picked = self._parse_combat_action(self.ask(summary))
-        if picked is not None:
-            return {"action": picked}
+            return math_move  # fight is over; no policy call
+        state = self._combat_state(self_stats, foe_stats)
+        try:
+            pick = active_policy.pick_action(state) \
+                if hasattr(active_policy, "pick_action") \
+                else active_policy(state)
+        except Exception:  # noqa: BLE001 - a bad policy never kills a move
+            _log.debug("combat policy failed", exc_info=True)
+            return math_move
+        action = self._parse_combat_action(pick)
+        if action is not None:
+            return {"action": action}
         return math_move
+
+    @staticmethod
+    def _combat_state(self_stats: dict[str, int],
+                      foe_stats: dict[str, int]) -> dict[str, float]:
+        """Ratio-form combat state for the learned policy — the same
+        features the tactics journal records."""
+        hp = max(1, int(self_stats.get("hp", 1) or 1))
+        max_hp = max(hp, int(self_stats.get("max_hp", hp) or hp))
+        foe_hp = max(1, int(foe_stats.get("hp", 1) or 1))
+        foe_max = max(foe_hp, int(foe_stats.get("max_hp", foe_hp)
+                                   or foe_hp))
+        return {
+            "self_hp": hp / max_hp,
+            "foe_hp": foe_hp / foe_max,
+            "foe_hp_low": 1.0 if foe_hp / foe_max < 0.25 else 0.0,
+            "potions": float(self_stats.get("potions", 0) or 0),
+            "fury_ready": 1.0 if int(self_stats.get("fury_cd", 0) or 0) <= 0
+                          else 0.0,
+            "focused": 1.0 if self_stats.get("focused") else 0.0,
+        }
 
     @staticmethod
     def _parse_combat_action(text: str | None) -> str | None:
@@ -807,7 +846,7 @@ class _MCTSNode:
                  "visits", "wins", "untried")
 
     def __init__(self, state: Any, player: int, adapter: MCTSAdapter,
-                 parent: "_MCTSNode | None" = None,
+                 parent: _MCTSNode | None = None,
                  move: Any = None) -> None:
         self.state = state
         self.player = player

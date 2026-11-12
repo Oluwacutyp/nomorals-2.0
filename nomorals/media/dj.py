@@ -41,13 +41,11 @@ import random
 import re
 import time
 import urllib.request
-import wave
 from array import array
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
@@ -484,8 +482,10 @@ class DJ:
 
         # ── DJ engine: analyze → energy arc → transition plans ──────────
         from .dj_engine import (
-            analyze_track, plan_energy_arc, plan_transition,
-            render_beatmatched_transition, select_taste,
+            analyze_track,
+            plan_energy_arc,
+            plan_transition,
+            select_taste,
         )
         # Taste rung, via the models-into-classes ladder: the learned
         # model when the owner's feedback trained it, else the
@@ -510,6 +510,11 @@ class DJ:
 
         # ── rebuild segments in arc order, with breaks ─────────────────
         # tracklist follows the arc order too (it was built in compose order)
+        # Phase 2: the arc reorder drops compose-failed tracks from the
+        # tracklist — capture them first, so the feedback loop records
+        # the skips instead of losing them.
+        skipped_before_arc = [t for t in tracklist
+                              if t.get("status") == "skipped"]
         arc_tracklist = [tracklist[track_units.index(u)] for u in ordered_units]
         tracklist[:] = arc_tracklist
         segments = []
@@ -539,6 +544,15 @@ class DJ:
 
         track_segs = [s for s in segments if s.kind == "track"]
         if not track_segs:
+            # Phase 2: even an empty show logs its skips — the record
+            # is the feedback loop, and a compose failure is still a
+            # skip the owner should see in the log.
+            try:
+                from .dj_engine import log_show_outcomes
+
+                log_show_outcomes([], skipped=skipped_before_arc)
+            except Exception:  # noqa: BLE001
+                _log.debug("dj show feedback log failed", exc_info=True)
             return {"ok": False, "reason": "no tracks rendered — show is empty",
                     "tracklist": tracklist}
 
@@ -596,6 +610,20 @@ class DJ:
                 tracklist[j]["taste_score"] = taste.score_transition(
                     a, ordered_analyses[j + 1], plans[j])
 
+        # Phase 2: the feedback loop — the show's keep/skip outcomes
+        # land in the taste log, so the LearnedTaste model trains from
+        # real rows. Played transitions carry real transition features;
+        # compose-failed skips are recorded (source "compose") and the
+        # taste fit ignores them — a compose failure is not a taste
+        # judgment. Best-effort: a log failure never kills a show.
+        try:
+            from .dj_engine import log_show_outcomes
+
+            log_show_outcomes(tracklist, skipped=skipped_before_arc,
+                              analyses=ordered_analyses, plans=plans)
+        except Exception:  # noqa: BLE001
+            _log.debug("dj show feedback log failed", exc_info=True)
+
         if len(mix) < 100:
             return {"ok": False, "reason": "mix came out empty",
                     "tracklist": tracklist}
@@ -634,6 +662,26 @@ def register(context: Any = None) -> dict[str, Any]:
     def _show(genre: str = "", n_tracks: int = 4) -> dict[str, Any]:
         return dj.build_show(genre=genre, n_tracks=n_tracks)
 
+    def _feedback(track: str = "", verdict: str = "liked"
+                  ) -> dict[str, Any]:
+        """Owner feedback on a track: "liked" | "kept" | "skipped".
+        Lands in the taste log — this is what trains the DJ's learned
+        taste (Phase 2). Returns {"ok": ...}; a bad verdict is refused,
+        never logged as a taste row."""
+        from .dj_engine import log_feedback
+
+        verdict = (verdict or "").strip().lower()
+        if verdict not in ("liked", "kept", "skipped", "played"):
+            return {"ok": False,
+                    "reason": f"unknown verdict {verdict!r} — "
+                              f"liked, kept, skipped, or played"}
+        if not (track or "").strip():
+            return {"ok": False, "reason": "no track named"}
+        log_feedback(verdict, track_id=str(track).strip(), source="owner")
+        return {"ok": True, "track": str(track).strip(),
+                "verdict": verdict}
+
     return {"name": "dj",
             "description": "Radio DJ: trending charts, voice breaks, mixed shows.",
-            "call": {"trending": _trending, "show": _show}}
+            "call": {"trending": _trending, "show": _show,
+                     "feedback": _feedback}}

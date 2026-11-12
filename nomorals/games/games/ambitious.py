@@ -19,6 +19,7 @@ import random
 import re
 from typing import Any
 
+from ...core.logging_setup import get_logger
 from ..ai import GameMind
 from ..combat import skill_power_mult
 from ..failures import record_failure
@@ -27,6 +28,8 @@ from ..players import Player
 from .base import MultiGame, Room
 
 __all__ = ["AMBITIOUS_GAMES"]
+
+_log = get_logger(__name__)
 
 # ── world: the town's building catalog ──────────────────────────────────────
 
@@ -1412,7 +1415,7 @@ class BattleArenaGame(MultiGame):
         if you_pow > 0 and foe_pow >= you_pow * 1.1:
             total = int(round(total * 1.25))  # the upset bonus
         # elites and bosses pay extra — harder fights, bigger rewards
-        from ..progression import ELITE_KILL_MULT, BOSS_KILL_MULT
+        from ..progression import BOSS_KILL_MULT, ELITE_KILL_MULT
         if s.get("house_is_boss"):
             total = int(round(total * BOSS_KILL_MULT))
         elif s.get("house_elite"):
@@ -1534,8 +1537,7 @@ class BattleArenaGame(MultiGame):
         s = room.state
         y = s["you"]
         try:
-            from ..stats import (StatBlock, apply_stats_to_fighter,
-                                 gear_stat_bonuses)
+            from ..stats import StatBlock, apply_stats_to_fighter, gear_stat_bonuses
         except Exception as exc:  # noqa: BLE001
             record_failure("ambitious.rpg_stats", exc)
             return
@@ -1733,11 +1735,66 @@ class BattleArenaGame(MultiGame):
         s = room.state
         if s["house"]["hp"] <= 0:
             s["done"] = True
+            # Phase 2: the fight outcome grades the journaled rounds —
+            # the delayed label the tactics policy trains on.
+            self._grade_fight(room, won=False)
             return "🏁 the house goes down — the arena is yours."
         if s["you"]["hp"] <= 0:
             s["done"] = True
+            self._grade_fight(room, won=True)
             return "🏁 the house takes you. the arena keeps its score."
         return None
+
+    def _tactics_policy(self) -> Any | None:
+        """The arena's learned combat policy, cached for 10 minutes
+        (a retrain lands within one cache window). None means the math
+        carries — the policy is not trusted until it beats the math on
+        a held-out slice."""
+        import time as _time
+
+        now = _time.time()
+        cached = getattr(self, "_tactics_policy_cache", None)
+        loaded_at = getattr(self, "_tactics_policy_at", 0.0)
+        if now - loaded_at < 600:
+            return cached  # fresh enough (None included: no policy yet)
+        self._tactics_policy_at = now
+        try:
+            from ..npc_learn import load_tactics_policy
+
+            self._tactics_policy_cache = load_tactics_policy(
+                getattr(self, "name", "arena"))
+        except Exception:  # noqa: BLE001 - a bad policy never kills a move
+            self._tactics_policy_cache = None
+        return self._tactics_policy_cache
+
+    def _journal_combat_round(self, room: Room, state: dict[str, float],
+                              action: str, you_before: int,
+                              house_before: int) -> None:
+        """Journal one house round (best-effort). The payoff is the
+        immediate exchange: damage dealt to the player plus self-heal
+        — a FEATURE, never the label (the fight outcome grades it)."""
+        try:
+            from ..npc_learn import TacticsJournal
+
+            s = room.state
+            payoff = ((you_before - int(s["you"].get("hp", 0)))
+                      + (int(s["house"].get("hp", 0)) - house_before))
+            TacticsJournal().record_round(
+                room.game, state, action, payoff=float(payoff),
+                fight_id=room.id,
+                stats={"self": dict(s["house"]), "foe": dict(s["you"])})
+        except Exception:  # noqa: BLE001 - journaling never kills a move
+            _log.debug("tactics journal failed", exc_info=True)
+
+    def _grade_fight(self, room: Room, *, won: bool) -> None:
+        """Attach the fight outcome to the room's journaled rounds
+        (best-effort, idempotent)."""
+        try:
+            from ..npc_learn import TacticsJournal
+
+            TacticsJournal().grade_fight(room.game, room.id, won)
+        except Exception:  # noqa: BLE001 - grading never kills a game
+            _log.debug("tactics grade failed", exc_info=True)
 
     def _equip(self, room: Room, player: Player, item: str) -> str | None:
         """Wear gear or spend a consumable.
@@ -1803,8 +1860,13 @@ class BattleArenaGame(MultiGame):
         through to the move list).  ``src``/``dst`` let the house cast
         its own rolled skills — including forbidden techniques — with
         the same code path."""
-        from ..skills import (SKILL_CATALOG, effective_def, resolve_skill,
-                              lookup_skill, is_enemy_skill)
+        from ..skills import (
+            SKILL_CATALOG,
+            effective_def,
+            is_enemy_skill,
+            lookup_skill,
+            resolve_skill,
+        )
         s = room.state
         me = s[src]
         foe = s[dst]
@@ -1975,8 +2037,13 @@ class BattleArenaGame(MultiGame):
         both skills.  Higher tiers make the weave harder; on failure
         the HP is lost and the turn is wasted.
         """
-        from ..skills import (SKILL_CATALOG, effective_def, resolve_skill,
-                              find_combo, combo_success_chance)
+        from ..skills import (
+            SKILL_CATALOG,
+            combo_success_chance,
+            effective_def,
+            find_combo,
+            resolve_skill,
+        )
         from ..stats import MANA_REGEN_PER_TURN  # noqa: F401 (doc anchor)
         s = room.state
         me = s["you"]
@@ -2250,7 +2317,7 @@ class BattleArenaGame(MultiGame):
         hardest-hitting ready strike.  Forbidden techniques get their
         own instincts: siphon when hurt, dread early, execute the dying.
         """
-        from ..skills import lookup_skill, effective_def
+        from ..skills import effective_def, lookup_skill
         s = room.state
         if int(s.get("house_skill", 0)) < 1:
             return None
@@ -2360,30 +2427,46 @@ class BattleArenaGame(MultiGame):
             if msg:
                 out.append(msg)
                 return
+        # Phase 2: the house fights with its learned policy when one
+        # is trained (the policy is per-game; the engine's mind is
+        # shared, so it passes per call). The round is journaled for
+        # the tactics retrain loop — state -> action -> fight outcome
+        # (the label attaches at fight end, in _check). The try/finally
+        # records on every exit path, so a mid-fury fight end still
+        # journals the round that ended it.
+        state = mind._combat_state(house, s["you"])
         move = mind.combat_move(house, s["you"],
-                                skill=int(s.get("house_skill", 0)))
-        if move["action"] == "potion" and house["potions"] > 0:
-            house["potions"] -= 1
-            house["hp"] = min(house["max_hp"], house["hp"] + 30)
-            out.append("the house drinks — it'll be back at 50.")
-            return
-        if move["action"] == "defend":
-            house["defending"] = True
-            out.append("the house guards.")
-            return
-        if move["action"] == "focus" and not house["focused"]:
-            house["focused"] = True
-            out.append("the house settles in — its next hit will land "
-                       "harder.")
-            return
-        if move["action"] == "fury" and house["fury_cd"] <= 0:
-            out.append(self._hit(room, "house", "you", mind, mult=0.8))
-            if not self._check(room):
-                out.append(self._hit(room, "house", "you", mind,
-                                     mult=0.8))
-            house["fury_cd"] = 2
-            return
-        out.append(self._hit(room, "house", "you", mind))
+                                skill=int(s.get("house_skill", 0)),
+                                policy=self._tactics_policy())
+        action = str(move.get("action", "attack"))
+        you_before = int(s["you"].get("hp", 0))
+        house_before = int(house.get("hp", 0))
+        try:
+            if move["action"] == "potion" and house["potions"] > 0:
+                house["potions"] -= 1
+                house["hp"] = min(house["max_hp"], house["hp"] + 30)
+                out.append("the house drinks — it'll be back at 50.")
+                return
+            if move["action"] == "defend":
+                house["defending"] = True
+                out.append("the house guards.")
+                return
+            if move["action"] == "focus" and not house["focused"]:
+                house["focused"] = True
+                out.append("the house settles in — its next hit will land "
+                           "harder.")
+                return
+            if move["action"] == "fury" and house["fury_cd"] <= 0:
+                out.append(self._hit(room, "house", "you", mind, mult=0.8))
+                if not self._check(room):
+                    out.append(self._hit(room, "house", "you", mind,
+                                         mult=0.8))
+                house["fury_cd"] = 2
+                return
+            out.append(self._hit(room, "house", "you", mind))
+        finally:
+            self._journal_combat_round(room, state, action,
+                                       you_before, house_before)
 
     def ai_turn(self, room, mind):
         return []
@@ -2662,7 +2745,7 @@ class PoliticalGame(MultiGame):
         for target in s["votes"].values():
             if target:
                 counts[target] = counts.get(target, 0) + 1
-        lines = [f"the ballot counts: " +
+        lines = ["the ballot counts: " +
                  ", ".join(f"{room.player(k).name} {v}"
                            for k, v in counts.items()) or "empty"]
         if counts:
@@ -2728,7 +2811,7 @@ class PoliticalGame(MultiGame):
                             out.extend(self._tally(room))
                         return out
                 return ["veto a candidate who already voted — "
-                        f"'veto <name>'."]
+                        "'veto <name>'."]
             for p in self._candidates(room):
                 if tl and (p.name.lower() in tl or tl in p.name.lower()):
                     s["votes"][player.key] = p.key

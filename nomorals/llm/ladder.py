@@ -11,13 +11,16 @@ runtime, with an honest unavailable path.
 This module is that decision layer (L3, so characters/games/media/agents
 may import it; it imports only core + llm):
 
-* :func:`resolve` — per job, per profile: ``"model"`` when the model rung
-  can actually run here, ``"code"`` otherwise, with a ``reason`` naming
-  the deciding factor. The model rung is the brain when the job needs
-  language (the brain fronts local + remote providers); for jobs whose
-  model is data (the DJ's learned taste) the caller supplies
-  ``model_available`` and owns the model object — the ladder decides the
-  rung, the caller owns the rung.
+* :func:`resolve` — per job, per profile: ``"model"`` when the job's
+  REAL specialist can actually run here, ``"code"`` otherwise, with a
+  ``reason`` naming the deciding factor. **The brain is never a rung:**
+  the brain directs and (for dialogue jobs) generates candidates, but
+  the rung is decided by the specialist's availability — a learned
+  scorer trained on the journal, a learned policy, a trained taste
+  model. A caller that cannot say whether the specialist is trained
+  gets the code rung. The returned ``suggest`` is the candidate
+  GENERATOR (brain-bound) when the model rung runs through it, else
+  None — the caller owns its code rung and any data-owned model object.
 * :func:`recommend_local_model` — which catalog entry fits this device
   (1.5B on Termux, 3.8B on a PC, 8B on a workstation), from
   :data:`MODEL_CATALOG`, never hardcoded.
@@ -30,6 +33,14 @@ may import it; it imports only core + llm):
 No single model is ever "her brain": the brain directs, the ladder
 selects, the specialists do the how. A rung that cannot run reports
 ``"code"`` with its reason — never a fake model result.
+
+Phase 2 (2026-11-12, owner correction): Phase 1 registered the brain
+itself as the model rung for dialogue/tactics/narration — a design-down.
+The four Phase-1 jobs now name their REAL specialist as the model rung
+(the character's learned line scorer, the learned combat policy, the
+trained taste model, and — for narration — a specialist that does NOT
+exist yet, so the template bank carries and the reason says so). Nine
+further specialist jobs are registered below.
 """
 
 from __future__ import annotations
@@ -38,6 +49,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any
 
 from ..core.logging_setup import get_logger
@@ -53,6 +65,7 @@ __all__ = [
     "JobSpec",
     "Resolution",
     "JOB_NAMES",
+    "JOBS",
     "MODEL_TIMEOUT_S",
     "list_jobs",
     "register_job",
@@ -100,6 +113,9 @@ class JobSpec:
     model_rung: str  # what the model does for this job
     code_rung: str  # what the deterministic code does (always works)
     model_needs_brain: bool = True  # False when the model is data-owned
+    #: False when no specialist model exists for this job yet — the
+    #: model rung is then honestly unavailable and the code rung carries.
+    specialist_exists: bool = True
 
 
 @dataclass
@@ -113,9 +129,13 @@ class Resolution:
     timeout_s: float = 30.0
     local_model: str = ""  # recommended local weights for this device
     local_available: bool = False
+    model_rung: str = ""  # the specialist named as the model rung
 
 
 _JOBS: dict[str, JobSpec] = {}
+
+#: Live read-only view of the registry (new jobs appear here).
+JOBS = MappingProxyType(_JOBS)
 
 
 def register_job(spec: JobSpec) -> JobSpec:
@@ -130,13 +150,18 @@ def list_jobs() -> list[str]:
 
 
 # ── the four Phase-1 jobs ─────────────────────────────────────────────────
+# Phase 2 (2026-11-12): the model rung is the REAL specialist, never the
+# brain. The brain generates candidates (dialogue) or directs; the
+# specialist decides. A job whose specialist does not exist yet
+# (narration) names that wall and the code rung carries.
 
 register_job(JobSpec(
     name="character_dialogue",
     description="NPCs talk dynamically, in their own voice, from persona "
                 "+ context + memory — not canned lines.",
-    model_rung="Brain chat via SuggestFn (GameMaster.npc_speak / "
-               "Character.speak)",
+    model_rung="The character's own learned line scorer — batch fit on "
+               "the journal (characters/learn.py fit_scorer); the brain "
+               "only generates candidates, the scorer picks the line",
     code_rung="Template forge: mood-band lines parameterized by name "
               "and situation (GameMaster._NPC_LINES, Character fallback)",
 ))
@@ -145,10 +170,12 @@ register_job(JobSpec(
     name="character_tactics",
     description="NPCs choose battle actions dynamically — the model may "
                 "override the math, but never invents an action.",
-    model_rung="Brain picks one legal action (attack/focus/fury/defend/"
-               "potion) from the live state; validated, else math",
+    model_rung="Learned combat policy — journal → grade → retrain "
+               "(games/npc_learn.py fit_tactics_policy); picks among "
+               "legal actions from the live state",
     code_rung="GameMind.combat_move math: potion/focus/defend/fury "
               "thresholds by hunter rank (deterministic)",
+    model_needs_brain=False,
 ))
 
 register_job(JobSpec(
@@ -166,13 +193,119 @@ register_job(JobSpec(
     name="arena_narration",
     description="Dynamic arena battle narration illustrating the actual "
                 "battle, in the table's DM mood — like a movie.",
-    model_rung="Brain narrates the drained DM feed (GameMaster.narrate / "
-               "announce) in the DM's mood",
+    model_rung="Narration specialist — NOT BUILT: no narration model "
+               "exists yet; the template bank carries until one lands",
     code_rung="GameMaster template bank, mood-parameterized, no immediate "
               "repeats",
+    model_needs_brain=False,
+    specialist_exists=False,
 ))
 
 JOB_NAMES: tuple[str, ...] = tuple(_JOBS)
+
+# ── Phase 2 specialist jobs ──────────────────────────────────────────────
+# Each names its real specialist as the model rung and its deterministic
+# fallback as the code rung. All are data-owned (model_needs_brain=False):
+# the specialist is a learned model on journal rows, never the brain.
+
+register_job(JobSpec(
+    name="npc_line_scorer",
+    description="An NPC's own line scorer: generated candidates, the "
+                "scorer picks the most in-character, outcomes journaled "
+                "and graded, retrained from the journal.",
+    model_rung="NPC line scorer — sklearn regressor on the NPC journal "
+               "(games/npc_learn.py fit_npc_scorer)",
+    code_rung="Hand-weight NPC scorer over the same five features "
+              "(trait overlap, mood fit, situation fit, novelty, "
+              "length fit)",
+    model_needs_brain=False,
+))
+
+register_job(JobSpec(
+    name="npc_tactics",
+    description="The NPC combat policy: which legal action wins fights, "
+                "learned from journaled rounds graded by fight outcome.",
+    model_rung="Learned combat policy — classifier on journaled rounds "
+               "(games/npc_learn.py fit_tactics_policy)",
+    code_rung="GameMind.combat_move math thresholds by hunter rank",
+    model_needs_brain=False,
+))
+
+register_job(JobSpec(
+    name="pumpdesk_win",
+    description="PumpDesk call scorer: the probability a call wins, "
+                "learned from the graded call journal — evidence on the "
+                "call, never a silent override of the gates.",
+    model_rung="Win-probability classifier on graded calls "
+               "(agents/pumpdesk/learn.py fit_win_model)",
+    code_rung="The incumbent composite score + CALL_THRESHOLD gate "
+              "(agents/pumpdesk/score.py evaluate)",
+    model_needs_brain=False,
+))
+
+register_job(JobSpec(
+    name="error_triage",
+    description="Error catcher: which failures are real vs noise, "
+                "learned from operator-graded failure rows.",
+    model_rung="Error classifier on graded failures "
+               "(agents/failure_models.py fit_error_classifier)",
+    code_rung="Surface every failure (the failures ledger, "
+              "agents/failures.py recent_failures)",
+    model_needs_brain=False,
+))
+
+register_job(JobSpec(
+    name="morning_rank",
+    description="Morning-pulse ranker: which briefing sections he "
+                "actually reads, learned from engagement history.",
+    model_rung="Learned ranker on briefing engagement history "
+               "(agents/pulse_rank.py fit_pulse_ranker)",
+    code_rung="Hand rule: views>=7 with followups/views<0.2 boosts "
+              "priority (agents/morning_briefing.py _apply_engagement)",
+    model_needs_brain=False,
+))
+
+register_job(JobSpec(
+    name="character_voice_xtts",
+    description="A character's voice: XTTS cloning speaks their lines "
+                "in their own voice.",
+    model_rung="XTTS voice clone via the voice catalogue "
+               "(characters/specialists.py character_voice)",
+    code_rung="No voice audio — the line is delivered as text",
+    model_needs_brain=False,
+))
+
+register_job(JobSpec(
+    name="character_voice_rvc",
+    description="A character's voice swap: RVC converts a rendered "
+                "line into the character's voice identity.",
+    model_rung="RVC voice-swap bridge per character "
+               "(characters/specialists.py swap_voice)",
+    code_rung="The unswapped render (or text) is delivered as-is",
+    model_needs_brain=False,
+))
+
+register_job(JobSpec(
+    name="character_lora",
+    description="A character's persona: a LoRA adapter per character on "
+                "one shared base, implanted when the character speaks.",
+    model_rung="Per-character LoRA adapter slot "
+               "(characters/specialists.py lora_for; local_server --lora)",
+    code_rung="The shared base model with the character's persona "
+              "prompt (no adapter implanted)",
+    model_needs_brain=False,
+))
+
+register_job(JobSpec(
+    name="character_face",
+    description="A character's face, only where the character appears "
+                "outside the game — guarded face swap under the vault "
+                "lock. NPCs in-game do NOT get faces.",
+    model_rung="Guarded face swap from the character's face reference "
+               "(characters/specialists.py swap_face)",
+    code_rung="No swapped image — the target image is delivered as-is",
+    model_needs_brain=False,
+))
 
 
 def _coerce_profile(profile: Any) -> EnvironmentProfile:
@@ -276,16 +409,35 @@ def local_model_available(repo_id: str,
 
 
 def resolve(job: str, *, profile: Any = None, brain: Any = None,
-            model_available: Callable[[], bool] | None = None
+            model_available: Callable[[], bool] | None = None,
+            specialist_available: Callable[[], bool] | bool | None = None
             ) -> Resolution:
     """Decide which rung runs ``job`` on this device.
 
-    Rung order: model first when it can actually run, code otherwise.
-    ``model_available`` overrides the brain check for jobs whose model
-    is data-owned (the DJ's learned taste); for brain jobs the check is
-    ``brain.available()``. The returned ``suggest`` is a brain-bound
-    SuggestFn when the model rung runs through the brain, else None —
-    the caller owns its code rung and any data-owned model object.
+    The rung is decided by the job's REAL specialist, never the brain:
+
+    1. A job with no specialist (``specialist_exists=False``) is always
+       the code rung — the reason names the missing specialist.
+    2. ``specialist_available`` (a bool, or a callable returning one)
+       decides the rung when supplied — this is the specialist's own
+       availability (a learned scorer trained, a policy fitted, a taste
+       model with enough rows). This is the Phase 2 correction: Phase 1
+       let brain availability decide the rung.
+    3. ``model_available`` is the legacy override for data-owned jobs
+       whose model the caller owns (the DJ's learned taste).
+    4. With neither supplied the rung is "code": the brain is NOT a
+       rung, so a bare brain never promotes a job to the model rung.
+
+    The returned ``suggest`` is the candidate GENERATOR (brain-bound)
+    and is set whenever the job needs the brain as its generator
+    (dialogue candidates) and a brain is supplied — on EITHER rung.
+    The generator is not the rung: on the code rung the brain's
+    candidates are picked by the job's code-rung scorer (the hand
+    weights), and when the brain is down the template forge supplies
+    the candidates instead, so the code rung always works. Jobs whose
+    model rung does not use the brain as a generator (tactics, the
+    data-owned jobs) never get a suggest. The caller owns its code
+    rung and any data-owned model object.
     """
     spec = _JOBS.get(job)
     if spec is None:
@@ -298,43 +450,45 @@ def resolve(job: str, *, profile: Any = None, brain: Any = None,
     local_ok, _local_reason = (
         local_model_available(local_id)
         if local_id else (False, "no local model recommended"))
-    if model_available is not None:
+    if not spec.specialist_exists:
+        model_ok = False
+        why = (f"no specialist model exists for {job} yet — the "
+               f"model rung is honestly unavailable")
+    elif specialist_available is not None:
+        try:
+            model_ok = bool(specialist_available()
+                            if callable(specialist_available)
+                            else specialist_available)
+        except Exception:  # noqa: BLE001 - availability check must not raise
+            model_ok = False
+        why = ("learned specialist available" if model_ok
+               else "learned specialist not trained yet")
+    elif model_available is not None:
         try:
             model_ok = bool(model_available())
         except Exception:  # noqa: BLE001 - availability check must not raise
             model_ok = False
         why = ("learned model available" if model_ok
                else "learned model not available")
-    elif spec.model_needs_brain:
-        if brain is None:
-            model_ok = False
-            why = "no brain available on this device"
-        else:
-            try:
-                model_ok = bool(brain.available())
-            except Exception:  # noqa: BLE001 - availability check must not raise
-                model_ok = False
-            if model_ok:
-                try:
-                    active = brain.active_model() or "model"
-                except Exception:  # noqa: BLE001 - name lookup must not raise
-                    active = "model"
-                why = f"brain available ({active})"
-            else:
-                why = "brain unavailable"
     else:
         model_ok = False
-        why = "no model availability supplied for a data-owned model job"
+        why = ("no specialist availability supplied — the directing "
+               "layer is not a rung")
+    # The generator flows whenever the job uses the brain to generate
+    # candidates, on either rung — it is not the rung. (Tactics and the
+    # data-owned jobs never get one: model_needs_brain is False.)
+    suggest = None
+    if brain is not None and spec.model_needs_brain:
+        suggest = _brain_suggest(brain, timeout)
     if model_ok:
-        suggest = None
-        if brain is not None and spec.model_needs_brain:
-            suggest = _brain_suggest(brain, timeout)
         return Resolution(job=job, rung="model",
                           reason=f"model rung: {why}",
                           suggest=suggest, timeout_s=timeout,
-                          local_model=local_id, local_available=local_ok)
+                          local_model=local_id, local_available=local_ok,
+                          model_rung=spec.model_rung)
     return Resolution(job=job, rung="code",
                       reason=f"code rung: {spec.code_rung} "
                       f"(model rung: {why})",
-                      suggest=None, timeout_s=timeout,
-                      local_model=local_id, local_available=local_ok)
+                      suggest=suggest, timeout_s=timeout,
+                      local_model=local_id, local_available=local_ok,
+                      model_rung=spec.model_rung)

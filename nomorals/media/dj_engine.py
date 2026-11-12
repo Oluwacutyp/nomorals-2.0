@@ -34,7 +34,7 @@ import random
 import time
 import wave
 from array import array
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -587,7 +587,7 @@ def plan_energy_arc(tracks: list[TrackAnalysis],
                     seed: int | None = None, *,
                     curve: str = "late_peak",
                     quality_floor: float = 0.0,
-                    taste: "TasteModel | None" = None) -> list[TrackAnalysis]:
+                    taste: TasteModel | None = None) -> list[TrackAnalysis]:
     """Order tracks along an energy curve with harmonic sanity.
 
     * Positions follow the named ``curve`` (``late_peak``/``linear``/
@@ -817,23 +817,132 @@ _FEEDBACK_DIR = Path(os.path.expanduser("~")) / ".cache" / "nomorals" / "dj"
 DEFAULT_FEEDBACK_PATH = _FEEDBACK_DIR / "taste-feedback.jsonl"
 
 
+def _feedback_path() -> Path:
+    """The feedback log path: NM_DJ_FEEDBACK_PATH overrides, else the
+    module default (monkeypatchable in tests)."""
+    override = (os.environ.get("NM_DJ_FEEDBACK_PATH") or "").strip()
+    if override:
+        return Path(os.path.expanduser(override))
+    return Path(DEFAULT_FEEDBACK_PATH)
+
+
 def log_feedback(event: str, *, track_id: str = "",
                  out_id: str = "", in_id: str = "",
-                 features: dict[str, Any] | None = None) -> None:
+                 features: dict[str, Any] | None = None,
+                 source: str = "") -> None:
     """Log owner feedback for future taste-model training.
 
-    event: "kept" | "skipped" | "liked" | "rated" (+ optional rating).
-    Appends one JSONL row per event. Never raises.
+    event: "kept" | "skipped" | "liked" | "rated" | "played".
+    Appends one JSONL row per event. Never raises. ``source`` names
+    where the row came from ("show" for a delivered show,
+    "compose" for a compose-failed skip — the taste fit ignores
+    compose rows: a compose failure is not a taste judgment).
     """
     try:
-        _FEEDBACK_DIR.mkdir(parents=True, exist_ok=True)
+        target = _feedback_path()
+        target.parent.mkdir(parents=True, exist_ok=True)
         row = {"ts": time.time(), "event": event, "track_id": track_id,
                "out_id": out_id, "in_id": in_id,
                "features": features or {}}
-        with open(_FEEDBACK_DIR / "taste-feedback.jsonl", "a") as f:
+        if source:
+            row["source"] = source
+        with open(target, "a") as f:
             f.write(json.dumps(row) + "\n")
     except Exception:  # noqa: BLE001
         _log.debug("taste feedback log failed", exc_info=True)
+
+
+def read_feedback_log(path: str | Path | None = None
+                      ) -> list[dict[str, Any]]:
+    """All feedback rows (raw dicts), oldest first. Missing log = []."""
+    target = Path(path) if path is not None else _feedback_path()
+    try:
+        lines = target.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return []
+    rows = []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(parsed, dict):
+            rows.append(parsed)
+    return rows
+
+
+def log_show_outcomes(tracklist: list[dict[str, Any]],
+                      kept: set[str] | None = None, *,
+                      skipped: list[dict[str, Any]] | None = None,
+                      analyses: list[Any] | None = None,
+                      plans: list[Any] | None = None) -> dict[str, int]:
+    """Log one show's keep/skip outcomes — the missing piece that
+    makes the taste model trainable (Phase 2).
+
+    ``kept`` (a set of track ids) or the tracklist's own "status"
+    field decides which tracks played. Two shapes, both honest:
+
+    * Played transitions: one "kept" row per consecutive played pair,
+      with the REAL transition features (the taste model's input) when
+      ``analyses``/``plans`` are given; otherwise one "played" row per
+      track with its known attributes mapped into the taste schema
+      (energy -> energy_abs_b, same_style kept).
+    * Compose-failed tracks: one "skipped" row each, source "compose"
+      (recorded for the record; the taste fit ignores them — a compose
+      failure is not a taste judgment).
+
+    Returns {"kept": n, "skipped": n}. Never raises.
+    """
+    n_kept = 0
+    n_skipped = 0
+    try:
+        def _tid(t: dict[str, Any]) -> str:
+            return str(t.get("track_id") or t.get("label") or "")
+
+        if kept is not None:
+            played = [t for t in (tracklist or []) if _tid(t) in kept]
+            skipped_rows = [t for t in (tracklist or [])
+                            if _tid(t) not in kept]
+        else:
+            played = [t for t in (tracklist or [])
+                      if str(t.get("status", "played")) != "skipped"]
+            skipped_rows = list(skipped or []) + [
+                t for t in (tracklist or [])
+                if str(t.get("status", "")) == "skipped"]
+        if analyses and len(analyses) >= 2 and len(played) >= 2:
+            for i in range(len(played) - 1):
+                plan = plans[i] if plans and i < len(plans) else None
+                try:
+                    feats = _transition_features(analyses[i],
+                                                 analyses[i + 1], plan)
+                except Exception:  # noqa: BLE001 - a bad pair skips itself
+                    feats = {}
+                log_feedback(
+                    "kept", track_id=_tid(played[i]),
+                    out_id=_tid(played[i]), in_id=_tid(played[i + 1]),
+                    features=feats, source="show")
+                n_kept += 1
+        else:
+            for t in played:
+                feats = dict(t.get("features") or {})
+                mapped = {
+                    "energy_abs_b": float(feats.get("energy", 0.0) or 0.0),
+                    "same_style": float(feats.get("same_style", 0.0)
+                                        or 0.0),
+                }
+                log_feedback("played", track_id=_tid(t),
+                             features=mapped, source="show")
+                n_kept += 1
+        for t in skipped_rows:
+            log_feedback("skipped", track_id=_tid(t),
+                         features={}, source="compose")
+            n_skipped += 1
+    except Exception:  # noqa: BLE001 - feedback logging never kills a show
+        _log.debug("show feedback log failed", exc_info=True)
+    return {"kept": n_kept, "skipped": n_skipped}
 
 
 #: Rows of labelled feedback needed before the learned model is trusted.
@@ -958,10 +1067,18 @@ class LearnedTaste:
         self._rows += 1
 
     def fit(self, rows: list[dict[str, Any]] | None) -> bool:
-        """Apply labelled feedback rows. True if any row was applied."""
+        """Apply labelled feedback rows. True if any row was applied.
+
+        Rows with source "compose" are operational skips (the track
+        failed to compose), not taste judgments — they are recorded
+        for the record and ignored here, so a compose failure never
+        teaches the model to skip a sound.
+        """
         applied = False
         for row in rows or []:
             if not isinstance(row, dict):
+                continue
+            if str(row.get("source", "") or "") == "compose":
                 continue
             label = _row_label(row)
             if label is None:
@@ -979,7 +1096,7 @@ class LearnedTaste:
         A missing or unreadable log is False, never an exception — a
         fresh box simply has no feedback yet.
         """
-        target = Path(path) if path is not None else DEFAULT_FEEDBACK_PATH
+        target = Path(path) if path is not None else _feedback_path()
         try:
             lines = target.read_text(encoding="utf-8").splitlines()
         except (OSError, UnicodeDecodeError):

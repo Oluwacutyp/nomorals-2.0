@@ -50,13 +50,22 @@ class _FakeBrain:
 def test_four_jobs_registered():
     from nomorals.llm.ladder import JOB_NAMES, list_jobs
 
+    # JOB_NAMES is the Phase-1 set (kept stable); the registry grew in
+    # Phase 2 with the real specialists (owner correction 2026-11-12:
+    # the brain is not a rung — the specialist is).
     assert set(JOB_NAMES) == {
         "character_dialogue",
         "character_tactics",
         "dj_sound_selection",
         "arena_narration",
     }
-    assert set(list_jobs()) == set(JOB_NAMES)
+    jobs = set(list_jobs())
+    assert set(JOB_NAMES) <= jobs
+    for specialist in ("npc_line_scorer", "npc_tactics", "pumpdesk_win",
+                       "error_triage", "morning_rank",
+                       "character_voice_xtts", "character_voice_rvc",
+                       "character_lora", "character_face"):
+        assert specialist in jobs
 
 
 def test_unknown_job_is_an_error():
@@ -81,15 +90,26 @@ def test_register_job_extends_registry():
 # ── resolution ───────────────────────────────────────────────────────────
 
 def test_resolve_model_rung_with_brain():
+    # Phase 2 correction: the brain alone NEVER promotes a job to the
+    # model rung — the rung is decided by the specialist. The brain is
+    # the candidate generator (dialogue), wired as ``suggest`` only
+    # when the specialist is trained.
     from nomorals.llm.ladder import resolve
 
     brain = _FakeBrain(available=True, replies=["hello there"])
     res = resolve("character_dialogue", brain=brain,
                   profile=resolve_profile("workstation"))
+    assert res.rung == "code"
+    # the generator flows on either rung — it is not the rung; the
+    # hand-weight scorer picks its candidates on the code rung
+    assert res.suggest is not None
+    assert res.suggest("say hi") == "hello there"
+    res = resolve("character_dialogue", brain=brain,
+                  profile=resolve_profile("workstation"),
+                  specialist_available=True)
     assert res.rung == "model"
     assert res.suggest is not None
-    assert "brain" in res.reason.lower()
-    assert res.suggest("say hi") == "hello there"
+    assert "scorer" in res.model_rung.lower()
     assert brain.calls[-1]["timeout_s"] == 60.0
 
 
@@ -98,11 +118,13 @@ def test_resolve_model_timeout_is_per_profile():
 
     brain = _FakeBrain(available=True, replies=["x", "x"])
     termux = resolve("character_dialogue", brain=brain,
-                     profile=resolve_profile("termux"))
+                     profile=resolve_profile("termux"),
+                     specialist_available=True)
     termux.suggest("hi")
     assert brain.calls[-1]["timeout_s"] == 20.0
     pc = resolve("character_dialogue", brain=brain,
-                 profile=resolve_profile("pc"))
+                 profile=resolve_profile("pc"),
+                 specialist_available=True)
     pc.suggest("hi")
     assert brain.calls[-1]["timeout_s"] == 30.0
 
@@ -114,7 +136,7 @@ def test_resolve_code_rung_no_brain():
                   profile=resolve_profile("pc"))
     assert res.rung == "code"
     assert res.suggest is None
-    assert "brain" in res.reason.lower()
+    assert "specialist" in res.reason.lower()
 
 
 def test_resolve_code_rung_brain_unavailable():
@@ -135,7 +157,8 @@ def test_resolve_suggest_never_raises():
             raise RuntimeError("provider exploded")
 
     res = resolve("character_dialogue", brain=_BoomBrain(available=True),
-                  profile=resolve_profile("pc"))
+                  profile=resolve_profile("pc"),
+                  specialist_available=True)
     assert res.rung == "model"
     assert res.suggest("hi") == ""
 
@@ -210,7 +233,8 @@ def test_dialogue_via_ladder_resolve():
 
     brain = _FakeBrain(available=True, replies=["Well met, traveller."])
     res = resolve("character_dialogue", brain=brain,
-                  profile=resolve_profile("pc"))
+                  profile=resolve_profile("pc"),
+                  specialist_available=True)
     gm = GameMaster(suggest=res.suggest)
     assert gm.model_on is True
     assert "Well met" in gm.npc_speak(_npc(), "hello")
@@ -235,19 +259,22 @@ def test_tactics_math_is_the_code_rung():
 
 
 def test_tactics_model_can_override_math():
+    # Phase 2 correction: the combat DECISION is the learned policy, not
+    # the brain. A trained policy overrides the math; the brain never
+    # picks an action.
     from nomorals.games.ai import GameMind
 
-    mind = GameMind(suggest=lambda _p: "defend")
-    # healthy + fury ready: math says fury, the model says defend
+    mind = GameMind(policy=lambda _state: "defend")
+    # healthy + fury ready: math says fury, the policy says defend
     assert mind.combat_move(_stats(), _stats(hp=50, atk=5)) == {"action": "defend"}
 
 
 def test_tactics_model_garbage_falls_back_to_math():
     from nomorals.games.ai import GameMind
 
-    mind = GameMind(suggest=lambda _p: "teleport behind the moon")
+    mind = GameMind(policy=lambda _state: "teleport behind the moon")
     assert mind.combat_move(_stats(), _stats(hp=50, atk=5)) == {"action": "fury"}
-    mind2 = GameMind(suggest=lambda _p: "")
+    mind2 = GameMind(policy=lambda _state: None)
     assert mind2.combat_move(_stats(), _stats(hp=50, atk=5)) == {"action": "fury"}
 
 
@@ -255,10 +282,19 @@ def test_tactics_model_never_invents_an_action():
     from nomorals.games.ai import GameMind
 
     for reply in ("FURY", "  potion ", "Focus!", "ATTACK"):
-        mind = GameMind(suggest=lambda _p, r=reply: r)
+        mind = GameMind(policy=lambda _state, r=reply: r)
         got = mind.combat_move(_stats(hp=20, potions=1), _stats(hp=50))
         assert got["action"] in ("attack", "focus", "fury", "defend",
                                  "potion")
+
+
+def test_tactics_brain_never_picks_an_action():
+    # The correction, pinned: a brain suggest on the mind does NOT
+    # decide combat — the math carries until a policy is trained.
+    from nomorals.games.ai import GameMind
+
+    mind = GameMind(suggest=lambda _p: "defend")
+    assert mind.combat_move(_stats(), _stats(hp=50, atk=5)) == {"action": "fury"}
 
 
 # ── job 3: DJ sound selection ────────────────────────────────────────────
@@ -349,11 +385,15 @@ def test_dj_select_taste_prefers_learned_when_trained(tmp_path):
 # ── job 4: arena battle narration ────────────────────────────────────────
 
 def test_narration_model_line_when_brain_present():
+    # Phase 2 correction: there is NO narration specialist — the
+    # template bank carries even when a brain is attached. The brain
+    # never narrates as a rung.
     from nomorals.games.gamemaster import GameMaster
 
     gm = GameMaster(suggest=lambda _p: "The blade sings.")
     line = gm.narrate("arena", "Ada lands a killing crit on the Hollow Warden")
-    assert "The blade sings." in line
+    assert line  # template bank, mood-parameterized, never empty
+    assert "The blade sings." not in line
 
 
 def test_narration_template_bank_when_no_model():
@@ -365,15 +405,20 @@ def test_narration_template_bank_when_no_model():
 
 
 def test_narration_via_ladder_resolve():
+    # Phase 2 correction: arena_narration is honestly unavailable —
+    # no narration specialist exists — so the ladder resolves to the
+    # code rung even with a brain present, and the reason says so.
     from nomorals.games.gamemaster import GameMaster
     from nomorals.llm.ladder import resolve
 
     brain = _FakeBrain(available=True, replies=["Dust settles. Ada stands."])
     res = resolve("arena_narration", brain=brain,
                   profile=resolve_profile("pc"))
-    assert res.rung == "model"
+    assert res.rung == "code"
+    assert "narration" in res.reason.lower()
+    assert res.suggest is None
     gm = GameMaster(suggest=res.suggest)
-    assert "Dust settles" in gm.narrate(
+    assert "Dust settles" not in gm.narrate(
         "arena", "Ada lands a killing crit on the Hollow Warden")
 
 

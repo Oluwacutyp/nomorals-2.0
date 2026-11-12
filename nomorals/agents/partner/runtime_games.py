@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import time
-from typing import Any, Callable
-from ...llm.brain import brain_for
+from collections.abc import Callable
+from typing import Any
+
 from ...core.logging_setup import get_logger
-from ...social.chat.base import ChatKind, ChatMessage, ChatRef
+from ...llm.brain import brain_for
+from ...social.chat.base import ChatKind, ChatRef
 from .failures import record_failure
+
 _log = get_logger(__name__)
 
 
@@ -214,8 +217,7 @@ class RuntimeGamesMixin:
                             f"(1 hour)")
                     # The button carries THIS invite's code — it
                     # exists exactly because this duel just ended.
-                    from ...social.chat.expression import (
-                        buttons_from_spec)
+                    from ...social.chat.expression import buttons_from_spec
 
                     relay_buttons = buttons_from_spec(
                         [[("rematch", "Rematch — accept",
@@ -496,9 +498,8 @@ class RuntimeGamesMixin:
             # Per-game toggle (D5): this one game off in this chat —
             # refused honestly before the table opens. (Whole-feature
             # games-off is gated earlier in handle_control.)
-            from ...partner.chat_modes import (
-                game_disabled_reply as _game_off_reply,
-                is_game_disabled as _game_off)
+            from ...partner.chat_modes import game_disabled_reply as _game_off_reply
+            from ...partner.chat_modes import is_game_disabled as _game_off
             if _game_off(chat_key, verb):
                 return _game_off_reply(verb)
             if player is None:
@@ -553,8 +554,7 @@ class RuntimeGamesMixin:
                 diff_line += f" · 🃏 {variant}"
             # mastery tier: shown at every game start
             try:
-                from ...games.mastery import (get_one_game_stats,
-                                              mastery_line)
+                from ...games.mastery import get_one_game_stats, mastery_line
                 diff_line += " · " + mastery_line(
                     verb, get_one_game_stats(engine.db, player.key, verb))
             except Exception as e:
@@ -765,8 +765,7 @@ class RuntimeGamesMixin:
         ref = (ref or "").strip().lower()
 
         def _piece_line(inst: Any) -> str:
-            from ...games.gear import (GEAR_CATALOG, durability_display,
-                                       effective_stats)
+            from ...games.gear import GEAR_CATALOG, durability_display, effective_stats
             defn = GEAR_CATALOG.get(inst.slug)
             stats = ""
             if defn is not None:
@@ -864,8 +863,13 @@ class RuntimeGamesMixin:
         if player is None:
             return "no player here — run this from the chat where you play."
         from ...games.progression import (
-            ARENA_LOSS_XP, ARENA_WIN_XP, GAME_LOSS_XP, GAME_WIN_XP,
-            level_for_xp, level_stat_bonus, xp_bar, xp_for_level,
+            ARENA_LOSS_XP,
+            ARENA_WIN_XP,
+            GAME_LOSS_XP,
+            GAME_WIN_XP,
+            level_stat_bonus,
+            xp_bar,
+            xp_for_level,
             xp_progress,
         )
         engine = self._game_engine()
@@ -910,9 +914,15 @@ class RuntimeGamesMixin:
             return "games are off. /features games on"
         if player is None:
             return "no player here — run this from the chat where you play."
-        from ...games.skills import (SKILL_CATALOG, SkillStore, tier_name,
-                                     effective_def, max_tier, resolve_skill)
         from ...games.progression import level_for_xp
+        from ...games.skills import (
+            SKILL_CATALOG,
+            SkillStore,
+            effective_def,
+            max_tier,
+            resolve_skill,
+            tier_name,
+        )
         engine = self._game_engine()
         store = engine.store
         skills = SkillStore(engine.db)
@@ -1145,8 +1155,7 @@ class RuntimeGamesMixin:
             return "games are off. /features games on"
         if player is None:
             return "no player here — run this from the chat where you play."
-        from ...games.stats import (STAT_NAMES, StatStore, describe_stats,
-                                    gear_stat_bonuses)
+        from ...games.stats import STAT_NAMES, StatStore, describe_stats, gear_stat_bonuses
         engine = self._game_engine()
         store = StatStore(engine.db)
         # Display-only: points are granted at the actual level-up event
@@ -1446,8 +1455,7 @@ class RuntimeGamesMixin:
             return "games are off. /features games on"
         if player is None:
             return "no player here — run this from the chat where you play."
-        from ...games.mastery import (describe_game_mastery,
-                                      describe_mastery)
+        from ...games.mastery import describe_game_mastery, describe_mastery
         engine = self._game_engine()
         want = (tail or "").strip().lower()
         if want:
@@ -1574,7 +1582,7 @@ class RuntimeGamesMixin:
                 # §33: a lapsed/unclaimed room's game freezes —
                 # the message is just chat here.
                 return None
-            
+
             # Check for relay room first (DM-to-DM multiplayer)
             relay = self._game_relay()
             relay_room = relay.get_relay_for_chat(chat_key)
@@ -1594,7 +1602,7 @@ class RuntimeGamesMixin:
                 reply = "\n".join(msgs)
                 self._relay_send(relay_room.other_chat(chat_key), reply)
                 return reply
-            
+
             engine = self._game_engine()
             room = engine.live(chat_key)
             if room is not None:
@@ -1603,9 +1611,8 @@ class RuntimeGamesMixin:
                 # handler ends it, but a crash between toggle and end
                 # must never let a move through), refuse the move
                 # honestly instead of playing a disabled game.
-                from ...partner.chat_modes import (
-                    game_disabled_reply as _game_off_reply,
-                    is_game_disabled as _game_off)
+                from ...partner.chat_modes import game_disabled_reply as _game_off_reply
+                from ...partner.chat_modes import is_game_disabled as _game_off
                 if _game_off(chat_key, str(getattr(room, "game", "") or "")):
                     return _game_off_reply(str(getattr(room, "game", "") or ""))
                 # A live room owns plain messages (moves) and the engine's
@@ -2173,8 +2180,11 @@ class RuntimeGamesMixin:
         """Character agents: /charagent list | create <name> [trait=0.8 ...]
         | talk <name> <message> | play <game> <name...> | forget <name>."""
         from ...characters import (
-            Character, CharacterStore, converse, AgentSeat,
-            run_agent_match, register_with_engine,
+            AgentSeat,
+            Character,
+            CharacterStore,
+            converse,
+            run_agent_match,
         )
         store = CharacterStore()
         parts = (tail or "").split(None, 1)
@@ -2251,7 +2261,7 @@ class RuntimeGamesMixin:
             except Exception as e:  # noqa: BLE001
                 return f"🎲 match failed: {e}"
             tail_lines = res.transcript[-14:]
-            return ("🎲 " + game_name + f" — Devon vs "
+            return ("🎲 " + game_name + " — Devon vs "
                     + ", ".join(c.name for c in chars) + "\n"
                     + "\n".join(tail_lines))
 
@@ -2435,11 +2445,16 @@ class RuntimeGamesMixin:
 
         ``job`` names a models-into-classes ladder job
         (``character_dialogue`` / ``character_tactics`` /
-        ``arena_narration``). A named job resolves through the ladder
-        (per-device profile + brain availability), so a job whose model
-        rung cannot run here returns None and the code rung carries it.
-        An empty job keeps the exact legacy behaviour (brain if a router
-        exists, else None) for callers that predate the ladder.
+        ``arena_narration``). A named job resolves through the ladder:
+        the returned fn is the candidate GENERATOR (the brain), never
+        the rung — the rung is the job's specialist (the NPC's learned
+        line scorer for dialogue, the learned combat policy for
+        tactics), decided where the decision is made. Dialogue gets
+        the generator whenever a brain exists (the scorer picks its
+        candidates); tactics and narration get None (the brain never
+        picks an action or narrates as a rung). An empty job keeps the
+        exact legacy behaviour (brain if a router exists, else None)
+        for callers that predate the ladder.
         """
         router = getattr(self.context, "router", None)
         if router is None:
@@ -2936,7 +2951,7 @@ class RuntimeGamesMixin:
             if len(parts) < 2:
                 return "usage: /arena promote <build-id>"
             from ..arena.ship import promote_build
-            from ..evolution import EvolutionAgent, _REPO_ROOT
+            from ..evolution import _REPO_ROOT, EvolutionAgent
 
             try:
                 pid = promote_build(self.context.db, self.context, parts[1],
@@ -3151,9 +3166,15 @@ class RuntimeGamesMixin:
         /bet backtest [n] [--seed S]
         /bet record <home> <away> <hg>-<ag> [--league L]
         """
-        from ..sports_bet import (BetStore, Fixture, OddsSnapshot, backtest,
-                                 render_analysis, render_backtest,
-                                 synthetic_history)
+        from ..sports_bet import (
+            BetStore,
+            Fixture,
+            OddsSnapshot,
+            backtest,
+            render_analysis,
+            render_backtest,
+            synthetic_history,
+        )
 
         store = BetStore()
         parts = (tail or "").strip().split(None, 1)
@@ -3304,8 +3325,7 @@ class RuntimeGamesMixin:
         /desk sources    — the desk's sources on the shared registry
         /desk provision [service] — key state, or drive provisioning
         """
-        from ..betdesk import (BettingDesk, render_collect,
-                               render_library, render_status)
+        from ..betdesk import BettingDesk, render_collect, render_library, render_status
 
         try:
             vault = self._provision_vault()
@@ -3465,10 +3485,15 @@ class RuntimeGamesMixin:
         /apk read <project> <path> — read a text file (smali above
                       all) from the decoded tree
         """
-        from ..apkforge import (ApkForge, render_build_card,
-                                render_diff_card, render_dossier_card,
-                                render_list, render_project,
-                                render_status, render_toolchain)
+        from ..apkforge import (
+            ApkForge,
+            render_diff_card,
+            render_dossier_card,
+            render_list,
+            render_project,
+            render_status,
+            render_toolchain,
+        )
 
         forge = ApkForge(getattr(self, "context", None))
         parts = (tail or "").strip().split()
@@ -3992,8 +4017,7 @@ class RuntimeGamesMixin:
         /pump unwatch <wallet> — stop tracking a wallet
         /pump provision [service] — keyed RPC tier state / drive
         """
-        from ..pumpdesk import (PumpDesk, render_calls, render_dossier,
-                                render_status)
+        from ..pumpdesk import PumpDesk, render_calls, render_dossier, render_status
 
         desk = PumpDesk(getattr(self, "context", None))
         parts = (tail or "").strip().split(None, 2)

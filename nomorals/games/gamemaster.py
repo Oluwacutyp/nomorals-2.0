@@ -24,8 +24,9 @@ import random
 import re
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from ..core.logging_setup import get_logger
 from .engine_failures import record_failure
@@ -417,8 +418,12 @@ class GameMaster:
         """Narrate a game event as a scene.
 
         ``mood`` overrides the game's DM mood for this one narration.
-        With a model: the DM persona + NPC voices shape the scene. Without:
-        the template bank, parameterized by mood, with no immediate repeats.
+
+        Phase 2 (2026-11-12): there is NO narration specialist — the
+        brain never narrates as a rung — so the template bank carries,
+        parameterized by mood, with no immediate repeats. A narration
+        specialist lands later in the programme; until then this is
+        the honest-unavailable rung, not a silent brain call.
         """
         event = (event_text or "").strip()
         if not event:
@@ -427,33 +432,6 @@ class GameMaster:
         if mood not in DM_MOODS:
             mood = "neutral"
 
-        if self.model_on:
-            npc_block = ""
-            if npcs:
-                bits = []
-                for npc in npcs[:3]:
-                    bits.append(
-                        f"- {npc.name} ({npc.voice_style or 'natural'}), "
-                        f"feeling {npc.mood_word()}")
-                npc_block = "Cast present:\n" + "\n".join(bits) + "\n"
-            reply = self._ask(
-                f"You are the dungeon master of a chat game, narrating in a "
-                f"{mood} tone. Event: {event}\n{npc_block}"
-                f"Write 1-3 vivid sentences. Stay in a {mood} voice. "
-                f"No stage directions, no fourth-wall breaks. "
-                f"Reply with the narration only — no analysis, no "
-                f"preamble, no list.",
-                # generous transport cap: the sanitizer bounds what
-                # posts — a tight cap here would amputate the reply
-                # mid-scaffold before extraction can recover the
-                # narration buried after it
-                max_len=1200,
-            )
-            if reply:
-                clean, reason = _sanitize_model_line(reply, kind="narrate")
-                if clean:
-                    return clean
-                _journal_sanitize_reject("narrate", reason, reply)
         # — template forge —
         with self._lock:
             bank = _NARRATE_TEMPLATES[mood]
@@ -478,17 +456,83 @@ class GameMaster:
                 "effect": effect, "narration": narration or event}
 
     # ── NPC dialogue ──────────────────────────────────────────────────────
-    def npc_speak(self, npc: NPCProfile, situation: str) -> str:
+    def npc_speak(self, npc: NPCProfile, situation: str, *,
+                  candidates: int = 1) -> str:
         """One in-character line from ``npc`` about ``situation``.
 
         Memories are filtered through the NPC's knowledge boundaries
         (via :meth:`NPCProfile.to_prompt` / :meth:`recall`) before any
         model sees them — the NPC can never leak what it must not know.
+
+        ``candidates`` (Phase 2): how many lines to generate and let
+        the NPC's own scorer pick from. 1 keeps the exact v1 behaviour
+        (one brain line, else one template line). Above 1 the brain is
+        asked N times (or the template forge yields N variants when
+        there is no brain), the NPC's scorer — learned when trained,
+        hand weights otherwise — picks the most in-character, and the
+        outcome is journaled for the grade → retrain loop. The brain
+        GENERATES candidates; the scorer DECIDES. Every line is
+        journaled best-effort (single lines too), so the journal fills
+        from ordinary play.
         """
         situation = (situation or "").strip()
         if not situation:
             return f"{npc.name} waits, saying nothing."
+        n = max(1, int(candidates or 1))
+        if n == 1:
+            line = self._npc_speak_one(npc, situation)
+            self._journal_npc_line(npc, situation, [line])
+            return line
+        cands: list[str] = []
+        if self.model_on:
+            for _ in range(n):
+                reply = self._ask(
+                    f"{npc.to_prompt()}\n\n"
+                    f"Situation: {situation}\n"
+                    f"Relevant memories:\n"
+                    + "\n".join(f"- {m['text']}"
+                                for m in npc.recall(situation, limit=3))
+                    + f"\n\nSpeak as {npc.name}: one or two sentences, in your "
+                    f"voice. Stay in character. Reply with the line only — "
+                    f"no analysis, no preamble, no stage directions.",
+                    max_len=800,
+                )
+                if reply:
+                    clean, reason = _sanitize_model_line(reply,
+                                                         kind="speak")
+                    if clean:
+                        cands.append(clean)
+                    else:
+                        _journal_sanitize_reject("npc_speak", reason, reply)
+        if not cands:
+            cands = self._npc_forge_lines(npc, situation, n)
+        if not cands:
+            return f"{npc.name} waits, saying nothing."
+        try:
+            from .npc_learn import NPCJournal, load_npc_scorer, score_npc_candidates_full
 
+            model = load_npc_scorer(npc.id)
+            scored = score_npc_candidates_full(cands, npc, situation,
+                                               model=model)
+            best = 0
+            for i in range(1, len(scored)):
+                if scored[i]["score"] > scored[best]["score"]:
+                    best = i
+            line = scored[best]["text"]
+            try:
+                NPCJournal().journal(
+                    game_id=npc.game_id, npc_id=npc.id, line=line,
+                    candidates=scored, chosen=best, situation=situation)
+            except Exception:  # noqa: BLE001 - journaling never kills a line
+                _log.debug("npc journal failed", exc_info=True)
+            return line
+        except Exception:  # noqa: BLE001 - a bad scorer never kills a line
+            _log.debug("npc scorer failed", exc_info=True)
+            return cands[0]
+
+    def _npc_speak_one(self, npc: NPCProfile, situation: str) -> str:
+        """The v1 single-line path, unchanged: one brain line, else
+        one template line."""
         if self.model_on:
             reply = self._ask(
                 f"{npc.to_prompt()}\n\n"
@@ -507,14 +551,39 @@ class GameMaster:
                     return clean
                 _journal_sanitize_reject("npc_speak", reason, reply)
         # — template forge —
+        return self._npc_forge_lines(npc, situation, 1)[0]
+
+    def _npc_forge_lines(self, npc: NPCProfile, situation: str,
+                         n: int) -> list[str]:
+        """N template-forge lines for ``npc`` about ``situation``
+        (mood band, distinct while the band lasts)."""
         valence = npc.mood.get("valence", 0.0)
         band = "bright" if valence >= 0.4 else "dark" if valence <= -0.4 \
             else "neutral"
-        line = self.rng.choice(_NPC_LINES[band])
         short = situation if len(situation) <= 90 else situation[:87] + "…"
-        return line.format(name=npc.name, situation=short)
+        bank = list(_NPC_LINES[band])
+        self.rng.shuffle(bank)
+        picked = bank[:n]
+        while len(picked) < n and bank:
+            picked.append(self.rng.choice(bank))
+        return [line.format(name=npc.name, situation=short)
+                for line in picked]
 
-    # ── runtime content (AI Roguelite) ────────────────────────────────────
+    def _journal_npc_line(self, npc: NPCProfile, situation: str,
+                          texts: list[str]) -> None:
+        """Journal one spoken line (best-effort). The single-line path
+        scores its own line so the journal carries a real feature
+        vector for the retrain loop."""
+        try:
+            from .npc_learn import NPCJournal, score_npc_candidates_full
+
+            scored = score_npc_candidates_full(texts, npc, situation)
+            NPCJournal().journal(
+                game_id=npc.game_id, npc_id=npc.id, line=texts[0],
+                candidates=scored, chosen=0, situation=situation)
+        except Exception:  # noqa: BLE001 - journaling never kills a line
+            _log.debug("npc journal failed", exc_info=True)
+
     def generate_quest(self, game_id: str, player_level: int,
                        theme: str = "adventure") -> dict[str, Any]:
         """A fresh quest, validated against the quest schema.
@@ -776,7 +845,7 @@ def validate_item(item: dict[str, Any]) -> bool:
 # the DM never contradicts itself. All three work fully offline via the
 # template forge — the model only makes them prettier.
 
-from dataclasses import dataclass, field as _dm_field
+from dataclasses import dataclass
 
 
 @dataclass

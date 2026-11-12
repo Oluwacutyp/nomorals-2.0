@@ -24,6 +24,7 @@ unrelated — this module is deliberately named ``morning_briefing.py``.
 from __future__ import annotations
 
 import abc
+import contextlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -202,8 +203,8 @@ def _save_prefs(context: Any, prefs: dict[str, Any]) -> None:
             setattr(bs, k, v)
         return
     try:
-        from pathlib import Path
         import json as _json
+        from pathlib import Path
         sidecar = (Path(context.settings.workspace_dir)
                    / "briefing_prefs.json")
         sidecar.write_text(_json.dumps(prefs, indent=2), encoding="utf-8")
@@ -233,8 +234,7 @@ def _owner_tz(context: Any) -> str:
 # standing survey-first rule; NOT redefined.
 
 try:
-    from ..integrations.sentinel_bridge import (
-        MarketDataProvider as _MarketDataProvider)
+    from ..integrations.sentinel_bridge import MarketDataProvider as _MarketDataProvider
 except Exception:  # noqa: BLE001 — integrations optional in some builds
     _MarketDataProvider = None  # type: ignore[assignment]
 
@@ -699,6 +699,7 @@ class RoomsProvider(_Provider):
     def collect(self, ctx: Any, since: float) -> BriefingSection | None:
         try:
             from pathlib import Path
+
             from ..workspace.rooms import RoomManager
             root = Path(ctx.settings.workspace_dir)
             mgr = RoomManager(root, db=ctx.db)
@@ -1659,7 +1660,12 @@ class BriefingComposer:
                 continue
             if sec is not None:
                 sections.append(sec)
-        sections = self._apply_engagement(ctx, sections)
+        sections = self._apply_engagement(ctx, sections, date=date)
+        # Phase 2: the per-briefing snapshot is the ranker's training
+        # data — one row per (date, section) with the counters as they
+        # stood when this briefing was composed. The label (a followup
+        # followed) lands later, via record_followup.
+        _snapshot_pulse_history(ctx, date, sections)
         sections.sort(key=lambda s: s.priority)
         self._apply_section_budgets(ctx, sections)
         briefing = Briefing(
@@ -1672,12 +1678,14 @@ class BriefingComposer:
 
     # -- engagement: demote sustained-ignored sections, honor pins --------
     def _apply_engagement(self, ctx: Any,
-                          sections: list[BriefingSection]
+                          sections: list[BriefingSection],
+                          date: str = ""
                           ) -> list[BriefingSection]:
         store = _engagement_store(ctx)
         if store is None:
             return sections
         pinned = set(_prefs(ctx).get("pinned_sections", []) or [])
+        ranker = _pulse_ranker(ctx)
         for s in sections:
             if s.name in pinned:
                 continue
@@ -1686,6 +1694,24 @@ class BriefingComposer:
             followups = st.get("followups", 0)
             if views >= 7 and followups / max(views, 1) < 0.2:
                 s.priority += 50  # sustained low engagement → demoted
+            # Phase 2: the learned ranker adjusts the same priority on
+            # the same scale when it is trained — a section he actually
+            # reads climbs, one he ignores sinks. The hand rule above
+            # still runs first; the ranker never replaces it, only
+            # refines it, and an absent ranker changes nothing.
+            if ranker is not None:
+                try:
+                    from .pulse_rank import pulse_features, rank_adjustment
+
+                    feats = pulse_features({
+                        "views": views, "followups": followups,
+                        "days_since": store.days_since(s.name, date),
+                        "n_items": len(s.items),
+                    })
+                    s.priority += int(round(
+                        rank_adjustment(ranker, feats) * 50))
+                except Exception:  # noqa: BLE001 - the ranker never kills
+                    pass           # a briefing; the hand rule carries.
         return sections
 
     # -- adaptive section budgets: the owner's word cap, split by priority --
@@ -1737,6 +1763,15 @@ class _EngagementStore:
 
     def record_followup(self, section: str) -> None:
         self._bump(section, "followups")
+        # Phase 2: the followup labels the latest snapshot row for
+        # this section — the ranker's training label. Labelling never
+        # kills a bump, so a failure here is swallowed deliberately.
+        with contextlib.suppress(Exception):
+            self.db.execute(
+                "UPDATE briefing_engagement_history SET followed_up=1 "
+                "WHERE rowid = (SELECT rowid FROM "
+                "briefing_engagement_history WHERE section=? "
+                "ORDER BY date DESC LIMIT 1)", (section,))
 
     def set_pinned(self, section: str, pinned: bool) -> None:
         try:
@@ -1747,6 +1782,95 @@ class _EngagementStore:
                 (section, 0, 0, 1 if pinned else 0))
         except Exception as exc:  # noqa: BLE001
             record_failure("morning_briefing._EngagementStore.set_pinned.execute", exc)
+
+    # -- Phase 2: per-briefing snapshot history (the ranker's data) --
+    def snapshot_history(self, date: str,
+                         sections: list[Any]) -> None:
+        """One row per (date, section) with the engagement counters as
+        they stood when this briefing was composed. Runtime-created
+        table (migrations are frozen); first snapshot of a day wins,
+        so a re-compose never wipes a label already recorded."""
+        try:
+            self.db.execute(
+                "CREATE TABLE IF NOT EXISTS briefing_engagement_history "
+                "(date TEXT NOT NULL, section TEXT NOT NULL, "
+                "views INTEGER NOT NULL DEFAULT 0, "
+                "followups INTEGER NOT NULL DEFAULT 0, "
+                "n_items INTEGER NOT NULL DEFAULT 0, "
+                "followed_up INTEGER NOT NULL DEFAULT 0, "
+                "PRIMARY KEY (date, section))")
+            for s in sections:
+                st = self.get(s.name)
+                self.db.execute(
+                    "INSERT OR IGNORE INTO briefing_engagement_history "
+                    "(date, section, views, followups, n_items) "
+                    "VALUES (?,?,?,?,?)",
+                    (date, s.name, int(st.get("views", 0)),
+                     int(st.get("followups", 0)), len(s.items or [])))
+        except Exception as exc:  # noqa: BLE001 - a briefing never dies
+            record_failure(
+                "morning_briefing._EngagementStore.snapshot_history", exc)
+
+    def history_rows(self) -> list[dict[str, Any]]:
+        """All snapshot rows, oldest first, each with ``label`` (a
+        followup followed that briefing) and ``days_since`` (gap since
+        the section's previous snapshot; 7 for a section's first row).
+        Missing table = no history yet."""
+        try:
+            rows = self.db.query_rows(
+                "SELECT date, section, views, followups, n_items, "
+                "followed_up FROM briefing_engagement_history "
+                "ORDER BY date ASC")
+        except Exception:  # noqa: BLE001 - no table yet is an empty history
+            return []
+        out: list[dict[str, Any]] = []
+        last_seen: dict[str, Any] = {}
+        import datetime as _dt
+
+        for raw in rows or []:
+            r = dict(raw)  # sqlite3.Row has no .get()
+            date_s = str(r.get("date", "") or "")
+            section = str(r.get("section", "") or "")
+            try:
+                day = _dt.date.fromisoformat(date_s)
+            except ValueError:
+                day = None
+            prev = last_seen.get(section)
+            gap = ((day - prev).days
+                   if day is not None and prev is not None else 7)
+            if day is not None:
+                last_seen[section] = day
+            out.append({"date": date_s, "section": section,
+                        "views": int(r.get("views", 0) or 0),
+                        "followups": int(r.get("followups", 0) or 0),
+                        "n_items": int(r.get("n_items", 0) or 0),
+                        "days_since": max(0, min(7, gap)),
+                        "label": 1 if r.get("followed_up") else 0})
+        return out
+
+    def days_since(self, section: str, date: str = "") -> float:
+        """Days since this section's last snapshot (7 when none)."""
+        rows = self.history_rows()
+        import datetime as _dt
+
+        try:
+            today = _dt.date.fromisoformat(date) if date else \
+                _dt.date.today()
+        except ValueError:
+            today = _dt.date.today()
+        last = None
+        for r in rows:
+            if r.get("section") != section:
+                continue
+            try:
+                day = _dt.date.fromisoformat(str(r.get("date", "")))
+            except ValueError:
+                continue
+            if last is None or day > last:
+                last = day
+        if last is None:
+            return 7.0
+        return float(max(0, min(7, (today - last).days)))
 
     def _bump(self, section: str, col: str) -> None:
         # first touch inserts a 1 in the bumped column (no conflict yet,
@@ -1767,6 +1891,72 @@ class _EngagementStore:
 def _engagement_store(ctx: Any) -> _EngagementStore | None:
     db = getattr(ctx, "db", None)
     return _EngagementStore(db) if db is not None else None
+
+
+# ── Phase 2: the morning-pulse ranker (learned, lazy, honest) ──────────
+_PULSE_RANKER: dict[str, Any] = {"model": None, "at": 0.0, "n_rows": 0}
+_PULSE_RANKER_TTL_S = 600.0
+_PULSE_REFIT_ROWS = 30
+
+
+def _snapshot_pulse_history(ctx: Any, date: str,
+                            sections: list[Any]) -> None:
+    """Best-effort per-briefing snapshot; never kills a briefing."""
+    store = _engagement_store(ctx)
+    if store is None:
+        return
+    store.snapshot_history(date, sections)
+
+
+def _pulse_ranker(ctx: Any) -> Any | None:
+    """The fitted pulse ranker, or None (honest-unavailable: not
+    enough section-days yet, or the fit held). Lazily refits when the
+    history has grown by ``_PULSE_REFIT_ROWS`` rows since the model's
+    training set — the ranker learns as briefings accumulate. A fit
+    runs at most once per TTL; any failure returns None and the hand
+    rule carries the briefing."""
+    from .pulse_rank import PULSE_MIN_ROWS, fit_pulse_ranker, load_pulse_ranker
+
+    now = time.time()
+    cached = _PULSE_RANKER
+    if cached["model"] is not None and \
+            now - float(cached["at"]) < _PULSE_RANKER_TTL_S:
+        return cached["model"]
+    store = _engagement_store(ctx)
+    if store is None:
+        return None
+    try:
+        history = store.history_rows()
+    except Exception:  # noqa: BLE001 - no history is an absent ranker
+        return None
+    if len(history) < PULSE_MIN_ROWS:
+        return None
+    if cached["model"] is not None and \
+            len(history) - int(cached["n_rows"]) < _PULSE_REFIT_ROWS:
+        cached["at"] = now
+        return cached["model"]
+    try:
+        outcome = fit_pulse_ranker(history)
+    except Exception:  # noqa: BLE001 - a failed fit is a hold, not a crash
+        cached["at"] = now
+        return cached["model"]
+    if outcome.status == "trained" and outcome.model is not None:
+        cached.update({"model": outcome.model, "at": now,
+                       "n_rows": outcome.n_rows})
+        return outcome.model
+    # held / insufficient / unavailable: fall back to a stored model
+    # if one exists, else None. The hand rule carries either way.
+    cached["at"] = now
+    if cached["model"] is not None:
+        return cached["model"]
+    try:
+        stored = load_pulse_ranker()
+    except Exception:  # noqa: BLE001 - a bad store never kills a briefing
+        stored = None
+    if stored is not None:
+        cached.update({"model": stored, "at": now,
+                       "n_rows": int(getattr(stored, "n_rows", 0))})
+    return stored
 
 
 def store_briefing(ctx: Any, briefing: Briefing) -> None:
@@ -1882,6 +2072,7 @@ def ensure_briefing_job(context: Any) -> dict[str, Any]:
 
 def _today_str(context: Any) -> str:
     from datetime import datetime
+
     from ..core.tz import safe_zoneinfo
     tz = safe_zoneinfo(_owner_tz(context))
     return datetime.now(tz).strftime("%Y-%m-%d")

@@ -17,14 +17,20 @@ co-located snipers (design §4).
 from __future__ import annotations
 
 import time
-from typing import Any, Optional
+from typing import Any
 
-from . import chain, dossier as _dossier, firehose as _firehose
-from . import graph as _graph, learn as _learn, shelf as _shelf
-from . import outcomes as _outcomes, score as _score, watch as _watch
-from .calls import CallEngine, calibration, render_call
-from .store import PumpStore, pumpdesk_dir
+from . import chain
+from . import dossier as _dossier
+from . import firehose as _firehose
+from . import graph as _graph
+from . import learn as _learn
+from . import outcomes as _outcomes
+from . import score as _score
+from . import shelf as _shelf
+from . import watch as _watch
+from .calls import CallEngine, calibration
 from .failures import record_failure
+from .store import PumpStore, pumpdesk_dir
 
 __all__ = ["PumpDesk", "render_status", "render_calls"]
 
@@ -37,7 +43,7 @@ class PumpDesk:
     _streams: dict[str, Any] = {}   # desk dir -> Firehose (process-wide)
 
     def __init__(self, context: Any = None, desk_dir: str = "",
-                 store: Optional[PumpStore] = None,
+                 store: PumpStore | None = None,
                  notifier: Any = None, rpc: Any = None,
                  registry: Any = None,
                  attention_search: Any = None,
@@ -60,7 +66,7 @@ class PumpDesk:
         self.calls = CallEngine(self.dir, notifier=notifier)
         self._registry = registry
         self._rpc = rpc
-        self._firehose: Optional[_firehose.Firehose] = None
+        self._firehose: _firehose.Firehose | None = None
         self._prefilter = _firehose.Prefilter(
             self.store.watched_devs(), set(self.store.dossiers()))
         self._last_watch_at = 0.0
@@ -70,8 +76,7 @@ class PumpDesk:
     @property
     def registry(self) -> Any:
         if self._registry is None:
-            from .sources import (ensure_pump_sources,
-                                  pump_registry_for_context)
+            from .sources import ensure_pump_sources, pump_registry_for_context
             self._registry = pump_registry_for_context(self.context)
             ensure_pump_sources(self._registry)
         return self._registry
@@ -196,7 +201,7 @@ class PumpDesk:
 
         return _get
 
-    def _dex_snapshot(self, mint: str) -> Optional[dict]:
+    def _dex_snapshot(self, mint: str) -> dict | None:
         """Call-grading snapshot over the recording transport."""
         return _outcomes.token_snapshot(mint, self._dex_http_get())
 
@@ -478,12 +483,18 @@ class PumpDesk:
         # 3. refresh + evaluate every dossiered mint; publish calls
         calls, reasons = [], []
         params = _learn.current_params(self.store)
+        # Phase 2: the learned win model (when trained) rides along as
+        # evidence on each verdict — the gates still rule.
+        try:
+            win_model = _learn.load_win_model()
+        except Exception:  # noqa: BLE001 - a bad store never kills a cycle
+            win_model = None
         for mint in sorted(self.store.dossiers()):
             d = self.refresh_dossier(mint)
             self._attention_check(d)
             verdict = _score.evaluate(
                 d, smart_wallets=self.store.watched_smart(),
-                params=params)
+                params=params, win_model=win_model)
             if verdict.verdict == "CALL_CANDIDATE":
                 call = self.calls.build_call(d, verdict)
                 if call is not None and not self._already_called(mint):
@@ -602,6 +613,23 @@ class PumpDesk:
         }
         out["learning"] = _learn.recalibrate(
             self.store, self.calls.log.calls())
+        # Phase 2: the win model refits on the same graded journal —
+        # the learned P(win) is evidence on the next cycle's calls,
+        # never a silent override of the gates. The fit outcome is
+        # recorded in the open (trained / held / insufficient).
+        try:
+            win_outcome = _learn.fit_win_model(self.calls.log.calls())
+            out["win_model"] = {
+                "status": win_outcome.status,
+                "reason": win_outcome.reason,
+                "n_rows": win_outcome.n_rows,
+                "heldout": (vars(win_outcome.report)
+                            if win_outcome.report else None),
+            }
+        except Exception as exc:  # noqa: BLE001 - a failed fit is a hold
+            out["win_model"] = {"status": "unavailable",
+                                "reason": f"win model fit failed: {exc}",
+                                "n_rows": 0, "heldout": None}
         out["shelved"] = _shelf.shelve_notable(
             self.store, context=self.context)
         return out
@@ -760,7 +788,7 @@ class PumpDesk:
         }
 
 
-def _dex_snapshot(mint: str) -> Optional[dict]:
+def _dex_snapshot(mint: str) -> dict | None:
     return _outcomes.token_snapshot(mint)
 
 

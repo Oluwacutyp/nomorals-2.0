@@ -60,6 +60,10 @@ class ScoreVerdict:
     reasons: list = field(default_factory=list)
     gates: list = field(default_factory=list)
     evidence: str = ""
+    #: Learned win probability (Phase 2) — EVIDENCE on the call, never
+    #: a silent override: the gates still rule, and a high probability
+    #: never admits a gated mint. None = no win model trained yet.
+    win_probability: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +75,9 @@ class ScoreVerdict:
             "smart_money": round(self.smart_money, 4),
             "reasons": list(self.reasons), "gates": list(self.gates),
             "evidence": self.evidence,
+            "win_probability": (
+                None if self.win_probability is None
+                else round(self.win_probability, 4)),
         }
 
 
@@ -80,11 +87,23 @@ def _clamp(x: float) -> float:
 
 def evaluate(dossier: dict[str, Any],
              smart_wallets: set[str] | None = None,
-             params: dict[str, Any] | None = None) -> ScoreVerdict:
+             params: dict[str, Any] | None = None,
+             win_model: Any = None) -> ScoreVerdict:
     """Score one dossier.  Pure decision over the dossier dict —
     publishing lives in calls.py.  ``params`` carries the desk's
     current (possibly recalibrated) weights/threshold; the P1
-    constants are the default."""
+    constants are the default.  ``win_model`` is a fitted
+    :func:`learn.fit_win_model` model: its P(win) lands on the verdict
+    as EVIDENCE (``win_probability`` + an evidence line) — it never
+    changes the verdict, and the gates still rule."""
+    if win_model is not None:
+        # lazy import: learn.py imports this module at its top level.
+        from .learn import win_probability as _win_probability
+
+        _win_model = win_model
+    else:
+        _win_probability = None  # type: ignore[assignment]
+        _win_model = None
     weights = (params or {}).get("weights") or DEFAULT_WEIGHTS
     call_threshold = float((params or {}).get("call_threshold",
                                              CALL_THRESHOLD))
@@ -240,7 +259,7 @@ def evaluate(dossier: dict[str, Any],
                 f"{hits} graph-graded smart wallet(s) bought "
                 f"(track-record confluence {smart:.2f})")
     elif smart_wallets:
-        hits = int((dossier.get("smart_hits") or 0))
+        hits = int(dossier.get("smart_hits") or 0)
         smart = _clamp(hits / 3.0)
         if hits:
             v.reasons.append(f"{hits} watched smart wallet(s) bought")
@@ -268,5 +287,19 @@ def evaluate(dossier: dict[str, Any],
         v.reasons.append(f"composite {v.composite:.2f} / momentum "
                          f"{v.momentum:.2f} below call floors "
                          f"({call_threshold} / {momentum_floor})")
+    if _win_probability is not None:
+        curve = dossier.get("curve") or {}
+        v.win_probability = _win_probability(_win_model, {
+            "components": {"momentum": v.momentum,
+                           "smart_money": v.smart_money,
+                           "rug_risk": v.rug_risk,
+                           "manipulation": v.manipulation},
+            "composite": v.composite,
+            "entry_mc_sol": float(curve.get("market_cap_sol") or 0),
+            "entry_curve_pct": float(curve.get("curve_pct") or 0),
+        })
+        v.reasons.append(
+            f"learned win probability {v.win_probability:.2f} "
+            f"(trained on {getattr(_win_model, 'n_rows', '?')} graded calls)")
     v.evidence = "; ".join(v.reasons)
     return v

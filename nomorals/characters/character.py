@@ -20,8 +20,10 @@ import math
 import random
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
+
 from .failures import record_failure
 
 SuggestFn = Callable[[str], str]  # (prompt) -> model text, may return ""
@@ -143,6 +145,17 @@ class Character:
     # persona: free-form traits, e.g. {"witty": 0.9, "sarcastic": 0.7}
     persona: dict[str, float] = field(default_factory=dict)
     voice_name: str = ""          # TTS voice in the voice catalogue
+    # ── generative specialists (Phase 2) ───────────────────────────────
+    # rvc_model: RVC voice-swap model name for this character (""
+    # = no swap model named — the voice is the catalogue voice only).
+    # lora_file: per-character persona LoRA adapter path ("" = no
+    # adapter yet — the shared base carries the persona prompt).
+    # face_ref: reference face image for guarded face swap, ONLY where
+    # the character appears OUTSIDE the game ("" = no face; NPCs
+    # in-game never get faces).
+    rvc_model: str = ""
+    lora_file: str = ""
+    face_ref: str = ""
     backstory: str = ""
     knowledge: list[str] = field(default_factory=list)   # things they know
     goals: list[str] = field(default_factory=list)       # things they want
@@ -552,13 +565,19 @@ class Character:
         the earliest. Stateless path (no handle needed); any scorer
         failure returns the first candidate, never raises."""
         try:
-            from .learn import score_candidates, pick_best
+            from .learn import pick_best, score_candidates
             handle = getattr(self, "_learn", None)
             if handle is not None:
                 weights, prefs, recent = handle.scorer_state()
+                # Phase 2: the fitted batch scorer is the pick when one
+                # was ever promoted (it beat the hand weights on a
+                # held-out slice); otherwise the hand weights score.
+                model = handle.learned_scorer()
             else:
                 weights, prefs, recent = None, None, []
-            scored = score_candidates(texts, self, weights, recent, prefs)
+                model = None
+            scored = score_candidates(texts, self, weights, recent, prefs,
+                                      model=model)
             idx = pick_best(scored)
             return texts[idx], idx
         except Exception as e:
@@ -652,15 +671,20 @@ class Character:
             "ocean": self.ocean, "insecurities": self.insecurities,
             "stage_of_life": self.stage_of_life, "interests": self.interests,
             "goal_states": self.goal_states, "reflections": self.reflections,
+            "rvc_model": self.rvc_model, "lora_file": self.lora_file,
+            "face_ref": self.face_ref,
         }
 
     @classmethod
-    def from_dict(cls, d: dict[str, Any]) -> "Character":
+    def from_dict(cls, d: dict[str, Any]) -> Character:
         return cls(
             id=str(d.get("id") or uuid.uuid4().hex[:12]),
             name=str(d.get("name") or ""),
             persona=dict(d.get("persona") or {}),
             voice_name=str(d.get("voice_name") or ""),
+            rvc_model=str(d.get("rvc_model") or ""),
+            lora_file=str(d.get("lora_file") or ""),
+            face_ref=str(d.get("face_ref") or ""),
             backstory=str(d.get("backstory") or ""),
             knowledge=list(d.get("knowledge") or []),
             goals=list(d.get("goals") or []),

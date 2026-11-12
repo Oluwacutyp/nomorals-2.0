@@ -26,11 +26,13 @@ and always returns the line.
 
 ML note: the journal stores (features, label) rows, and
 ``export_training_data()`` emits them, so a future sklearn/CatBoost
-batch fit trains directly on this doc. No batch fit ships in v1:
-fitting on a handful of graded rows would be fake learning, and
-CatBoost is not installed in this environment (sklearn is, but the
-volume gate comes first). Any future fit path must lazy-import and
-return a clear "unavailable" reason, never fake success.
+batch fit trains directly on this doc. Phase 2 (2026-11-12) ships
+that fit path: :func:`fit_scorer` trains a regressor on the graded
+rows behind the volume gate (``CHAR_LINE_MIN_ROWS``), and promotes it
+only when it beats the hand-weight scorer on a held-out slice — the
+learned scorer then replaces the hand weights as the pick. Any fit
+path must lazy-import and return a clear "unavailable" reason, never
+fake success.
 """
 from __future__ import annotations
 
@@ -49,13 +51,18 @@ from .voice import VoiceFingerprint, consistency, fingerprint
 __all__ = [
     "LearnStore", "LearnHandle", "ScoredCandidate",
     "attach", "detach", "get_handle",
-    "score_candidates", "extract_features",
+    "score_candidates", "extract_features", "fit_scorer",
+    "CHAR_LINE_MIN_ROWS",
     "DEFAULT_WEIGHTS", "MAX_ENTRIES", "SESSION_GRADES",
     "GRADE_SOURCES", "FEATURES", "DECIDE_OUTCOMES",
 ]
 
 # ── constants ──────────────────────────────────────────────────────────
 MAX_ENTRIES = 500           # journal cap per character; oldest pruned
+#: Floor for the batch line scorer: a character's graded lines
+#: accumulate slowly, so the floor is 30 graded rows — declared here,
+#: enforced by fit_scorer, never waived.
+CHAR_LINE_MIN_ROWS = 30
 FEATURES = ("consistency", "catchphrase", "length_fit", "punct_fit",
             "novelty")
 DEFAULT_WEIGHTS = {"consistency": 0.5, "catchphrase": 0.1,
@@ -204,12 +211,20 @@ def score_candidates(texts: list[str], char: Any,
                      weights: dict[str, float] | None = None,
                      recent_lines: list[str] | tuple[str, ...] = (),
                      prefs: dict[str, Any] | None = None,
+                     model: Any = None,
                      ) -> list[ScoredCandidate]:
     """Score candidates with the character's own scorer.
 
     Pure function (no I/O, no journaling) — usable from speak() even
     without an attached handle. Returns candidates in input order with
     scores attached; the caller picks the best (ties: earliest wins).
+
+    ``model`` is a fitted :class:`llm.specialists.LearnerModel` from
+    :func:`fit_scorer` — when given, the LEARNED scorer scores (its
+    -1..1 grade prediction rescaled to the same 0..1 scale as the hand
+    weights); otherwise the hand weights score. The learned scorer is
+    only ever handed here after it beat the hand weights on a held-out
+    slice, so this is a promotion, not a guess.
     """
     w = dict(DEFAULT_WEIGHTS)
     if weights:
@@ -223,7 +238,14 @@ def score_candidates(texts: list[str], char: Any,
     out = []
     for t in texts:
         feats = extract_features(t, char, recent_lines, prefs)
-        score = sum(w[k] * feats[k] for k in FEATURES)
+        if model is not None:
+            try:
+                pred = float(model.predict_one(feats))
+            except Exception:  # noqa: BLE001 - a bad model never kills a line
+                pred = 0.0
+            score = max(0.0, min(1.0, (pred + 1.0) / 2.0))
+        else:
+            score = sum(w[k] * feats[k] for k in FEATURES)
         out.append(ScoredCandidate(t, feats, score))
     return out
 
@@ -489,7 +511,7 @@ class LearnStore:
                            if e.get("grade") is not None]
                 lines.append(f"  decide moves: {len(decide)} journaled, "
                              f"{len(dgraded)} graded")
-                for game in sorted((d.get("decide_stats") or {})):
+                for game in sorted(d.get("decide_stats") or {}):
                     for opt in sorted(d["decide_stats"][game]):
                         c = d["decide_stats"][game][opt]
                         lines.append(f"    decide {game}: {opt} "
@@ -523,6 +545,58 @@ class LearnStore:
             return rows
 
 
+# ── batch fit (Phase 2) ─────────────────────────────────────────────────
+
+def _hand_grade_prediction(feats: dict[str, float],
+                           weights: dict[str, float]) -> float:
+    """The hand-weight scorer's grade prediction for one row, on the
+    -1..1 grade scale (its 0..1 score rescaled). The comparison unit
+    for the held-out promotion test."""
+    score = sum(float(weights.get(k, DEFAULT_WEIGHTS[k])) * float(feats.get(k, 0.0))
+                for k in FEATURES)
+    return max(-1.0, min(1.0, 2.0 * score - 1.0))
+
+
+def fit_scorer(char_id: str, *, store: LearnStore | None = None,
+               model_store: Any = None,
+               backend: str = "gradboost") -> Any:
+    """Batch-fit the character's line scorer on its graded journal.
+
+    Trains a regressor (features -> grade, -1..1) behind the
+    ``CHAR_LINE_MIN_ROWS`` floor, and promotes it ONLY when it beats
+    the hand-weight scorer on the same held-out slice. Returns the
+    toolkit's :class:`llm.specialists.FitOutcome` — "trained" (saved
+    to the model store under ``character-line:<char_id>``), "held"
+    (the hand weights keep carrying), "insufficient" (below the
+    floor), or "unavailable" (the backend is missing — the wall named).
+    """
+    from ..llm.specialists import LearnerSpec, ModelStore, fit_if_ready
+
+    learn_store = store or LearnStore()
+    rows = learn_store.export_training_data(char_id)
+    weights = dict(learn_store.doc(char_id).get("weights")
+                    or dict(DEFAULT_WEIGHTS))
+
+    def _code_score(feats: list[dict[str, float]],
+                    labels: list[float]) -> float:
+        # hand-weight scorer on the same held-out slice, in the
+        # report's units (1 - MAE / label range)
+        if not labels:
+            return 0.0
+        preds = [_hand_grade_prediction(f, weights) for f in feats]
+        mae = sum(abs(p - y) for p, y in zip(preds, labels, strict=True)) / len(labels)
+        span = (max(labels) - min(labels)) or 1.0
+        return max(0.0, 1.0 - mae / span)
+
+    spec = LearnerSpec(job=f"character-line:{char_id}",
+                       features=FEATURES, kind="regressor",
+                       backend=backend,
+                       min_examples=CHAR_LINE_MIN_ROWS,
+                       label_name="grade")
+    return fit_if_ready(rows, spec, code_score_fn=_code_score,
+                        store=(model_store or ModelStore()))
+
+
 # ── handle: the runtime object attached to a Character ────────────────
 class LearnHandle:
     """Runtime binding between a Character and its learn doc.
@@ -554,6 +628,19 @@ class LearnHandle:
         d = self.store.doc(self.char_id)
         return (d.get("weights") or dict(DEFAULT_WEIGHTS),
                 _prefs_targets(d), self._recent_lines())
+
+    def learned_scorer(self, model_store: Any = None) -> Any | None:
+        """The fitted batch scorer for this character, if one was ever
+        promoted (fit_scorer saved it). None means the hand weights
+        carry — the model is not trusted until it beats them on a
+        held-out slice, so absence is the honest state, never a gap."""
+        try:
+            from ..llm.specialists import ModelStore
+
+            store = model_store or ModelStore()
+            return store.load(f"character-line:{self.char_id}")
+        except Exception:  # noqa: BLE001 - a bad store never kills a line
+            return None
 
     def _recent_lines(self, n: int = 8) -> list[str]:
         d = self.store.doc(self.char_id)
