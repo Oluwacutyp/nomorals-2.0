@@ -38,6 +38,7 @@ from nomorals.media.site_descriptors import (
     BLOCK_CLASSES,
     CHAIN_STAGES,
     SOUNDCLOUD_DESCRIPTOR,
+    TIKTOK_DESCRIPTOR,
     YOUTUBE_DESCRIPTOR,
     SiteDescriptor,
     SiteDescriptorError,
@@ -228,6 +229,147 @@ class TestYouTubeDescriptor:
                    side_effect=_fail_direct):
             report = dl.download(
                 "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                dest_dir=tmp_path, audio_only=True)
+        assert report.ok is False
+        # Kit silent (ytdlp rule, not direct), connector skipped.
+        assert report.tried() == ["direct", "proxy", "rendered",
+                                  "browser"]
+        assert "connector" not in report.tried()
+        connector.stream_url.assert_not_called()
+
+
+# ── the TikTok descriptor (descriptor #3) ─────────────────────────
+
+
+class TestTikTokDescriptor:
+    #: Real TikTok URL shapes, one per form the descriptor claims.
+    #: Verified against yt-dlp's own TikTok extractor grammar
+    #: (yt_dlp/extractor/tiktok.py, master, fetched 2026-11-12):
+    #: TikTokIE video (``@user/video/<id>``, ``share/video/<id>``,
+    #: ``embed/<id>``, ``tiktokv.com``), TikTokVMIE short links
+    #: (``vm|vt.tiktok.com`` + ``tiktok.com/t/``), TikTokLiveIE
+    #: (``@user/live``, ``m.tiktok.com/share/live/<id>``) — plus
+    #: ``/photo/<id>``, the photo-post form TikTok itself serves
+    #: (real tiktok.com photo URLs), which yt-dlp does NOT cover:
+    #: on a photo post it lands only the slideshow's background
+    #: audio, never the images.
+    TIKTOK_URLS = (
+        "https://www.tiktok.com/@someuser/video/7170520270497680683",
+        "https://www.tiktok.com/@someuser/video/7170520270497680683"
+        "?is_from_webapp=1&sender_device=pc",
+        "https://m.tiktok.com/@someuser/video/7170520270497680683",
+        "https://www.tiktok.com/@someuser/photo/7604667694410894606",
+        "https://www.tiktok.com/@someuser/live",
+        "https://www.tiktok.com/share/video/7170520270497680683",
+        "https://www.tiktok.com/embed/7170520270497680683",
+        "https://www.tiktokv.com/embed/7170520270497680683",
+        "https://www.tiktok.com/t/ZTRC5xgJp",
+        "https://vm.tiktok.com/ZTR45GpSF/",
+        "https://vt.tiktok.com/ZSe4FqkKd",
+        "https://m.tiktok.com/share/live/7209423610325322522",
+    )
+
+    #: URLs the descriptor must NOT claim: non-TikTok hosts,
+    #: look-alikes, bare short hosts, and TikTok pages that are
+    #: not one playable item (home, profile, tag, music, feed) —
+    #: those fall through to the generic chain instead of taking
+    #: the TikTok chain.
+    NOT_TIKTOK_URLS = (
+        "https://example.com/@user/video/7170520270497680683",
+        "https://www.instagram.com/reel/123456",
+        "https://nottiktok.com/@user/video/7170520270497680683",
+        "https://tiktok.com.evil.test/@user/video/7170520270497680683",
+        "https://www.tiktok.com/",
+        "https://www.tiktok.com/@someuser",
+        "https://www.tiktok.com/@someuser/video/",
+        "https://www.tiktok.com/@someuser/video",
+        "https://www.tiktok.com/@someuser/livestream",
+        "https://www.tiktok.com/tag/cats",
+        "https://www.tiktok.com/music/original-sound-7170520270497680683",
+        "https://www.tiktok.com/foryou",
+        "https://www.tiktok.com/discover",
+        "https://vm.tiktok.com/",
+        "https://vt.tiktok.com/",
+    )
+
+    def test_matches_tiktok_url_shapes_only(self):
+        reg = SiteDescriptorRegistry([TIKTOK_DESCRIPTOR])
+        for url in self.TIKTOK_URLS:
+            assert reg.for_url(url) is TIKTOK_DESCRIPTOR, url
+        for url in self.NOT_TIKTOK_URLS:
+            assert reg.for_url(url) is None, url
+
+    def test_descriptor_carries_tiktok_behaviour(self):
+        desc = TIKTOK_DESCRIPTOR
+        assert desc.site == "tiktok"
+        # Canonical ladder minus the connector rung: there is no
+        # TikTok connector, the direct stage (yt-dlp) resolves.
+        assert desc.chain == ("direct", "kit", "proxy", "rendered",
+                              "browser")
+        assert "connector" not in desc.chain
+        assert desc.connector == ""
+        assert tuple(desc.block_classes) == (
+            "region", "login", "private")
+        # Public by default; the session shape is declared so a
+        # login block can retry authenticated (B5) — sid_tt is the
+        # one cookie yt-dlp's TikTok extractor reads and forwards
+        # to the API host; sessionid / msToken are not consumed by
+        # that extractor and are not named.
+        assert desc.auth == "none"
+        assert desc.auth_needed is False
+        assert desc.auth_domains == ("tiktok.com",)
+        assert desc.auth_cookie_names == ("sid_tt",)
+        assert desc.downloadable is True
+
+    def test_default_registry_resolves_tiktok_and_keeps_the_others(
+            self):
+        from nomorals.media.site_descriptors import (
+            DEFAULT_SITE_DESCRIPTORS,
+        )
+
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.tiktok.com/@someuser/video/7170520270497680683"
+            ) is TIKTOK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://vm.tiktok.com/ZTR45GpSF/") is TIKTOK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.tiktok.com/@someuser/photo/7604667694410894606"
+            ) is TIKTOK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.get("tiktok") \
+            is TIKTOK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            ) is YOUTUBE_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://soundcloud.com/a/b") is SOUNDCLOUD_DESCRIPTOR
+
+    def test_tiktok_chain_skips_connector_and_fails_honestly(
+            self, tmp_path):
+        # The descriptor's chain governs the engine for a TikTok
+        # URL: no rung in this hermetic rig can serve a video page
+        # — the kit rung only fetches direct-rule URLs (a video
+        # page is the ytdlp rule, not direct); there is no TikTok
+        # connector; the proxy pool is empty; rendered and browser
+        # are unwired — so the report fails honestly, and the
+        # injected connector is never engaged.  In production the
+        # direct stage (yt-dlp) lands a TikTok video; a live
+        # landing is NOT proven here — it needs network and a real
+        # video.  A photo post lands audio-only via yt-dlp, never
+        # its images — that limit is named on the descriptor, not
+        # hidden by this test.
+        from unittest.mock import patch
+
+        connector = SimpleNamespace(
+            stream_url=mock.Mock(
+                side_effect=AssertionError("connector engaged")))
+        registry = SiteDescriptorRegistry([TIKTOK_DESCRIPTOR])
+        dl = _downloader(tmp_path, connector,
+                         site_descriptors=registry)
+        with patch("nomorals.tools.media.download",
+                   side_effect=_fail_direct):
+            report = dl.download(
+                "https://www.tiktok.com/@someuser/video/"
+                "7170520270497680683",
                 dest_dir=tmp_path, audio_only=True)
         assert report.ok is False
         # Kit silent (ytdlp rule, not direct), connector skipped.

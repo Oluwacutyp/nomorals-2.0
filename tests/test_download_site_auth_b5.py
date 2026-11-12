@@ -57,6 +57,7 @@ from nomorals.media.site_auth import (
 )
 from nomorals.media.site_descriptors import (
     SOUNDCLOUD_DESCRIPTOR,
+    TIKTOK_DESCRIPTOR,
     YOUTUBE_DESCRIPTOR,
     SiteDescriptor,
     SiteDescriptorError,
@@ -571,6 +572,14 @@ class TestDescriptorAuthFields:
         assert YOUTUBE_DESCRIPTOR.auth_cookie_names == (
             "SID", "SAPISID")
 
+    def test_tiktok_descriptor_carries_session_shape(self):
+        # sid_tt is the one cookie yt-dlp's TikTok extractor
+        # reads and forwards to the API host; sessionid / msToken
+        # are not consumed by that extractor and are not named.
+        assert TIKTOK_DESCRIPTOR.auth == "none"
+        assert TIKTOK_DESCRIPTOR.auth_domains == ("tiktok.com",)
+        assert TIKTOK_DESCRIPTOR.auth_cookie_names == ("sid_tt",)
+
 
 # ── the YouTube session (descriptor #2, B5 shape) ───────────────────
 
@@ -637,4 +646,62 @@ class TestYouTubeSession:
             YOUTUBE_DESCRIPTOR, require=True)
         assert auth.status == "missing"
         assert "youtube" in auth.owner_action
+        assert "/cookies import" in auth.owner_action
+
+
+# ── the TikTok session (descriptor #3, B5 shape) ────────────────────
+
+
+class TestTikTokSession:
+    def test_public_tiktok_needs_no_session(self, tmp_path):
+        # auth "none" without require: the resolver answers ok
+        # without touching vault or estate — public videos need
+        # nothing.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            TIKTOK_DESCRIPTOR)
+        assert auth.ok and auth.source == ""
+        assert store.gets == 0
+
+    def test_require_resolves_tiktok_session_from_estate(
+            self, tmp_path):
+        # A login block says a session IS needed: require=True
+        # resolves the owner's tiktok.com session from the
+        # estate — sid_tt is the cookie yt-dlp's TikTok
+        # extractor forwards to the API host.
+        store = _DictStore()
+        estate = _estate(tmp_path)
+        resolver = SiteAuthResolver(
+            vault_store=store, cookie_estate=estate)
+        assert resolver.resolve(
+            TIKTOK_DESCRIPTOR, require=True).status == "missing"
+        estate.upsert([_session_cookie("tiktok.com", name="sid_tt")],
+                      source="test")
+        gets_before = store.gets
+        auth = resolver.resolve(TIKTOK_DESCRIPTOR, require=True)
+        assert auth.ok and auth.source == "estate"
+        assert len(auth.cookies) == 1
+        # The estate hit resolves without a vault touch (the one
+        # earlier get belongs to the missing resolve above).
+        assert store.gets == gets_before
+
+    def test_anonymous_clearance_is_not_a_tiktok_login(
+            self, tmp_path):
+        store = _DictStore()
+        estate = _estate(tmp_path)
+        estate.upsert([_session_cookie(
+            "tiktok.com", name="cf_clearance")], source="test")
+        auth = SiteAuthResolver(
+            vault_store=store, cookie_estate=estate).resolve(
+                TIKTOK_DESCRIPTOR, require=True)
+        assert auth.status == "missing"
+        assert "/cookies import" in auth.owner_action
+
+    def test_require_without_session_names_owner_action(
+            self, tmp_path):
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            TIKTOK_DESCRIPTOR, require=True)
+        assert auth.status == "missing"
+        assert "tiktok" in auth.owner_action
         assert "/cookies import" in auth.owner_action

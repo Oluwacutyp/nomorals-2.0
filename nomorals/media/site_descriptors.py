@@ -21,8 +21,8 @@ download never raises.  True DRM is named, never chased (the
 rendered stage reports it from the log's license traffic and
 downloads nothing).
 
-Auth: ``auth="none"`` means the public path (SoundCloud and YouTube
-today).
+Auth: ``auth="none"`` means the public path (SoundCloud, YouTube
+and TikTok today).
 ``"account"`` / ``"vault"`` name a requirement the authenticated
 rung (B5, :mod:`nomorals.media.site_auth`) honours: a descriptor
 with ``auth != "none"`` resolves its session before the chain
@@ -61,6 +61,7 @@ __all__ = [
     "SiteDescriptorRegistry",
     "SOUNDCLOUD_DESCRIPTOR",
     "YOUTUBE_DESCRIPTOR",
+    "TIKTOK_DESCRIPTOR",
     "DEFAULT_SITE_DESCRIPTORS",
 ]
 
@@ -395,6 +396,69 @@ YOUTUBE_DESCRIPTOR = SiteDescriptor(
           "are region/login/private; no connector rung",
 )
 
+#: TikTok — the THIRD site descriptor: public video by default,
+#: no account, resolved by the direct stage through yt-dlp (its
+#: TikTok extractor covers video, short links and live; the kit
+#: stage only fetches direct-rule URLs, so it stays silent here —
+#: the chain's real yt-dlp work happens in the direct stage).
+#: There is no TikTok connector in :mod:`nomorals.connectors`,
+#: so the chain is the canonical ladder minus the connector
+#: rung.  What needs a login, plainly: public videos need
+#: nothing; a login wall (TikTok redirects the page to /login)
+#: needs the owner's signed-in tiktok.com session — the B5 rung
+#: resolves it (estate first, then vault) when a login block is
+#: classified, and the retry runs authenticated through the
+#: estate's cookies file.  The up-front gate does NOT apply
+#: (``auth`` is ``"none"``): the chain runs anonymously first
+#: and only a login block asks for the session.  The session
+#: cookie is ``sid_tt`` — the one cookie yt-dlp's own TikTok
+#: extractor reads and forwards to the API host
+#: (yt_dlp/extractor/tiktok.py, ``_call_api_impl``, master,
+#: fetched 2026-11-12); TikTok web's ``sessionid`` login cookie
+#: is NOT consumed by yt-dlp's extractor and is therefore not
+#: named, and ``msToken`` is an anti-bot token the extractor
+#: never reads either.  Honest gap: no TikTok connector exists
+#: to classify a login block today, so the live login-block
+#: retry for TikTok is unproven in this lane — the declared
+#: shape is what the B5 resolver answers (``require=True``) and
+#: what a future classified block would retry with.  Blocks:
+#: ``region`` (geo-blocked), ``login`` (login wall), ``private``
+#: (private, deleted or otherwise unavailable).  No ``preview``
+#: class — TikTok has no preview-only streams — and no ``drm``
+#: on standard video streams.  Photo posts (``/photo/<id>``)
+#: are genuine TikTok post URLs and are claimed, but honestly:
+#: yt-dlp lands only the slideshow's background audio on a
+#: photo post, never the images — the images need the
+#: rendered / browser rungs (page extraction), never chased
+#: through the kit.
+TIKTOK_DESCRIPTOR = SiteDescriptor(
+    site="tiktok",
+    url_patterns=(
+        r"https?://([a-z0-9-]+\.)*tiktok\.com/@[\w.-]+/"
+        r"(video|photo)/\d+\b",
+        r"https?://([a-z0-9-]+\.)*tiktok\.com/@[\w.-]+/live\b",
+        r"https?://([a-z0-9-]+\.)*tiktok\.com/"
+        r"(embed/\d+|share/video/\d+)",
+        r"https?://www\.tiktokv?\.com/(embed|share/video)/\d+",
+        r"https?://([a-z0-9-]+\.)*tiktok\.com/t/\w+",
+        r"https?://(vm|vt)\.tiktok\.com/\w+",
+        r"https?://m\.tiktok\.com/share/live/\d+",
+    ),
+    chain=("direct", "kit", "proxy", "rendered", "browser"),
+    connector="",
+    block_classes=("region", "login", "private"),
+    auth="none",
+    auth_domains=("tiktok.com",),
+    auth_cookie_names=("sid_tt",),
+    downloadable=True,
+    notes="TikTok public video: no account, direct stage via "
+          "yt-dlp; photo posts land audio-only via yt-dlp, "
+          "images need rendered/browser; login wall retries "
+          "authenticated through the owner's tiktok.com session "
+          "(B5) when a login block is classified; blocks are "
+          "region/login/private; no connector rung",
+)
+
 #: The descriptors the engine reads by default.
 DEFAULT_SITE_DESCRIPTORS = SiteDescriptorRegistry(
-    [SOUNDCLOUD_DESCRIPTOR, YOUTUBE_DESCRIPTOR])
+    [SOUNDCLOUD_DESCRIPTOR, YOUTUBE_DESCRIPTOR, TIKTOK_DESCRIPTOR])
