@@ -57,6 +57,7 @@ from nomorals.media.site_auth import (
 )
 from nomorals.media.site_descriptors import (
     SOUNDCLOUD_DESCRIPTOR,
+    YOUTUBE_DESCRIPTOR,
     SiteDescriptor,
     SiteDescriptorError,
     SiteDescriptorRegistry,
@@ -563,3 +564,77 @@ class TestDescriptorAuthFields:
             "soundcloud.com",)
         assert SOUNDCLOUD_DESCRIPTOR.auth_cookie_names == (
             "auth_token",)
+
+    def test_youtube_descriptor_carries_session_shape(self):
+        assert YOUTUBE_DESCRIPTOR.auth == "none"
+        assert YOUTUBE_DESCRIPTOR.auth_domains == ("youtube.com",)
+        assert YOUTUBE_DESCRIPTOR.auth_cookie_names == (
+            "SID", "SAPISID")
+
+
+# ── the YouTube session (descriptor #2, B5 shape) ───────────────────
+
+
+class TestYouTubeSession:
+    def test_public_youtube_needs_no_session(self, tmp_path):
+        # auth "none" without require: the resolver answers ok
+        # without touching vault or estate — public videos need
+        # nothing.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            YOUTUBE_DESCRIPTOR)
+        assert auth.ok and auth.source == ""
+        assert store.gets == 0
+
+    def test_require_resolves_youtube_session_from_estate(
+            self, tmp_path):
+        # A login block says a session IS needed: require=True
+        # resolves the owner's youtube.com session from the
+        # estate — either Google session cookie proves it.
+        store = _DictStore()
+        estate = _estate(tmp_path)
+        resolver = SiteAuthResolver(
+            vault_store=store, cookie_estate=estate)
+        assert resolver.resolve(
+            YOUTUBE_DESCRIPTOR, require=True).status == "missing"
+        estate.upsert([_session_cookie("youtube.com", name="SID")],
+                      source="test")
+        gets_before = store.gets
+        auth = resolver.resolve(YOUTUBE_DESCRIPTOR, require=True)
+        assert auth.ok and auth.source == "estate"
+        assert len(auth.cookies) == 1
+        # The estate hit resolves without a vault touch (the one
+        # earlier get belongs to the missing resolve above).
+        assert store.gets == gets_before
+
+    def test_sapisid_also_proves_a_youtube_session(
+            self, tmp_path):
+        store = _DictStore()
+        estate = _estate(tmp_path)
+        estate.upsert([_session_cookie(
+            "youtube.com", name="SAPISID")], source="test")
+        auth = SiteAuthResolver(
+            vault_store=store, cookie_estate=estate).resolve(
+                YOUTUBE_DESCRIPTOR, require=True)
+        assert auth.ok and auth.source == "estate"
+
+    def test_anonymous_clearance_is_not_a_youtube_login(
+            self, tmp_path):
+        store = _DictStore()
+        estate = _estate(tmp_path)
+        estate.upsert([_session_cookie(
+            "youtube.com", name="cf_clearance")], source="test")
+        auth = SiteAuthResolver(
+            vault_store=store, cookie_estate=estate).resolve(
+                YOUTUBE_DESCRIPTOR, require=True)
+        assert auth.status == "missing"
+        assert "/cookies import" in auth.owner_action
+
+    def test_require_without_session_names_owner_action(
+            self, tmp_path):
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            YOUTUBE_DESCRIPTOR, require=True)
+        assert auth.status == "missing"
+        assert "youtube" in auth.owner_action
+        assert "/cookies import" in auth.owner_action

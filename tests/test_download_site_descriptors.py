@@ -38,6 +38,7 @@ from nomorals.media.site_descriptors import (
     BLOCK_CLASSES,
     CHAIN_STAGES,
     SOUNDCLOUD_DESCRIPTOR,
+    YOUTUBE_DESCRIPTOR,
     SiteDescriptor,
     SiteDescriptorError,
     SiteDescriptorRegistry,
@@ -121,6 +122,119 @@ class TestSoundCloudDescriptor:
             "https://soundcloud.com/a/b") is SOUNDCLOUD_DESCRIPTOR
         assert DEFAULT_SITE_DESCRIPTORS.get("soundcloud") \
             is SOUNDCLOUD_DESCRIPTOR
+
+
+# ── the YouTube descriptor (descriptor #2) ───────────────────────────
+
+
+class TestYouTubeDescriptor:
+    #: Real YouTube URL shapes, one per form the descriptor claims.
+    YOUTUBE_URLS = (
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://m.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://music.youtube.com/watch?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PL123",
+        "https://www.youtube.com/shorts/dQw4w9WgXcQ",
+        "https://www.youtube.com/live/dQw4w9WgXcQ",
+        "https://www.youtube.com/embed/dQw4w9WgXcQ",
+        "https://www.youtube.com/v/dQw4w9WgXcQ",
+        "https://www.youtube.com/playlist?list=PL123456",
+        "https://www.youtube-nocookie.com/embed/dQw4w9WgXcQ",
+        "https://youtu.be/dQw4w9WgXcQ",
+        "https://youtu.be/dQw4w9WgXcQ?si=abc123",
+    )
+
+    #: URLs the descriptor must NOT claim: non-YouTube hosts, look-
+    #: alikes, and YouTube pages that are not a playable item (home,
+    #: channel, search, feed) — those fall through to the generic
+    #: chain instead of taking the YouTube chain.
+    NOT_YOUTUBE_URLS = (
+        "https://example.com/watch?v=dQw4w9WgXcQ",
+        "https://vimeo.com/123456",
+        "https://notyoutube.com/watch?v=dQw4w9WgXcQ",
+        "https://youtube.com.evil.test/watch?v=dQw4w9WgXcQ",
+        "https://www.youtube.com/",
+        "https://www.youtube.com/@SomeChannel",
+        "https://www.youtube.com/channel/UC123456",
+        "https://www.youtube.com/results?search_query=cats",
+        "https://www.youtube.com/feed/subscriptions",
+        "https://youtu.be/",
+    )
+
+    def test_matches_youtube_url_shapes_only(self):
+        reg = SiteDescriptorRegistry([YOUTUBE_DESCRIPTOR])
+        for url in self.YOUTUBE_URLS:
+            assert reg.for_url(url) is YOUTUBE_DESCRIPTOR, url
+        for url in self.NOT_YOUTUBE_URLS:
+            assert reg.for_url(url) is None, url
+
+    def test_descriptor_carries_youtube_behaviour(self):
+        desc = YOUTUBE_DESCRIPTOR
+        assert desc.site == "youtube"
+        # Canonical ladder minus the connector rung: there is no
+        # YouTube connector, the kit rung (yt-dlp) resolves.
+        assert desc.chain == ("direct", "kit", "proxy", "rendered",
+                              "browser")
+        assert "connector" not in desc.chain
+        assert desc.connector == ""
+        assert tuple(desc.block_classes) == (
+            "region", "login", "private")
+        # Public by default; the session shape is declared so a
+        # login block can retry authenticated (B5).
+        assert desc.auth == "none"
+        assert desc.auth_needed is False
+        assert desc.auth_domains == ("youtube.com",)
+        assert desc.auth_cookie_names == ("SID", "SAPISID")
+        assert desc.downloadable is True
+
+    def test_default_registry_resolves_youtube_and_keeps_soundcloud(
+            self):
+        from nomorals.media.site_descriptors import (
+            DEFAULT_SITE_DESCRIPTORS,
+        )
+
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            ) is YOUTUBE_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://youtu.be/dQw4w9WgXcQ") is YOUTUBE_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.get("youtube") \
+            is YOUTUBE_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://soundcloud.com/a/b") is SOUNDCLOUD_DESCRIPTOR
+
+    def test_youtube_chain_skips_connector_and_fails_honestly(
+            self, tmp_path):
+        # The descriptor's chain governs the engine for a YouTube
+        # URL: no rung in this hermetic rig can serve a watch page
+        # — the kit rung only fetches direct-rule URLs (a watch
+        # page is the ytdlp rule, not direct); there is no YouTube
+        # connector; the proxy pool is empty; rendered and browser
+        # are unwired — so the report fails honestly, and the
+        # injected connector is never engaged.  In production the
+        # rendered / browser rungs are what land a YouTube video
+        # (driven-player capture / page extraction); a live landing
+        # is NOT proven here — it needs network and a real video.
+        from unittest.mock import patch
+
+        connector = SimpleNamespace(
+            stream_url=mock.Mock(
+                side_effect=AssertionError("connector engaged")))
+        registry = SiteDescriptorRegistry([YOUTUBE_DESCRIPTOR])
+        dl = _downloader(tmp_path, connector,
+                         site_descriptors=registry)
+        with patch("nomorals.tools.media.download",
+                   side_effect=_fail_direct):
+            report = dl.download(
+                "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
+                dest_dir=tmp_path, audio_only=True)
+        assert report.ok is False
+        # Kit silent (ytdlp rule, not direct), connector skipped.
+        assert report.tried() == ["direct", "proxy", "rendered",
+                                  "browser"]
+        assert "connector" not in report.tried()
+        connector.stream_url.assert_not_called()
 
 
 # ── validation: malformed fails at LOAD, naming site + field ─────────

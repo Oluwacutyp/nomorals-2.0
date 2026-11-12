@@ -21,7 +21,8 @@ download never raises.  True DRM is named, never chased (the
 rendered stage reports it from the log's license traffic and
 downloads nothing).
 
-Auth: ``auth="none"`` means the public path (SoundCloud today).
+Auth: ``auth="none"`` means the public path (SoundCloud and YouTube
+today).
 ``"account"`` / ``"vault"`` name a requirement the authenticated
 rung (B5, :mod:`nomorals.media.site_auth`) honours: a descriptor
 with ``auth != "none"`` resolves its session before the chain
@@ -59,6 +60,7 @@ __all__ = [
     "SiteDescriptor",
     "SiteDescriptorRegistry",
     "SOUNDCLOUD_DESCRIPTOR",
+    "YOUTUBE_DESCRIPTOR",
     "DEFAULT_SITE_DESCRIPTORS",
 ]
 
@@ -348,6 +350,51 @@ SOUNDCLOUD_DESCRIPTOR = SiteDescriptor(
           "through the owner's soundcloud.com session (B5)",
 )
 
+#: YouTube — the SECOND site descriptor: public video by default,
+#: no account, resolved by the kit rung (yt-dlp) — there is no
+#: YouTube connector in :mod:`nomorals.connectors`, so the chain
+#: is the canonical ladder minus the connector rung.  The resolver
+#: already routes YouTube URLs through yt-dlp (kind ``"youtube"``,
+#: with a single-video-id check); this descriptor is what puts the
+#: download engine on the same path.  What needs a login, plainly:
+#: public videos need nothing; age-restricted, sign-in-required
+#: and members-only videos need the owner's signed-in youtube.com
+#: session — the B5 rung resolves it (estate first, then vault)
+#: when a login block is classified, and the retry runs
+#: authenticated through the estate's cookies file.  The up-front
+#: gate does NOT apply (``auth`` is ``"none"``): the chain runs
+#: anonymously first and only a login block asks for the session.
+#: The session cookies are Google's own: ``SID`` is the primary
+#: session cookie, ``SAPISID`` the cookie yt-dlp uses for
+#: authenticated innertube calls — an anonymous clearance cookie
+#: is not a login.  Blocks: ``region`` (geo-blocked), ``login``
+#: (age / sign-in wall), ``private`` (private, deleted or
+#: otherwise unavailable).  No ``preview`` class — YouTube has no
+#: preview-only streams — and no ``drm`` on standard video
+#: streams; rented / purchased movie content is DRM-gated and
+#: out of the chain's reach, named as a site error, never chased.
+YOUTUBE_DESCRIPTOR = SiteDescriptor(
+    site="youtube",
+    url_patterns=(
+        r"https?://([a-z0-9-]+\.)*youtube\.com/"
+        r"(watch|shorts|live|embed|v|playlist)\b",
+        r"https?://([a-z0-9-]+\.)*youtube-nocookie\.com/embed/",
+        r"https?://youtu\.be/[A-Za-z0-9_-]+",
+    ),
+    chain=("direct", "kit", "proxy", "rendered", "browser"),
+    connector="",
+    block_classes=("region", "login", "private"),
+    auth="none",
+    auth_domains=("youtube.com",),
+    auth_cookie_names=("SID", "SAPISID"),
+    downloadable=True,
+    notes="YouTube public video: no account, kit (yt-dlp) resolves; "
+          "age-restricted / sign-in-required / members-only videos "
+          "retry authenticated through the owner's youtube.com "
+          "session (B5) when a login block is classified; blocks "
+          "are region/login/private; no connector rung",
+)
+
 #: The descriptors the engine reads by default.
 DEFAULT_SITE_DESCRIPTORS = SiteDescriptorRegistry(
-    [SOUNDCLOUD_DESCRIPTOR])
+    [SOUNDCLOUD_DESCRIPTOR, YOUTUBE_DESCRIPTOR])
