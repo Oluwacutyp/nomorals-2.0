@@ -2699,7 +2699,7 @@ def _seed(store: Any = None) -> SourceRegistry:
         ("ZA", "en", "sahiphopmag.co.za", "SA Hip Hop Mag", ("music", "news"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "SA hip-hop", 10),
         # ── Brazil / India ──
         ("BR", "pt", "g1.globo.com", "G1 Globo", ("news",), Licence.LICENSED, TrustTier.VERIFIED, "Brazil news", 15),
-        ("BR", "pt", "palcomp3.com.br", "Palco MP3", ("music",), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Brazilian music", 10),
+        ("BR", "pt", "palcomp3.com.br", "Palco MP3", ("music",), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Brazilian music — NOT wired into the /play chain (verified 2026-11-12): Akamai bot wall 403s every plain fetch (curl + urllib, home/GraphQL/search); no search shape verified (/busca?q= 404, /pesquisa/ is an artist page); yt-dlp PalcoMP3 extractor proves an unauthenticated GraphQL API returning mp3File direct MP3s, but it carries no search. Do NOT add a PalcoMP3Source until a live-browser probe lands.", 10),
         ("IN", "en", "ndtv.com", "NDTV", ("news",), Licence.LICENSED, TrustTier.VERIFIED, "India news", 15),
         ("IN", "hi", "jiosaavn.com", "JioSaavn", ("music", "charts"), Licence.LICENSED, TrustTier.COMMUNITY, "Indian music/charts", 10),
         # ── globals ──

@@ -463,6 +463,29 @@ MUSIC_REGISTRY: List[MusicSource] = [
              "Do NOT add a GhanaMusicSource until a live-browser probe "
              "passes the challenge and pins a track-page audio URL.",
        pack={"nation": "GH"}),
+    _M(id="palcomp3", name="Palco MP3", source_class="open", auth="none",
+       formats=["MP3"], quality_ceiling="MP3 via GraphQL mp3File (unverified live — endpoint 403s plain fetch from this box)",
+       licence="Per-track licence as stated by rights holder",
+       volatility="commercial", bulk=False, api=True, bot_wall=True,
+       etiquette=OPEN_POLITE,
+       notes="Brazilian indie music platform (1.6M songs, 138k artists). NOT "
+             "wired into the /play chain — verified 2026-11-12: an Akamai "
+             "bot wall 403s every plain fetch from this box (curl AND urllib "
+             "with full browser headers — home, /graphql/ and search alike), "
+             "so the chain's plain fetch reads nothing; and no search shape "
+             "is verified — /busca?q= is 404, /pesquisa/ is an artist page, "
+             "and the yt-dlp PalcoMP3 extractor (which proves the "
+             "unauthenticated GraphQL API at /graphql/ returning mp3File "
+             "direct MP3s plus hls, song /<artist>/<song>/, artist "
+             "/<artist>/) carries no search. A JSON client would have to "
+             "invent a GraphQL search field and an HTML parser would have "
+             "to invent a search path — both fake. Major-label tracks are "
+             "suspended per-track by APDIF copyright claims, so the live "
+             "catalogue is indie-first. Do NOT add a PalcoMP3Source until a "
+             "live-browser probe pins the search URL shape, confirms the "
+             "GraphQL endpoint answers from a browser session, and checks "
+             "the schema for a search field.",
+       pack={"nation": "BR"}),
     _M(id="imslp", name="IMSLP", source_class="open", auth="none",
        formats=["PDF", "MP3"], quality_ceiling="as scanned",
        licence="Public domain scores", volatility="institutional",

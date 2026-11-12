@@ -692,6 +692,29 @@ class TestResolverWiring:
                    for name, _ in src_mod.SOURCE_CHAIN)
         assert not hasattr(src_mod, "GhanaMusicSource")
 
+    def test_text_chain_does_not_claim_palcomp3(self):
+        # Palco MP3 is NOT in the chain, deliberately (CENSUS B7):
+        # verified 2026-11-12, an Akamai bot wall 403s every plain
+        # fetch from this box (curl AND urllib with full browser
+        # headers — home, /graphql/ and search alike), so the chain's
+        # plain fetch reads nothing; and no search shape is verified
+        # — /busca?q= is 404, /pesquisa/ is an artist page, and the
+        # yt-dlp PalcoMP3 extractor (which proves the unauthenticated
+        # GraphQL API returning mp3File direct MP3s) carries no search
+        # — so there is no honest source class to wire (a JSON client
+        # would have to invent a GraphQL search field; an HTML parser
+        # would have to invent a search path).  Remove this pin only
+        # when a live-browser probe pins the search URL shape,
+        # confirms the GraphQL endpoint answers from a browser
+        # session, and checks the schema for a search field, and wire
+        # the real shape then.
+        from nomorals.media import sources as src_mod
+
+        assert "palcomp3-search" not in src_mod.MUSIC_SEARCH_SOURCES
+        assert all(name != "palcomp3-search"
+                   for name, _ in src_mod.SOURCE_CHAIN)
+        assert not hasattr(src_mod, "PalcoMP3Source")
+
     def test_text_chain_includes_new_sources(self):
         # The chain tries netnaija before the proven globals.
         # Boomplay is BACK in the chain (browser-backed search,

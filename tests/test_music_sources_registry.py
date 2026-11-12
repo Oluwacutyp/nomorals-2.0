@@ -378,3 +378,43 @@ class TestGhanaMusicRow:
         assert "zero .mp3 links" in notes
         assert "live-browser probe" in notes
         assert "Do NOT add a GhanaMusicSource" in notes
+
+
+# ── Palco MP3: verified NOT wireable (CENSUS B7) ─────────────────────
+#
+# The /play chain does NOT claim Palco MP3, deliberately: verified
+# 2026-11-12, an Akamai bot wall 403s every plain fetch from this box
+# (curl AND urllib with full browser headers — home, /graphql/ and
+# search alike), so the chain's plain fetch reads nothing; and no
+# search shape is verified — /busca?q= is 404, /pesquisa/ is an artist
+# page, and the yt-dlp PalcoMP3 extractor (which proves the
+# unauthenticated GraphQL API at /graphql/ returning mp3File direct
+# MP3s plus hls, song /<artist>/<song>/, artist /<artist>/) carries
+# no search.  A JSON client would have to invent a GraphQL search
+# field and an HTML parser would have to invent a search path — both
+# fake — so no PalcoMP3Source exists.  Wiring needs a live-browser
+# probe that pins the search URL shape, confirms the GraphQL endpoint
+# answers from a browser session, and checks the schema for a search
+# field; until then these pins hold the NOT-wired state.
+
+
+class TestPalcoMP3Row:
+    def test_row_exists_and_is_open_keyless_api_bot_walled(self):
+        row = by_id("palcomp3")
+        assert row is not None
+        assert row.source_class == "open"
+        assert row.auth == "none"
+        assert row.api is True
+        assert row.bot_wall is True
+
+    def test_row_records_the_verified_wall(self):
+        row = by_id("palcomp3")
+        assert row is not None
+        notes = row.notes
+        assert "NOT wired into the /play chain" in notes
+        assert "Akamai" in notes
+        assert "403s every plain fetch" in notes
+        assert "/busca?q= is 404" in notes
+        assert "mp3File" in notes
+        assert "live-browser probe" in notes
+        assert "Do NOT add a PalcoMP3Source" in notes
