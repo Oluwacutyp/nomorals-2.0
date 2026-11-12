@@ -9,8 +9,12 @@ is the one that downloads.
 When a query is specific (``/play lifestyle ya man``), the top result
 is downloaded directly, no list.
 
-The :class:`PickCache` is short-lived (5-minute TTL) and in-memory:
+The :class:`PickCache` is short-lived (30-minute TTL) and in-memory:
 stale picks simply vanish instead of downloading the wrong track later.
+A short-lived tombstone remembers a slot that HAD a pick for 30 minutes
+past expiry/consumption, so a late bare-number reply gets an honest
+"that pick-list expired" instead of silence — a bare number in a chat
+that never had a pick still flows on untouched.
 Never raises.
 """
 
@@ -28,6 +32,7 @@ _log = get_logger(__name__)
 
 __all__ = [
     "PICK_TTL",
+    "PICK_TOMBSTONE_TTL",
     "PICK_LIMIT",
     "MATCH_RECALL_FLOOR",
     "MATCH_SCORE_FLOOR",
@@ -42,8 +47,15 @@ __all__ = [
     "format_duration",
 ]
 
-#: How long a pick-list stays valid.
-PICK_TTL = 300.0
+#: How long a pick-list stays valid. 30 minutes: a human reads a list
+#: slower than 5 minutes, and the list is single-use and consumed on
+#: success, so a longer TTL cannot download the wrong track — it is
+#: the same list the user was shown.
+PICK_TTL = 1800.0
+#: How long the "this slot HAD a pick" memory lasts past expiry or
+#: consumption. A late bare-number reply inside this window gets the
+#: honest expired answer; past it, the number is a stray number again.
+PICK_TOMBSTONE_TTL = 1800.0
 #: Max candidates shown.
 PICK_LIMIT = 8
 
@@ -87,6 +99,20 @@ class PickCache:
 
     _by_token: dict[str, PickEntry] = {}
     _by_chat: dict[str, str] = {}  # (chat, owner) slot -> latest token
+    #: (chat, owner) slot -> time the slot's pick expired or was
+    #: consumed. Lets a late bare-number reply tell "your list ran
+    #: out" from "there never was a list". Pruned with the cache.
+    _expired: dict[str, float] = {}
+
+    @classmethod
+    def _note_expired(cls, chat_key: str, owner_key: str = "") -> None:
+        """Remember that this slot HAD a pick, now gone. Never raises."""
+        try:
+            if not chat_key:
+                return
+            cls._expired[_slot(chat_key, owner_key)] = time.time()
+        except Exception:  # noqa: BLE001
+            pass
 
     @classmethod
     def store(cls, candidates: list[Any], chat_key: str,
@@ -100,7 +126,11 @@ class PickCache:
                               owner_key=owner_key or "")
             cls._by_token[token] = entry
             if chat_key:
-                cls._by_chat[_slot(chat_key, owner_key)] = token
+                slot = _slot(chat_key, owner_key)
+                cls._by_chat[slot] = token
+                # A fresh list supersedes the expired memory: the
+                # chat has a LIVE pick again, not a gone one.
+                cls._expired.pop(slot, None)
             cls.prune()
             return token
         except Exception:  # noqa: BLE001 — cache must never break chat
@@ -115,6 +145,7 @@ class PickCache:
             if entry is None:
                 return None
             if entry.expired():
+                cls._note_expired(entry.chat_key, entry.owner_key)
                 cls._by_token.pop(token, None)
                 return None
             return entry
@@ -167,6 +198,47 @@ class PickCache:
             return None
 
     @classmethod
+    def had_expired_pick(cls, chat_key: str,
+                         owner_key: str = "") -> bool:
+        """True when this (chat, owner) slot HAD a pick-list that is
+        now gone (expired or consumed) inside the tombstone window —
+        the difference between "your list ran out" and "there never
+        was a list". A bare number with a live pick never reaches
+        here (the live lookup runs first); a bare number with no
+        history at all returns False so the turn flows on untouched.
+        Owner scoping mirrors :meth:`get_for_chat`: another user's
+        expired list never answers this user's number. Never raises."""
+        try:
+            now = time.time()
+            slot = _slot(chat_key, owner_key)
+            noted = cls._expired.get(slot)
+            if noted is not None:
+                if noted > now - PICK_TOMBSTONE_TTL:
+                    return True
+                cls._expired.pop(slot, None)
+            # Fall back across the chat's slots, mirroring
+            # get_for_chat: the most recent expired memory under
+            # any owner slot, with the same owner guard.
+            prefix = f"{chat_key or ''}\x1f"
+            best_slot: str | None = None
+            best_noted = 0.0
+            for s, n in list(cls._expired.items()):
+                if not s.startswith(prefix):
+                    continue
+                if n <= now - PICK_TOMBSTONE_TTL:
+                    cls._expired.pop(s, None)
+                    continue
+                if n > best_noted:
+                    best_noted, best_slot = n, s
+            if best_slot is None:
+                return False
+            _chat, _, slot_owner = best_slot.partition("\x1f")
+            return not (owner_key and slot_owner
+                        and slot_owner != owner_key)
+        except Exception:  # noqa: BLE001
+            return False
+
+    @classmethod
     def is_superseded(cls, token: str) -> bool:
         """True when a NEWER list has replaced ``token``'s list in
         its (chat, owner) slot — a tap on the old card must answer
@@ -193,6 +265,9 @@ class PickCache:
                 slot = _slot(entry.chat_key, entry.owner_key)
                 if cls._by_chat.get(slot) == (token or "").strip().lower():
                     cls._by_chat.pop(slot, None)
+            # Consumed, not vanished: a second number still gets
+            # the honest expired answer inside the window.
+            cls._note_expired(entry.chat_key, entry.owner_key)
         return entry
 
     @classmethod
@@ -207,6 +282,11 @@ class PickCache:
                     slot = _slot(entry.chat_key, entry.owner_key)
                     if cls._by_chat.get(slot) == t:
                         cls._by_chat.pop(slot, None)
+                    cls._note_expired(entry.chat_key, entry.owner_key)
+            stale = [s for s, n in cls._expired.items()
+                     if n <= now - PICK_TOMBSTONE_TTL]
+            for s in stale:
+                cls._expired.pop(s, None)
         except Exception:  # noqa: BLE001
             pass
 
@@ -215,6 +295,7 @@ class PickCache:
         """Test helper: empty the cache."""
         cls._by_token.clear()
         cls._by_chat.clear()
+        cls._expired.clear()
 
 
 def is_specific(query: str) -> bool:

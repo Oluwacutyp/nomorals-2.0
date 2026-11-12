@@ -55,6 +55,23 @@ play_owner_var: contextvars.ContextVar = contextvars.ContextVar(
     "devon_play_owner", default="")
 
 
+def _pick_expired_reply() -> Any:
+    """The honest answer when a /play pick-list is gone.
+
+    One wording for both paths that can meet a dead list — the
+    explicit ``/play pick <token> <n>`` command and the bare-number
+    reply hook — so the two can never drift apart again (the
+    2026-11-12 live defect: the hook had no answer at all, and the
+    owner's "1" met silence). The "Search again" button re-runs
+    /play; on surfaces without buttons it stays as tappable text.
+    """
+    from ...social.chat.tgbot_buttons import actionable
+
+    return actionable(
+        "that pick-list expired (30 min) — pick fast next time 😄",
+        [[("🎵 Search again", "play")]])
+
+
 def _looks_like_path_or_url(ref: str) -> bool:
     """Heuristic: is this an image path/URL (lookup) or a text prompt (generate)?"""
     s = (ref or "").strip()
@@ -1032,12 +1049,7 @@ class RuntimeMediaMixin:
         # re-search every source) just to try another number.
         entry = PickCache.get(token)
         if entry is None:
-            from ...social.chat.tgbot_buttons import actionable
-
-            return actionable(
-                "that pick-list expired (5 min) — pick fast "
-                "next time 😄",
-                [[("🎵 Search again", "play")]])
+            return _pick_expired_reply()
         if PickCache.is_superseded(token):
             # A newer list replaced this one in the chat: a tap on
             # the stale card must not download from a list the
@@ -1089,8 +1101,14 @@ class RuntimeMediaMixin:
         number", the user replies "3", this resolves it through the same
         ``/play pick`` path as the Telegram buttons.  Returns a reply
         string when a pending pick-list and a bare number both match,
-        else None.  Never raises.
+        else None — EXCEPT when the chat HAD a pick-list that is now
+        gone: then it answers honestly ("that pick-list expired")
+        instead of silence (2026-11-12: the owner's "1" five minutes
+        after the list met nothing at all).  A bare number in a chat
+        that never had a pick-list still returns None and the turn
+        flows on untouched.  Never raises.
         """
+        from ...games.players import canonical_whatsapp_sender_id
         from ...media.picklist import PICK_LIMIT, PickCache
 
         text = (message.text or "").strip()
@@ -1099,10 +1117,22 @@ class RuntimeMediaMixin:
         n = int(text)
         if n < 1 or n > PICK_LIMIT:
             return None
-        owner_key = str(getattr(message, "sender_id", "")
-                        or getattr(message, "sender", "") or "")
+        # Same owner derivation as _pick_owner_key (runtime.py):
+        # WhatsApp reports one human as phone JID or LID "in
+        # either order", so the raw sender id is folded to the
+        # canonical phone form — otherwise a reply arriving on
+        # the other form misses a live pick and meets silence.
+        meta = getattr(message, "meta", None)
+        alt_id = ""
+        if isinstance(meta, dict):
+            alt_id = str(meta.get("sender_alt_id") or "").strip()
+        sender_id = str(getattr(message, "sender_id", "") or "")
+        owner_key = (canonical_whatsapp_sender_id(sender_id, alt_id)
+                     or str(getattr(message, "sender", "") or ""))
         found = PickCache.get_for_chat(message.chat.key, owner_key)
         if found is None:
+            if PickCache.had_expired_pick(message.chat.key, owner_key):
+                return _pick_expired_reply()
             return None
         token, _entry = found
         try:

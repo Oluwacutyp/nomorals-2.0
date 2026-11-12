@@ -325,9 +325,27 @@ def _strip_button_claims(text: str) -> str:
 def _pick_owner_key(message: Any) -> str:
     """The operation-slot owner for a message's cards: the stable
     sender id when the adapter provides one, else the display
-    sender, else "" (the chat's shared slot)."""
-    return str(getattr(message, "sender_id", "")
-               or getattr(message, "sender", "") or "")
+    sender, else "" (the chat's shared slot).
+
+    WhatsApp reports one human two ways — the phone JID and the
+    privacy LID — "in either order, depending on the account's
+    addressing migration" (register #29). The raw form is folded
+    to the canonical phone form here, so a pick-list offered on
+    one form still resolves when the reply arrives on the other;
+    without the fold the slot lookup misses with a live pick
+    sitting in the cache and the bare-number reply meets silence
+    (2026-11-12 /play pick-list). The fold is the same one the
+    game identity resolution already applies.
+    """
+    from ...games.players import canonical_whatsapp_sender_id
+
+    sender_id = str(getattr(message, "sender_id", "") or "")
+    sender = str(getattr(message, "sender", "") or "")
+    meta = getattr(message, "meta", None)
+    alt_id = ""
+    if isinstance(meta, dict):
+        alt_id = str(meta.get("sender_alt_id") or "").strip()
+    return canonical_whatsapp_sender_id(sender_id, alt_id) or sender
 
 
 def _numbered_button_fallback(runtime: Any, message: Any, text: str,
