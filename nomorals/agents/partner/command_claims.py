@@ -108,10 +108,13 @@ def open_shared_claims_db(path: str | None = None):
 __all__ = [
     "CommandClaimLedger",
     "DurableCommandClaimLedger",
+    "DurableConversationClaimLedger",
     "DurableGroupClaimStore",
     "WINDOW_S",
     "MAX_KEYS",
     "command_claim_key",
+    "load_bot_ids",
+    "register_bot_id",
     "shared_claims_path",
     "open_shared_claims_db",
 ]
@@ -489,3 +492,213 @@ class DurableGroupClaimStore:
             return None
         return {"bot_admin": row[0], "bot_jid": row[1],
                 "updated_at": row[2]}
+
+
+_BOT_IDS_DDL = """
+CREATE TABLE IF NOT EXISTS bot_ids (
+  platform TEXT NOT NULL,
+  bot_id TEXT NOT NULL,
+  updated_at REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY(platform, bot_id)
+);
+"""
+
+
+def register_bot_id(db: Any, platform: str, bot_id: Any) -> None:
+    """Record one of Devon's own bot account ids in the shared
+    store (dupfix3, 2026-11-12).
+
+    The userbot's peer-bot guard used to learn bot ids ONLY from
+    its own settings' bot tokens — and the live userbot carries
+    none, so both guards failed together and the DM looped. A bot
+    runtime writes its own id here at startup (it knows it from
+    its token, before any poll); every runtime reads the set back
+    instead of trusting settings alone. Idempotent upsert; never
+    raises — a store fault degrades to settings-only, never to a
+    broken boot."""
+    platform = str(platform or "").strip()
+    bot_id = str(bot_id or "").strip()
+    if not platform or not bot_id or db is None:
+        return
+    try:
+        db.executescript(_BOT_IDS_DDL)
+        db.execute(
+            "INSERT INTO bot_ids (platform, bot_id, updated_at)"
+            " VALUES (?, ?, ?)"
+            " ON CONFLICT(platform, bot_id) DO UPDATE SET"
+            " updated_at = excluded.updated_at",
+            (platform, bot_id, time.time()))
+    except Exception:  # noqa: BLE001 - degraded, never fatal
+        _log.debug("bot registry: register failed for %s:%s",
+                   platform, bot_id, exc_info=True)
+
+
+def load_bot_ids(db: Any) -> set[str]:
+    """Every bot account id in the shared registry, or empty
+    when the store cannot be read. Never raises."""
+    if db is None:
+        return set()
+    try:
+        rows = db.query("SELECT bot_id FROM bot_ids")
+    except Exception:  # noqa: BLE001 - degraded, never fatal
+        _log.debug("bot registry: load failed", exc_info=True)
+        return set()
+    out: set[str] = set()
+    for row in rows or []:
+        try:
+            value = str(row["bot_id"] or "").strip()
+        except Exception:  # noqa: BLE001 - a bad row is skipped
+            continue
+        if value:
+            out.add(value)
+    return out
+
+
+_CONVERSATION_CLAIMS_DDL = """
+CREATE TABLE IF NOT EXISTS conversation_claims (
+  claim_key TEXT PRIMARY KEY,
+  surface TEXT NOT NULL DEFAULT '',
+  claimed_at REAL NOT NULL DEFAULT 0
+);
+"""
+
+
+class DurableConversationClaimLedger:
+    """Cross-surface exactly-once for conversational turns
+    (dupfix3, 2026-11-12).
+
+    The command ledger arbitrates commands; conversational replies
+    had NO cross-surface equivalent — the reply claims were
+    per-runtime in-memory, so a plain-text turn seen by both
+    Telegram runtimes was answered by both. This ledger is the
+    same Batch-B seam over the shared store: one row per
+    (chat, sender, content-hash) turn (see
+    :func:`nomorals.agents.partner.reply_claims.reply_content_key`).
+
+    The contract differs from commands in one place: a claim
+    repeated by ANY surface inside the window stands down —
+    including the surface that took it — because a second
+    delivery of the same turn is a redelivery whoever brings
+    it. Claims expire after the window (a surface that claimed
+    and then crashed mutes its twins for at most the window).
+    Atomic across processes (insert-or-nothing, then a
+    compare-and-swap steal of an expired row). Never raises: a
+    store fault degrades to unclaimed (proceed) and is logged —
+    claim bookkeeping must not eat a turn.
+    """
+
+    def __init__(self, db: Any, *, window_s: float | None = None) -> None:
+        self._db = db
+        if window_s is None:
+            from .reply_claims import CONTENT_WINDOW_S
+
+            window_s = CONTENT_WINDOW_S
+        self._window_s = float(window_s)
+        self._lock = threading.Lock()
+        self._broken = False
+        self._last_sweep = 0.0
+        try:
+            self._db.executescript(_CONVERSATION_CLAIMS_DDL)
+        except Exception:  # noqa: BLE001 - degraded, never fatal
+            _log.warning("conversation claims: DDL failed; claims "
+                         "degrade to unclaimed", exc_info=True)
+            self._broken = True
+
+    def _row(self, key: str) -> tuple[str, float] | None:
+        row = self._db.query_one(
+            "SELECT surface, claimed_at FROM conversation_claims"
+            " WHERE claim_key = ?", (key,))
+        if row is None:
+            return None
+        return str(row["surface"] or ""), float(row["claimed_at"] or 0)
+
+    def _sweep(self, ts: float) -> None:
+        """Drop expired rows, throttled — the table stays tiny
+        and expired rows are stealable even unswept."""
+        if ts - self._last_sweep < 60.0:
+            return
+        self._last_sweep = ts
+        try:
+            self._db.execute(
+                "DELETE FROM conversation_claims WHERE claimed_at < ?",
+                (ts - self._window_s,))
+        except Exception:  # noqa: BLE001 - housekeeping only
+            _log.debug("conversation claims: sweep failed",
+                       exc_info=True)
+
+    def _steal_expired(self, key: str, surface: str, ts: float,
+                       held_ts: float) -> bool:
+        """Compare-and-swap an expired row to this surface."""
+        cursor = self._db.execute(
+            "UPDATE conversation_claims SET surface = ?, claimed_at = ?"
+            " WHERE claim_key = ? AND claimed_at = ?",
+            (surface, ts, key, held_ts))
+        return bool(getattr(cursor, "rowcount", 0))
+
+    def claim(self, key: str, surface: str, *,
+              now: float | None = None) -> bool:
+        """Try to own the conversational turn for ``key``.
+
+        True only when this caller owns the turn — a fresh claim,
+        or the previous claim aged out of the window. False when
+        ANY surface holds a live claim: stand down silently. An
+        empty key is unkeyable and always passes."""
+        key = str(key or "")
+        surface = str(surface or "")
+        if not key or not surface or self._broken:
+            return True  # unkeyable / degraded: legacy path
+        ts = time.time() if now is None else float(now)
+        with self._lock:
+            try:
+                self._sweep(ts)
+                row = self._row(key)
+                if row is not None:
+                    _holder, held_ts = row
+                    if ts - held_ts <= self._window_s:
+                        return False
+                    if self._steal_expired(key, surface, ts, held_ts):
+                        return True
+                    row = self._row(key)  # lost the steal race
+                    if row is None:
+                        return True
+                    _holder, held_ts = row
+                    return ts - held_ts > self._window_s
+                cursor = self._db.execute(
+                    "INSERT INTO conversation_claims"
+                    " (claim_key, surface, claimed_at)"
+                    " VALUES (?, ?, ?)"
+                    " ON CONFLICT(claim_key) DO NOTHING",
+                    (key, surface, ts))
+                if getattr(cursor, "rowcount", 0):
+                    return True
+                row = self._row(key)  # a twin inserted first
+                if row is None:
+                    return True
+                _holder, held_ts = row
+                return ts - held_ts > self._window_s and self._steal_expired(
+                    key, surface, ts, held_ts)
+            except Exception:  # noqa: BLE001 - never eats a turn
+                _log.warning("conversation claims: claim failed for %s; "
+                             "proceeding unclaimed", key,
+                             exc_info=True)
+                return True
+
+    def claimed_by(self, key: str, *,
+                   now: float | None = None) -> str:
+        """The surface holding a live claim on ``key``, or \"\"."""
+        key = str(key or "")
+        if not key or self._broken:
+            return ""
+        ts = time.time() if now is None else float(now)
+        try:
+            row = self._row(key)
+        except Exception:  # noqa: BLE001 - a probe, never fatal
+            _log.debug("conversation claims: claimed_by failed",
+                       exc_info=True)
+            return ""
+        if row is None:
+            return ""
+        holder, held_ts = row
+        if ts - held_ts > self._window_s:
+            return ""
+        return holder

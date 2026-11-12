@@ -658,6 +658,55 @@ class TelegramAdapter(ChatAdapter):
         """Both companion BotFather bot IDs (gated + personal)."""
         return self._companion_bot_ids
 
+    def note_companion_bot_ids(self, ids: Any) -> bool:
+        """Merge bot account ids into the peer-bot guard set
+        (dupfix3, 2026-11-12): the runtime pushes ids it learned
+        from the shared bot registry, so the guard holds even
+        when this adapter was built without the bot tokens.
+        Returns True when the set changed. Never raises."""
+        try:
+            fresh: set[int] = set()
+            if ids is None:
+                return False
+            if isinstance(ids, (str, int)):
+                ids = (ids,)
+            for cand in ids:
+                try:
+                    if cand:
+                        fresh.add(int(cand))
+                except (TypeError, ValueError):
+                    continue
+            if not fresh:
+                return False
+            merged = set(self._companion_bot_ids) | fresh
+            if merged == set(self._companion_bot_ids):
+                return False
+            self._companion_bot_ids = frozenset(merged)
+            self._companion_bot_id = min(merged) if merged else None
+            return True
+        except Exception:  # noqa: BLE001 - a guard update never dies
+            return False
+
+    def _peer_is_bot_dm(self, chat_id: Any) -> bool:
+        """True when ``chat_id`` is a DM whose peer is one of
+        Devon's own bots (dupfix3, 2026-11-12).
+
+        The peer IS the chat id in a DM — known before any entity
+        resolution, and independent of Telethon's .bot flag. A DM
+        with a bot is the primary's room; this surface observes
+        only, never generates a turn there. Groups are never a
+        bot DM (their chat id is the room, not a peer)."""
+        try:
+            cid = str(chat_id or "").strip()
+            if not cid or cid.startswith("-"):
+                return False
+            companions = getattr(self, "_companion_bot_ids", None)
+            if not companions or not cid.lstrip("-").isdigit():
+                return False
+            return int(cid) in companions
+        except Exception:  # noqa: BLE001 - a guard never eats intake
+            return False
+
     def _cache_input_entity(self, chat_id: str, entity: Any) -> None:
         """Store an input entity, indexed under every key it answers to."""
         if entity is None:
@@ -778,14 +827,24 @@ class TelegramAdapter(ChatAdapter):
         # Primary: explicit companion bot ID match — bulletproof even when
         # Telethon hasn't resolved the sender entity. Membership test
         # against the full set: the userbot must not reply to EITHER bot.
-        if self._companion_bot_ids:
+        # The set is read getattr-guarded and merged with the singular
+        # id (dupfix3): a half-built adapter (or one whose ids arrived
+        # through note_companion_bot_ids) must never crash this guard —
+        # a crash here used to propagate out of _handle_inbound.
+        companions: set[int] = set(
+            getattr(self, "_companion_bot_ids", None) or ())
+        singular = getattr(self, "_companion_bot_id", None)
+        if singular:
+            with contextlib.suppress(TypeError, ValueError):
+                companions.add(int(singular))
+        if companions:
             for candidate in (
                 getattr(event, "sender_id", None),
                 getattr(getattr(event, "message", None), "sender_id", None),
                 getattr(message, "sender_id", None),
             ):
                 try:
-                    if candidate is not None and int(candidate) in self._companion_bot_ids:
+                    if candidate is not None and int(candidate) in companions:
                         return True
                 except (TypeError, ValueError) as exc:
                     _log.debug("bot detection: candidate %r not numeric (%s)", candidate, exc)
@@ -1909,16 +1968,20 @@ class TelegramAdapter(ChatAdapter):
 
     def _deliver_peer_post(self, event: Any, message: Any,
                            handler: IncomingHandler) -> None:
-        """Deliver a bot's post in a DM as an observation, never a
-        turn (dupfix2). The runtime's peer-answer deferral resolves
-        on it — did the primary answer the owner's command in that
-        DM? — and the runtime's bot-turn law would drop it as a
-        turn even if it arrived shaped as one. Never raises: an
-        observation fault must not break the event loop."""
+        """Deliver a bot's post as an observation, never a turn
+        (dupfix2; groups since dupfix3). The runtime's peer-answer
+        deferral resolves on it — did the primary answer the
+        owner's command in that chat? — and the runtime's bot-turn
+        law would drop it as a turn even if it arrived shaped as
+        one. The kind follows the chat: a DM peer is the bot
+        itself, a negative chat id is a group room. Never raises:
+        an observation fault must not break the event loop."""
         try:
             chat_id = str(getattr(event, "chat_id", "") or "")
             if not chat_id:
                 return
+            kind = (ChatKind.GROUP if chat_id.startswith("-")
+                    else ChatKind.DM)
             reply_head = getattr(message, "reply_to", None)
             reply_to = str(
                 getattr(reply_head, "reply_to_msg_id", None)
@@ -1939,7 +2002,7 @@ class TelegramAdapter(ChatAdapter):
                        or getattr(message, "text", "") or "")
             obs = ChatMessage(
                 chat=ChatRef(platform=self.name, chat_id=chat_id,
-                             kind=ChatKind.DM),
+                             kind=kind),
                 incoming=True,
                 text=text,
                 sender="",
@@ -1994,19 +2057,20 @@ class TelegramAdapter(ChatAdapter):
         # When the companion BotFather bot runs alongside this userbot, the
         # bot's outgoing messages arrive here as incoming (different account).
         # Processing them would make the bot reply to itself in a loop.
-        # A bot's post in a DM is still delivered — as an OBSERVATION,
-        # never a turn (dupfix2): the runtime's peer-answer deferral
-        # resolves on it (did the primary answer the owner's command
-        # in that DM?), and the runtime's bot-turn law drops anything
-        # that arrives shaped as a turn anyway. Groups keep the plain
-        # drop: a bot's group post is not a room the userbot defers in.
-        if self._sender_is_bot(event, message):
-            if not str(chat_id).startswith("-"):
-                self._deliver_peer_post(event, message, handler)
-            else:
-                _log.debug(
-                    "telegram: DROPPED inbound chat_id=%s — sender is a "
-                    "bot (self-reply loop guard)", chat_id)
+        # A bot's post is delivered — as an OBSERVATION, never a turn
+        # (dupfix2): the runtime's peer-answer deferral resolves on it
+        # (did the primary answer the owner's command in that chat?),
+        # and the runtime's bot-turn law drops anything that arrives
+        # shaped as a turn anyway. DMs AND groups alike (dupfix3):
+        # the old group drop swallowed the bot's answer, so a pending
+        # group deferral could never resolve by observation and the
+        # 8s side failed over into a second answer. The peer is
+        # recognised by sender OR by the DM chat id itself
+        # (_peer_is_bot_dm) — the chat id needs no entity resolution
+        # and no .bot flag.
+        if self._sender_is_bot(event, message) \
+                or self._peer_is_bot_dm(chat_id):
+            self._deliver_peer_post(event, message, handler)
             return
         entity = None
         

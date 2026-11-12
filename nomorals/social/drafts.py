@@ -158,12 +158,21 @@ def detect_explicit_post(text: str) -> dict[str, Any] | None:
 
     Returns ``{"action": "post"|"schedule", "at": ts|None}`` or None.
     Case-insensitive. The bare noun "post" ("read that post") never matches.
+
+    The instruction must LEAD the message (dupfix3, 2026-11-12):
+    an explicit-post instruction is a message that IS the
+    instruction ("post this", "post this: <text>", "send it"),
+    not a message that merely MENTIONS the phrase inside a
+    question ("what should i post? ... then say 'post this'").
+    A quoted/mentioned occurrence mid-message never fires it —
+    the mention used to fire the override, whose canned reply
+    contains the phrase, so every copy re-fired it.
     """
     text = (text or "").strip()
     if not text:
         return None
     for pattern, action in EXPLICIT_POST_PATTERNS:
-        m = re.search(pattern, text, re.IGNORECASE)
+        m = re.match(pattern, text, re.IGNORECASE)
         if not m:
             continue
         at = parse_post_time(text) if action == "schedule" else None

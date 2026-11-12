@@ -132,6 +132,18 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
                 _t.split(":")[0] for _t in _bot_tokens
                 if _t and ":" in str(_t)
             }
+            if not _companion_ids:
+                # dupfix3: an empty set used to pass silently, and
+                # the peer-bot guard then degraded to Telethon's
+                # .bot flag alone — the live DM loop. Loud now: the
+                # runtime's shared bot registry is the derivation
+                # that fills this in at start; until it lands, the
+                # guard is degraded.
+                _log.warning(
+                    "telegram userbot built with NO companion bot ids "
+                    "(no bot tokens in settings) — the peer-bot guard "
+                    "degrades to the .bot flag until the shared bot "
+                    "registry sync fills it in")
             return TelegramAdapter(
                 api_id=chat.telegram_api_id,
                 api_hash=chat.telegram_api_hash,

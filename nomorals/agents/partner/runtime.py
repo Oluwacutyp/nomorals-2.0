@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import json
 import re
@@ -1139,10 +1140,9 @@ class PartnerRuntime(
             first = not getattr(self, "_autonomy_db_episode", False)
             self._autonomy_db_episode = True
         if handle is not None:
-            try:
+            # teardown is best-effort
+            with contextlib.suppress(Exception):
                 handle.close()
-            except Exception:  # noqa: BLE001 - teardown is best-effort
-                pass
         if first:
             record_failure(site, exc)
 
@@ -1696,6 +1696,34 @@ class PartnerRuntime(
             if _pending and self._is_peer_surface_group_post(message):
                 self._peer_post_observed(message)
                 return
+        # Cross-surface conversational exactly-once (dupfix3): one
+        # plain-text turn, one answer, across BOTH runtimes. The
+        # in-memory reply seam below only sees one runtime; the
+        # shared claim keys on (chat, sender, words), so the same
+        # turn arriving on the sibling surface stands down instead
+        # of generating a second reply — in the DM and in groups
+        # alike (group chat ids are perspective-independent, so
+        # the key collides there too). Runs before every turn
+        # consumer below, including the override and all hooks.
+        # Observations return above, so they never claim; echoes
+        # are not incoming turns, so they never claim either.
+        # SLASH COMMANDS ARE EXEMPT: a command must reach the
+        # peer deferral below, which is the arbitration that
+        # decides which surface answers — claiming it here would
+        # swallow the deferral on the second surface, so its
+        # failover never fires (and a later peer observation has
+        # no pending deferral to resolve). Commands keep their
+        # own arbitration: the shared command claim + deferral.
+        _text = str(getattr(message, "text", "") or "").strip()
+        if (message.incoming and not _text.startswith("/")
+                and self._conversation_already_claimed(message)):
+            self._bump("conversation_claim_held")
+            _log.info(
+                "conversation claim: turn held in %s "
+                "(id=%s) — already answered on another surface",
+                message.chat.key,
+                str(getattr(message, "message_id", "") or ""))
+            return
         # Trigger engine hook (nomorals/triggers): message-source triggers
         # evaluate the final inbound text here.  One call, no fork of the
         # dispatch path below; a no-op when no engine is attached, and a
@@ -2238,6 +2266,19 @@ class PartnerRuntime(
                 _log.exception("explicit-post override failed")
                 override_reply = None
             if override_reply is not None:
+                # dupfix3: an override reply is still one
+                # conversational turn for one message identity —
+                # claim it before sending, so a byte-identical
+                # repeat inside the window is held instead of
+                # re-firing the override.
+                if self._reply_already_claimed(message):
+                    self._bump("reply_claim_held")
+                    _log.info(
+                        "reply claim: override repeat held in %s "
+                        "(id=%s) — already answered",
+                        message.chat.key,
+                        str(getattr(message, "message_id", "") or ""))
+                    return
                 self._bump("controls")
                 try:
                     self._typing_for(message.chat, override_reply)
@@ -2818,6 +2859,15 @@ class PartnerRuntime(
         # locked vault skips the bridge, never the boot.
         self._bridge_provisioned_credentials()
         started = self.gateway.start(self.on_message)
+        # Shared bot registry (dupfix3): register this runtime's
+        # bot ids and push the merged set into the userbot
+        # adapter(s) before any inbound arrives, so the peer-bot
+        # guard holds from the first message. Failure-isolated.
+        try:
+            self._sync_bot_registry()
+        except Exception as exc:  # noqa: BLE001 - boot never dies here
+            record_failure(
+                "runtime.PartnerRuntime.start:bot_registry", exc)
         # WhatsApp cold-start attach (§15): gateway start builds
         # the whatsapp adapter once, against the static config
         # endpoint, and drops it when no bridge is listening yet —
@@ -4658,6 +4708,56 @@ class PartnerRuntime(
                 "runtime.PartnerRuntime._reply_already_claimed", exc)
             return False
 
+    def _shared_conversation_claims(self):  # type: ignore[no-untyped-def]
+        """The shared conversational-claim ledger (dupfix3), or
+        None when no store is attached. Mirrors
+        :meth:`_command_claims`: the shared claims file wins
+        whenever it opens, else the home database stands — and a
+        db-less construction keeps no ledger (the in-memory seam
+        below still guards same-runtime redelivery)."""
+        ledger = getattr(self, "_conversation_claims_obj", None)
+        if ledger is None:
+            from .command_claims import DurableConversationClaimLedger
+
+            db = self._shared_claims_db()
+            if db is None:
+                db = getattr(getattr(self, "context", None), "db", None)
+            if db is not None and hasattr(db, "query_one") \
+                    and hasattr(db, "execute"):
+                try:
+                    ledger = DurableConversationClaimLedger(db)
+                except Exception as exc:  # noqa: BLE001 - degrade
+                    record_failure(
+                        "runtime.PartnerRuntime"
+                        "._shared_conversation_claims", exc)
+                    ledger = None
+            self._conversation_claims_obj = ledger
+        return ledger
+
+    def _conversation_already_claimed(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """True when this conversational turn was already claimed
+        by ANY surface in the shared store (dupfix3) — a second
+        delivery of the same (chat, sender, words) inside the
+        window stands down. Never raises: a ledger fault lets the
+        turn proceed unclaimed (the in-memory seam below still
+        guards same-runtime redelivery)."""
+        try:
+            from .reply_claims import reply_content_key
+
+            key = reply_content_key(message)
+            if not key:
+                return False
+            ledger = self._shared_conversation_claims()
+            if ledger is None:
+                return False
+            return not ledger.claim(key, self._claim_surface(
+                str(getattr(message.chat, "platform", "") or "")))
+        except Exception as exc:  # noqa: BLE001 - arbitration
+            record_failure(               # never eats a turn
+                "runtime.PartnerRuntime._conversation_already_claimed",
+                exc)
+            return False
+
     def _surface_usernames(self) -> dict[str, str]:
         """{username (lowercase, no @): platform} for every
         attached surface that knows its own handle — the bot
@@ -4685,25 +4785,101 @@ class PartnerRuntime(
         return out
 
     def _bot_account_ids(self) -> set[str]:
-        """The numeric account ids of Devon's own bots, from the
-        attached adapters: each bot adapter's own id, and the
-        userbot's companion-bot registry (it is configured with
-        BOTH bot ids so it never talks over them)."""
+        """The numeric account ids of Devon's own bots (dupfix3).
+
+        Three sources, merged: each attached bot adapter's own id,
+        the userbot's companion-bot registry, and the shared bot
+        registry the bot runtimes write at startup (see
+        :meth:`_sync_bot_registry`). The shared registry is what
+        makes this set true on a runtime whose own settings carry
+        no bot tokens — the live shape that looped the DM. The
+        sync is TTL-gated, so this stays cheap on the hot path."""
+        try:
+            return set(self._sync_bot_registry())
+        except Exception:  # noqa: BLE001 - a guard never eats intake
+            return set()
+
+    _BOT_REGISTRY_TTL_S = 60.0
+
+    def _sync_bot_registry(self) -> set[str]:
+        """Sync this runtime's view of Devon's own bot ids.
+
+        Registers this runtime's bot-adapter ids in the shared
+        registry, reads the ids the sibling runtimes registered,
+        and pushes the merged set into attached userbot adapters
+        (their adapter-level peer guard then holds without
+        settings tokens). TTL-gated (60s); never raises. Returns
+        the merged set of bot account ids as strings."""
+        now = time.time()
+        cached = getattr(self, "_bot_registry_ids", None)
+        cached_ts = float(getattr(self, "_bot_registry_ts", 0.0) or 0.0)
+        if cached is not None and now - cached_ts < self._BOT_REGISTRY_TTL_S:
+            return set(cached)
         ids: set[str] = set()
-        gateway = getattr(self, "gateway", None)
-        adapters = getattr(gateway, "adapters", {}) or {}
-        for adapter in adapters.values():
-            bot_id = getattr(adapter, "_bot_id", None)
-            if bot_id:
-                ids.add(str(bot_id))
-            companions = getattr(adapter, "companion_bot_ids", None)
-            if companions:
-                for cand in companions:
-                    try:
-                        ids.add(str(int(cand)))
-                    except (TypeError, ValueError):
-                        continue
-        return ids
+        try:
+            gateway = getattr(self, "gateway", None)
+            adapters = getattr(gateway, "adapters", {}) or {}
+            bot_platforms: list[str] = []
+            for name, adapter in adapters.items():
+                bot_id = getattr(adapter, "_bot_id", None)
+                if bot_id:
+                    ids.add(str(bot_id))
+                    bot_platforms.append(str(name))
+                companions = getattr(adapter, "companion_bot_ids", None)
+                if companions:
+                    for cand in companions:
+                        try:
+                            ids.add(str(int(cand)))
+                        except (TypeError, ValueError):
+                            continue
+            # Shared registry: this runtime's bot ids go in, the
+            # siblings' ids come out. Best-effort — a store fault
+            # leaves the settings-derived set standing.
+            try:
+                from .command_claims import load_bot_ids, register_bot_id
+
+                db = self._shared_claims_db()
+                if db is not None:
+                    for name in bot_platforms:
+                        adapter = adapters.get(name)
+                        bot_id = getattr(adapter, "_bot_id", None)
+                        if bot_id:
+                            register_bot_id(db, str(name), bot_id)
+                    ids |= load_bot_ids(db)
+            except Exception as exc:  # noqa: BLE001 - registry is best-effort
+                record_failure(
+                    "runtime.PartnerRuntime._sync_bot_registry", exc)
+            # Push the merged set into attached userbot adapters.
+            for adapter in adapters.values():
+                push = getattr(adapter, "note_companion_bot_ids", None)
+                if callable(push):
+                    # push never dies
+                    with contextlib.suppress(Exception):
+                        push(ids)
+            # Loud failure (dupfix3): a userbot surface with NO bot
+            # id from any source has a peer guard running on the
+            # .bot flag alone — the live loop shape. Once per
+            # runtime life, so the log stays readable.
+            has_userbot = any(str(name) == "telegram"
+                              for name in adapters)
+            if has_userbot and not ids \
+                    and not getattr(self, "_bot_registry_empty_warned",
+                                    False):
+                self._bot_registry_empty_warned = True
+                _log.error(
+                    "bot registry: userbot attached but NO bot account "
+                    "id is known from settings, adapters or the shared "
+                    "registry — the peer-bot guard degrades to the .bot "
+                    "flag alone and the DM can loop")
+                record_failure(
+                    "runtime.PartnerRuntime._sync_bot_registry:empty",
+                    RuntimeError("no bot account id known"))
+        except Exception as exc:  # noqa: BLE001 - a guard never eats intake
+            record_failure(
+                "runtime.PartnerRuntime._sync_bot_registry", exc)
+        self._bot_registry_ids = set(ids)
+        self._bot_registry_ts = now
+        return set(ids)
 
     def _surface_account_id(self, platform: str) -> str:
         """This runtime's own account id on ``platform`` — the
