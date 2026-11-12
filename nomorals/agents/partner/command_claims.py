@@ -702,3 +702,37 @@ class DurableConversationClaimLedger:
         if ts - held_ts > self._window_s:
             return ""
         return holder
+
+    def has_live_claim_in_chat(self, family: str, chat_id: str,
+                               surface: str, *,
+                               now: float | None = None) -> bool:
+        """True when ``surface`` holds a live conversational claim
+        on ANY turn in this chat (dupfix4 fix 1): the runtime
+        answered here inside the window, so an owner-account post
+        arriving now is plausibly the sibling surface's answer to
+        that turn — an observation, never a fresh turn. A
+        sibling's claim does NOT count: it names the sibling's
+        turn, not this runtime's, and eating a fresh owner
+        message on it would be the wrong trade. Never raises: a
+        probe fault reads as no live claim (the post flows on as
+        a turn)."""
+        family = str(family or "")
+        chat_id = str(chat_id or "")
+        surface = str(surface or "")
+        if not family or not chat_id or not surface or self._broken:
+            return False
+        ts = time.time() if now is None else float(now)
+        prefix = f"{family}:{chat_id}:"
+        escaped = (prefix.replace("\\", "\\\\")
+                   .replace("%", "\\%").replace("_", "\\_"))
+        try:
+            row = self._db.query_one(
+                "SELECT 1 FROM conversation_claims"
+                " WHERE claim_key LIKE ? ESCAPE '\\'"
+                " AND surface = ? AND claimed_at > ?",
+                (escaped + "%", surface, ts - self._window_s))
+        except Exception:  # noqa: BLE001 - a probe, never fatal
+            _log.debug("conversation claims: has_live_claim_in_chat "
+                       "failed", exc_info=True)
+            return False
+        return row is not None

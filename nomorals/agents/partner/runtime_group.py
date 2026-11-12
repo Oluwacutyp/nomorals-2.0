@@ -23,6 +23,7 @@ normal pipeline (claimed-once, games, conversation).
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import time
 from typing import Any
@@ -430,6 +431,33 @@ class RuntimeGroupMixin:
             _log.debug("group side-send failed", exc_info=True)
             return None
 
+    def _claim_system_send(self, chat, what: str, text: str) -> bool:  # type: ignore[no-untyped-def]
+        """Exactly-once gate for group surface sends (dupfix4 fix
+        4): notices, ask answers, closes and feeds are system
+        output both runtimes can emit for the same room, so each
+        send claims ``system:<chat>:<what>:<sha1(text)>`` on the
+        shared conversational ledger first. True = this surface
+        owns the send (fresh claim); False = the sibling holds a
+        live claim on the identical text — skip it, the sibling
+        sent it. No ledger (db-less construction) or any fault
+        FAILS OPEN (True): a §33-approved notice is never
+        silenced by a missing ledger. The 30s window matches the
+        conversational claim window — an identical notice more
+        than 30s later is a new send, not a duplicate."""
+        try:
+            ledger = self._shared_conversation_claims()
+            if ledger is None:
+                return True
+            key = ("system:" + str(getattr(chat, "key", "") or "")
+                   + ":" + str(what or "") + ":"
+                   + hashlib.sha1(str(text or "").encode("utf-8")
+                                  ).hexdigest()[:16])
+            platform = str(getattr(chat, "platform", "") or "")
+            return bool(ledger.claim(
+                key, self._claim_surface(platform)))
+        except Exception:  # noqa: BLE001 - gate fault: fail open
+            return True
+
     # ---- the system-output gate (DESIGN §33) --------------------
     def _system_send_ok(self, surface, key, message,  # type: ignore[no-untyped-def]
                         what: str) -> bool:
@@ -578,6 +606,9 @@ class RuntimeGroupMixin:
                 record, settings=surface.store.settings(key))
         else:
             body, buttons = text, None
+        if not self._claim_system_send(message.chat, "action_notice",
+                                       body):
+            return
         result = self._send(
             message.chat, body, buttons=buttons,
             parse_mode=self._rendered_mode(message, body))
@@ -1309,6 +1340,9 @@ class RuntimeGroupMixin:
                 classify_notice_moment)
 
             for notice in notices:
+                if not self._claim_system_send(
+                        message.chat, "notice", str(notice)):
+                    continue
                 self._send(message.chat, str(notice))
                 # Celebration notices carry a moment (§21): a
                 # finished quest / a season podium gets her
@@ -1378,9 +1412,11 @@ class RuntimeGroupMixin:
         ask_reply = self._resolve_pending_ask(surface, key, message)
         if ask_reply is not None:
             if isinstance(ask_reply, str):
-                if ask_reply:
+                if ask_reply and self._claim_system_send(
+                        message.chat, "ask", ask_reply):
                     self._send(message.chat, ask_reply)
-            else:
+            elif self._claim_system_send(
+                    message.chat, "ask", ask_reply.text):
                 self._send(
                     message.chat, ask_reply.text,
                     buttons=ask_reply.buttons,
@@ -2430,12 +2466,19 @@ class RuntimeGroupMixin:
         for item in items:
             try:
                 if item.get("kind") == "line":
+                    if not self._claim_system_send(
+                            message.chat, "conflict",
+                            str(item.get("text") or "")):
+                        continue
                     self._send(message.chat, str(item.get("text")
                                                  or ""))
                 elif item.get("kind") == "sysdrop":
                     drop = item.get("drop") or {}
                     text, buttons = self._sysdrop_render(
                         surface, key, message, drop)
+                    if not self._claim_system_send(
+                            message.chat, "conflict", text):
+                        continue
                     result = self._send(
                         message.chat, text, buttons=buttons,
                         parse_mode=self._rendered_mode(
@@ -2473,6 +2516,9 @@ class RuntimeGroupMixin:
             try:
                 text, buttons = self._proposal_feed_render(
                     surface, key, message, item)
+                if not self._claim_system_send(
+                        message.chat, "proposal", text):
+                    continue
                 result = self._send(
                     message.chat, text, buttons=buttons,
                     parse_mode=self._rendered_mode(message, text))

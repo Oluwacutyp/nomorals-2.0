@@ -36,6 +36,13 @@ The law here is therefore in-band, not in-store:
 This registry is in-memory per runtime and clock-injectable; it holds
 no store of its own, because the observation channel is the point —
 the mechanism must work when the surfaces share nothing at all.
+
+Dupfix4 extends the same registry to plain-text GROUP turns: when the
+shared conversational claim is unavailable, a group text defers on
+the same role-staggered windows (bot surface 3s, every other surface
+8s) and the sweep re-queues it for one answer instead of running a
+command. Records carry ``turn_kind`` ("command" or "text") so the
+sweep can tell them apart.
 """
 from __future__ import annotations
 

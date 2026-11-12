@@ -1737,6 +1737,13 @@ class RuntimeGamesMixin:
                 # retrying an empty post on every cycle pass.
                 posted.append(record)
                 continue
+            if not self._claim_system_send(message.chat, "math_close",
+                                           text):
+                # The sibling sent this identical close — ack it
+                # away here (it was already taken from the queue)
+                # instead of sending a second copy.
+                posted.append(record)
+                continue
             try:
                 self._send(message.chat, text)
                 posted.append(record)

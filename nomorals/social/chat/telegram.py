@@ -2047,6 +2047,21 @@ class TelegramAdapter(ChatAdapter):
             _mid = int(getattr(message, "id", 0) or 0)
         except (TypeError, ValueError):
             _mid = 0
+        # An EDIT of a message is a new version, not a replay
+        # (dupfix4 D2): the primary's pick-list answer arrives as
+        # an edit of its ack, and the dedupe below swallows it
+        # because the ack's id was already seen — so the pick-list
+        # answer can never be observed as a peer post, even when
+        # the ack was. A recognised bot edit bypasses the dedupe
+        # and is delivered as a peer_post observation (never a
+        # turn); an unrecognised edit still falls through to the
+        # dedupe, so a human's edited message keeps today's
+        # behaviour and never becomes a second turn.
+        if getattr(event, "_devon_edited", False) and (
+                self._sender_is_bot(event, message)
+                or self._peer_is_bot_dm(chat_id)):
+            self._deliver_peer_post(event, message, handler)
+            return
         if _mid and self._note_inbound_seen(chat_id, _mid):
             _log.debug(
                 "telegram: skipping replayed message id=%s in chat_id=%s",

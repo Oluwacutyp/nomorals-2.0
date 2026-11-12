@@ -44,7 +44,7 @@ from .runtime_group import RuntimeGroupMixin
 from .runtime_expression import RuntimeExpressionMixin
 from .runtime_fun import RuntimeFunMixin
 from .runtime_system import RuntimeSystemMixin
-from .runtime_media import RuntimeMediaMixin, play_owner_var
+from .runtime_media import RuntimeMediaMixin, play_claim_var, play_owner_var
 from .runtime_intel import RuntimeIntelMixin
 from .runtime_search import RuntimeSearchMixin
 from .runtime_wisdom import RuntimeWisdomMixin
@@ -63,6 +63,12 @@ from .reply_guard import (
 )
 from .brain_gate import BrainGate, is_personal_platform
 _log = get_logger(__name__)
+
+#: How long a failed shared-claims open waits before the next
+#: attempt (dupfix4 fix 5). A transient first-open failure used
+#: to degrade the runtime to its home ledger for its whole life;
+#: the open is now retried, bounded, instead.
+_SHARED_CLAIMS_RETRY_S = 60.0
 
 #: Living-card tap stamp (Living Chat P2): a card button's
 #: callback payload — "cardtap <card_id> <revision> <index>" —
@@ -1675,19 +1681,62 @@ class PartnerRuntime(
                     == _bot_peer:
                 self._peer_post_observed(message)
                 return
-        # WhatsApp group peer posts (groupdup): the bot's answer
-        # in a group — and the userbot's answer, which the bot
-        # runtime sees as its owner's account posting — arrive
-        # on the sibling's WhatsApp stream as ordinary incoming
-        # messages. When a deferral is pending in that chat, a
-        # post from one of Devon's own surfaces is an
-        # OBSERVATION for the deferral registry, never a turn:
-        # the sibling answered, this surface stands down
-        # silently. The pending check runs first so the hot path
-        # pays nothing when nothing is deferred; the sender is
-        # identified only then (durable bot JID, then the owner
-        # registry, then the group roster).
+            # DM deferral-context recognition (dupfix4, DM
+            # commands): a pending deferral in this chat certifies
+            # it is a bot DM — the deferral only registers when
+            # _peer_bot_dm said so. In a DM the participants are
+            # the owner and the peer, so ANY non-owner sender
+            # while a deferral is pending IS the primary's answer
+            # — no companion set, no registry, no .bot flag, no
+            # shared store needed. The ack (and its pick-list
+            # edit) resolve the deferral here even when the
+            # adapter never recognised the bot.
+            if message.chat.kind == ChatKind.DM:
+                try:
+                    _dm_pending = self._peer_deferral().has_pending(
+                        message.chat.key)
+                except Exception:  # noqa: BLE001 - observation never dies
+                    _dm_pending = False
+                if _dm_pending and self._is_peer_dm_sender(message):
+                    self._peer_post_observed(message)
+                    return
+        # Group peer recognition (dupfix4 fix 1): a post from one
+        # of Devon's own surfaces is an OBSERVATION, never a turn
+        # — for EVERY group post, not only when a peer deferral
+        # is already pending. The pending-gated check below stays
+        # for the broader grounds (roster, owner-with-no-room);
+        # the unconditional set is narrow on purpose: the bot's
+        # own id, or an owner-account post while THIS runtime
+        # holds a live conversational claim in the chat. That
+        # kills the ping-pong even when the shared store is down,
+        # without eating a fresh owner message (no live claim, no
+        # eat) and without eating an admin member's message (the
+        # roster ground is NOT in the unconditional set).
         if message.incoming and message.chat.kind == ChatKind.GROUP:
+            # Fix 3: re-sync the bot registry on group traffic
+            # — _bot_account_ids is otherwise reached only via
+            # the DM-only _peer_bot_dm, so the userbot's
+            # companion set can stay empty for a runtime's
+            # life after a boot-order miss. TTL-gated (60s),
+            # so the hot path pays a timestamp check. Suppressed:
+            # observation never dies on a registry fault.
+            with contextlib.suppress(Exception):
+                self._bot_account_ids()
+            if self._is_own_surface_group_post(message):
+                self._peer_post_observed(message)
+                return
+            # WhatsApp group peer posts (groupdup): the bot's answer
+            # in a group — and the userbot's answer, which the bot
+            # runtime sees as its owner's account posting — arrive
+            # on the sibling's WhatsApp stream as ordinary incoming
+            # messages. When a deferral is pending in that chat, a
+            # post from one of Devon's own surfaces is an
+            # OBSERVATION for the deferral registry, never a turn:
+            # the sibling answered, this surface stands down
+            # silently. The pending check runs first so the hot path
+            # pays nothing when nothing is deferred; the sender is
+            # identified only then (durable bot JID, then the owner
+            # registry, then the group roster).
             try:
                 _pending = self._peer_deferral().has_pending(
                     message.chat.key)
@@ -1696,6 +1745,26 @@ class PartnerRuntime(
             if _pending and self._is_peer_surface_group_post(message):
                 self._peer_post_observed(message)
                 return
+        # Plain-text defer-and-observe for groups (dupfix4 fix 2):
+        # when the shared conversational claim is unavailable, a
+        # plain-text group turn DEFERS briefly instead of answering
+        # blind — mirroring the command path. The sibling's answer
+        # in the room resolves it (fix 1 observes it); if no
+        # answer lands, the sweep fails over and answers once.
+        # The deferral sits BEFORE the conversational seam, so the
+        # deferred pass claims nothing — the failover re-queue
+        # claims fresh at the seam, and a sibling that claimed
+        # meanwhile stands this one down. Commands are exempt
+        # (their own arbitration below); the failover re-queue
+        # carries the bypass flag and never re-defers.
+        _text = str(getattr(message, "text", "") or "").strip()
+        if (message.incoming and message.chat.kind == ChatKind.GROUP
+                and _text and not _text.startswith("/")
+                and not (message.meta or {}).get(
+                    "dupfix4_text_failover")
+                and not self._claims_are_shared()
+                and self._defer_peer_text(message)):
+            return
         # Cross-surface conversational exactly-once (dupfix3): one
         # plain-text turn, one answer, across BOTH runtimes. The
         # in-memory reply seam below only sees one runtime; the
@@ -2868,6 +2937,18 @@ class PartnerRuntime(
         except Exception as exc:  # noqa: BLE001 - boot never dies here
             record_failure(
                 "runtime.PartnerRuntime.start:bot_registry", exc)
+        # Shared claims store, resolved at boot (dupfix4 fix 5):
+        # the live "is the store shared?" check is one log grep,
+        # not a guess from behaviour after pull.
+        try:
+            from .command_claims import shared_claims_path
+
+            _log.info(
+                "shared claims store: %s (shared=%s)",
+                shared_claims_path(), self._claims_are_shared())
+        except Exception as exc:  # noqa: BLE001 - boot never dies here
+            record_failure(
+                "runtime.PartnerRuntime.start:shared_claims_log", exc)
         # WhatsApp cold-start attach (§15): gateway start builds
         # the whatsapp adapter once, against the static config
         # endpoint, and drops it when no bridge is listening yet —
@@ -4607,18 +4688,43 @@ class PartnerRuntime(
         (``~/.nomorals/shared/claims.db``, overridable by
         ``NM_SHARED_CLAIMS``) — both runtimes run as the same OS
         user on one host, so both reach it whatever their own
-        ``NM_HOME`` is. A failed open is remembered for the
-        runtime's life: arbitration falls back to the home
-        database and to defer, never to double-handle."""
+        ``NM_HOME`` is.
+
+        A failed open is NOT permanent (dupfix4 fix 5): the first
+        open can fail on a transient fault (a half-written file,
+        a mount that is not ready yet, a lock held by the other
+        runtime's first boot), and caching that failure for the
+        runtime's life degrades arbitration to the home ledger
+        forever. The open is retried, bounded (one attempt per
+        minute — the hot path pays a timestamp check), and a late
+        success INVALIDATES the ledgers cached against the home
+        store so the next claim rebuilds against the shared file.
+        The path derivation itself is unchanged."""
         if getattr(self, "_shared_claims_db_obj", None) is not None:
             return self._shared_claims_db_obj
-        if getattr(self, "_shared_claims_db_tried", False):
+        now = time.time()
+        failed_at = float(
+            getattr(self, "_shared_claims_db_failed_at", 0.0) or 0.0)
+        if now - failed_at < _SHARED_CLAIMS_RETRY_S:
             return None
-        self._shared_claims_db_tried = True
         from .command_claims import open_shared_claims_db
 
         db = open_shared_claims_db()
+        if db is None:
+            self._shared_claims_db_failed_at = now
+            return None
         self._shared_claims_db_obj = db
+        # A late open means the ledgers cached against the home
+        # store are stale — the next claim rebuilds them against
+        # the shared file, so a sibling's claim is visible here.
+        self._command_claims_obj = None
+        self._conversation_claims_obj = None
+        from .command_claims import shared_claims_path
+
+        _log.info(
+            "shared claims store opened (late retry): %s — "
+            "arbitration is shared from here",
+            shared_claims_path())
         return db
 
     def _claims_are_shared(self) -> bool:
@@ -5053,6 +5159,90 @@ class PartnerRuntime(
                 return True
         return False
 
+    def _is_peer_dm_sender(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """True when a DM message's sender is the peer surface,
+        not the owner (dupfix4, DM commands). The owner is
+        excluded by the owner registry AND by this runtime's own
+        account id (on the userbot the owner IS its own id); a
+        sender that is neither is the peer — a DM has no third
+        participant. A registry fault fails closed: an unprovable
+        sender is not a peer post. Only ever called where a
+        pending deferral already certifies the chat is a bot DM.
+        """
+        try:
+            platform = str(getattr(message.chat, "platform", "") or "")
+            sender_id = str(getattr(message, "sender_id", "") or "")
+            if not sender_id:
+                return False
+            try:
+                if self._owner_registry().is_owner(
+                        platform, sender_id):
+                    return False
+            except Exception:  # noqa: BLE001 - registry fault: fall through
+                pass
+            own = str(self._surface_account_id(platform) or "")
+            return not (own and sender_id == own)
+        except Exception:  # noqa: BLE001 - unprovable: not a peer post
+            return False
+
+    def _is_own_surface_group_post(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """Unconditional group peer recognition (dupfix4 fix 1):
+        True when a group post comes from one of Devon's own
+        surfaces — the bot's own id (the userbot sees the bot's
+        group posts as sender=bot id), or an owner-account post
+        while THIS runtime holds a live conversational claim in
+        the chat (the bot runtime sees the userbot's answer as
+        its owner's account posting). Runs for EVERY group post:
+        no pending deferral, no shared store, no companion set
+        needed. Slash-led posts are never peer answers (a command
+        must reach arbitration), and a live game room means the
+        owner's post may be a game move, never a peer answer.
+        Deliberately narrower than _is_peer_surface_group_post:
+        the roster ground is NOT here — an admin member's message
+        must stay a turn.
+        """
+        try:
+            text = str(getattr(message, "text", "") or "")
+            if text.strip().startswith("/"):
+                return False
+            platform = str(getattr(message.chat, "platform", "") or "")
+            sender_id = str(getattr(message, "sender_id", "") or "")
+            if not sender_id:
+                return False
+            # Ground (i): the bot's own id.
+            try:
+                if sender_id in {str(x) for x in
+                                 self._bot_account_ids()}:
+                    return True
+            except Exception:  # noqa: BLE001 - registry fault: try ground (ii)
+                pass
+            # Ground (ii): the owner's account, while this runtime
+            # holds a live conversational claim in this chat.
+            try:
+                if not self._owner_registry().is_owner(
+                        platform, sender_id):
+                    return False
+            except Exception:  # noqa: BLE001 - registry fault: not a peer post
+                return False
+            try:
+                if self._game_engine().live(message.chat.key):
+                    return False
+            except Exception:  # noqa: BLE001 - engine fault: not a peer post
+                return False
+            try:
+                ledger = self._shared_conversation_claims()
+                if ledger is None:
+                    return False
+                family = ("telegram" if platform.startswith("telegram")
+                          else platform)
+                return bool(ledger.has_live_claim_in_chat(
+                    family, str(message.chat.chat_id or ""),
+                    self._claim_surface(platform)))
+            except Exception:  # noqa: BLE001 - probe fault: not a peer post
+                return False
+        except Exception:  # noqa: BLE001 - recognition never eats a turn
+            return False
+
     def _is_peer_surface_group_post(self, message) -> bool:  # type: ignore[no-untyped-def]
         """True when ``message`` is a post by one of Devon's own
         surfaces in a group — the bot account, or the owner's
@@ -5362,6 +5552,90 @@ class PartnerRuntime(
             self._peer_deferral_obj = registry
         return registry
 
+    def _command_claim_key_for(self, message) -> str:  # type: ignore[no-untyped-def]
+        """The canonical command-claim key for ``message`` (dupfix4
+        D4): the same key _command_arbitration claims at intake, so
+        an async answer can re-check it at send time. "" when the
+        message is unkeyable — the send-time gate then stays open
+        (fail open, never silence a download on a key fault)."""
+        try:
+            from .command_claims import command_claim_key
+
+            platform = str(getattr(message.chat, "platform", "") or "")
+            return str(command_claim_key(
+                message, self._surface_account_id(platform)) or "")
+        except Exception:  # noqa: BLE001 - unkeyable: gate stays open
+            return ""
+
+    def _command_claim_lost(self, claim_key: str, chat) -> bool:  # type: ignore[no-untyped-def]
+        """True when ANOTHER surface now holds a live claim on
+        ``claim_key`` (dupfix4 D4): an async answer must stand
+        down. False when this surface holds it, when no surface
+        holds it (expired, or never claimed), or when no ledger
+        exists — all fail open, the download proceeds. Never
+        raises."""
+        try:
+            if not claim_key:
+                return False
+            ledger = self._command_claims()
+            if ledger is None:
+                return False
+            platform = str(getattr(chat, "platform", "") or "")
+            holder = str(ledger.claimed_by(claim_key) or "")
+            if not holder:
+                return False
+            return holder != self._claim_surface(platform)
+        except Exception:  # noqa: BLE001 - probe fault: fail open
+            return False
+
+    def _defer_peer_text(self, message) -> bool:  # type: ignore[no-untyped-def]
+        """Register a plain-text group turn as deferred (dupfix4
+        fix 2). Mirrors _defer_peer_command but for text: the
+        record carries turn_kind="text" (the sweep re-queues it
+        instead of running a command) and the window is by
+        PLATFORM role, not by sender — the bot surface fails over
+        fast (3s) and answers; every other surface waits (8s)
+        and observes the answer in the room. Role by platform
+        because a group text is often a MEMBER's, and the
+        sender-based _is_owner_surface cannot stagger a member's
+        turn when the owner registry is unseeded. False when the
+        registry could not take it — the caller then answers at
+        once (a failed deferral never silences a turn)."""
+        try:
+            from ...social.chat.group_surface import BOT_PLATFORMS
+            from .peer_deferral import (
+                GROUP_PEER_ANSWER_WINDOW_FAST_S,
+                GROUP_PEER_ANSWER_WINDOW_S,
+            )
+
+            platform = str(message.chat.platform or "")
+            record = {
+                "turn_kind": "text",
+                "chat_key": message.chat.key,
+                "platform": platform,
+                "chat_id": str(message.chat.chat_id or ""),
+                "kind": "",
+                "arg": "",
+                "text": str(message.text or ""),
+                "message_id": str(
+                    getattr(message, "message_id", "") or ""),
+                "message": message,
+                "window_s": (
+                    GROUP_PEER_ANSWER_WINDOW_FAST_S
+                    if platform in BOT_PLATFORMS
+                    else GROUP_PEER_ANSWER_WINDOW_S),
+            }
+            registered = self._peer_deferral().register(record)
+            if registered:
+                self._peer_deferral().supersede(
+                    record["chat_key"], record["message_id"])
+                self._start_peer_deferral_sweeper()
+            return bool(registered)
+        except Exception as exc:  # noqa: BLE001 - deferral never eats a turn
+            record_failure(
+                "runtime.PartnerRuntime._defer_peer_text", exc)
+            return False
+
     def _defer_peer_command(self, message, command) -> bool:  # type: ignore[no-untyped-def]
         """Register this echo command as deferred. False when the
         registry could not take it (unkeyable) — the caller then
@@ -5371,6 +5645,7 @@ class PartnerRuntime(
 
             platform = str(message.chat.platform or "")
             record = {
+                "turn_kind": "command",
                 "chat_key": message.chat.key,
                 "platform": platform,
                 "chat_id": str(message.chat.chat_id or ""),
@@ -5464,6 +5739,34 @@ class PartnerRuntime(
         due = self._peer_deferral().expire(now=now)
         for record in due:
             try:
+                if record.get("turn_kind") == "text":
+                    # Plain-text failover (dupfix4 fix 2): the
+                    # sibling never answered, so this surface
+                    # answers once. Re-queue through on_message
+                    # (per-chat serialised, the safe re-entry
+                    # path) with the bypass flag, so the re-queued
+                    # turn never re-defers — it claims fresh at
+                    # the conversational seam, and a sibling that
+                    # claimed meanwhile stands it down there.
+                    message = record.get("message")
+                    if message is None:
+                        continue
+                    meta = getattr(message, "meta", None)
+                    if not isinstance(meta, dict):
+                        meta = {}
+                        # The bypass flag rides on the message; if
+                        # it cannot be attached, the flag stays on
+                        # the local dict and the re-queued turn
+                        # re-defers instead of failing the sweep.
+                        with contextlib.suppress(Exception):
+                            message.meta = meta
+                    meta["dupfix4_text_failover"] = True
+                    self.on_message(message)
+                    _log.info(
+                        "deferred group text in %s failed over — "
+                        "the sibling never answered",
+                        record.get("chat_key"))
+                    continue
                 key = str(record.get("claim_key") or "")
                 platform = str(record.get("platform") or "")
                 if key and not self._command_claims().claim(
@@ -8437,10 +8740,24 @@ class PartnerRuntime(
             _owner = _pick_owner_key(message) \
                 if message is not None else ""
             _tok = play_owner_var.set(_owner)
+            # The intake command-claim key rides down as a
+            # ContextVar (dupfix4 D4), like the owner key above:
+            # the async download job re-checks who holds it at
+            # SEND time, so a sibling that failed over and
+            # claimed meanwhile stands this job down instead of
+            # landing the second pick list. A ContextVar — not a
+            # new call argument — so the two-argument
+            # _control_play shape keeps working unchanged (that
+            # seam is doubled in tests with the two-argument
+            # signature).
+            _claim = (self._command_claim_key_for(message)
+                      if message is not None else "")
+            _ctok = play_claim_var.set(_claim)
             try:
-                return self._control_play(command.tail or arg,
-                                          chat_key=chat_key)
+                return self._control_play(
+                    command.tail or arg, chat_key=chat_key)
             finally:
+                play_claim_var.reset(_ctok)
                 play_owner_var.reset(_tok)
         if kind in {"anime", "manga", "anichar", "charpic", "staff",
                     "studio", "episodes", "animechars", "trailer",

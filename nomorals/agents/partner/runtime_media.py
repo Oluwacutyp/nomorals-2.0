@@ -54,6 +54,19 @@ _RUNNING_JOB_ACK: contextvars.ContextVar = contextvars.ContextVar(
 play_owner_var: contextvars.ContextVar = contextvars.ContextVar(
     "devon_play_owner", default="")
 
+#: The intake command-claim key for the play turn in flight
+#: (dupfix4 D4): the control dispatch in runtime.py sets it from
+#: the requesting message, and
+#: :meth:`RuntimeMediaMixin._control_play` reads it and threads it
+#: to :meth:`_play_download_bg`, whose async body re-checks who
+#: holds the key at SEND time — so a sibling that failed over and
+#: claimed meanwhile stands this job down instead of landing the
+#: second pick list. A ContextVar, like play_owner_var above, so
+#: _control_play's two-argument call shape is unchanged (that seam
+#: is doubled in tests with the two-argument signature).
+play_claim_var: contextvars.ContextVar = contextvars.ContextVar(
+    "devon_play_claim", default="")
+
 
 def _pick_expired_reply() -> Any:
     """The honest answer when a /play pick-list is gone.
@@ -659,6 +672,10 @@ class RuntimeMediaMixin:
         # owner wins; otherwise the dispatch's in-flight owner
         # (play_owner_var) applies; "" keeps the chat slot.
         owner_key = owner_key or play_owner_var.get("")
+        # Intake command-claim key (dupfix4 D4): the dispatch's
+        # in-flight key (play_claim_var) applies; "" means no
+        # claim to re-check at send time.
+        claim_key = play_claim_var.get("")
         from ...connectors.wiring import wire_streaming_adapters
         from ...media.playback import PlaybackEngine
 
@@ -748,7 +765,7 @@ class RuntimeMediaMixin:
                             chat, chat_key, f"⏳ {yt_title}",
                             lambda: self._play_send_in_chat_result(
                                 engine, added[0], chat),
-                            title=yt_title)
+                            title=yt_title, claim_key=claim_key)
                     # CLI: play the item _add_youtube just enqueued.
                     # Do NOT call engine.play_youtube(rest) — it
                     # re-adds the same video, double-enqueuing it.
@@ -950,7 +967,7 @@ class RuntimeMediaMixin:
                             engine, first_item, fallbacks, merged,
                             chat, match=(title_q, artist_q), query=rest),
                         title=str(added[0].get("title") or "audio"),
-                        tracker=_play_tracker)
+                        tracker=_play_tracker, claim_key=claim_key)
                 # The tried trail goes to the journal only
                 # (presentation law, 2026-11-05) — attempts record
                 # every strategy in order (failed + the winner), and
@@ -962,7 +979,8 @@ class RuntimeMediaMixin:
                         chat, chat_key, f"⏳ {play_title or 'audio'}",
                         lambda: self._play_send_in_chat_result(
                             engine, added[0], chat),
-                        title=play_title, tracker=_play_tracker)
+                        title=play_title, tracker=_play_tracker,
+                        claim_key=claim_key)
                 if action == "play":
                     st = engine.play()
                     if st.get("status") == "playing":
@@ -1995,7 +2013,8 @@ class RuntimeMediaMixin:
     def _play_download_bg(self, chat: Any, chat_key: str,
                           ack: str, produce: Any, *,
                           on_sent: Any = None, title: str = "",
-                          tracker: Any = None) -> str:
+                          tracker: Any = None,
+                          claim_key: str = "") -> str:
         """Start a chat download+send as a background job behind ONE
         ack message, edited in place (presentation law, 2026-11-05).
 
@@ -2154,6 +2173,30 @@ class RuntimeMediaMixin:
             ttoken = set_current_tracker(tracker)
             try:
                 report_progress("download started")
+                # Send-time exactly-once (dupfix4 D4): the intake
+                # claim was taken minutes ago; re-check who holds
+                # it before the file/pick list goes out. A sibling
+                # that failed over and claimed meanwhile owns the
+                # command — this job stands down without sending,
+                # instead of landing the second copy the owner
+                # screenshotted. No ledger, no key, or this surface
+                # holding the claim: proceed (fail open). The ack
+                # is left as the searching card — the sibling's
+                # answer is the visible outcome — and the harvester
+                # skips a "skipped" result, so no failure is
+                # invented for a deliberate stand-down.
+                if claim_key and self._command_claim_lost(
+                        claim_key, chat):
+                    tracker.finish(
+                        "skipped",
+                        note="stood down: sibling surface holds the "
+                        "command claim")
+                    self._play_dl_mark_finished(holder)
+                    return {"ok": False, "delivered": False,
+                            "sent": False, "title": title, "text": "",
+                            "ack_id": ack_id, "skipped": True,
+                            "error": "stood-down: sibling surface "
+                            "holds the command claim"}
                 text, sent = produce()
             except Exception as exc:  # noqa: BLE001 - failure is data
                 tracker.finish(
@@ -2546,6 +2589,12 @@ class RuntimeMediaMixin:
                 res = job.result if isinstance(job.result, dict) else {}
                 if res.get("delivered"):
                     continue  # body already reported — never twice
+                if res.get("skipped"):
+                    continue  # stood down at send time (dupfix4 D4):
+                    # the sibling surface holds the command claim
+                    # and sent the answer — the outcome landed,
+                    # there is nothing to harvest and no failure
+                    # to invent for a deliberate stand-down.
                 title = str(job.labels.get("title")
                             or res.get("title") or "download")
                 if job.status == "failed":
