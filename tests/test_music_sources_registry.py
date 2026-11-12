@@ -306,3 +306,37 @@ class TestGenerality:
     def test_all_packs_are_dicts(self):
         for source in all_sources():
             assert isinstance(source.pack, dict)
+
+
+# ── SoundClick: verified NOT wireable (CENSUS B4) ─────────────────────
+#
+# The /play chain does NOT claim SoundClick, deliberately: verified
+# live 2026-11-12, the site has no public API and no anonymous
+# server-rendered search — /search/default.cfm?searchterm= redirects
+# to /discover/<slug>, whose anonymous HTML carries only promo songs
+# unrelated to the query (no query results, no audio URL); results
+# load through the JS filter framework and the player takes audio from
+# server-rendered playlist DOM.  Parsing the promo boxes as results
+# would return wrong tracks, and a JSON-API client would be fake, so
+# no SoundClickSource exists.  Wiring needs a live-browser probe that
+# pins the framework search and a track-page audio URL; until then
+# these pins hold the NOT-wired state.
+
+
+class TestSoundClickRow:
+    def test_row_exists_and_is_open_keyless_no_api(self):
+        row = by_id("soundclick")
+        assert row is not None
+        assert row.source_class == "open"
+        assert row.auth == "none"
+        assert row.api is False
+
+    def test_row_records_the_verified_wall(self):
+        row = by_id("soundclick")
+        assert row is not None
+        notes = row.notes
+        assert "NOT wired into the /play chain" in notes
+        assert "no public API" in notes
+        assert "JS filter framework" in notes
+        assert "live-browser probe" in notes
+        assert "Do NOT add a SoundClickSource" in notes

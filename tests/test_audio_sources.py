@@ -570,6 +570,24 @@ class TestResolverWiring:
         assert ja < fm < bp
         assert fm < ov
 
+    def test_text_chain_does_not_claim_soundclick(self):
+        # SoundClick is NOT in the chain, deliberately (CENSUS B4):
+        # verified live 2026-11-12, the site has no public API and
+        # no anonymous server-rendered search — the search URL
+        # redirects to a JS-driven discover page whose anonymous
+        # HTML carries only promo songs unrelated to the query, so
+        # there is no honest source class to wire (parsing the
+        # promos as results would return wrong tracks; a JSON-API
+        # client would be fake).  Remove this pin only when a
+        # live-browser probe pins the framework search and a
+        # track-page audio URL, and wire the real shape then.
+        from nomorals.media import sources as src_mod
+
+        assert "soundclick-search" not in src_mod.MUSIC_SEARCH_SOURCES
+        assert all(name != "soundclick-search"
+                   for name, _ in src_mod.SOURCE_CHAIN)
+        assert not hasattr(src_mod, "SoundClickSource")
+
     def test_text_chain_includes_new_sources(self):
         # The chain tries netnaija before the proven globals.
         # Boomplay is BACK in the chain (browser-backed search,

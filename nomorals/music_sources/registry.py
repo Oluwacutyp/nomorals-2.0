@@ -429,7 +429,22 @@ MUSIC_REGISTRY: List[MusicSource] = [
        licence="Per-track licence as stated by rights holder",
        volatility="commercial", bulk=False, api=False, bot_wall=False,
        etiquette=PER_TRACK,
-       notes="Artist uploads; free and paid tiers with per-track terms set by the rights holder."),
+       notes="Artist uploads; free and paid tiers with per-track terms "
+             "set by the rights holder. NOT wired into the /play chain "
+             "— verified live 2026-11-12: no public API (api=False "
+             "stands) and no anonymous server-rendered search — "
+             "/search/default.cfm?searchterm= redirects to "
+             "/discover/<slug>, whose anonymous HTML carries only "
+             "promo songs unrelated to the query (no query results, "
+             "no audio URL); results load through the JS filter "
+             "framework and the player takes audio from "
+             "server-rendered playlist DOM, so the chain cannot read "
+             "SoundClick without a live-browser probe. No yt-dlp "
+             "extractor either. Do NOT add a SoundClickSource until "
+             "that probe pins the framework search and a track-page "
+             "audio URL. (Repeated anonymous fetches were then "
+             "refused — empty replies / 403 — so the probe must run "
+             "in a browser session.)"),
     _M(id="imslp", name="IMSLP", source_class="open", auth="none",
        formats=["PDF", "MP3"], quality_ceiling="as scanned",
        licence="Public domain scores", volatility="institutional",
