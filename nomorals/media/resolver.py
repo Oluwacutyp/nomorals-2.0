@@ -543,6 +543,7 @@ class SourceResolver:
             ("youtube-music-search", self._youtube_music_search_many),
             ("archiveorg-search", self._archiveorg_search_many),
             ("jamendo-search", self._jamendo_search_many),
+            ("fma-search", self._fma_search_many),
             ("musicbrainz-search", self._musicbrainz_search_many),
             ("openverse-search", self._openverse_search_many),
             ("wikimedia-search", self._wikimedia_search_many),
@@ -801,6 +802,16 @@ class SourceResolver:
             query, limit, "JamendoSource", "jamendo",
             "Jamendo search", downloadable=True)
 
+    def _fma_search_many(self, query: str,
+                         limit: int) -> list[ResolvedAudio]:
+        # FMA is HTML-scraped, not a JSON API — but the shared helper
+        # only needs a class with .search(), and FMA is metadata-class
+        # (downloadable=False): identification + track page, never
+        # audio, until a live-browser probe pins the download href.
+        return self._api_source_search_many(
+            query, limit, "FMASource", "fma",
+            "Free Music Archive search", downloadable=False)
+
     def _preview_search_many(self, query: str, limit: int,
                              cls_name: str, kind: str,
                              label: str) -> list[ResolvedAudio]:
@@ -1026,6 +1037,10 @@ class SourceResolver:
             ("archiveorg-search", lambda: self._s_archiveorg_search(query)),
             ("jamendo-search", lambda: self._s_blog_search(
                 query, "JamendoSource", "jamendo")),
+            ("fma-search", lambda: self._s_metadata_search(
+                query, "FMASource", "fma",
+                "Free Music Archive — track identified, no audio; "
+                "download via the track page")),
             ("boomplay-search", lambda: self._s_boomplay_search(query)),
             ("musicbrainz-search", lambda: self._s_metadata_search(
                 query, "MusicBrainzSource", "musicbrainz",

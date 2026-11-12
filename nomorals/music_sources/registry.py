@@ -362,8 +362,15 @@ MUSIC_REGISTRY: List[MusicSource] = [
        source_class="open", auth="none",
        formats=["MP3", "FLAC", "Ogg"], quality_ceiling="varies by track",
        licence="CC per-track (see track page)", volatility="institutional",
-       bulk=False, api=True, bot_wall=False, etiquette=PER_TRACK,
-       notes="Curated free archive; check the per-track licence before use."),
+       bulk=False, api=False, bot_wall=False, etiquette=PER_TRACK,
+       notes="Curated free archive; check the per-track licence before "
+             "use. NO public API — the WFMU-era JSON API is dead "
+             "(verified 2026-11-12: /api, /api/trackSearch and "
+             "/recent.json all 404). Site search is live and keyless "
+             "(/search?quicksearch=); the /play chain reads it as "
+             "metadata-class (track page, no audio) until a "
+             "live-browser probe pins the track-page download href; "
+             "downloads via the track page may need an account."),
     _M(id="jamendo", name="Jamendo", source_class="open", auth="api_key",
        formats=["MP3", "FLAC"], quality_ceiling="varies by track",
        licence="CC per-track; paid commercial tier separate",

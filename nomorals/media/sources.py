@@ -53,6 +53,7 @@ __all__ = [
     "DeezerSource",
     "ArchiveOrgSource",
     "JamendoSource",
+    "FMASource",
     "BandcampSource",
     "NotJustOkSource",
     "TooXclusiveSource",
@@ -957,6 +958,129 @@ class JamendoSource(_JsonApiSource):
         return out
 
 
+class FMASource(AudioSource):
+    """Free Music Archive — CC catalogue, HTML search, metadata-class.
+
+    The WFMU-era JSON API is DEAD — verified live 2026-11-12, NOT
+    assumed: ``/api``, ``/api/trackSearch`` and ``/recent.json``
+    all answer 404, and there is no documented public API left on
+    the current (Tribe of Noise) site.  So this source does NOT
+    speak a JSON API: it reads the live, server-rendered search
+    page (``/search?quicksearch=<q>``, verified live 2026-11-12 —
+    174,634 tracks in the unfiltered index) the way BandcampSource
+    reads Bandcamp: track rows carry the title, artist, album and
+    ``MM:SS`` duration, each title linking to its track page at
+    ``/music/<Artist>/<album>/<track>/``.
+
+    Honest classification: METADATA-class
+    (``candidate_asset_class`` == "metadata",
+    ``downloadable=False``).  The search page proves the track
+    exists and where its page lives; it does NOT expose a direct
+    audio URL, and downloads on the current site may need an
+    account — so no audio URL is invented here and the chain must
+    never WIN on an FMA hit for audio.  The resolver routes FMA
+    through the metadata path (MusicBrainz shape): identification
+    + track page, never a download.  Promotion to full-track needs
+    a live-browser probe of a track page pinning the download href
+    (or the account wall) — named here, not silently assumed.
+
+    Parser shape, from the live page (2026-11-12): a track row is
+    a 3-segment ``/music/`` anchor (artist/album/track), followed
+    by a 1-segment artist anchor, a 2-segment album anchor and a
+    ``M:SS`` duration (minutes may exceed 59 — "65:36" observed).
+    Anchor inner markup is tag-stripped; a row missing artist,
+    album or duration still yields its track (title + page URL),
+    never dropped for missing decoration.  Changed markup degrades
+    to [] and the chain moves on (Bandcamp contract).
+    """
+
+    name = "fma"
+    _SEARCH = "https://freemusicarchive.org/search"
+    _SITE = "https://freemusicarchive.org"
+
+    #: A track link has exactly three /music/ segments; artist links
+    #: have one, album links two.  Segment counts are the discriminator.
+    _TRACK_RE = re.compile(
+        r'<a\s+[^>]*href=["\']((?:https?://freemusicarchive\.org)?'
+        r'/music/[^/"\'<>]+/[^/"\'<>]+/[^/"\'<>]+/?)["\'][^>]*>'
+        r'(.*?)</a>', re.I | re.S)
+    _ANCHOR_RE = re.compile(
+        r'<a\s+[^>]*href=["\']((?:https?://freemusicarchive\.org)?'
+        r'/music/[^/"\'<>]+(?:/[^/"\'<>]+){0,2}/?)["\'][^>]*>'
+        r'(.*?)</a>', re.I | re.S)
+    _DURATION_RE = re.compile(r"(\d+):(\d{2})")
+
+    def search_url(self, query: str) -> str:
+        """The search URL this source fetches (registry probe)."""
+        return (f"{self._SEARCH}?quicksearch="
+                + urllib.parse.quote_plus((query or "").strip())
+                + "&pageSize=20&sort=track")
+
+    def search(self, query: str, limit: int = 8) -> list[SourceCandidate]:
+        q = (query or "").strip()
+        if not q:
+            return []
+        html = self._get(self.search_url(q))
+        if not html:
+            return []
+        try:
+            out = self._parse_rows(html, q)
+        except Exception as exc:  # noqa: BLE001 — never raises
+            _log.info("fma: parse failed for %r: %s", q, exc)
+            return []
+        _log.info("fma: %d candidates for %r", len(out), q)
+        return out[:limit]
+
+    def _parse_rows(self, html: str,
+                    query: str) -> list[SourceCandidate]:
+        tracks = list(self._TRACK_RE.finditer(html))
+        out: list[SourceCandidate] = []
+        seen: set[str] = set()
+        for i, m in enumerate(tracks):
+            href = m.group(1)
+            url = (href if href.startswith("http") else self._SITE + href)
+            if url in seen:
+                continue
+            seen.add(url)
+            title = BaseScrapeSource._clean(
+                re.sub(r"<[^>]+>", "", m.group(2)))
+            if len(title) < 2:
+                continue
+            # Row window: until the next track anchor (or 800 chars).
+            end = (tracks[i + 1].start() if i + 1 < len(tracks)
+                   else m.end() + 800)
+            window = html[m.end():min(end, m.end() + 800)]
+            artist = ""
+            album = ""
+            for am in self._ANCHOR_RE.finditer(window):
+                ahref = am.group(1)
+                segs = [s for s in ahref.split("/music/", 1)[-1]
+                        .strip("/").split("/") if s]
+                text = BaseScrapeSource._clean(
+                    re.sub(r"<[^>]+>", "", am.group(2)))
+                if len(segs) == 1 and not artist:
+                    artist = text
+                elif len(segs) == 2 and not album:
+                    album = text
+                if artist and album:
+                    break
+            duration = 0.0
+            dm = self._DURATION_RE.search(window)
+            if dm:
+                duration = float(int(dm.group(1)) * 60
+                                 + int(dm.group(2)))
+            out.append(SourceCandidate(
+                source=self.name, title=title or query, artist=artist,
+                url=url, duration=duration, downloadable=False,
+                extra={"album": album,
+                       "note": "Free Music Archive — CC catalogue; "
+                               "track identified, no audio: download "
+                               "via the track page (audio URL "
+                               "unverified, account may be required); "
+                               "check the track page for the licence"}))
+        return out
+
+
 class BandcampSource(AudioSource):
     """Bandcamp search — HTML, keyless.  Full-track streams via yt-dlp.
 
@@ -1049,6 +1173,7 @@ SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("bandcamp-search", BandcampSource()),
     ("archiveorg-search", ArchiveOrgSource()),
     ("jamendo-search", JamendoSource()),
+    ("fma-search", FMASource()),
     ("musicbrainz-search", MusicBrainzSource()),
     ("openverse-search", OpenverseSource()),
     ("wikimedia-search", WikimediaSource()),
@@ -1075,6 +1200,7 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "youtube-music-search",
     "archiveorg-search",
     "jamendo-search",
+    "fma-search",
     "boomplay-search",
     "musicbrainz-search",
     "openverse-search",
@@ -1108,6 +1234,7 @@ MUSIC_SOURCE_DOMAINS: dict[str, str | None] = {
     "youtube-music-search": "youtube.com",
     "archiveorg-search": "archive.org",
     "jamendo-search": "api.jamendo.com",
+    "fma-search": "freemusicarchive.org",
     "boomplay-search": "boomplay.com",
     "musicbrainz-search": "musicbrainz.org",
     "openverse-search": "api.openverse.org",
@@ -1139,6 +1266,7 @@ MUSIC_SOURCE_REGIONS: dict[str, str] = {
     "youtube-music-search": "global",
     "archiveorg-search": "global",
     "jamendo-search": "global",
+    "fma-search": "global",
     "boomplay-search": "africa",
     "musicbrainz-search": "global",
     "openverse-search": "global",

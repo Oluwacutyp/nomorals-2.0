@@ -100,7 +100,7 @@ def _cand(source, title="Song", artist="Singer", url="", direct_url=""):
 _SEARCH_CLASSES = (
     "NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
     "BandcampSource", "ArchiveOrgSource", "JamendoSource",
-    "MusicBrainzSource",
+    "FMASource", "MusicBrainzSource",
     "OpenverseSource", "WikimediaSource", "ITunesSource",
     "DeezerSource", "BoomplaySource",
 )

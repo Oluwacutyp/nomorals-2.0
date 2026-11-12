@@ -22,6 +22,7 @@ from nomorals.media.sources import (
     AudiomackSource,
     BaseScrapeSource,
     BoomplaySource,
+    FMASource,
     JamendoSource,
     NetNaijaSource,
     SourceCandidate,
@@ -358,6 +359,80 @@ class TestJamendoSource:
             get.assert_not_called()
 
 
+#: Realistic FMA search-page rows — titles, artists, albums,
+#: durations and /music/ URL shapes copied from the LIVE search page
+#: fetched 2026-11-12 (?quicksearch=blue+dot, 2,193 tracks), with
+#: the anchor markup as the page renders it.  The JSON API the row
+#: used to describe is dead (verified: /api, /api/trackSearch and
+#: /recent.json all 404), so the fixture is HTML, not a JSON envelope.
+_FMA_SEARCH_HTML = """
+<html><body>
+<table>
+<tr><td><a href="/music/Blue_Dot_Sessions/reflections/ether-ridge/">Ether Ridge</a> by <a href="/music/Blue_Dot_Sessions/">Blue Dot Sessions</a> <a href="/music/Blue_Dot_Sessions/reflections/">Reflections</a> &mdash; 03:10</td></tr>
+<tr><td><a href="/music/Blue_Dot_Sessions/the-viscount/etude-1-cherub/"><span>Etude 1 Cherub</span></a> by <a href="/music/Blue_Dot_Sessions/">Blue Dot Sessions</a> <a href="/music/Blue_Dot_Sessions/the-viscount/">The Viscount</a> &mdash; 02:00</td></tr>
+<tr><td><a href="https://freemusicarchive.org/music/M_Mucci/days-blur-together/days-blur-together/">Days Blur Together</a> by <a href="/music/M_Mucci/">M. Mucci</a> <a href="/music/M_Mucci/days-blur-together/">Days Blur Together</a> &mdash; 65:36</td></tr>
+<tr><td><a href="/music/Blue_Dot_Sessions/reflections/ether-ridge/">Ether Ridge</a> by <a href="/music/Blue_Dot_Sessions/">Blue Dot Sessions</a> <a href="/music/Blue_Dot_Sessions/reflections/">Reflections</a> &mdash; 03:10</td></tr>
+<tr><td><a href="/music/Blue_Dot_Sessions/comptroller/even-spread/">Even Spread</a> by <a href="/music/Blue_Dot_Sessions/">Blue Dot Sessions</a> <a href="/music/Blue_Dot_Sessions/comptroller/">Comptroller</a></td></tr>
+<tr><td><a href="/search/?quicksearch=blue&amp;page=2">next page</a></td></tr>
+</table>
+</body></html>
+"""
+
+
+# ── FMASource ─────────────────────────────────────────────────────────
+
+
+class TestFMASource:
+    def test_search_url_shape(self):
+        url = FMASource().search_url("blue dot")
+        assert url == ("https://freemusicarchive.org/search"
+                       "?quicksearch=blue+dot&pageSize=20&sort=track")
+
+    def test_search_parses_live_shaped_rows(self):
+        with patch.object(FMASource, "_get",
+                          return_value=_FMA_SEARCH_HTML):
+            cands = FMASource().search("blue dot")
+        assert [c.title for c in cands] == [
+            "Ether Ridge", "Etude 1 Cherub", "Days Blur Together",
+            "Even Spread"]
+        first = cands[0]
+        assert first.artist == "Blue Dot Sessions"
+        assert first.extra["album"] == "Reflections"
+        assert first.duration == pytest.approx(190.0)
+        assert first.url == ("https://freemusicarchive.org/music/"
+                             "Blue_Dot_Sessions/reflections/ether-ridge/")
+        # metadata-class: identified, no audio — never a download claim
+        assert first.downloadable is False
+        assert candidate_asset_class(first) == "metadata"
+        assert "track page" in first.extra["note"]
+        # nested markup inside the anchor is stripped
+        assert cands[1].title == "Etude 1 Cherub"
+        assert cands[1].duration == pytest.approx(120.0)
+        # absolute hrefs stay absolute; multi-digit minutes parse
+        assert cands[2].url.startswith("https://freemusicarchive.org/")
+        assert cands[2].duration == pytest.approx(65 * 60 + 36.0)
+        # a row with no duration still yields its track
+        assert cands[3].title == "Even Spread"
+        assert cands[3].duration == pytest.approx(0.0)
+
+    def test_search_skips_non_track_links_and_dedupes(self):
+        with patch.object(FMASource, "_get",
+                          return_value=_FMA_SEARCH_HTML):
+            cands = FMASource().search("blue dot")
+        assert all("/music/" in c.url for c in cands)
+        assert len({c.url for c in cands}) == len(cands)
+
+    def test_search_empty_and_garbage(self):
+        with patch.object(FMASource, "_get") as get:
+            assert FMASource().search("   ") == []
+            get.assert_not_called()
+        with patch.object(FMASource, "_get",
+                          return_value="<html><body>no results</body></html>"):
+            assert FMASource().search("zzz") == []
+        with patch.object(FMASource, "_get", return_value=""):
+            assert FMASource().search("zzz") == []
+
+
 class TestScrapeHelpers:
     def test_direct_media_links(self):
         html = ('<a href="/music/a.mp3">x</a>'
@@ -458,6 +533,42 @@ class TestResolverWiring:
         ov = src.index("openverse-search")
         assert ao < ja < bp
         assert ja < ov
+
+    def test_fma_search_hit_is_metadata_only(self):
+        # FMA identifies the track and its page — the JSON API is
+        # dead, so no audio is claimed.  The chain keeps going for a
+        # full track and only surfaces this when nothing downloadable
+        # exists anywhere (MusicBrainz shape).
+        r = self._resolver()
+        cands = [SourceCandidate(
+            source="fma", title="Ether Ridge", artist="Blue Dot Sessions",
+            url="https://freemusicarchive.org/music/Blue_Dot_Sessions/"
+                "reflections/ether-ridge/",
+            duration=190.0, downloadable=False)]
+        with patch.object(FMASource, "search", return_value=cands):
+            out = r._s_metadata_search(
+                "ether ridge", "FMASource", "fma",
+                "Free Music Archive — track identified, no audio; "
+                "download via the track page")
+        assert out.ok and out.kind == "fma"
+        assert out.title == "Ether Ridge"
+        assert out.path_or_url.endswith("/ether-ridge/")
+        assert out.downloadable is False
+
+    def test_text_chain_places_fma_after_jamendo(self):
+        # The third open archive, grouped with archive.org and
+        # Jamendo, before the metadata-only block — and before the
+        # Openverse aggregator.
+        import inspect
+
+        from nomorals.media import resolver as res_mod
+        src = inspect.getsource(res_mod.SourceResolver._resolve_text)
+        ja = src.index("jamendo-search")
+        fm = src.index("fma-search")
+        bp = src.index("boomplay-search")
+        ov = src.index("openverse-search")
+        assert ja < fm < bp
+        assert fm < ov
 
     def test_text_chain_includes_new_sources(self):
         # The chain tries netnaija before the proven globals.
