@@ -445,6 +445,24 @@ MUSIC_REGISTRY: List[MusicSource] = [
              "audio URL. (Repeated anonymous fetches were then "
              "refused — empty replies / 403 — so the probe must run "
              "in a browser session.)"),
+    _M(id="ghanamusic", name="Ghana Music", source_class="open", auth="none",
+       formats=["MP3"], quality_ceiling="not observed — posts link streaming only",
+       licence="Per-item licence as stated by rights holder",
+       volatility="commercial", bulk=False, api=False, bot_wall=True,
+       etiquette=OPEN_POLITE,
+       notes="Ghana music magazine (WordPress 6.8.2, MiPROMO network). NOT "
+             "wired into the /play chain — verified 2026-11-12: a Hostinger "
+             "JS challenge (/hcdn-cgi/jschallenge) 403s every anonymous "
+             "fetch (home, wp-json, search), so the chain's plain fetch "
+             "reads nothing; and a real music post (Efemor 'Jo', Sept 2025 "
+             "capture) carries zero .mp3 links and zero audio tags — the "
+             "only listen path is an Apple Music embed plus an ffm.to "
+             "smart-link to streaming stores, so the posts identify songs "
+             "but deliver no audio. Search is WordPress ?s= returning "
+             "editorial articles, not tracks. No yt-dlp extractor either. "
+             "Do NOT add a GhanaMusicSource until a live-browser probe "
+             "passes the challenge and pins a track-page audio URL.",
+       pack={"nation": "GH"}),
     _M(id="imslp", name="IMSLP", source_class="open", auth="none",
        formats=["PDF", "MP3"], quality_ceiling="as scanned",
        licence="Public domain scores", volatility="institutional",

@@ -2691,7 +2691,7 @@ def _seed(store: Any = None) -> SourceRegistry:
         ("NG", "en", "tooxclusive.com", "TooXclusive", ("music", "news"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Naija charts", 10),
         ("NG", "yo", "nollywood", "Nollywood (generic)", ("film",), Licence.UNKNOWN, TrustTier.UNVERIFIED, "Nollywood film sources vary; resolve per-title", 6),
         # ── Ghana / Kenya / South Africa ──
-        ("GH", "en", "ghanamusic.com", "Ghana Music", ("music", "charts"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Ghana charts", 10),
+        ("GH", "en", "ghanamusic.com", "Ghana Music", ("music", "charts"), Licence.USER_UPLOAD, TrustTier.COMMUNITY, "Ghana charts — NOT wired into the /play chain (verified 2026-11-12): Hostinger JS challenge 403s every anonymous fetch; music posts link streaming only (Apple Music embed / ffm.to), zero direct MP3s observed. Do NOT add a GhanaMusicSource until a live-browser probe lands.", 10),
         ("GH", "en", "joyonline.org", "Joy Online", ("news",), Licence.LICENSED, TrustTier.VERIFIED, "Ghana news", 15),
         ("KE", "en", "nation.africa", "Nation Africa", ("news",), Licence.LICENSED, TrustTier.VERIFIED, "Kenya news", 15),
         ("KE", "en", "mdundo.com", "Mdundo", ("music",), Licence.LICENSED, TrustTier.COMMUNITY, "East African music downloads", 10),

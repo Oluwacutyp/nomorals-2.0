@@ -340,3 +340,41 @@ class TestSoundClickRow:
         assert "JS filter framework" in notes
         assert "live-browser probe" in notes
         assert "Do NOT add a SoundClickSource" in notes
+
+
+# ── GhanaMusic: verified NOT wireable (CENSUS B6) ────────────────────
+#
+# The /play chain does NOT claim GhanaMusic, deliberately: verified
+# 2026-11-12, a Hostinger JS challenge (/hcdn-cgi/jschallenge) 403s
+# every anonymous fetch (home, wp-json, search), so the chain's plain
+# fetch reads nothing; and a real music post (Efemor "Jo", Sept 2025
+# capture) carries zero .mp3 links and zero audio tags — the only
+# listen path is an Apple Music embed plus an ffm.to smart-link to
+# streaming stores, so the posts identify songs but deliver no audio.
+# Search is WordPress ?s= returning editorial articles, not tracks.
+# A NetNaija-shaped parser would return articles as song candidates
+# with nothing to download, and a JSON-API client would be fake, so
+# no GhanaMusicSource exists.  Wiring needs a live-browser probe that
+# passes the challenge and pins a track-page audio URL; until then
+# these pins hold the NOT-wired state.
+
+
+class TestGhanaMusicRow:
+    def test_row_exists_and_is_open_keyless_no_api_bot_walled(self):
+        row = by_id("ghanamusic")
+        assert row is not None
+        assert row.source_class == "open"
+        assert row.auth == "none"
+        assert row.api is False
+        assert row.bot_wall is True
+
+    def test_row_records_the_verified_wall(self):
+        row = by_id("ghanamusic")
+        assert row is not None
+        notes = row.notes
+        assert "NOT wired into the /play chain" in notes
+        assert "Hostinger" in notes
+        assert "403s every anonymous" in notes
+        assert "zero .mp3 links" in notes
+        assert "live-browser probe" in notes
+        assert "Do NOT add a GhanaMusicSource" in notes

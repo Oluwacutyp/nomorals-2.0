@@ -672,6 +672,26 @@ class TestResolverWiring:
                    for name, _ in src_mod.SOURCE_CHAIN)
         assert not hasattr(src_mod, "SoundClickSource")
 
+    def test_text_chain_does_not_claim_ghanamusic(self):
+        # GhanaMusic is NOT in the chain, deliberately (CENSUS B6):
+        # verified 2026-11-12, a Hostinger JS challenge 403s every
+        # anonymous fetch (home, wp-json, search), so the chain's
+        # plain fetch reads nothing; and a real music post carries
+        # zero .mp3 links and zero audio tags — the only listen path
+        # is an Apple Music embed plus an ffm.to smart-link to
+        # streaming stores — so there is no honest source class to
+        # wire (a NetNaija-shaped parser would return editorial
+        # articles as song candidates with nothing to download; a
+        # JSON-API client would be fake).  Remove this pin only when
+        # a live-browser probe passes the challenge and pins a
+        # track-page audio URL, and wire the real shape then.
+        from nomorals.media import sources as src_mod
+
+        assert "ghanamusic-search" not in src_mod.MUSIC_SEARCH_SOURCES
+        assert all(name != "ghanamusic-search"
+                   for name, _ in src_mod.SOURCE_CHAIN)
+        assert not hasattr(src_mod, "GhanaMusicSource")
+
     def test_text_chain_includes_new_sources(self):
         # The chain tries netnaija before the proven globals.
         # Boomplay is BACK in the chain (browser-backed search,
