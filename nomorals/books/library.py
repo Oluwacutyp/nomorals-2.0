@@ -50,6 +50,7 @@ import time
 import urllib.error
 import urllib.request
 import xml.etree.ElementTree as ET
+from array import array
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -660,6 +661,65 @@ _COMPOSITE_PK = {
 }
 
 
+class _SeamSearchIndex:
+    """In-memory inverted index over the seam passages.
+
+    The seam rung has no FTS5: ``Library.search`` used to load EVERY
+    passage document into memory and BM25-score them in Python on
+    EVERY call (6.7s per call at 100k passages on the SQLite-backed
+    seam, worse over the Mongo wire — and a fresh adapter per
+    federated call paid it every time). The index is built once —
+    tokenize each passage once, postings word → row indices — and
+    every search after it scores only the rows containing a query
+    word, with the SAME BM25 formula ``_search_memory_rows`` uses.
+
+    Storage is ``array``-based, not per-token Python objects: at
+    100k passages the token + postings arrays are ~55MB, where
+    per-token tuples would be ~10x that on a 2GB host. Passage TEXT
+    is not held — top hits fetch their document by id (one point
+    read each). ``version`` is the corpus-version stamp the index
+    was built from; a changed stamp rebuilds it.
+    """
+
+    def __init__(self, rows, meta, version: int) -> None:
+        self.version = version
+        self.n = len(rows)
+        self.meta = meta
+        self.vocab: dict[str, int] = {}
+        self.words: list[str] = []
+        self.tokens: array = array("I")
+        self.offsets: array = array("I", [0])
+        self.postings: dict[int, array] = {}
+        self.row_slugs: array = array("I")
+        self.row_numbers: array = array("I")
+        self.slug_vocab: list[str] = []
+        slug_ids: dict[str, int] = {}
+        for slug, _title, _chapter, number, text in rows:
+            sid = slug_ids.get(slug)
+            if sid is None:
+                sid = len(self.slug_vocab)
+                slug_ids[slug] = sid
+                self.slug_vocab.append(slug)
+            self.row_slugs.append(sid)
+            self.row_numbers.append(int(number or 0))
+            seen: dict[int, None] = {}
+            for tok in _WORD.findall(text or ""):
+                w = tok.lower()
+                wid = self.vocab.get(w)
+                if wid is None:
+                    wid = len(self.words)
+                    self.vocab[w] = wid
+                    self.words.append(w)
+                self.tokens.append(wid)
+                seen[wid] = None
+            for wid in seen:
+                bucket = self.postings.get(wid)
+                if bucket is None:
+                    bucket = self.postings[wid] = array("I")
+                bucket.append(len(self.offsets) - 1)
+            self.offsets.append(len(self.tokens))
+
+
 class Library:
     """Owns ``workspace/library/``: ingest, search, read, list, drop."""
 
@@ -671,6 +731,7 @@ class Library:
         # Callers may inject a native/router Embedder instead.
         self.embedder = embedder
         self._port = None
+        self._seam_index = None
         from ..storage.sidecars import sidecar_port
 
         port = sidecar_port("books-library", _LIBRARY_DDL,
@@ -704,9 +765,15 @@ class Library:
             return write
 
         def _put_passages(rows):
-            for row in rows:
-                doc_id = f"{row['book_slug']}\x1f{int(row['number'])}"
-                port.put_raw("passages", doc_id, dict(row))
+            # Bulk: one put per row pays a transaction + round-trip
+            # per document — the lazy import of a 100k-passage library
+            # copies at ~55 rows/s over Mongo that way (~30 min),
+            # which is what killed the 2026-11-11 "motivation morning"
+            # job inside BooksAdapter.probe. Same documents, same
+            # ids, batched through the store's bulk path.
+            pairs = [(f"{row['book_slug']}\x1f{int(row['number'])}",
+                      dict(row)) for row in rows]
+            port.put_raw_many("passages", pairs)
             return len(rows)
 
         writers = {t: _put_row(t) for t in _PK_TABLES}
@@ -726,6 +793,53 @@ class Library:
         self._port = port
 
     # ── seam helpers ────────────────────────────────────────────────
+    #: Doc id of the corpus-version stamp in the port's meta collection.
+    _CORPUS_VERSION_DOC = "corpus_version"
+
+    def _corpus_version(self) -> int:
+        """The seam corpus version stamp, or 0 when unversioned.
+
+        One point read — the cheap freshness signal for the cached
+        search index. A count would not do: the SQLite-backed store
+        counts by loading every document, which is the scan the index
+        exists to avoid.
+        """
+        if self._port is None:
+            return 0
+        try:
+            doc = self._port.store.get(
+                self._port.meta_collection, self._CORPUS_VERSION_DOC)
+        except Exception:
+            return 0
+        if not doc:
+            return 0
+        try:
+            return int(doc.get("v", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    def _bump_corpus_version(self) -> None:
+        """Mark the seam corpus changed (a passage write just landed).
+
+        Called by the passage-mutating paths (``_index_book``,
+        ``drop``) on the seam rung. The next search on ANY Library
+        instance over this store sees the new stamp and rebuilds its
+        index; without the bump, a cached index would keep answering
+        from the pre-ingest corpus.
+        """
+        if self._port is None:
+            return
+        try:
+            self._port.store.put(
+                self._port.meta_collection, self._CORPUS_VERSION_DOC,
+                {"v": time.time_ns()})
+        except Exception as exc:  # noqa: BLE001 - journaled, then local
+            record_failure("books.library.corpus_version",
+                           f"corpus version bump failed: {exc}")
+            # The stamp may be stale now: drop this instance's index
+            # so ITS next search rebuilds rather than answering stale.
+            self._seam_index = None
+
     def _t(self, table):
         """The RowTable for a PK catalog table on the seam."""
         return self._port.tables[table]
@@ -982,6 +1096,7 @@ class Library:
                     {"book_slug": slug, "book_title": title,
                      "chapter": ch.get("title", ""), "number": num,
                      "text": body})
+            self._bump_corpus_version()
             return
         con.execute("DELETE FROM passages WHERE book_slug = ?", (slug,))
         book_json = self.book_dir(slug) / "book.json"
@@ -1216,18 +1331,25 @@ class Library:
         if not query:
             return []
         if self._port is not None:
-            # FTS5 stays native-rung-only: the seam runs this module's
-            # own in-memory BM25 over the seam passage documents —
-            # same scorer, same labels, same result shape.
-            rows = [(d.get("book_slug", ""), d.get("book_title", ""),
-                     d.get("chapter", ""), int(d.get("number", 0)),
-                     d.get("text") or "")
-                    for d in self._child_find("passages")]
-            meta = {r.get("slug", ""): (r.get("author", "") or "",
-                                        float(r.get("ingested_at", 0) or 0))
-                    for r in self._t("books").all()}
-            return self._search_memory_rows(
-                rows, meta, query, top, context_chars, book)
+            if book:
+                # Book-scoped search stays on the exact legacy path:
+                # the book's rows are few, and its df/n are scoped
+                # to the book — the index's corpus-wide df would
+                # score it differently.
+                rows = [(d.get("book_slug", ""), d.get("book_title", ""),
+                         d.get("chapter", ""), int(d.get("number", 0)),
+                         d.get("text") or "")
+                        for d in self._child_find(
+                            "passages", {"book_slug": book})]
+                meta = {r.get("slug", ""): (r.get("author", "") or "",
+                                            float(r.get("ingested_at", 0) or 0))
+                        for r in self._t("books").all()}
+                return self._search_memory_rows(
+                    rows, meta, query, top, context_chars, book)
+            index = self._seam_search_index()
+            if index is None or index.n == 0:
+                return []
+            return self._search_indexed(index, query, top, context_chars)
         con, fts5 = self._connect()
         try:
             if fts5:
@@ -1244,6 +1366,97 @@ class Library:
         finally:
             con.close()
         return hits[:top]
+
+    def _seam_search_index(self) -> _SeamSearchIndex | None:
+        """The cached inverted index over the seam passages, or None.
+
+        Built once per Library (the Library itself is cached per
+        context by BooksAdapter, so the index survives across
+        federated calls); rebuilt when the corpus version stamp
+        changes (ingest/drop bump it). The build is the one full
+        scan; every search after it answers from the postings.
+        """
+        if self._port is None:
+            return None
+        version = self._corpus_version()
+        cached = self._seam_index
+        if cached is not None and cached.version == version:
+            return cached
+        rows = [(d.get("book_slug", ""), d.get("book_title", ""),
+                 d.get("chapter", ""), int(d.get("number", 0)),
+                 d.get("text") or "")
+                for d in self._child_find("passages")]
+        meta = {r.get("slug", ""): (r.get("author", "") or "",
+                                    float(r.get("ingested_at", 0) or 0))
+                for r in self._t("books").all()}
+        cached = _SeamSearchIndex(rows, meta, version)
+        self._seam_index = cached
+        return cached
+
+    def _search_indexed(self, index: _SeamSearchIndex, query: str,
+                        top: int, context_chars: int) -> list[SearchHit]:
+        """BM25 over the seam index — same scorer as _search_memory_rows.
+
+        Candidates come from the postings (rows containing a query
+        word); each is scored with the identical idf/tf formula
+        (sums run over sorted query words, so scores agree with the
+        legacy scorer to float noise, ~1e-9). Ties keep row order:
+        candidates are scanned row-ascending and the sort is stable.
+        Passage text is fetched per top hit only (point reads), never
+        held for the whole corpus.
+        """
+        q_words = {w.lower() for w in _WORD.findall(query) if len(w) >= 2}
+        if not q_words or index.n == 0:
+            return []
+        cand: set[int] = set()
+        for w in q_words:
+            wid = index.vocab.get(w)
+            if wid is not None:
+                cand.update(index.postings.get(wid, ()))
+        if not cand:
+            return []
+        scored: list[tuple[float, int]] = []
+        for row_idx in sorted(cand):
+            start = index.offsets[row_idx]
+            end = index.offsets[row_idx + 1]
+            seg = index.tokens[start:end]
+            tf: dict[str, int] = {}
+            for w in q_words:
+                wid = index.vocab.get(w)
+                if wid is None:
+                    continue
+                f = seg.count(wid)
+                if f:
+                    tf[w] = f
+            if not tf:
+                continue
+            s = 0.0
+            for w in sorted(tf):
+                dfw = len(index.postings[index.vocab[w]])
+                idf = math.log(1 + (index.n - dfw + 0.5) / (dfw + 0.5))
+                s += idf * tf[w]
+            scored.append((s, row_idx))
+        scored.sort(key=lambda x: -x[0])
+        out: list[SearchHit] = []
+        for s, row_idx in scored:
+            if len(out) >= top:
+                break
+            slug = index.slug_vocab[index.row_slugs[row_idx]]
+            number = int(index.row_numbers[row_idx])
+            doc = self._port.store.get(
+                self._raw("passages"), f"{slug}\x1f{number}")
+            if doc is None:
+                continue
+            author, ingested = index.meta.get(slug, ("", 0.0))
+            title = doc.get("book_title", "") or slug
+            out.append(SearchHit(
+                book=title, title=title,
+                chapter=self._chapter_label(doc.get("chapter", ""), number),
+                score=s, passage=self._context_window(
+                    doc.get("text") or "", query, context_chars),
+                source="bm25-memory", book_slug=slug, author=author,
+                chapter_number=number, ingested_at=ingested))
+        return out
 
     def _search_fts5(self, con, query, top, context_chars, book) -> list[SearchHit]:
         try:
@@ -1584,6 +1797,7 @@ class Library:
             self._del_composite("collection_books", slug=slug)
             self._del_composite("book_tags", slug=slug)
             self._t("ratings").delete(slug)
+            self._bump_corpus_version()
         else:
             con, fts5 = self._connect()
             con.execute("DELETE FROM passages WHERE book_slug = ?", (slug,))

@@ -246,6 +246,27 @@ class SidecarPort:
     def put_raw(self, table: str, doc_id: str, fields: Mapping[str, Any]) -> None:
         self.store.put(_collection(self.store_name, table), doc_id, dict(fields))
 
+    def put_raw_many(self, table: str,
+                     pairs) -> int:
+        """Upsert many PK-less documents at once (bulk import path).
+
+        ``pairs`` is (doc_id, fields) pairs. Uses the store's bulk
+        path when it has one, else one ``put_raw`` per row — same
+        documents, same ids, just slower. Returns how many were
+        written. The sidecar lazy import of a 100k-passage library
+        pays one round-trip per row without this (~55 rows/s over
+        Mongo, ~30 min); batched it is seconds.
+        """
+        pairs = list(pairs)
+        if not pairs:
+            return 0
+        put_many = getattr(self.store, "put_many", None)
+        if callable(put_many):
+            return int(put_many(_collection(self.store_name, table), pairs))
+        for doc_id, fields in pairs:
+            self.put_raw(table, doc_id, fields)
+        return len(pairs)
+
     def find_raw(self, table: str,
                  filter: Mapping[str, Any] | None = None) -> list[dict[str, Any]]:
         return self.store.find(_collection(self.store_name, table), filter)

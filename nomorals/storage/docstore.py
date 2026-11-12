@@ -339,6 +339,24 @@ class SQLiteDocumentStore:
         with self._tx():
             self._write_row(collection, _clean_doc(collection, doc_id, doc, expires_at))
 
+    def put_many(self, collection, pairs, *, expires_at=None):
+        """Upsert many documents in ONE transaction (bulk import path).
+
+        One ``put`` per row pays a transaction per document — the
+        sidecar lazy import of a 100k-passage library copies at ~55
+        rows/s over Mongo that way (~30 min), which is what killed
+        the 2026-11-11 "motivation morning" job inside
+        ``BooksAdapter.probe``. Same upsert semantics, just batched:
+        every pair is (doc_id, doc). Returns how many were written.
+        """
+        _check_collection(collection)
+        pairs = list(pairs)
+        with self._tx():
+            for doc_id, doc in pairs:
+                self._write_row(
+                    collection, _clean_doc(collection, doc_id, doc, expires_at))
+        return len(pairs)
+
     def update_fields(self, collection, doc_id, fields, *, upsert=False):
         _check_collection(collection)
         if "_id" in fields:
@@ -580,6 +598,34 @@ class MongoDocumentStore:
         self._run(lambda: self._coll(collection).replace_one(
             {"_id": doc_id}, full, upsert=True))
 
+    def put_many(self, collection, pairs, *, expires_at=None):
+        """Upsert many documents with bulk_write (see SQLite put_many).
+
+        One ``put`` per row is one round-trip per document — the
+        sidecar lazy import of a 100k-passage library copies at ~55
+        rows/s that way (~30 min over a local mongod), which is what
+        killed the 2026-11-11 "motivation morning" job inside
+        ``BooksAdapter.probe``. Same upsert semantics, in chunks of
+        1000, unordered. Returns how many were written.
+        """
+        pairs = list(pairs)
+        if not pairs:
+            return 0
+        ReplaceOne = self._mongo().ReplaceOne
+        coll = self._coll(collection)
+        written = 0
+        for i in range(0, len(pairs), 1000):
+            chunk = pairs[i:i + 1000]
+            ops = [ReplaceOne(
+                {"_id": doc_id},
+                _clean_doc(collection, doc_id, doc, expires_at),
+                upsert=True)
+                for doc_id, doc in chunk]
+            result = self._run(
+                lambda ops=ops: coll.bulk_write(ops, ordered=False))
+            written += result.upserted_count + result.modified_count
+        return written
+
     def update_fields(self, collection, doc_id, fields, *, upsert=False):
         if "_id" in fields:
             raise StorageError("update_fields may not set _id")
@@ -803,6 +849,36 @@ class ShadowDocumentStore:
         self.primary.put(collection, doc_id, doc, expires_at=expires_at)
         self._shadow("put", lambda: self.secondary.put(
             collection, doc_id, doc, expires_at=expires_at))
+
+    def put_many(self, collection, pairs, *, expires_at=None):
+        """Bulk upsert: primary authoritative, secondary shadowed (see put).
+
+        A rung without a bulk path falls back to one ``put`` per row
+        on that rung — same documents, just slower. Returns how many
+        the primary wrote.
+        """
+        pairs = list(pairs)
+        primary_bulk = getattr(self.primary, "put_many", None)
+        if callable(primary_bulk):
+            written = int(primary_bulk(
+                collection, pairs, expires_at=expires_at))
+        else:
+            written = 0
+            for doc_id, doc in pairs:
+                self.primary.put(collection, doc_id, doc,
+                                 expires_at=expires_at)
+                written += 1
+        secondary_bulk = getattr(self.secondary, "put_many", None)
+        if callable(secondary_bulk):
+            self._shadow("put_many", lambda: secondary_bulk(
+                collection, pairs, expires_at=expires_at))
+        else:
+            def _shadow_loop():
+                for doc_id, doc in pairs:
+                    self.secondary.put(collection, doc_id, doc,
+                                       expires_at=expires_at)
+            self._shadow("put_many", _shadow_loop)
+        return written
 
     def delete(self, collection, doc_id):
         result = self.primary.delete(collection, doc_id)

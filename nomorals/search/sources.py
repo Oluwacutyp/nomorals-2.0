@@ -116,6 +116,53 @@ def _query_terms(query: str) -> list[str]:
 # SourceAdapter`` keeps working (it is also in __all__ above).
 
 
+#: Attribute holding the per-context cached books Library (see below).
+_BOOKS_LIBRARY_CACHE_ATTR = "_books_library_cached"
+
+
+def _context_books_library(context: Any) -> Library | None:
+    """A Library cached on the context, or None.
+
+    The stamp is (library DB path, ambient store identity): the
+    cache is valid only while both match the live ones, so a
+    workspace move or a store change rebuilds instead of answering
+    from the wrong library. Anything unexpected (a Mock context, a
+    context that cannot hold attributes) returns None — the caller
+    constructs fresh, exactly as before.
+    """
+    try:
+        cached = getattr(context, _BOOKS_LIBRARY_CACHE_ATTR, None)
+    except Exception:
+        return None
+    if not isinstance(cached, tuple) or len(cached) != 3:
+        return None
+    lib, db_path, store = cached
+    if not isinstance(lib, Library):
+        return None
+    try:
+        current_path = str(_workspace_dir(context) / "library" / "library.db")
+        if current_path != db_path:
+            return None
+        from ..storage.docstore import ambient_document_store
+        if ambient_document_store() is not store:
+            return None
+    except Exception:
+        return None
+    return lib
+
+
+def _cache_books_library(context: Any, lib: Library) -> None:
+    """Cache a Library on its context (see _context_books_library)."""
+    try:
+        db_path = str(_workspace_dir(context) / "library" / "library.db")
+        from ..storage.docstore import ambient_document_store
+        store = ambient_document_store()
+        setattr(context, _BOOKS_LIBRARY_CACHE_ATTR,
+                (lib, db_path, store))
+    except Exception:
+        pass
+
+
 # ── books ──────────────────────────────────────────────────────────────
 
 class BooksAdapter(SourceAdapter):
@@ -135,20 +182,41 @@ class BooksAdapter(SourceAdapter):
         self._library = library
 
     def _lib(self) -> Library:
-        if self._library is None:
-            self._library = Library(self._context)
-        return self._library
+        """The Library for this adapter's context, cached per context.
+
+        Adapters are built fresh on every federated call, so a
+        per-adapter Library pays construction (and, on the seam rung,
+        the search index build) on EVERY call. The context is one
+        object per process, so caching the Library on it makes
+        construction — and the index it carries — once per process.
+        The stamp (db path + ambient store identity) rebuilds when
+        either changes; a context that cannot hold attributes falls
+        back to per-adapter construction.
+        """
+        if self._library is not None:
+            return self._library
+        cached = _context_books_library(self._context)
+        if cached is not None:
+            self._library = cached
+            return cached
+        lib = Library(self._context)
+        _cache_books_library(self._context, lib)
+        self._library = lib
+        return lib
 
     def _db_path_fast(self) -> Path:
         """The library DB path WITHOUT constructing a ``Library``.
 
-        ``Library()`` construction is the slow step in the probe path:
-        when a document store is ambient it runs ``ensure_imported`` —
-        a full copy of every table (passages included) into the seam —
-        before the probe has asked a single question. The probe only
-        needs the file path, which is the same derivation
-        ``Library.root()`` uses. An injected library (tests, callers
-        that already hold one) keeps its own ``db_path()``.
+        ``Library()`` construction is the slow step in the probe path
+        only when a document store is ambient and the one-time import
+        has not run yet: ``ensure_imported`` copies the file's rows
+        into the seam — once per store, behind a done marker — at
+        ~55 rows/s over Mongo, so a large library stalls the first
+        construction for minutes (the 2026-11-11 "motivation
+        morning" kill). The probe only needs the file path, which is
+        the same derivation ``Library.root()`` uses. An injected
+        library (tests, callers that already hold one) keeps its own
+        ``db_path()``.
         """
         if self._library is not None:
             return self._library.db_path()
