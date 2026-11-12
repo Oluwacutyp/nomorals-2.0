@@ -135,7 +135,13 @@ def _descriptor_table() -> list[SourceDescriptor]:
             rights_class="public_domain",
             verified=True,
             notes="Served by GutenbergAdapter (Gutendex JSON + plain-text "
-                  "ebooks), not by generic HTML scraping.",
+                  "ebooks), not by generic HTML scraping. C4 probe "
+                  "2026-11-12: Gutendex API down (HTTP 503 + 30s read "
+                  "timeouts; gutenberg.org itself HTTP 200) — search not "
+                  "verifiable live today. Do NOT add gutenberg to "
+                  "BOOK_SEARCH_SOURCES until a re-probe shows Gutendex "
+                  "answering; wiring it now would make every search pay "
+                  "a 30s timeout against a down API.",
         ),
         SourceDescriptor(
             id="scribblehub",
@@ -158,7 +164,14 @@ def _descriptor_table() -> list[SourceDescriptor]:
             verified=False,
             notes="Unverified markup — DescriptorAdapter self-tunes via "
                   "GenericAdapter scoring; verified stays False until a "
-                  "real fetch is confirmed.",
+                  "real fetch is confirmed. C4 probe 2026-11-12: plain "
+                  "fetch Cloudflare 'Just a moment' 403; a browser-like "
+                  "fetch returns a near-empty shell; the Fetcher's "
+                  "browser-context fallback is untestable on this box "
+                  "(BrowserSession SSL failure even on example.com). Do "
+                  "NOT add scribblehub to BOOK_SEARCH_SOURCES until a "
+                  "live-browser probe passes the wall and pins the "
+                  "search-results markup.",
         ),
         SourceDescriptor(
             id="ao3",
@@ -181,7 +194,12 @@ def _descriptor_table() -> list[SourceDescriptor]:
             rights_class="author_posted",
             verified=False,
             notes="No API; HTML only, 3s minimum delay, locked works "
-                  "are honestly blocked, never bypassed.",
+                  "are honestly blocked, never bypassed. C4 probe "
+                  "2026-11-12: HTTP 418 'Request temporarily denied' "
+                  "from plain fetch AND a browser-like fetch — the wall "
+                  "is not client-specific. Do NOT add ao3 to "
+                  "BOOK_SEARCH_SOURCES until a live-browser probe passes "
+                  "it and pins the search-results markup.",
         ),
         SourceDescriptor(
             id="wattpad",
@@ -199,7 +217,12 @@ def _descriptor_table() -> list[SourceDescriptor]:
             requires_key=True,
             api_key_env="WATTPAD_API_KEY",
             notes="API-key source. Without WATTPAD_API_KEY every call "
-                  "returns an honest unavailable error.",
+                  "returns an honest unavailable error. C4 probe "
+                  "2026-11-12: no search template and requires_key — "
+                  "search raises the honest key error with no key set. "
+                  "Do NOT add wattpad to BOOK_SEARCH_SOURCES until "
+                  "WATTPAD_API_KEY is provisioned (owner's hand); no "
+                  "keyless search path exists to verify.",
         ),
         SourceDescriptor(
             id="webnovel",
@@ -220,7 +243,17 @@ def _descriptor_table() -> list[SourceDescriptor]:
             rights_class="licensed_official",
             verified=False,
             notes="Unverified markup; paywalled chapters are blocked, "
-                  "never bypassed.",
+                  "never bypassed. C4 probe 2026-11-12: plain fetch gets "
+                  "an empty reply, but a browser-like fetch passes the "
+                  "wall — the search page is live and server-rendered "
+                  "with real book results. The adapter's link-extraction "
+                  "shape against the real markup is still unverified "
+                  "(the browser fetch exposes rendered text, not raw "
+                  "hrefs), and with no search_link_must_contain set the "
+                  "adapter would return nav links as stories. Do NOT add "
+                  "webnovel to BOOK_SEARCH_SOURCES until a live-browser "
+                  "probe pins the search-page link shapes (and sets "
+                  "search_link_must_contain='/book/' if verified).",
         ),
     ]
 

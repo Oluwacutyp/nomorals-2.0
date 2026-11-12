@@ -190,6 +190,19 @@ BOOK_SOURCE_BY_DOMAIN: dict[str, str] = {
 }
 
 #: The dedicated-adapter search pool, in search_all's day-one order.
+#: The working pool is ``ADAPTERS`` (``search_all`` iterates it); this
+#: tuple is the declared order — the two must move together when a
+#: probe lands for a new source.
+#: C4 verdict (2026-11-12, census §10 item 5 — the last census item):
+#: the five descriptor adapters (gutenberg, scribblehub, ao3, wattpad,
+#: webnovel) were probed live and NONE was wired — gutenberg's Gutendex
+#: API was down (HTTP 503 + read timeouts), scribblehub is Cloudflare-
+#: walled, ao3 answers 418 to every client, wattpad needs a key the
+#: owner has not provisioned, and webnovel's search page is live but
+#: its link-extraction shape is unverified.  The evidence and the named
+#: next probe for each live in the descriptor table's notes
+#: (books/descriptors.py).  Do NOT extend this tuple until a probe
+#: lands for that source.
 BOOK_SEARCH_SOURCES: tuple[str, ...] = (
     "freewebnovel", "novelfull", "royalroad", "pandanovel",
 )
