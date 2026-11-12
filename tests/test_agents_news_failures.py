@@ -12,6 +12,7 @@ totals or news counts. Every test redirects stores with the app's own
 Restart tests use real subprocesses. Every trigger was probed live
 before its pin was written.
 """
+import calendar
 import json
 import os
 import subprocess
@@ -500,6 +501,38 @@ def test_excl_parse_feed_date():
     assert len(items) == 1
     assert items[0]["source_ts"] == 0.0
     assert af.failure_count() == 0
+
+
+def test_parse_feed_date_rfc822_and_iso8601():
+    # Burn-down (register §3.3, 2026-11-12): parse_feed's date parse
+    # used time.strptime(text[:25]) with no format, so every real-feed
+    # date except ctime-shaped text yielded source_ts == 0.0 and the
+    # newest-first ordering in poll() was lost. RFC-822 and ISO-8601
+    # pubDates must parse, in chronological order.
+    feed = ("<rss version=\"2.0\"><channel>"
+            "<item><title>Older</title><link>http://u/1</link>"
+            "<pubDate>Sat, 24 Oct 2026 10:00:00 GMT</pubDate></item>"
+            "<item><title>Newer</title><link>http://u/2</link>"
+            "<pubDate>2026-10-26T08:30:00Z</pubDate></item>"
+            "</channel></rss>")
+    items = nw.parse_feed(feed)
+    assert len(items) == 2
+    older = calendar.timegm((2026, 10, 24, 10, 0, 0, 0, 0, 0))
+    newer = calendar.timegm((2026, 10, 26, 8, 30, 0, 0, 0, 0))
+    assert items[0]["source_ts"] == older
+    assert items[1]["source_ts"] == newer
+    assert items[1]["source_ts"] > items[0]["source_ts"]
+
+
+def test_parse_feed_date_ctime_fallback_still_parses():
+    # The one shape the old no-format strptime DID parse keeps working.
+    feed = ("<rss version=\"2.0\"><channel>"
+            "<item><title>T</title><link>http://u</link>"
+            "<pubDate>Sat Oct 24 10:00:00 2026</pubDate></item>"
+            "</channel></rss>")
+    items = nw.parse_feed(feed)
+    assert len(items) == 1
+    assert items[0]["source_ts"] > 0.0
 
 
 def test_excl_ensure_delivery_columns():

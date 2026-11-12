@@ -63,11 +63,14 @@ Oceania — has its own outlets in the default digest (see FEED_REGIONS).
 
 from __future__ import annotations
 
+import calendar
+import email.utils
 import html as _html
 import json
 import re
 import time
 import xml.etree.ElementTree as ET
+from datetime import datetime
 from typing import Any
 
 from ..llm.brain import brain_for
@@ -364,6 +367,41 @@ def _short_summary(summary: str, limit: int = 200) -> str:
     return text[:cut].rstrip() + "…"
 
 
+def _parse_feed_date(text: str) -> float:
+    """Parse a feed-item date to an epoch, or 0.0 when unparseable.
+
+    Real feeds publish RFC-822 (``Sat, 24 Oct 2026 10:00:00 GMT``) or
+    ISO-8601 (``2026-10-24T10:00:00Z``) dates; the old code ran
+    ``time.strptime(text[:25])`` with no format, so only ctime-shaped
+    text parsed and every other date silently became 0.0 — the
+    newest-first ordering in :meth:`NewsAgent.poll` was lost. Order:
+    the legacy ctime fallback first (byte-identical to the old path),
+    then RFC-822, then ISO-8601; naive datetimes read as UTC.
+    """
+    text = (text or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return time.mktime(time.strptime(text[:25].replace("Z", "")))
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        parsed = email.utils.parsedate_to_datetime(text)
+    except (TypeError, ValueError, OverflowError):
+        parsed = None
+    if parsed is not None:
+        if parsed.tzinfo is None:
+            return calendar.timegm(parsed.timetuple())
+        return parsed.timestamp()
+    try:
+        iso = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    if iso.tzinfo is None:
+        return calendar.timegm(iso.timetuple())
+    return iso.timestamp()
+
+
 def parse_feed(markup: str) -> list[dict[str, str]]:
     """Parse RSS/Atom-ish markup into item dicts.
 
@@ -412,12 +450,7 @@ def parse_feed(markup: str) -> list[dict[str, str]]:
             elif ctag in {"description", "summary", "content"} and not item["summary"]:
                 item["summary"] = _strip(text)
             elif ctag in {"pubdate", "published", "updated", "dc:date"}:
-                try:
-                    item["source_ts"] = time.mktime(
-                        time.strptime(text[:25].replace("Z", ""))
-                    )
-                except Exception:  # noqa: BLE001
-                    pass
+                item["source_ts"] = _parse_feed_date(text)
         if item["title"] and item["url"]:
             items.append(item)
     return items
