@@ -69,6 +69,38 @@ class TestDefinitions:
         assert pack_b.builder == BUILDER_NE_RASTER
         assert pack_b.tile_format == "png"
 
+    def test_ghana_pack_carries_the_pack_a_shape(self):
+        """Census B10: the first country pack beyond Nigeria —
+        same Pack A shape as pack-a-nigeria, same pipeline."""
+        ghana = get_pack("pack-a-ghana")
+        assert (ghana.zoom_min, ghana.zoom_max) == (0, 14)
+        assert ghana.stretch_zoom_max == 16
+        assert ghana.builder == BUILDER_PLANETILER
+        assert ghana.tile_format == "mvt"
+        assert ghana.source_id == "geofabrik-ghana"
+        # The bbox is the live Ghana extent (Nominatim, verified
+        # 2026-11-12: west -3.2608, south 4.5393, east 1.2733,
+        # north 11.1749), rounded outward to 1 decimal like
+        # Nigeria's — and it holds the country's cities.
+        assert ghana.bbox.as_list() == [-3.3, 4.5, 1.3, 11.2]
+        for lat, lon in ((5.6037, -0.1870),   # Accra
+                         (6.6885, -1.6244),   # Kumasi
+                         (9.4008, -0.8393)):  # Tamale
+            assert ghana.bbox.west <= lon <= ghana.bbox.east
+            assert ghana.bbox.south <= lat <= ghana.bbox.north
+
+    def test_ghana_source_is_a_rolling_geofabrik_extract(self):
+        source = get_source("geofabrik-ghana")
+        assert source.url == ("https://download.geofabrik.de/africa/"
+                              "ghana-latest.osm.pbf")
+        assert source.md5_url == source.url + ".md5"
+        assert source.filename == "ghana-latest.osm.pbf"
+        assert source.attribution == "© OpenStreetMap contributors"
+        assert source.license == "ODbL 1.0"
+        # Rolling, like Nigeria's: no pinned SHA-256, the MD5
+        # sidecar is the publisher check (pin-after-first-fetch).
+        assert source.sha256 == "" and source.md5_url
+
     def test_every_pack_source_resolves_with_attribution(self):
         for pack in PACKS:
             for source_id in pack.source_ids():
@@ -278,6 +310,25 @@ def _geofabrik_fetcher(url: str, dest: Path, timeout_s: float) -> None:
         dest.write_bytes(b"fake-pbf")
 
 
+def _fake_runner_ghana_mbtailes(argv: list[str], timeout_s: float):
+    """The z14 twin of the Lagos runner: one tile inside the
+    Ghana pack's own zoom range (z0–z14), never above it."""
+    output = next(a.split("=", 1)[1] for a in argv
+                  if a.startswith("--output="))
+    _write_mbtiles(Path(output), [(14, 100, 200, b"mvt-tile-bytes")])
+    return 0, "planetiler-fixture: ok"
+
+
+def _ghana_fetcher(url: str, dest: Path, timeout_s: float) -> None:
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    if url.endswith(".md5"):
+        digest = hashlib.md5(b"fake-pbf").hexdigest()
+        dest.write_text(digest + "  ghana-latest.osm.pbf",
+                        encoding="utf-8")
+    else:
+        dest.write_bytes(b"fake-pbf")
+
+
 class TestRunBuild:
     def test_planetiler_pack_end_to_end(self, tmp_path):
         jar = tmp_path / "planetiler.jar"
@@ -308,6 +359,39 @@ class TestRunBuild:
         verifies = store.recent(operation=OP_PACK_VERIFY)
         assert len(installs) == 1 and len(verifies) == 1
         assert installs[0].receipt_id == report.install_receipt_id
+
+    def test_ghana_pack_end_to_end(self, tmp_path):
+        """Census B10: ``nm maps build pack-a-ghana`` runs the
+        whole pipeline for the registered Ghana definition —
+        the build command is parameterised by pack id, never a
+        one-off per country."""
+        jar = tmp_path / "planetiler.jar"
+        jar.write_bytes(b"jar")
+        store = MapReceiptStore(home=str(tmp_path / "home"))
+        report = run_build(
+            "pack-a-ghana", build_root=tmp_path / "build",
+            packs_dir=tmp_path / "packs", store=store,
+            fetcher=_ghana_fetcher, runner=_fake_runner_ghana_mbtailes,
+            env={"NM_MAPS_JAVA": "java-fixture",
+                 "NM_MAPS_PLANETILER_JAR": str(jar)})
+        assert report.ok, report.error
+        assert report.stages == [
+            "acquire:geofabrik-ghana", "build:planetiler-mbtiles",
+            "package", "verify", "install"]
+        assert report.tiles == 1
+        pack_dir = tmp_path / "packs" / "pack-a-ghana"
+        assert (pack_dir / "manifest.json").is_file()
+        manifest = load_manifest(pack_dir)
+        assert manifest.digest == report.digest
+        assert manifest.attribution == \
+            "© OpenStreetMap contributors · Natural Earth"
+        assert report.signature_state == "unsigned"
+        entry = ReleaseRegistry(tmp_path / "packs").get("pack-a-ghana")
+        assert entry is not None and entry.digest == report.digest
+        assert entry.zoom_max == 14
+        installs = store.recent(operation=OP_PACK_INSTALL)
+        verifies = store.recent(operation=OP_PACK_VERIFY)
+        assert len(installs) == 1 and len(verifies) == 1
 
     def test_ne_pack_end_to_end_via_seam(self, tmp_path, monkeypatch):
         import nomorals.maps.pipeline as pipeline
@@ -352,6 +436,20 @@ class TestRunBuild:
         assert "build" in report.error or "command failed" in report.error
         assert not (tmp_path / "packs" / "pack-a-lagos").exists()
         assert store.recent(operation=OP_PACK_INSTALL) == []
+
+    def test_planetiler_argv_ghana_bounds(self):
+        """The Planetiler command for the Ghana pack carries the
+        Ghana bbox and zoom range — the build is the same
+        command, parameterised by the pack row."""
+        argv = planetiler_argv(
+            "java", "p.jar", Path("in.pbf"), Path("out.mbtiles"),
+            get_pack("pack-a-ghana"), Path("data"))
+        assert argv[:4] == ["java", "-Xmx2g", "-jar", "p.jar"]
+        assert "--osm-path=in.pbf" in argv
+        assert "--bounds=-3.3,4.5,1.3,11.2" in argv
+        assert "--minzoom=0" in argv
+        assert "--maxzoom=14" in argv
+        assert all(isinstance(item, str) for item in argv)
 
     def test_planetiler_argv_shape(self):
         argv = planetiler_argv(
@@ -428,6 +526,20 @@ class TestCli:
         ids = [row["source_id"] for row in payload["sources"]]
         assert "geofabrik-nigeria" in ids
         assert "planetiler-jar" in ids
+
+    def test_packs_verb_lists_ghana_uninstalled(self, tmp_path, capsys):
+        context = SimpleNamespace(settings=None)
+        rc = _cmd_maps(
+            self._args(maps_action="packs",
+                       packs_dir=str(tmp_path / "packs")), context)
+        assert rc == 0
+        payload = json.loads(capsys.readouterr().out)
+        by_id = {row["pack_id"]: row for row in payload["packs"]}
+        ghana = by_id["pack-a-ghana"]
+        assert ghana["zoom_min"] == 0 and ghana["zoom_max"] == 14
+        assert ghana["stretch_zoom_max"] == 16
+        assert ghana["tile_format"] == "mvt"
+        assert ghana["installed"] is None
 
     def test_packs_verb_empty_registry(self, tmp_path, capsys):
         context = SimpleNamespace(settings=None)

@@ -197,7 +197,7 @@ class _PackBuilder:
         return (zoom, x, y)
 
     def build(self, root: Path, *, pack_id="fixture-pack",
-              name="Fixture Pack"):
+              name="Fixture Pack", bbox=NIGERIA):
         root.mkdir(parents=True, exist_ok=True)
         for (z, x, y), layers in self.tiles.items():
             tile = _tile(*(_layer_from_specs(lname, specs)
@@ -206,7 +206,7 @@ class _PackBuilder:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(tile)
         manifest = build_manifest(
-            root, pack_id=pack_id, name=name, bbox=NIGERIA,
+            root, pack_id=pack_id, name=name, bbox=bbox,
             zoom_min=0, zoom_max=14, attribution=ATTRIBUTION,
             built_at="2026-11-10T00:00:00+00:00",
             tile_format="mvt")
@@ -480,3 +480,55 @@ class TestCliIndex:
         args = self._args(packs_dir=str(empty))
         assert _index(args, self._context(tmp_path)) == 1
         assert "no map packs installed" in capsys.readouterr().out
+
+
+# ── census B10: the Ghana pack answers Ghana queries ──────────
+
+#: The registered Ghana bbox (definitions._GHANA_BBOX): the live
+#: extent rounded outward to 1 decimal, like Nigeria's.
+GHANA_BBOX = BBox(west=-3.3, south=4.5, east=1.3, north=11.2)
+ACCRA = (5.6037, -0.1870)    # Accra — capital, city
+KUMASI = (6.6885, -1.6244)   # Kumasi — city
+
+
+class TestGhanaPackIndex:
+    """A fixture pack built from the Ghana definition answers
+    Ghana queries from the local index — the pack is a real
+    shelf member, not just a registry row."""
+
+    def _ghana_shelf(self, tmp_path):
+        packs = tmp_path / "packs"
+        pack_dir = packs / "pack-a-ghana"
+        builder = _PackBuilder()
+        builder.add_point({"name": "Accra", "class": "city",
+                           "population": 2500000}, *ACCRA)
+        builder.add_point({"name": "Kumasi", "class": "city",
+                           "population": 3800000}, *KUMASI)
+        manifest = builder.build(
+            pack_dir, pack_id="pack-a-ghana",
+            name="Devon Atlas — Ghana (Pack A)", bbox=GHANA_BBOX)
+        assert manifest.pack_id == "pack-a-ghana"
+        gaz = Gazetteer(packs)
+        built = gaz.build([(pack_dir, manifest)])
+        assert built.total_entries == 2
+        return packs, [(pack_dir, manifest)], gaz
+
+    def test_ghana_cities_answer_from_the_local_index(self, tmp_path):
+        _packs, shelf, gaz = self._ghana_shelf(tmp_path)
+        for query, (lat, lon) in (("Accra", ACCRA),
+                                  ("Kumasi", KUMASI)):
+            result = gaz.search(query, packs=shelf)
+            assert result.posture == "local"
+            assert result.provider == "local"
+            assert [c.name for c in result.candidates] == [query]
+            found = result.candidates[0]
+            assert found.pack_id == "pack-a-ghana"
+            assert found.kind == "city"
+            assert abs(found.lat - lat) < 0.01
+            assert abs(found.lon - lon) < 0.01
+
+    def test_ghana_pack_serves_nothing_it_does_not_hold(self, tmp_path):
+        _packs, shelf, gaz = self._ghana_shelf(tmp_path)
+        # Lagos lives in the Nigeria pack, not this shelf — the
+        # Ghana pack answers nothing for it.
+        assert not gaz.search("Lagos", packs=shelf).candidates

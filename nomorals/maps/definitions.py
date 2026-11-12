@@ -113,6 +113,10 @@ class PackDefinition:
 
 
 _NIGERIA_BBOX = BBox(2.6, 4.2, 14.7, 13.9)
+#: Ghana, rounded outward to 1 decimal like Nigeria's: the live
+#: extent (Nominatim, verified 2026-11-12) is west -3.2608,
+#: south 4.5393, east 1.2733, north 11.1749.
+_GHANA_BBOX = BBox(-3.3, 4.5, 1.3, 11.2)
 _LAGOS_BBOX = BBox(2.65, 6.35, 4.35, 6.95)
 _WORLD_BBOX = BBox(-180.0, -85.05112878, 180.0, 85.05112878)
 
@@ -126,6 +130,15 @@ SOURCES: tuple[MapSource, ...] = (
         md5_url=("https://download.geofabrik.de/africa/"
                  "nigeria-latest.osm.pbf.md5"),
         filename="nigeria-latest.osm.pbf"),
+    MapSource(
+        source_id="geofabrik-ghana",
+        name="Geofabrik Ghana extract (OpenStreetMap)",
+        url="https://download.geofabrik.de/africa/ghana-latest.osm.pbf",
+        attribution="© OpenStreetMap contributors",
+        license="ODbL 1.0",
+        md5_url=("https://download.geofabrik.de/africa/"
+                 "ghana-latest.osm.pbf.md5"),
+        filename="ghana-latest.osm.pbf"),
     MapSource(
         source_id="ne-land",
         name="Natural Earth 10m land (GeoJSON)",
@@ -232,6 +245,25 @@ PACKS: tuple[PackDefinition, ...] = (
                "land as bounded urban addenda (see pack-a-lagos) "
                "because a country-wide z15 MVT build multiplies "
                "size/time for detail only cities carry.")),
+    PackDefinition(
+        pack_id="pack-a-ghana",
+        name="Devon Atlas — Ghana (Pack A)",
+        source_id="geofabrik-ghana",
+        builder=BUILDER_PLANETILER,
+        tile_format="mvt",
+        bbox=_GHANA_BBOX,
+        zoom_min=0, zoom_max=14, stretch_zoom_max=16,
+        notes=("Regional basemap, doc 21 §3 Pack A (z0–z15/16), "
+               "census B10 — the first country pack beyond "
+               "Nigeria, same shape as pack-a-nigeria: the "
+               "standard build is z0–z14 country-wide; z15–16 "
+               "would land as bounded urban addenda (an Accra "
+               "addendum, like pack-a-lagos, is not defined in "
+               "this lane) because a country-wide z15 MVT build "
+               "multiplies size/time for detail only cities "
+               "carry.  Geofabrik Ghana extract, verified live "
+               "2026-11-12 (ghana-latest.osm.pbf answers 307 to "
+               "the dated extract; MD5 sidecar present).")),
     PackDefinition(
         pack_id="pack-a-lagos",
         name="Devon Atlas — Lagos detail (Pack A addendum)",
