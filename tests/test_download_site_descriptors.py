@@ -35,6 +35,7 @@ import pytest
 
 from nomorals.connectors.soundcloud import SoundCloudError
 from nomorals.media.site_descriptors import (
+    AUDIOMACK_DESCRIPTOR,
     BLOCK_CLASSES,
     CHAIN_STAGES,
     MP3PM_DESCRIPTOR,
@@ -507,6 +508,167 @@ class TestMp3pmDescriptor:
                    side_effect=_fail_direct):
             report = dl.download(
                 "https://mp3.pm/song/170547096/T.I._-_King_Back/",
+                dest_dir=tmp_path, audio_only=True)
+        assert report.ok is False
+        # Kit silent (page, not a direct-rule file), connector
+        # skipped.
+        assert report.tried() == ["direct", "proxy", "rendered",
+                                  "browser"]
+        assert "connector" not in report.tried()
+        connector.stream_url.assert_not_called()
+
+
+class TestAudiomackDescriptor:
+    #: Real Audiomack URL shapes, one per form the descriptor
+    #: claims.  Every shape verified live 2026-11-12: the track
+    #: pages (``/jstontrapp_/song/kwabena-adu``,
+    #: ``/41/song/mvp-audiomack-fine-tuned-version-8135016``,
+    #: ``/King-Maj/song/nack-am-prod-by-hitz-duktor``,
+    #: ``/early-morning-jazz-playlist/song/cocktail-music-bar``),
+    #: the bare ``/song/<artist>/<slug>`` form yt-dlp's own
+    #: tests use (``/song/roosh-williams/extraordinary``), the
+    #: album pages (``/ajujusamuel/album/beyond-limitations``,
+    #: ``/ricoace/album/blackjack-8414236``,
+    #: ``/album/flytunezcom/tha-tour-part-2-mixtape``), the
+    #: playlist pages (``/future/playlist/future``,
+    #: ``/joevango/playlist/lil-skies-essentials``,
+    #: ``/gucci-mane/playlist/guccimane``), and the embed
+    #: player (``/embed/eugeneportman/playlist/playlist``,
+    #: ``/embed/j-balvin/playlist/j-balvin-essentials``) — all
+    #: served by the live site (HTTP 200).
+    AUDIOMACK_URLS = (
+        "https://audiomack.com/jstontrapp_/song/kwabena-adu",
+        "https://audiomack.com/41/song/"
+        "mvp-audiomack-fine-tuned-version-8135016",
+        "https://audiomack.com/King-Maj/song/"
+        "nack-am-prod-by-hitz-duktor",
+        "https://audiomack.com/early-morning-jazz-playlist/song/"
+        "cocktail-music-bar",
+        "http://www.audiomack.com/song/roosh-williams/extraordinary",
+        "https://audiomack.com/ajujusamuel/album/beyond-limitations",
+        "https://audiomack.com/ricoace/album/blackjack-8414236",
+        "http://www.audiomack.com/album/flytunezcom/"
+        "tha-tour-part-2-mixtape",
+        "https://audiomack.com/future/playlist/future",
+        "https://audiomack.com/joevango/playlist/"
+        "lil-skies-essentials",
+        "https://audiomack.com/gucci-mane/playlist/guccimane",
+        "https://audiomack.com/embed/eugeneportman/playlist/playlist",
+        "https://audiomack.com/embed/j-balvin/playlist/"
+        "j-balvin-essentials",
+        "https://audiomack.com/acedadon-savage/album/my-own-fan-4-2"
+        "?share-user-id=125739655",
+    )
+
+    #: URLs the descriptor must NOT claim: non-Audiomack hosts,
+    #: look-alikes, and Audiomack pages that are not one
+    #: playable item (home, an artist page, search, and bare
+    #: song / album / playlist paths) — those fall through to
+    #: the generic chain instead of taking the Audiomack chain.
+    NOT_AUDIOMACK_URLS = (
+        "https://example.com/future/song/x",
+        "https://notaudiomack.com/future/song/x",
+        "https://audiomack.com.evil.test/future/song/x",
+        "https://audiomack.com/",
+        "https://www.audiomack.com/",
+        "https://audiomack.com/future",
+        "https://audiomack.com/search?q=drake",
+        "https://audiomack.com/future/song/",
+        "https://audiomack.com/song/",
+        "https://audiomack.com/future/album/",
+        "https://audiomack.com/future/playlist/",
+    )
+
+    def test_matches_audiomack_url_shapes_only(self):
+        reg = SiteDescriptorRegistry([AUDIOMACK_DESCRIPTOR])
+        for url in self.AUDIOMACK_URLS:
+            assert reg.for_url(url) is AUDIOMACK_DESCRIPTOR, url
+        for url in self.NOT_AUDIOMACK_URLS:
+            assert reg.for_url(url) is None, url
+
+    def test_descriptor_carries_audiomack_behaviour(self):
+        desc = AUDIOMACK_DESCRIPTOR
+        assert desc.site == "audiomack"
+        # Canonical ladder minus the connector rung: there is no
+        # Audiomack connector, and the kit rung only fetches
+        # direct-rule file URLs and stays silent on pages — in
+        # production the direct stage (yt-dlp's audiomack /
+        # audiomack:album extractors, no auth) lands a track or
+        # album.
+        assert desc.chain == ("direct", "kit", "proxy", "rendered",
+                              "browser")
+        assert "connector" not in desc.chain
+        assert desc.connector == ""
+        # Only "private" is evidenced: a removed track.  No login
+        # wall exists on public playback and yt-dlp's extractor
+        # reads no cookies at all — so no login / region / preview
+        # / drm classes.  Audiomack+ premium-only tracks are a
+        # paywall with no block class and fail honestly
+        # unclassified, never as a named block.
+        assert tuple(desc.block_classes) == ("private",)
+        # Fully public AND session-less: no session shape is
+        # declared — empty on purpose, not missing.  A login block
+        # can never be classified for this site.
+        assert desc.auth == "none"
+        assert desc.auth_needed is False
+        assert desc.auth_domains == ()
+        assert desc.auth_cookie_names == ()
+        assert desc.downloadable is True
+
+    def test_default_registry_resolves_audiomack_and_keeps_the_others(
+            self):
+        from nomorals.media.site_descriptors import (
+            DEFAULT_SITE_DESCRIPTORS,
+        )
+
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://audiomack.com/jstontrapp_/song/kwabena-adu"
+            ) is AUDIOMACK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://audiomack.com/ajujusamuel/album/"
+            "beyond-limitations") is AUDIOMACK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://audiomack.com/future/playlist/future"
+            ) is AUDIOMACK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.get("audiomack") \
+            is AUDIOMACK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://mp3.pm/song/170547096/T.I._-_King_Back/"
+            ) is MP3PM_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.tiktok.com/@someuser/video/"
+            "7170520270497680683") is TIKTOK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            ) is YOUTUBE_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://soundcloud.com/a/b") is SOUNDCLOUD_DESCRIPTOR
+
+    def test_audiomack_chain_skips_connector_and_fails_honestly(
+            self, tmp_path):
+        # The descriptor's chain governs the engine for an
+        # Audiomack URL: no rung in this hermetic rig can serve a
+        # track page — the kit rung only fetches direct-rule URLs
+        # (a track page is a page, not a file); there is no
+        # Audiomack connector; the proxy pool is empty; rendered
+        # and browser are unwired — so the report fails honestly,
+        # and the injected connector is never engaged.  In
+        # production the direct stage (yt-dlp's audiomack
+        # extractor, no auth) is what lands a track; a live
+        # landing is NOT proven here — it needs network and a
+        # real track.
+        from unittest.mock import patch
+
+        connector = SimpleNamespace(
+            stream_url=mock.Mock(
+                side_effect=AssertionError("connector engaged")))
+        registry = SiteDescriptorRegistry([AUDIOMACK_DESCRIPTOR])
+        dl = _downloader(tmp_path, connector,
+                         site_descriptors=registry)
+        with patch("nomorals.tools.media.download",
+                   side_effect=_fail_direct):
+            report = dl.download(
+                "https://audiomack.com/jstontrapp_/song/kwabena-adu",
                 dest_dir=tmp_path, audio_only=True)
         assert report.ok is False
         # Kit silent (page, not a direct-rule file), connector

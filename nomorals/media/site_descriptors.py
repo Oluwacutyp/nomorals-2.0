@@ -22,7 +22,7 @@ rendered stage reports it from the log's license traffic and
 downloads nothing).
 
 Auth: ``auth="none"`` means the public path (SoundCloud, YouTube,
-TikTok and mp3.pm today).
+TikTok, mp3.pm and Audiomack today).
 ``"account"`` / ``"vault"`` name a requirement the authenticated
 rung (B5, :mod:`nomorals.media.site_auth`) honours: a descriptor
 with ``auth != "none"`` resolves its session before the chain
@@ -63,6 +63,7 @@ __all__ = [
     "YOUTUBE_DESCRIPTOR",
     "TIKTOK_DESCRIPTOR",
     "MP3PM_DESCRIPTOR",
+    "AUDIOMACK_DESCRIPTOR",
     "DEFAULT_SITE_DESCRIPTORS",
 ]
 
@@ -514,7 +515,81 @@ MP3PM_DESCRIPTOR = SiteDescriptor(
           "only (removed track)",
 )
 
+#: Audiomack — the FIFTH site descriptor: the Afrobeats home, in
+#: the music chain and the ONE registry but with no site descriptor
+#: until now (sources-abandoned census A2).  Public track / album /
+#: playlist by default, no account — the public stream endpoint
+#: ``audiomack.com/api/music/url/song/<artist>/<slug>?extended=1``
+#: needs no auth: yt-dlp's audiomack extractor calls it with no
+#: auth and no cookies — the full 280-line extractor source
+#: (master, fetched 2026-11-12) carries no cookie / auth code at
+#: all, and :mod:`nomorals.media.sources` verified the same
+#: 2026-10-09.  Honest note: a bare fetch of that endpoint from
+#: this box on 2026-11-12 returned the Next.js SPA shell instead
+#: of JSON (http and https, with and without XHR headers), so the
+#: live JSON response was NOT re-fetched in this lane — the
+#: no-auth claim rests on the extractor source, and a live
+#: Audiomack landing (direct stage via yt-dlp) remains unproven,
+#: as with the other descriptors.  There is no Audiomack
+#: connector in :mod:`nomorals.connectors`, so the chain is the
+#: canonical ladder minus the connector rung — and the kit rung
+#: only fetches direct-rule file URLs and stays silent on pages;
+#: in production the direct stage (yt-dlp's audiomack /
+#: audiomack:album extractors) is what lands a track or album.
+#: URL shapes, all verified live 2026-11-12: track
+#: ``audiomack.com/<artist>/song/<slug>`` (also the bare
+#: ``audiomack.com/song/<artist>/<slug>`` form yt-dlp's own tests
+#: use), album ``audiomack.com/<artist>/album/<slug>`` (bare form
+#: too), playlist ``audiomack.com/<artist>/playlist/<slug>``, and
+#: the embed player ``audiomack.com/embed/<artist>/
+#: (song|album|playlist)/<slug>``.  Artist pages
+#: (``audiomack.com/<artist>``) and search (``/search?q=``) are
+#: listings, not one playable item, and are NOT claimed — the
+#: same exclusion rule as the other descriptors' profiles and
+#: home pages.  No login wall exists on public playback, and
+#: yt-dlp's extractor reads no cookies at all, so ``auth`` is
+#: ``"none"`` with NO session shape — ``auth_domains`` and
+#: ``auth_cookie_names`` are empty ON PURPOSE, not missing (the
+#: mp3.pm shape): a login block can never be classified for
+#: Audiomack, and ``require=True`` answers unavailable rather
+#: than inventing a session.  Honest gap: some tracks are
+#: Audiomack+ premium-only ("This song is only available for
+#: premium subscribers") — a paywall, not a login wall, and the
+#: block vocabulary has no paywall class, so a premium track
+#: fails honestly as an unclassified error, never as a named
+#: block.  Blocks: only ``private`` (a removed / deleted track —
+#: the API answers with an error and yt-dlp raises
+#: ``ExtractorError("Invalid url ...")``).  No ``region`` /
+#: ``login`` / ``preview`` / ``drm`` classes: none is evidenced
+#: — the site streams full tracks to anyone, with no geo wall
+#: seen.
+AUDIOMACK_DESCRIPTOR = SiteDescriptor(
+    site="audiomack",
+    url_patterns=(
+        r"https?://(?:www\.)?audiomack\.com/[\w-]+/song/[\w-]+",
+        r"https?://(?:www\.)?audiomack\.com/song/[\w-]+/[\w-]+",
+        r"https?://(?:www\.)?audiomack\.com/[\w-]+/album/[\w-]+",
+        r"https?://(?:www\.)?audiomack\.com/album/[\w-]+/[\w-]+",
+        r"https?://(?:www\.)?audiomack\.com/[\w-]+/playlist/[\w-]+",
+        r"https?://(?:www\.)?audiomack\.com/embed/[\w-]+/"
+        r"(song|album|playlist)/[\w-]+",
+    ),
+    chain=("direct", "kit", "proxy", "rendered", "browser"),
+    connector="",
+    block_classes=("private",),
+    auth="none",
+    auth_domains=(),
+    auth_cookie_names=(),
+    downloadable=True,
+    notes="Audiomack public track/album/playlist: no account, "
+          "no session shape at all; direct stage via yt-dlp "
+          "audiomack extractors lands it in production; "
+          "Audiomack+ premium-only tracks are a paywall with "
+          "no block class and fail honestly unclassified; "
+          "blocks are private only (removed track)",
+)
+
 #: The descriptors the engine reads by default.
 DEFAULT_SITE_DESCRIPTORS = SiteDescriptorRegistry(
     [SOUNDCLOUD_DESCRIPTOR, YOUTUBE_DESCRIPTOR, TIKTOK_DESCRIPTOR,
-     MP3PM_DESCRIPTOR])
+     MP3PM_DESCRIPTOR, AUDIOMACK_DESCRIPTOR])

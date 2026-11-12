@@ -56,6 +56,7 @@ from nomorals.media.site_auth import (
     vault_key,
 )
 from nomorals.media.site_descriptors import (
+    AUDIOMACK_DESCRIPTOR,
     MP3PM_DESCRIPTOR,
     SOUNDCLOUD_DESCRIPTOR,
     TIKTOK_DESCRIPTOR,
@@ -591,6 +592,19 @@ class TestDescriptorAuthFields:
         assert MP3PM_DESCRIPTOR.auth_domains == ()
         assert MP3PM_DESCRIPTOR.auth_cookie_names == ()
 
+    def test_audiomack_descriptor_declares_no_session_shape(self):
+        # Audiomack has accounts (and Audiomack+ premium), but
+        # no login wall on public playback and yt-dlp's
+        # audiomack extractor reads no cookies at all — so no
+        # session shape exists that would prove a signed-in
+        # session for downloads.  The empty auth_domains /
+        # auth_cookie_names are the honest declaration, not a
+        # missing field: a login block can never be classified
+        # for this site.
+        assert AUDIOMACK_DESCRIPTOR.auth == "none"
+        assert AUDIOMACK_DESCRIPTOR.auth_domains == ()
+        assert AUDIOMACK_DESCRIPTOR.auth_cookie_names == ()
+
 
 # ── the YouTube session (descriptor #2, B5 shape) ───────────────────
 
@@ -744,4 +758,34 @@ class TestMp3pmSession:
             MP3PM_DESCRIPTOR, require=True)
         assert auth.status == "unavailable"
         assert "mp3pm" in auth.reason
+        assert store.gets == 0
+
+
+# ── the Audiomack session (descriptor #5: there is none) ────────────
+
+
+class TestAudiomackSession:
+    def test_public_audiomack_needs_no_session(self, tmp_path):
+        # auth "none" without require: the resolver answers ok
+        # without touching vault or estate — public tracks need
+        # nothing, and yt-dlp's extractor reads no cookies.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            AUDIOMACK_DESCRIPTOR)
+        assert auth.ok and auth.source == ""
+        assert store.gets == 0
+
+    def test_require_cannot_resolve_a_session_that_does_not_exist(
+            self, tmp_path):
+        # require=True means "a login block said a session is
+        # needed" — for Audiomack that can never happen (no login
+        # wall on public playback, no cookie the download path
+        # consumes), and the descriptor honestly declares no
+        # session domain.  The resolver refuses (unavailable)
+        # rather than inventing a session or answering ok empty.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            AUDIOMACK_DESCRIPTOR, require=True)
+        assert auth.status == "unavailable"
+        assert "audiomack" in auth.reason
         assert store.gets == 0
