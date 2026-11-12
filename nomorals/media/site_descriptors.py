@@ -22,7 +22,7 @@ rendered stage reports it from the log's license traffic and
 downloads nothing).
 
 Auth: ``auth="none"`` means the public path (SoundCloud, YouTube,
-TikTok, mp3.pm, Audiomack and NetNaija today).
+TikTok, mp3.pm, Audiomack, NetNaija and Boomplay today).
 ``"account"`` / ``"vault"`` name a requirement the authenticated
 rung (B5, :mod:`nomorals.media.site_auth`) honours: a descriptor
 with ``auth != "none"`` resolves its session before the chain
@@ -65,6 +65,7 @@ __all__ = [
     "MP3PM_DESCRIPTOR",
     "AUDIOMACK_DESCRIPTOR",
     "NETNAIJA_DESCRIPTOR",
+    "BOOMPLAY_DESCRIPTOR",
     "DEFAULT_SITE_DESCRIPTORS",
 ]
 
@@ -669,7 +670,83 @@ NETNAIJA_DESCRIPTOR = SiteDescriptor(
           "blocks are region + private",
 )
 
+#: Boomplay — the SEVENTH site descriptor: the Afrobeats home, in
+#: the music chain (``nomorals/media/sources.py`` ``BoomplaySource``,
+#: ``candidate_asset_class`` — metadata-only) but with no site
+#: descriptor until now (sources-abandoned census A3).  This one
+#: is ``downloadable=False``: it NAMES the honest refusal instead
+#: of leaving Boomplay reachable only via the silent generic
+#: fallback.  There is no official public API, no yt-dlp
+#: extractor (supportedsites.md, master, fetched 2026-11-12: no
+#: ``Boomplay`` hit at all), and streams are protected —
+#: candidates are metadata-only, open in the Boomplay app.
+#: URL shapes, all verified live 2026-11-12: track
+#: ``boomplay.com/songs/<id>`` (also ``<id>_<slug>`` — the
+#: in-repo source's legacy path) — a live-linked song URL shows
+#: ``boomplay.com/songs/132072…``; album ``boomplay.com/albums/
+#: <id>`` (``/albums/93328816``, ``/albums/56593624``); artist
+#: ``boomplay.com/artists/<id>`` (``/artists/55663392``,
+#: ``/artists/42423194?from=search``).  Artist pages are listings
+#: — Audiomack does NOT claim them — but for a non-downloadable
+#: descriptor the claim only routes the URL to the honest refusal
+#: (no chain ever runs, no wrong item can be downloaded), so
+#: claiming the artist page names the refusal instead of falling
+#: through to the generic chain; that is the census A3 ask.
+#: NOT claimed: home, search (``/search/music/`` is a listing,
+#: and the legacy ``/search?q=`` path answers a login page to an
+#: anonymous fetch), bare ``/songs/`` / ``/albums/`` /
+#: ``/artists/`` with no id, and playlists (the ``/playlists/
+#: <id>`` shape was not verified in this lane).
+#: The chain is the canonical ladder minus the connector rung —
+#: there is no Boomplay connector in :mod:`nomorals.connectors`
+#: — declared for shape-completeness (validation requires a
+#: non-empty chain) but it NEVER runs: the site-descriptor
+#: refusal gate (``downloader.py``) fires first and returns the
+#: honest refusal.  The registry view already marks boomplay.com
+#: not-downloadable too (``source_registry.py``: extraction rule
+#: ``"none"``, downloadable False) — the site descriptor is the
+#: download engine's own per-site record of the same refusal,
+#: and the one the hermetic engine test proves (the extractor
+#: gate is inert in that rig).
+#: No login wall exists on public pages: the homepage and
+#: ``/search/music/<query>`` serve real results to an anonymous
+#: fetch (verified live 2026-11-12 — the SPA search returns 12
+#: songs for "burna boy"), so ``auth`` is ``"none"`` with NO
+#: session shape — ``auth_domains`` and ``auth_cookie_names``
+#: are empty ON PURPOSE, not missing (the mp3.pm / Audiomack /
+#: NetNaija shape): a login block can never be classified for
+#: Boomplay, and ``require=True`` answers unavailable rather
+#: than inventing a session.  The SPA search's ``JSESSIONID`` /
+#: ``imei`` cookies are anonymous session cookies set by a
+#: homepage visit, not a signed-in session, and are therefore
+#: not named.  Blocks: only ``private`` (a removed / deleted
+#: track — the page is gone).  No ``region`` (no geo wall seen:
+#: the homepage and search served from this non-NG box), no
+#: ``login`` (no login wall on the claimed pages), no
+#: ``preview`` (no preview-only streams — the streams are
+#: protected wholesale, not preview-clipped), no ``drm`` (no
+#: DRM class evidenced — "protected" is the refusal itself).
+BOOMPLAY_DESCRIPTOR = SiteDescriptor(
+    site="boomplay",
+    url_patterns=(
+        r"https?://([a-z0-9-]+\.)*boomplay\.com/songs/\d+",
+        r"https?://([a-z0-9-]+\.)*boomplay\.com/albums/\d+",
+        r"https?://([a-z0-9-]+\.)*boomplay\.com/artists/\d+",
+    ),
+    chain=("direct", "kit", "proxy", "rendered", "browser"),
+    connector="",
+    block_classes=("private",),
+    auth="none",
+    auth_domains=(),
+    auth_cookie_names=(),
+    downloadable=False,
+    notes="Boomplay streams are protected — metadata only, "
+          "open in the Boomplay app; this site serves no "
+          "downloads",
+)
+
 #: The descriptors the engine reads by default.
 DEFAULT_SITE_DESCRIPTORS = SiteDescriptorRegistry(
     [SOUNDCLOUD_DESCRIPTOR, YOUTUBE_DESCRIPTOR, TIKTOK_DESCRIPTOR,
-     MP3PM_DESCRIPTOR, AUDIOMACK_DESCRIPTOR, NETNAIJA_DESCRIPTOR])
+     MP3PM_DESCRIPTOR, AUDIOMACK_DESCRIPTOR, NETNAIJA_DESCRIPTOR,
+     BOOMPLAY_DESCRIPTOR])

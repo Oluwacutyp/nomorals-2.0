@@ -57,6 +57,7 @@ from nomorals.media.site_auth import (
 )
 from nomorals.media.site_descriptors import (
     AUDIOMACK_DESCRIPTOR,
+    BOOMPLAY_DESCRIPTOR,
     MP3PM_DESCRIPTOR,
     NETNAIJA_DESCRIPTOR,
     SOUNDCLOUD_DESCRIPTOR,
@@ -606,6 +607,23 @@ class TestDescriptorAuthFields:
         assert AUDIOMACK_DESCRIPTOR.auth_domains == ()
         assert AUDIOMACK_DESCRIPTOR.auth_cookie_names == ()
 
+    def test_boomplay_descriptor_declares_no_session_shape(self):
+        # Boomplay has accounts, but no login wall on public
+        # pages — the homepage and /search/music/ serve real
+        # results to an anonymous fetch (verified live
+        # 2026-11-12) — and the SPA search's JSESSIONID / imei
+        # cookies are anonymous session cookies, not a signed-in
+        # session.  So no session shape exists that would prove
+        # a signed-in session, and none is needed: the site
+        # serves no downloads at all.  The empty auth_domains /
+        # auth_cookie_names are the honest declaration, not a
+        # missing field: a login block can never be classified
+        # for this site.
+        assert BOOMPLAY_DESCRIPTOR.auth == "none"
+        assert BOOMPLAY_DESCRIPTOR.auth_domains == ()
+        assert BOOMPLAY_DESCRIPTOR.auth_cookie_names == ()
+        assert BOOMPLAY_DESCRIPTOR.downloadable is False
+
 
 # ── the YouTube session (descriptor #2, B5 shape) ───────────────────
 
@@ -821,4 +839,36 @@ class TestNetnaijaSession:
             NETNAIJA_DESCRIPTOR, require=True)
         assert auth.status == "unavailable"
         assert "netnaija" in auth.reason
+        assert store.gets == 0
+
+# ── the Boomplay session (descriptor #7: there is none) ─────────────
+
+
+class TestBoomplaySession:
+    def test_public_boomplay_needs_no_session(self, tmp_path):
+        # auth "none" without require: the resolver answers ok
+        # without touching vault or estate — public pages need
+        # nothing, and the site serves no downloads at all, so
+        # no session could ever help.  The SPA search's
+        # JSESSIONID / imei cookies are anonymous, not a login.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            BOOMPLAY_DESCRIPTOR)
+        assert auth.ok and auth.source == ""
+        assert store.gets == 0
+
+    def test_require_cannot_resolve_a_session_that_does_not_exist(
+            self, tmp_path):
+        # require=True means "a login block said a session is
+        # needed" — for Boomplay that can never happen (no login
+        # wall on public pages, no session domain declared, and
+        # the site serves no downloads), and the descriptor
+        # honestly declares no session domain.  The resolver
+        # refuses (unavailable) rather than inventing a session
+        # or answering ok empty.
+        store = _DictStore()
+        auth = _resolver(tmp_path, store).resolve(
+            BOOMPLAY_DESCRIPTOR, require=True)
+        assert auth.status == "unavailable"
+        assert "boomplay" in auth.reason
         assert store.gets == 0

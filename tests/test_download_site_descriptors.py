@@ -37,6 +37,7 @@ from nomorals.connectors.soundcloud import SoundCloudError
 from nomorals.media.site_descriptors import (
     AUDIOMACK_DESCRIPTOR,
     BLOCK_CLASSES,
+    BOOMPLAY_DESCRIPTOR,
     CHAIN_STAGES,
     MP3PM_DESCRIPTOR,
     NETNAIJA_DESCRIPTOR,
@@ -842,6 +843,151 @@ class TestNetnaijaDescriptor:
                                   "browser"]
         assert "connector" not in report.tried()
         connector.stream_url.assert_not_called()
+
+
+class TestBoomplayDescriptor:
+    #: Real Boomplay URL shapes, one per form the descriptor
+    #: claims.  Provenance is in the descriptor comment — all
+    #: verified live 2026-11-12: track ``/songs/132072…`` (a
+    #: live-linked song URL) and the ``<id>_<slug>`` form from
+    #: the in-repo source's legacy path; album ``/albums/
+    #: 93328816`` and ``/albums/56593624``; artist
+    #: ``/artists/55663392`` and ``/artists/42423194?from=search``.
+    BOOMPLAY_URLS = (
+        "https://www.boomplay.com/songs/132072",
+        "https://www.boomplay.com/songs/12345678_last-last/",
+        "http://boomplay.com/songs/12345678",
+        "https://boomplay.com/songs/12345678",
+        "https://www.boomplay.com/albums/93328816",
+        "https://www.boomplay.com/albums/56593624",
+        "https://boomplay.com/albums/55665594",
+        "https://www.boomplay.com/artists/55663392",
+        "https://www.boomplay.com/artists/42423194?from=search",
+        "https://www.boomplay.com/albums/42424763?from=search",
+    )
+
+    #: URLs the descriptor must NOT claim: non-Boomplay hosts,
+    #: look-alikes, and Boomplay pages that are not one content
+    #: item (home, search — ``/search/music/`` is a listing and
+    #: the legacy ``/search?q=`` answers a login page to an
+    #: anonymous fetch — bare ``/songs/`` / ``/albums/`` /
+    #: ``/artists/`` with no id, playlist pages whose
+    #: ``/playlists/<id>`` shape was not verified in this lane,
+    #: and chart listings).
+    NOT_BOOMPLAY_URLS = (
+        "https://example.com/songs/132072",
+        "https://notboomplay.com/songs/123/",
+        "https://boomplay.com.evil.test/songs/123/",
+        "https://www.boomplay.com/",
+        "https://boomplay.com/",
+        "https://www.boomplay.com/search/music/burna%20boy",
+        "https://www.boomplay.com/search?q=burna+boy",
+        "https://www.boomplay.com/songs/",
+        "https://www.boomplay.com/albums/",
+        "https://www.boomplay.com/artists/",
+        "https://www.boomplay.com/playlists/12345678",
+        "https://www.boomplay.com/charts/top-songs",
+    )
+
+    def test_matches_boomplay_url_shapes_only(self):
+        reg = SiteDescriptorRegistry([BOOMPLAY_DESCRIPTOR])
+        for url in self.BOOMPLAY_URLS:
+            assert reg.for_url(url) is BOOMPLAY_DESCRIPTOR, url
+        for url in self.NOT_BOOMPLAY_URLS:
+            assert reg.for_url(url) is None, url
+
+    def test_descriptor_carries_boomplay_behaviour(self):
+        desc = BOOMPLAY_DESCRIPTOR
+        assert desc.site == "boomplay"
+        # Canonical ladder minus the connector rung: there is no
+        # Boomplay connector and yt-dlp has no Boomplay extractor
+        # (supportedsites.md, master, 2026-11-12) — declared for
+        # shape-completeness, but the chain NEVER runs: the
+        # site-descriptor refusal gate fires first.
+        assert desc.chain == ("direct", "kit", "proxy", "rendered",
+                              "browser")
+        assert "connector" not in desc.chain
+        assert desc.connector == ""
+        # "private" is a removed track.  No region (no geo wall
+        # seen — homepage and search served from this non-NG
+        # box), no login (no login wall on the claimed pages),
+        # no preview / drm (streams are protected wholesale, not
+        # preview-clipped or DRM-classified).
+        assert tuple(desc.block_classes) == ("private",)
+        # Fully public AND session-less: public pages serve
+        # without a session, and the SPA search's JSESSIONID /
+        # imei cookies are anonymous, not a signed-in session —
+        # so no session shape is declared, empty on purpose.
+        assert desc.auth == "none"
+        assert desc.auth_needed is False
+        assert desc.auth_domains == ()
+        assert desc.auth_cookie_names == ()
+        # THE point of this descriptor: Boomplay serves no
+        # downloads at all.
+        assert desc.downloadable is False
+        assert "serves no downloads" in desc.notes
+
+    def test_default_registry_resolves_boomplay_and_keeps_the_others(
+            self):
+        from nomorals.media.site_descriptors import (
+            DEFAULT_SITE_DESCRIPTORS,
+        )
+
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.boomplay.com/songs/132072"
+            ) is BOOMPLAY_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.boomplay.com/albums/93328816"
+            ) is BOOMPLAY_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.boomplay.com/artists/55663392"
+            ) is BOOMPLAY_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.get("boomplay") \
+            is BOOMPLAY_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://netnaija.com/music/burna-boy-last-last/"
+            ) is NETNAIJA_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://audiomack.com/jstontrapp_/song/kwabena-adu"
+            ) is AUDIOMACK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://mp3.pm/song/170547096/T.I._-_King_Back/"
+            ) is MP3PM_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.tiktok.com/@someuser/video/"
+            "7170520270497680683") is TIKTOK_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+            ) is YOUTUBE_DESCRIPTOR
+        assert DEFAULT_SITE_DESCRIPTORS.for_url(
+            "https://soundcloud.com/a/b") is SOUNDCLOUD_DESCRIPTOR
+
+    def test_boomplay_url_refused_honestly_not_fallen_through(
+            self, tmp_path):
+        # The FIRST downloadable=False descriptor: a Boomplay URL
+        # is refused by the site-descriptor gate with Boomplay's
+        # own reason — the chain never runs, the generic fallback
+        # never gets a chance, and the report names the site and
+        # the app instead of a bare failure.  The default registry
+        # is used (no injection) so this proves the shipped
+        # wiring, not a test-only registry.  A live landing is NOT
+        # proven here — there is nothing to land; the refusal is
+        # the behaviour.
+        from unittest.mock import patch
+
+        dl = _downloader(tmp_path)
+        with patch("nomorals.tools.media.download",
+                   side_effect=AssertionError("chain ran")):
+            report = dl.download(
+                "https://www.boomplay.com/songs/132072",
+                dest_dir=tmp_path, audio_only=True)
+        assert report.ok is False
+        assert report.extractor == "boomplay"
+        assert "boomplay" in report.likely_cause
+        assert "does not serve downloads" in report.likely_cause
+        assert "Boomplay app" in report.likely_cause
+        assert report.tried() == ["extractor"]
+        assert "downloadable source" in report.hint
 
 
 # ── validation: malformed fails at LOAD, naming site + field ─────────
