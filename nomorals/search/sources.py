@@ -125,6 +125,11 @@ class BooksAdapter(SourceAdapter):
     result_type = "book"
     description = "book library full-text search (FTS5 BM25)"
 
+    #: Lock-wait bound for the probe's SQLite open: a library DB held
+    #: by another writer (an ingest, another Devon process) must fail
+    #: fast into "unavailable", never stall the probe phase.
+    _PROBE_CONNECT_TIMEOUT_S = 2.0
+
     def __init__(self, context: Any, library: Library | None = None) -> None:
         self._context = context
         self._library = library
@@ -134,22 +139,45 @@ class BooksAdapter(SourceAdapter):
             self._library = Library(self._context)
         return self._library
 
+    def _db_path_fast(self) -> Path:
+        """The library DB path WITHOUT constructing a ``Library``.
+
+        ``Library()`` construction is the slow step in the probe path:
+        when a document store is ambient it runs ``ensure_imported`` —
+        a full copy of every table (passages included) into the seam —
+        before the probe has asked a single question. The probe only
+        needs the file path, which is the same derivation
+        ``Library.root()`` uses. An injected library (tests, callers
+        that already hold one) keeps its own ``db_path()``.
+        """
+        if self._library is not None:
+            return self._library.db_path()
+        return _workspace_dir(self._context) / "library" / "library.db"
+
     def probe(self) -> str | None:
         try:
-            db_path = self._lib().db_path()
+            db_path = self._db_path_fast()
         except Exception as exc:  # noqa: BLE001 - probe reports, never raises
             return f"unavailable: {exc}"
         if not db_path.exists():
             return "no library database yet (no books ingested)"
         try:
-            con = sqlite3.connect(str(db_path))
+            con = sqlite3.connect(
+                str(db_path), timeout=self._PROBE_CONNECT_TIMEOUT_S)
             try:
-                count = con.execute("SELECT COUNT(*) FROM passages").fetchone()[0]
+                # NOT COUNT(*): on the FTS5 passages table that is a
+                # full index scan with no statement deadline — on a
+                # large library it stalls the whole probe phase (the
+                # 2026-11-11 "motivation morning" kill: the job died at
+                # the 900s wall inside this probe). One row answers
+                # the probe's only question (is anything ingested?).
+                row = con.execute(
+                    "SELECT 1 FROM passages LIMIT 1").fetchone()
             finally:
                 con.close()
         except Exception as exc:  # noqa: BLE001 - probe reports, never raises
             return f"unavailable: {exc}"
-        if not count:
+        if not row:
             return "library is empty (no passages ingested)"
         return None
 

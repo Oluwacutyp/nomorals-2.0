@@ -310,12 +310,31 @@ def library_candidates(context: Any, themes: list[str]) -> list[dict[str, Any]]:
     return out
 
 
-def _web_hunt(context: Any, query: str, limit: int = 5) -> list[dict[str, Any]]:
+#: One live-net hunt gets at most this long. The motivation job's own
+#: wall is 900s (``motivation._SHOT_POLICIES["run_timeout_s"]``) and a
+#: stock() runs at most two hunts (``themes[:2]`` in net_candidates):
+#: two hunts at 120s cap at 240s, leaving 660s for the library/memory
+#: producers, synthesis, TTS and delivery. A hunt that runs past its
+#: deadline degrades (partial / no web results, the job completes)
+#: instead of dying at the wall — the 2026-11-11 "motivation morning"
+#: kill, where an unbounded federated search stalled inside
+#: BooksAdapter.probe until the watchdog named it at 900s.
+WEB_HUNT_DEADLINE_S = 120.0
+
+
+def _web_hunt(context: Any, query: str, limit: int = 5, *,
+              deadline_s: float = WEB_HUNT_DEADLINE_S) -> list[dict[str, Any]]:
     """One live-net hunt via the federated search spine.  Seam for tests."""
     from ..search.federated import federated_search
 
-    resp = federated_search(query, context=context, limit=limit)
-    results = getattr(resp, "results", None) or []
+    resp = federated_search(query, context=context, limit=limit,
+                            deadline_s=deadline_s)
+    # NOTE: SearchResponse carries ``hits``, not ``results`` — reading
+    # ``results`` here used to yield [] on every hunt, so the net feed
+    # silently stocked nothing even when the search answered. Found by
+    # the deadline proof test (2026-11-11): the hunt returned [] with
+    # a healthy hit in the response.
+    results = getattr(resp, "hits", None) or []
     out: list[dict[str, Any]] = []
     for r in results:
         if isinstance(r, dict):

@@ -22,9 +22,15 @@ deterministic tie-break still apply afterwards.
 
 Fan-out: sequential by default; ``parallel=True`` searches sources on a
 thread pool (one worker per source, capped at 8). Probes always run
-sequentially first (they are cheap and never touch the network), and
-results/errors are collected in canonical source order — so failure
-semantics and ``sources_searched`` order are identical either way.
+sequentially first (they are cheap and never touch the network), each
+isolated on its own worker with a hard per-probe deadline (default
+10s) and a phase budget (30s) — a probe that exceeds its deadline is
+skipped with a timeout note, never awaited — and results/errors are
+collected in canonical source order — so failure semantics and
+``sources_searched`` order are identical either way. With
+``deadline_s`` set, the whole call (probes + searches) is bounded by
+it: slow sources are skipped with a timeout note and the call returns
+the partial results instead of hanging past the deadline.
 
 Filters: ``--type`` keeps only matching result types; ``--since`` /
 ``--before`` drop hits whose timestamp falls outside the range. Hits
@@ -45,9 +51,10 @@ sources were searched and which failed.
 from __future__ import annotations
 
 import time
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, TypeVar
 
 from .errors import InvalidDateError, SearchError, UnknownSourceError, UnknownTypeError
 from ..core.events import Event, global_bus
@@ -77,6 +84,78 @@ from .web import (
 __all__ = ["federated_search", "parse_date", "list_sources"]
 
 _log = get_logger(__name__)
+
+#: A probe is contractually cheap ("they are cheap, never touch the
+#: network"). A probe that runs longer than this is the hang class
+#: itself: it is skipped with a timeout note, never awaited. The
+#: 2026-11-11 "motivation morning" kill died at the 900s wall inside
+#: ``BooksAdapter.probe`` because one probe could block forever.
+DEFAULT_PROBE_TIMEOUT_S = 10.0
+
+#: The probe phase as a whole never exceeds this: probes are a gate,
+#: not the work. Without an overall deadline the phase is still
+#: capped, so slow probes cannot eat the call.
+PROBE_PHASE_BUDGET_S = 30.0
+
+_T = TypeVar("_T")
+
+
+def _remaining(deadline_s: float | None, t_start: float) -> float | None:
+    """Seconds left on the caller's overall deadline, or None (no
+    deadline — the call runs unbounded, as before)."""
+    if deadline_s is None:
+        return None
+    return (t_start + deadline_s) - time.perf_counter()
+
+
+def _probe_timeout(deadline_s: float | None,
+                   probe_timeout_s: float) -> float:
+    """The per-probe cap for this call. Under an overall deadline a
+    single probe may take at most a quarter of it — otherwise one hung
+    probe eats the whole call before any source is searched."""
+    cap = probe_timeout_s
+    if deadline_s is not None:
+        cap = min(cap, deadline_s / 4.0)
+    return max(cap, 0.0)
+
+
+def _run_isolated(fn: Callable[[], _T],
+                  timeout_s: float) -> tuple[_T | None, bool]:
+    """Run ``fn`` on its own worker thread with a hard deadline.
+
+    Returns ``(value, timed_out)``. On timeout the worker is abandoned
+    (never joined — joining would re-introduce the hang); the thread
+    finishes its op in the background. An exception ``fn`` raises is
+    re-raised here, except a ``TimeoutError`` the callable itself
+    raised is also re-raised (it is the callable's own error, not our
+    deadline — distinguished via ``future.done()``).
+    """
+    pool = ThreadPoolExecutor(max_workers=1,
+                              thread_name_prefix="search-deadline")
+    try:
+        fut = pool.submit(fn)
+        try:
+            return fut.result(timeout=timeout_s), False
+        except FuturesTimeoutError:
+            if fut.done():
+                raise
+            return None, True
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+
+
+def _collect(fut, timeout_s: float | None) -> tuple[Any, bool]:
+    """``(result, timed_out)`` for one already-submitted future under
+    a deadline. ``timeout_s=None`` waits forever (the no-deadline
+    path). A future that finished by raising keeps its error
+    (re-raised); a future still running past the deadline reports
+    ``timed_out``."""
+    try:
+        return fut.result(timeout=timeout_s), False
+    except FuturesTimeoutError:
+        if fut.done():
+            raise
+        return None, True
 
 
 def _emit(topic: str, data: dict[str, Any]) -> None:
@@ -229,6 +308,8 @@ def federated_search(
     fusion: str = "legacy",
     parallel: bool = False,
     source_weights: dict[str, float] | list[float] | None = None,
+    deadline_s: float | None = None,
+    probe_timeout_s: float = DEFAULT_PROBE_TIMEOUT_S,
 ) -> SearchResponse:
     """Run ``query`` across the selected sources and return merged results.
 
@@ -239,6 +320,13 @@ def federated_search(
     contract) or ``"rrf"`` (reciprocal rank fusion across sources).
     ``parallel=True`` fans the source searches out on a thread pool while
     preserving canonical order and failure semantics.
+    ``deadline_s`` is the overall budget for the whole call (probes +
+    searches): when it runs out, slow sources are skipped with a timeout
+    note and the call returns what the healthy sources found — never a
+    hang past the deadline. ``None`` (the default) keeps the historic
+    unbounded search phase, but probes are ALWAYS capped at
+    ``probe_timeout_s`` (default 10s): a probe is contractually cheap,
+    and one that runs longer is the hang class itself.
     ``source_weights`` (RRF only) trusts some sources more than others —
     a dict keyed by source name or a list aligned with ``sources`` order;
     each weight scales that source's ``1/(k+rank)`` contributions (the
@@ -277,6 +365,12 @@ def federated_search(
     if limit <= 0:
         raise SearchError(f"limit must be positive, got {limit}")
 
+    if deadline_s is not None and float(deadline_s) <= 0:
+        raise SearchError(f"deadline_s must be positive, got {deadline_s}")
+    if float(probe_timeout_s) <= 0:
+        raise SearchError(
+            f"probe_timeout_s must be positive, got {probe_timeout_s}")
+
     if adapters is None:
         adapters = build_adapters(
             context,
@@ -308,10 +402,45 @@ def federated_search(
 
     # Probes run sequentially first: they are cheap, never touch the
     # network, and keep sources_skipped deterministic under parallel.
+    # Each probe runs isolated on its own worker with a hard deadline —
+    # the 2026-11-11 "motivation morning" kill: BooksAdapter.probe
+    # stalled the whole job at the 900s wall because one probe could
+    # block forever (a full FTS5 COUNT(*) scan, or a Library
+    # construction doing a full seam import). A probe that exceeds its
+    # deadline is skipped with a timeout note, never awaited, and the
+    # phase as a whole is budgeted so slow probes cannot eat the
+    # caller's deadline. A probe that raises is likewise skipped with
+    # its error — one bad source never kills the whole search.
     searchable: list[str] = []
+    probe_phase_deadline = t_start + PROBE_PHASE_BUDGET_S
+    if deadline_s is not None:
+        probe_phase_deadline = min(
+            probe_phase_deadline, t_start + deadline_s)
+    per_probe_cap = _probe_timeout(deadline_s, probe_timeout_s)
     for name in names:
-        note = adapters[name].probe()
-        if note is not None:
+        remaining_phase = probe_phase_deadline - time.perf_counter()
+        if remaining_phase <= 0:
+            response.sources_skipped[name] = (
+                "probe timed out: probe phase budget exhausted")
+            continue
+        remaining_call = _remaining(deadline_s, t_start)
+        timeout = min(per_probe_cap, remaining_phase)
+        if remaining_call is not None:
+            timeout = min(timeout, remaining_call)
+        if timeout <= 0:
+            response.sources_skipped[name] = (
+                "probe timed out: deadline exceeded")
+            continue
+        try:
+            note, timed_out = _run_isolated(
+                lambda n=name: adapters[n].probe(), timeout)
+        except Exception as exc:  # noqa: BLE001 - probe reports, never raises
+            response.sources_skipped[name] = f"probe error: {exc}"
+            continue
+        if timed_out:
+            response.sources_skipped[name] = (
+                f"probe timed out after {timeout:g}s")
+        elif note is not None:
             response.sources_skipped[name] = note
         else:
             searchable.append(name)
@@ -324,33 +453,62 @@ def federated_search(
     per_source_hits: list[list[SearchResult]] = []
     hit_source_names: list[str] = []
     if parallel and searchable:
-        with ThreadPoolExecutor(
+        pool = ThreadPoolExecutor(
             max_workers=min(len(searchable), 8),
             thread_name_prefix="search",
-        ) as pool:
+        )
+        try:
             futures = {name: pool.submit(_run, name) for name in searchable}
             # Collect in canonical order.  A failing source is recorded
             # in sources_skipped and the rest still contribute — one
-            # bad source never kills the whole search.
+            # bad source never kills the whole search. Under a deadline
+            # a source still running past it is skipped with a timeout
+            # note and the call returns the partial results.
             for name in searchable:
+                t0 = time.perf_counter()
                 try:
-                    t0 = time.perf_counter()
-                    hits = futures[name].result()
-                    response.timings[name] = time.perf_counter() - t0
+                    hits, timed_out = _collect(
+                        futures[name], _remaining(deadline_s, t_start))
                 except Exception as exc:
                     response.sources_skipped[name] = (
                         f"error: {exc}")
+                    response.timings[name] = time.perf_counter() - t0
                     _log.info("federated: source %r failed, continuing: %s",
                               name, exc)
+                    continue
+                response.timings[name] = time.perf_counter() - t0
+                if timed_out:
+                    response.sources_skipped[name] = (
+                        f"search timed out after {deadline_s:g}s")
+                    _log.info("federated: source %r timed out, continuing",
+                              name)
                     continue
                 per_source_hits.append(hits)
                 hit_source_names.append(name)
                 response.sources_searched.append(name)
+        finally:
+            # Never wait: a timed-out future's worker is abandoned,
+            # not joined — joining would re-introduce the hang this
+            # deadline exists to eliminate. With no deadline every
+            # future is already resolved here, so this is a no-op.
+            pool.shutdown(wait=False, cancel_futures=True)
     else:
         for name in searchable:
             t0 = time.perf_counter()
+            remaining = _remaining(deadline_s, t_start)
             try:
-                hits = _run(name)
+                if remaining is not None:
+                    hits, timed_out = _run_isolated(
+                        lambda n=name: _run(n), remaining)
+                    if timed_out:
+                        response.sources_skipped[name] = (
+                            f"search timed out after {deadline_s:g}s")
+                        response.timings[name] = time.perf_counter() - t0
+                        _log.info("federated: source %r timed out, continuing",
+                                  name)
+                        continue
+                else:
+                    hits = _run(name)
             except Exception as exc:
                 response.sources_skipped[name] = f"error: {exc}"
                 response.timings[name] = time.perf_counter() - t0
