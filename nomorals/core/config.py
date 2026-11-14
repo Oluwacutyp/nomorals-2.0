@@ -406,6 +406,25 @@ class GuardrailSettings:
 
 
 @dataclass
+class PromptCompilerSettings:
+    """The DSPy-style prompt compiler (see
+    ``nomorals/llm/prompt_compiler.py``): self-improving prompt
+    pipelines over the journal -> grade -> retrain loop.
+
+    Global defaults for every task; a task declares its own floors in
+    its signature and those win. ``enabled`` is the master switch —
+    off means compiling refuses plainly. Compiles never invent a
+    grade and never pad with made-up examples: too few graded rows
+    is a refusal, not a guess.
+    """
+
+    enabled: bool = True
+    default_min_examples: int = 8
+    default_max_demos: int = 4
+    default_max_counter_examples: int = 2
+
+
+@dataclass
 class SocialSettings:
     enabled: bool = True
     dry_run: bool = False
@@ -973,6 +992,8 @@ class Settings:
     tools: ToolSettings = field(default_factory=ToolSettings)
     mcp: MCPSettings = field(default_factory=MCPSettings)
     guardrails: GuardrailSettings = field(default_factory=GuardrailSettings)
+    prompt_compiler: PromptCompilerSettings = field(
+        default_factory=PromptCompilerSettings)
     social: SocialSettings = field(default_factory=SocialSettings)
     mission: MissionSettings = field(default_factory=MissionSettings)
     api: APISettings = field(default_factory=APISettings)

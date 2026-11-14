@@ -95,6 +95,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "tools": ["t"],
     "trade": ["td"],
     "trace": [],
+    "prompt": [],
     "trial": ["trl"],
     "tui": ["ui"],
     "timeline": ["tl"],
@@ -941,6 +942,47 @@ def _parser() -> argparse.ArgumentParser:
     t_replay.add_argument("--tool-args", default="",
                           help="JSON object (or a JSON file) keyed by span id")
     _trace_common(t_replay)
+
+    prompt = sub.add_parser("prompt", aliases=CLI_ALIASES["prompt"],
+        help="Prompt compiler: compile a task's prompt from its graded journal",
+        description=("nm prompt compile <task> [--game-id X --npc-id Y | --char-id Z] [--validate] [--timeout S]\n"
+                     "nm prompt status [task]\n"
+                     "nm prompt list\n"
+                     "nm prompt show <task> [--version N]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    prompt_sub = prompt.add_subparsers(dest="prompt_action", required=True)
+
+    def _prompt_common(sub_p: argparse.ArgumentParser) -> None:
+        # Common flags live on every subparser: argparse does not
+        # inherit parent-parser arguments into subparsers.
+        sub_p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+
+    p_compile = prompt_sub.add_parser("compile", help="compile a task's prompt from its graded journal")
+    p_compile.add_argument("task", help="task to compile (npc_dialogue | character_dialogue)")
+    p_compile.add_argument("--game-id", default="",
+                           help="npc_dialogue: the game id")
+    p_compile.add_argument("--npc-id", default="",
+                           help="npc_dialogue: the npc id")
+    p_compile.add_argument("--char-id", default="",
+                           help="character_dialogue: the character id")
+    p_compile.add_argument("--validate", action="store_true",
+                           help="run base vs compiled on held-out inputs through the model")
+    p_compile.add_argument("--timeout", type=float, default=30.0,
+                           help="seconds per validation run (default: 30)")
+    _prompt_common(p_compile)
+    p_status = prompt_sub.add_parser("status", help="status of the compiled prompts")
+    p_status.add_argument("task", nargs="?", default="",
+                          help="one task, or nothing for all of them")
+    _prompt_common(p_status)
+    p_list = prompt_sub.add_parser("list", help="compiled tasks + versions")
+    _prompt_common(p_list)
+    p_show = prompt_sub.add_parser("show", help="show one compiled prompt")
+    p_show.add_argument("task", help="task to show")
+    p_show.add_argument("--version", type=int, default=0,
+                        help="version to show (default: latest)")
+    _prompt_common(p_show)
 
     media = sub.add_parser("media", aliases=CLI_ALIASES["media"],
         help="Edit images and video from plain language",

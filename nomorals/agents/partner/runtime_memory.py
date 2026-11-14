@@ -732,6 +732,18 @@ class RuntimeMemoryMixin:
         return control_llmguard(
             tail or "", self.settings, brain=brain_for(self.context))
 
+    def _control_prompt(self, tail: str, *, chat_key: str = "") -> str:
+        """The prompt compiler in chat. Owner-only, list-only.
+
+        /prompt — status of every compiled task · /prompt status
+        [task] — one task's numbers · /prompt list — tasks +
+        versions. Compiling happens through `nm prompt compile` or
+        the prompt_compile tool, never from chat.
+        """
+        from ...llm.prompt_compiler import control_prompt
+
+        return control_prompt(tail or "", self.settings)
+
     def _control_character(self, tail: str, *, chat_key: str = "") -> str:
         """Conversational story characters — talk to them. Owner-only.
 

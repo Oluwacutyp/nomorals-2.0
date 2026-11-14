@@ -342,6 +342,13 @@ MODULE_PINS: dict[str, int] = {
     # stays L4; the full foundation-vs-composition split is T1.6.
     "nomorals.tools.autonomy": 5,
     "nomorals.tools.finance": 5,
+    # The prompt-compiler tool surface composes the L5 organs that own
+    # the graded journals (games.npc_learn, characters.learn) into a
+    # compile/status surface — it IS the L5 composition layer, not an
+    # L4 foundation tool, the same shape as tools/games.py. The
+    # registry loads it dynamically by dotted name, never by static
+    # import, so no L4 module statically imports it.
+    "nomorals.tools.prompt_compiler": 5,
     # ── Fix-17: agency composition modules + os application services.
     # agency/ is otherwise L0 (SHARED) — the agency layer must not
     # import organs — but these three modules ARE the composition

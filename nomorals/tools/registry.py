@@ -600,6 +600,7 @@ class ToolRegistry:
             "map", "macros", "mcp_client", "media", "media_edit", "media_gen", "media_director", "media_pipeline", "metadata",
             "music", "studio",
             "network", "osint", "osint_people", "parsers",
+            "prompt_compiler",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
             "trace_view",
             "sceneintel", "directed", "seer", "shell", "side_chats", "ssh_socks", "traindata", "translate", "vision", "web", "weather",

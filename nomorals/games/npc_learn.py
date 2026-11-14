@@ -293,6 +293,7 @@ class NPCJournal:
             rows.append({"features": dict(chosen["features"]),
                          "label": float(e["grade"]),
                          "line": e.get("line", ""),
+                         "situation": e.get("situation", ""),
                          "entry_id": e.get("id", "")})
         return rows
 
@@ -340,6 +341,53 @@ def load_npc_scorer(npc_id: str, store: Any = None) -> Any | None:
         return (store or ModelStore()).load(f"npc-line:{npc_id}")
     except Exception:  # noqa: BLE001 - a bad store never kills a line
         return None
+
+
+# ── prompt compiler ─────────────────────────────────────────────────────
+# The DSPy-style prompt compiler over this journal (see
+# llm/prompt_compiler.py): the same graded rows the line scorer trains
+# on, compiled into a versioned prompt instead of a fitted model.
+# The base instruction is the speak instruction GameMaster asks with
+# (gamemaster.py: npc_speak) — the persona block (NPCProfile.to_prompt)
+# is prepended by the caller at USE time, not compiled in.
+
+#: The NPC dialogue task: one line, in character, from a situation.
+NPC_DIALOGUE_SIGNATURE = {
+    "task": "npc_dialogue",
+    "instruction": ("Speak as the character: one or two sentences, in "
+                    "your voice. Stay in character. Reply with the line "
+                    "only — no analysis, no preamble, no stage "
+                    "directions."),
+    "input_fields": ("situation",),
+    "output_fields": ("line",),
+}
+
+
+def compile_npc_prompt(game_id: str, npc_id: str, *, suggest: Any = None,
+                       metric: Any = None, store: Any = None,
+                       settings: Any = None,
+                       journal: NPCJournal | None = None) -> Any:
+    """Compile the NPC dialogue prompt from this NPC's graded journal.
+
+    Returns the compiler's :class:`llm.prompt_compiler.CompileOutcome`
+    — "compiled" (saved + promoted), "held", "insufficient" (below
+    the floor — the base prompt carries), or "disabled". Validation
+    runs only when a runner AND a metric are both supplied; the CLI
+    passes the brain + the imitation metric for ``--validate``.
+    Never raises for an empty journal: that is "insufficient".
+    """
+    from ..llm.prompt_compiler import (
+        GradedExample,
+        PromptSignature,
+        compile_prompt,
+    )
+
+    rows = (journal or NPCJournal()).rows(game_id, npc_id)
+    examples = [ex for ex in (GradedExample.from_row(r) for r in rows)
+                if ex is not None]
+    signature = PromptSignature(**NPC_DIALOGUE_SIGNATURE)
+    return compile_prompt(signature, examples, suggest=suggest,
+                          metric=metric, store=store, settings=settings)
 
 
 # ── combat policy ───────────────────────────────────────────────────────

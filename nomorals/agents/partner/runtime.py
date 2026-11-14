@@ -9359,6 +9359,13 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_llmguard(command.tail or arg,
                                           chat_key=chat_key)
+        if kind == "prompt":
+            # Prompt compiler status — owner-only, list-only. Same
+            # belt-and-braces operator check as /llmguard.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_prompt(command.tail or arg,
+                                        chat_key=chat_key)
         if kind == "notion":
             return self._control_notion(command.tail or arg)
         if kind == "gcal":
