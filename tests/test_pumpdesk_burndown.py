@@ -70,20 +70,18 @@ def test_rpc_routes_helius_first_when_keyed(monkeypatch):
     assert "api-key=test-key" in routes[0]["endpoint"]
     domains = [r["domain"] for r in routes]
     assert domains[1:] == ["api.mainnet-beta.solana.com",
-                           "solana-rpc.publicnode.com",
-                           "solana.drpc.org"]
+                           "solana-rpc.publicnode.com"]
 
 
 def test_rpc_routes_public_floor_and_health_order(monkeypatch):
     monkeypatch.delenv("HELIUS_API_KEY", raising=False)
     routes = rpc_routes(None)
     assert routes[0]["domain"] == "api.mainnet-beta.solana.com"
-    assert len(routes) == 3
+    assert len(routes) == 2
     # a stood-down route sinks below the still-active ones
     reg = _FakeRegistry(inactive={"solana-rpc.publicnode.com"})
     domains = [r["domain"] for r in rpc_routes(reg)]
     assert domains == ["api.mainnet-beta.solana.com",
-                       "solana.drpc.org",
                        "solana-rpc.publicnode.com"]
 
 

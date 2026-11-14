@@ -45,10 +45,22 @@ __all__ = [
     "fetch_frontend", "fetch_coin_row", "base_backoff",
     "PumpPortalBackend", "RpcLogBackend", "Firehose",
     "TransportDeniedError", "TRANSPORT_DENIED_CLASS",
+    "DEX_PROFILES", "fetch_dex_profiles", "dex_profile_candidate",
+    "DEX_DISCOVERY_MAX_NEW",
 ]
 
 PUMPPORTAL_WS = "wss://pumpportal.fun/api/data"
 FRONTEND_API = "https://frontend-api-v3.pump.fun"
+#: DexScreener's newest token profiles — the desk's working
+#: discovery surface.  Verified live from this box (2026-11-14):
+#: 200, 30 rows in ~1.3s.  The pump.fun frontend API the desk
+#: used to poll is Cloudflare-blocked from datacenter IPs (403,
+#: empty body), so DexScreener is the primary discovery leg and
+#: the frontend poll is the fallback, not the other way round.
+DEX_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
+#: New mints the discovery leg spends pair lookups on per cycle
+#: (a pair read per mint; the PumpVet monitor's cap).
+DEX_DISCOVERY_MAX_NEW = 10
 
 Emit = Callable[[str, dict], None]
 
@@ -137,6 +149,47 @@ def fetch_frontend(http_get: Callable, limit: int = 50,
         raise IOError(f"frontend api answered HTTP {status}")
     rows = json.loads(text)
     return rows if isinstance(rows, list) else []
+
+
+def fetch_dex_profiles(http_get: Callable,
+                       limit: int = 30) -> list[dict[str, Any]]:
+    """Newest DexScreener token profiles (the desk's primary
+    discovery surface — the one that answers from a datacenter
+    IP).  ``http_get(url, headers) -> (status, text)`` — the house
+    shape; the UA resolves through the desk's ONE config surface.
+    Returns the profile rows; raises on a non-200 so the caller
+    records the leg's real outcome.  ``limit`` caps the rows the
+    caller walks (the API returns the newest 30)."""
+    from .sources import desk_user_agent
+    status, text = http_get(DEX_PROFILES,
+                            {"User-Agent": desk_user_agent()})
+    if status != 200:
+        raise OSError(f"dexscreener profiles answered HTTP {status}")
+    rows = json.loads(text)
+    rows = rows if isinstance(rows, list) else []
+    return rows[:max(0, int(limit))]
+
+
+def dex_profile_candidate(row: dict[str, Any]) -> dict[str, Any] | None:
+    """Normalize one DexScreener profile row into a launch-shaped
+    record when it is a Solana pump.fun mint; None otherwise.
+    The filter is the PumpVet monitor's verified one: chainId
+    ``solana`` and the mint address ending in ``pump`` — pump
+    mints carry that suffix.  Name / symbol / creator are unknown
+    at profile stage — the dossier fills them from the chain and
+    the RugCheck report."""
+    if not isinstance(row, dict):
+        return None
+    if row.get("chainId") != "solana":
+        return None
+    mint = str(row.get("tokenAddress") or "")
+    if not mint or not mint.endswith("pump"):
+        return None
+    return {
+        "mint": mint, "creator": "", "name": "", "symbol": "",
+        "uri": "", "bonding_curve": "",
+        "source": "dexscreener-profiles", "ts": time.time(),
+    }
 
 
 #: Pages of the market-cap list the single-coin lookup scans.

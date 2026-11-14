@@ -53,8 +53,12 @@ MEMCOIN_SEEDS: tuple = (
      "stood down when it stops answering."),
     ("GLOBAL", "solana.drpc.org", "Solana RPC (dRPC public)",
      False,
-     "dRPC's free public endpoint — a third keyless RPC route in "
-     "the holder-read failover. Health-graded; shed when dead."),
+     "dRPC's free public endpoint — RETIRED as a route 2026-11-14: "
+     "the free plan does not serve Solana at all (HTTP 400 code 35 "
+     "\"chain is not available on free plan\" on getSlot and on "
+     "getAccountInfo, verified live). Kept as a registry record "
+     "only; it is NOT in PUBLIC_RPC_ENDPOINTS and no route is "
+     "built for it."),
     ("GLOBAL", "frontend-api-v3.pump.fun", "pump.fun frontend API",
      False,
      "Unofficial REST the pump.fun site itself reads: coin lists "
@@ -63,6 +67,11 @@ MEMCOIN_SEEDS: tuple = (
     ("GLOBAL", "api.dexscreener.com", "DexScreener API", False,
      "Free pair/token surface — the outcome grader for calls "
      "(post-graduation prices). No key, generous rate limits."),
+    ("GLOBAL", "api.rugcheck.xyz", "RugCheck API", False,
+     "Free token safety reports — mint/freeze authority, top "
+     "holders with insider flags, creator + creator balance, "
+     "risks, rugged flag. The dossier's de-rug fallback when the "
+     "RPC reads fail; verified live from this box. No key."),
     ("GLOBAL", "public-api.birdeye.so", "Birdeye API", True,
      "Keyed token analytics (holders, trades). Optional tier; the "
      "desk provisions it only on the owner's word."),
@@ -222,13 +231,16 @@ def pumpportal_api_key() -> str:
 #: single endpoint makes whole dossier fields hostages.  Routes
 #: join the memecoin registry kind above and are health-graded
 #: from real outcomes; rpc_routes() orders by that health.
+#: dRPC is NOT a route (2026-11-14, verified live): its free plan
+#: does not serve Solana at all (HTTP 400 code 35 on getSlot and
+#: on getAccountInfo) — a route that can never answer is not a
+#: route, and every failover walk that tried it paid a call and a
+#: failure for nothing.  Its registry seed stays as the record.
 PUBLIC_RPC_ENDPOINTS: tuple = (
     ("https://api.mainnet-beta.solana.com",
      "api.mainnet-beta.solana.com", "solana public RPC"),
     ("https://solana-rpc.publicnode.com",
      "solana-rpc.publicnode.com", "PublicNode public RPC"),
-    ("https://solana.drpc.org",
-     "solana.drpc.org", "dRPC public RPC"),
 )
 
 

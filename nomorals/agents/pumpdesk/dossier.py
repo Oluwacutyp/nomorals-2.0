@@ -16,6 +16,7 @@ is computed here, in the open.
 
 from __future__ import annotations
 
+import json
 import time
 from typing import Any, Optional
 
@@ -25,9 +26,19 @@ from .failures import record_failure
 __all__ = [
     "SERIAL_MIN_LAUNCHES", "SERIAL_RUG_RATIO",
     "HOLDER_DERIVE_MAX_WALLETS",
+    "RUGCHECK_API", "fetch_rugcheck_report", "rugcheck_evidence",
     "classify_launch_outcome", "build_dev_profile",
     "refresh_dev_profiles", "build_dossier", "render_dossier",
 ]
+
+#: RugCheck's free report API — the dossier's de-rug fallback.
+#: Verified live from this box (2026-11-14): 200 in ~1.3s, and
+#: the report carries exactly the evidence the dossier reads
+#: from the throttled RPC — mint/freeze authority, top holders
+#: with insider flags, creator + creator balance, risks, and the
+#: rugged flag.  The chain is the spine when it answers;
+#: RugCheck only fills what the RPC could not.
+RUGCHECK_API = "https://api.rugcheck.xyz"
 
 #: Serial-rugger headline rule (design §8.1, G-BOT blueprint).
 SERIAL_MIN_LAUNCHES = 3
@@ -207,6 +218,93 @@ def trade_facts(trades: list[dict[str, Any]], creator: str,
 
 # ── holder concentration ──────────────────────────────────────────────
 
+def fetch_rugcheck_report(http_get: Any,
+                          mint: str) -> dict[str, Any] | None:
+    """The RugCheck report for one mint (authorities, holders,
+    insiders, risks, rugged flag).  ``http_get(url, headers) ->
+    (status, text)`` — the house shape.  Returns the parsed report
+    dict, or None when RugCheck has no report for the mint
+    (non-200).  Raises on transport failure so the caller can
+    record it as a gap instead of wearing it as an absence."""
+    status, text = http_get(
+        f"{RUGCHECK_API}/v1/tokens/{mint}/report", {})
+    if status != 200:
+        return None
+    data = json.loads(text)
+    return data if isinstance(data, dict) else None
+
+
+def _rugcheck_amm_addresses(report: dict[str, Any]) -> set[str]:
+    """Addresses belonging to the AMM / bonding-curve pool itself
+    (the PumpVet vetting rule): the pool is always the biggest
+    holder — counting it as concentration is wrong."""
+    addrs: set[str] = set()
+    for m in report.get("markets") or []:
+        for k in ("pubkey", "mintLP", "liquidityA", "liquidityB"):
+            if m.get(k):
+                addrs.add(m[k])
+    return addrs
+
+
+def rugcheck_evidence(report: dict[str, Any]) -> dict[str, Any]:
+    """Normalize a RugCheck report into dossier-shaped evidence:
+    ``authorities`` (mint/freeze live flags, supply, decimals),
+    ``holders`` (top-1/3/10 shares as FRACTIONS of total supply
+    — RugCheck's holder pcts are percentages — with the AMM/pool
+    excluded, plus creator + insider shares and holder count),
+    ``creator``, ``rugged`` and the risk lists.  The holder
+    picture is a real one (not ledger-derived): ``partial`` is
+    False and the source is named ``rugcheck``."""
+    token = report.get("token") or {}
+    supply = int(token.get("supply") or 0)
+    amm = _rugcheck_amm_addresses(report)
+    top = []
+    for h in (report.get("topHolders") or [])[:10]:
+        if h.get("address") in amm or h.get("owner") in amm:
+            continue  # the pool itself, not a person
+        top.append(h)
+    pcts = [float(h.get("pct") or 0.0) / 100.0 for h in top]
+    creator_bal = int(report.get("creatorBalance") or 0)
+    creator_pct = (creator_bal / supply) if supply else None
+    insider_pct = sum(float(h.get("pct") or 0.0) / 100.0
+                      for h in top if h.get("insider"))
+    risks = report.get("risks") or []
+    danger = [r.get("name") for r in risks
+              if str(r.get("level") or "").lower()
+              in ("danger", "critical")]
+    warns = [r.get("name") for r in risks
+             if str(r.get("level") or "").lower()
+             in ("warn", "warning")]
+    return {
+        "authorities": {
+            "mint_authority_live":
+                report.get("mintAuthority") is not None,
+            "freeze_authority_live":
+                report.get("freezeAuthority") is not None,
+            "supply": supply,
+            "decimals": int(token.get("decimals") or 6),
+            "source": "rugcheck",
+        },
+        "holders": {
+            "top1_share": round(pcts[0], 4) if pcts else 0.0,
+            "top3_share": round(sum(pcts[:3]), 4),
+            "top10_share": round(sum(pcts[:10]), 4),
+            "accounts_seen": len(top),
+            "partial": False,
+            "source": "rugcheck",
+            "creator_pct": (round(creator_pct, 4)
+                            if creator_pct is not None else None),
+            "insider_pct": round(insider_pct, 4),
+            "total_holders": int(report.get("totalHolders") or 0),
+        },
+        "creator": report.get("creator") or "",
+        "rugged": bool(report.get("rugged")),
+        "risks_danger": danger,
+        "risks_warn": warns,
+        "rugcheck_score": report.get("score"),
+    }
+
+
 def _route_of(rpc: Any, method: str) -> str:
     """Which endpoint served a read (RoutedRPC provenance), or
     the single client's endpoint for a plain SolanaRPC."""
@@ -321,8 +419,13 @@ def build_dossier(store: Any, rpc: Any, mint: str,
     Chain reads are the spine (curve account, mint account, largest
     holders); the desk's ledgers supply history (launch record,
     trades, dev profile).  ``rpc`` is duck-typed (SolanaRPC or a
-    test double).  Fields that cannot be measured are marked
-    missing in ``gaps`` — the score reads the gaps, not hopes."""
+    test double).  ``http_get`` (the house ``(url, headers) ->
+    (status, text)`` shape) is the RugCheck fallback: when the RPC
+    leaves the authorities or the holder picture missing, the
+    report fills them over plain HTTPS — the chain is the spine
+    when it answers, RugCheck only fills what it could not.
+    Fields that cannot be measured are marked missing in ``gaps``
+    — the score reads the gaps, not hopes."""
     now = time.time() if now is None else now
     launch = store.launch(mint) or {}
     gaps: list[str] = []
@@ -389,6 +492,30 @@ def build_dossier(store: Any, rpc: Any, mint: str,
     else:
         dossier["curve"] = None
 
+    # RugCheck fallback (the de-rug leg that answers from a
+    # datacenter IP): fetched LAZILY, once per build, and only
+    # when the RPC left evidence missing.  The chain is the spine
+    # when it answers — RugCheck only fills what it could not.
+    # ``http_get`` absent (tests, offline CLI) means no fallback:
+    # the gaps stand as they always did.
+    rug_evidence: dict[str, Any] | None = None
+    rug_tried = False
+
+    def _rug_evidence() -> dict[str, Any] | None:
+        nonlocal rug_evidence, rug_tried
+        if not rug_tried:
+            rug_tried = True
+            if http_get is not None:
+                try:
+                    report = fetch_rugcheck_report(http_get, mint)
+                except Exception as exc:  # noqa: BLE001 - a failed
+                    # report is a gap, never a crash
+                    gaps.append(f"rugcheck report unreadable: {exc}")
+                    report = None
+                if report is not None:
+                    rug_evidence = rugcheck_evidence(report)
+        return rug_evidence
+
     if mint_info is not None:
         dossier["authorities"] = {
             "mint_authority_live": mint_info.mint_authority is not None,
@@ -396,8 +523,14 @@ def build_dossier(store: Any, rpc: Any, mint: str,
             "supply": mint_info.supply, "decimals": mint_info.decimals,
         }
     else:
-        dossier["authorities"] = None
-        gaps.append("authority flags unknown")
+        # RugCheck fallback: the report carries the same flags
+        # over plain HTTPS when the mint account is unreadable.
+        ev = _rug_evidence()
+        if ev is not None:
+            dossier["authorities"] = ev["authorities"]
+        else:
+            dossier["authorities"] = None
+            gaps.append("authority flags unknown")
 
     # holder concentration (top accounts vs total supply)
     supply_hint = (mint_info.supply if mint_info else
@@ -406,7 +539,27 @@ def build_dossier(store: Any, rpc: Any, mint: str,
         store, rpc, mint, supply_hint, dossier["creator"])
     dossier["holders"] = holders
     if holder_gap:
-        gaps.append(holder_gap)
+        # RugCheck fallback: the report's top holders (pool
+        # excluded) when every RPC holder route is dead.
+        ev = _rug_evidence()
+        if ev is not None:
+            dossier["holders"] = ev["holders"]
+        else:
+            gaps.append(holder_gap)
+
+    # A RugCheck report consulted for a gap also names the
+    # creator (when the chain did not) and the rugged flag the
+    # score gates on — free from the same evidence, never a
+    # second fetch.
+    if rug_tried and rug_evidence is not None:
+        if not dossier["creator"] and rug_evidence["creator"]:
+            dossier["creator"] = rug_evidence["creator"]
+        dossier["rugged"] = bool(rug_evidence["rugged"])
+        dossier["rugcheck"] = {
+            "risks_danger": rug_evidence["risks_danger"],
+            "risks_warn": rug_evidence["risks_warn"],
+            "score": rug_evidence["rugcheck_score"],
+        }
 
     # dev profile (the desk's memory of this creator)
     creator = dossier["creator"]

@@ -37,8 +37,10 @@ def register(registry: Any) -> None:
         "pumpdesk",
         description=(
             "Pump.fun intelligence desk: action=watch (one intake + "
-            "evaluation cycle: frontend candidates, dossier refresh, "
-            "attention verification, de-rug gate, publish calls) | "
+            "evaluation cycle: discovery candidates (DexScreener "
+            "profiles first, pump.fun frontend as fallback), "
+            "dossier refresh, attention verification, de-rug gate, "
+            "publish calls) | "
             "study (grade due calls, recompute dev profiles, rebuild "
             "the smart-money graph, recalibrate score parameters "
             "from the graded journal, shelve dossiers into the "

@@ -83,9 +83,12 @@ def token_snapshot(mint: str,
         price_native = float(best.get("priceNative") or 0)
     except (TypeError, ValueError):
         price_native = 0.0
+    base = best.get("baseToken") or {}
     return {
         "dex": best.get("dexId", ""),
         "pair": best.get("pairAddress", ""),
+        "name": base.get("name", ""),
+        "symbol": base.get("symbol", ""),
         "price_native": price_native,          # in SOL for SOL pairs
         "market_cap_usd": best.get("marketCap"),
         "fdv_usd": best.get("fdv"),

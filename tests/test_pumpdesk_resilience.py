@@ -125,6 +125,11 @@ def test_frontend_failure_degrades_one_leg_only(tmp_path, monkeypatch):
         raise TimeoutError("frontend stalled")
 
     monkeypatch.setattr(firehose, "fetch_frontend", dead_frontend)
+    # DexScreener yields nothing, so the frontend fallback runs —
+    # the leg under test.  Without this the cycle would dial the
+    # live DexScreener API.
+    monkeypatch.setattr(firehose, "fetch_dex_profiles",
+                        lambda http_get, limit=30: [])
     out = desk.watch_cycle()
     assert out["frontend"]["error"].startswith("TimeoutError")
     assert "frontend-api-v3.pump.fun" in out["degraded_sources"]
@@ -371,6 +376,11 @@ def test_frontend_transport_denial_records_its_real_class(
         raise TransportDeniedError("transport denied: WSAEACCES")
 
     monkeypatch.setattr(firehose, "fetch_frontend", denied_frontend)
+    # DexScreener yields nothing, so the frontend fallback runs —
+    # the leg under test.  Without this the cycle would dial the
+    # live DexScreener API.
+    monkeypatch.setattr(firehose, "fetch_dex_profiles",
+                        lambda http_get, limit=30: [])
     desk.watch_cycle()
     stats = reg.stats_for(reg.for_domain("frontend-api-v3.pump.fun"))
     assert stats["fail"] == 1
@@ -429,6 +439,11 @@ def test_stand_down_enters_journals_and_recovers(tmp_path, monkeypatch):
         firehose, "fetch_frontend",
         lambda http_get, limit=50: (_ for _ in ()).throw(
             TimeoutError("still down")))
+    # DexScreener yields nothing, so the frontend fallback runs —
+    # the leg under test.  Without this the cycle would dial the
+    # live DexScreener API.
+    monkeypatch.setattr(firehose, "fetch_dex_profiles",
+                        lambda http_get, limit=30: [])
     out = desk.watch_cycle()
     assert out["stand_down"] is not None
     assert out["stand_down"]["state"] == "stand-down"

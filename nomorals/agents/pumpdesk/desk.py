@@ -205,6 +205,37 @@ class PumpDesk:
         """Call-grading snapshot over the recording transport."""
         return _outcomes.token_snapshot(mint, self._dex_http_get())
 
+    def _rugcheck_http_get(self) -> Any:
+        """The RugCheck transport with outcome recording: every
+        real read lands in the ONE registry for api.rugcheck.xyz.
+        Success is the source SERVING: a 200 (a report) or a 404
+        (no report for this mint — an answer, not a failure; a
+        miss must never stand a healthy source down).  Any other
+        status, or a transport failure, records with its real
+        class.  The transport timeout is the source's cycle
+        budget.  This is the recording the dossier's fallback
+        needs: an unrecorded source is how a never-used leg wears
+        a death certificate (the DexScreener lesson)."""
+        from .sources import desk_source_budget_s
+
+        def _get(url: str, headers: dict) -> tuple[int, str]:
+            try:
+                status, text = _outcomes.default_http_get(
+                    url, headers,
+                    timeout=max(1.0, desk_source_budget_s()))
+            except Exception as exc:  # noqa: BLE001 - recorded, re-raised
+                self._record_source(
+                    "api.rugcheck.xyz", False,
+                    error_class=self._error_class_of(exc))
+                raise
+            served = status in (200, 404)
+            self._record_source(
+                "api.rugcheck.xyz", served,
+                error_class="" if served else f"http-{status}")
+            return status, text
+
+        return _get
+
     def _source_states(self) -> list[dict[str, Any]]:
         """Per-source feed state from the ONE registry, in the
         desk's vocabulary: ok / degraded / down / unprobed, each
@@ -362,8 +393,13 @@ class PumpDesk:
         """Build/refresh one dossier, then backfill its block-0
         trades from the chain when the create slot is known and the
         ledger has none yet (bounded: the create slot's signatures
-        on the curve account only)."""
+        on the curve account only).  The RugCheck transport rides
+        along so the dossier's de-rug fallback can fill the
+        authorities / holder picture the RPC left missing — the
+        chain is the spine when it answers, RugCheck only fills
+        what it could not."""
         d = _dossier.build_dossier(self.store, self.rpc, mint,
+                                   http_get=self._rugcheck_http_get(),
                                    now=time.time())
         launch = self.store.launch(mint) or {}
         # first-sight facts the outcome classifier + curve basis use
@@ -393,6 +429,7 @@ class PumpDesk:
         if slot and not self.store.trades(mint):
             self._backfill_slot_trades(mint, slot)
             d = _dossier.build_dossier(self.store, self.rpc, mint,
+                                       http_get=self._rugcheck_http_get(),
                                        now=time.time())
         smart = _watch.smart_confluence(self.store, mint,
                                         self.store.watched_smart())
@@ -452,29 +489,72 @@ class PumpDesk:
         outcome; a dead leg never kills the cycle."""
         out: dict[str, Any] = {"at": time.time()}
         self._reset_source_budgets()
-        # 1. frontend candidate poll (backfill/discovery) — one
-        #    source, one hard budget: the poll spends at most the
-        #    source's cycle budget, so a wedged frontend degrades
-        #    this leg only.
+        # 1. discovery — DexScreener newest profiles FIRST (the
+        #    source that answers from a datacenter IP: verified
+        #    live 200 in ~1.3s).  A profile mint earns dossier
+        #    work when DexScreener has a pair for it (traction
+        #    exists); a pair-less mint is ledgered only, no
+        #    dossier spend.  The pump.fun frontend API is the
+        #    FALLBACK, attempted only when DexScreener contributed
+        #    nothing new this cycle — it is Cloudflare-blocked
+        #    from datacenter IPs (403), so polling it every cycle
+        #    burns the budget on a leg that cannot answer.  Each
+        #    leg reports its own outcome; a dead leg never kills
+        #    the cycle.
+        dex_new = 0
+        dex_promoted = 0
         try:
-            rows = _firehose.fetch_frontend(self._budgeted_http_get(),
-                                            limit=50)
-            promoted = 0
-            for row in rows:
-                cand = _firehose.frontend_candidate(row)
+            profiles = _firehose.fetch_dex_profiles(
+                self._dex_http_get())
+            for row in profiles:
+                cand = _firehose.dex_profile_candidate(row)
                 if cand is None:
                     continue
                 mint = cand["mint"]
-                if self.store.launch(mint) is None:
+                if self.store.launch(mint) is not None:
+                    continue
+                if dex_new >= _firehose.DEX_DISCOVERY_MAX_NEW:
+                    break
+                dex_new += 1
+                snap = self._dex_snapshot(mint)
+                if snap is None:
                     self.store.record_launch(cand)
+                    continue
+                cand["name"] = snap.get("name", "") or ""
+                cand["symbol"] = snap.get("symbol", "") or ""
+                self.store.record_launch(cand)
                 self.refresh_dossier(mint)
-                promoted += 1
-            out["frontend"] = {"rows": len(rows), "promoted": promoted}
-            self._record_source("frontend-api-v3.pump.fun", True)
+                dex_promoted += 1
+            out["dexscreener"] = {"profiles": len(profiles),
+                                  "new": dex_new,
+                                  "promoted": dex_promoted}
         except Exception as exc:  # noqa: BLE001 - a leg reports
-            out["frontend"] = {"error": f"{type(exc).__name__}: {exc}"}
-            self._record_source("frontend-api-v3.pump.fun", False,
-                                error_class=self._error_class_of(exc))
+            out["dexscreener"] = {"error": f"{type(exc).__name__}: {exc}"}
+        if dex_new == 0 and dex_promoted == 0:
+            try:
+                rows = _firehose.fetch_frontend(
+                    self._budgeted_http_get(), limit=50)
+                promoted = 0
+                for row in rows:
+                    cand = _firehose.frontend_candidate(row)
+                    if cand is None:
+                        continue
+                    mint = cand["mint"]
+                    if self.store.launch(mint) is None:
+                        self.store.record_launch(cand)
+                    self.refresh_dossier(mint)
+                    promoted += 1
+                out["frontend"] = {"rows": len(rows),
+                                   "promoted": promoted}
+                self._record_source("frontend-api-v3.pump.fun", True)
+            except Exception as exc:  # noqa: BLE001 - a leg reports
+                out["frontend"] = {"error":
+                                   f"{type(exc).__name__}: {exc}"}
+                self._record_source("frontend-api-v3.pump.fun", False,
+                                    error_class=self._error_class_of(exc))
+        else:
+            out["frontend"] = {
+                "skipped": "dexscreener discovery served this cycle"}
         # 2. bounded stream slice (jobs/tests); the runtime's thread
         #    consumer is the standing intake — a slice here also
         #    serves hosts where the thread never started.

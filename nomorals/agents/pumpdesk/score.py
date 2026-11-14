@@ -150,6 +150,12 @@ def evaluate(dossier: dict[str, Any],
     if auth.get("freeze_authority_live"):
         rug = max(rug, 0.75)
         v.gates.append("freeze authority still live — balances can freeze")
+    if dossier.get("rugged"):
+        # RugCheck's own verdict (the report the dossier fell
+        # back to when the RPC could not speak): a rugged token
+        # is a hard no, whatever the other components say.
+        rug = max(rug, 0.95)
+        v.gates.append("rugcheck reports this token as rugged")
     if trades.get("dev_sold"):
         rug = max(rug, 0.65)
         v.reasons.append(f"dev already sold {trades.get('dev_sold_sol', 0)} "

@@ -448,7 +448,8 @@ def test_registry_seeds_and_status():
     ensure_pump_sources(reg)
     ensure_pump_sources(reg)   # idempotent
     st = pump_status(reg)
-    assert st["count"] == 7   # 5 P1 seeds + 2 added public RPC routes
+    assert st["count"] == 8   # 5 P1 seeds + 2 added public RPC routes
+    # + RugCheck (the dossier's de-rug fallback)
     assert all(s["health"] == "unknown" for s in st["sources"])
 
 
