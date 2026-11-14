@@ -2427,7 +2427,11 @@ def _parser() -> argparse.ArgumentParser:
                      "nm voice stats [--json]\n"
                      "nm voice consent [--grant|--revoke] [--device ID]\n"
                      "nm voice purge\n"
-                     "nm voice decrypt <file.enc> --key-file PATH"),
+                     "nm voice decrypt <file.enc> --key-file PATH\n"
+                     "nm voice live start --room NAME [--turns N] "
+                     "[--profile P] [--stt tools|local|bridge]\n"
+                     "nm voice live provision [--json]\n"
+                     "nm voice live status [--json]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     voice_sub = voice.add_subparsers(dest="voice_action", required=True)
@@ -2560,6 +2564,38 @@ def _parser() -> argparse.ArgumentParser:
     v_probe = voice_sub.add_parser(
         "probe", help="acoustic voice-print of a clip (clone quality)")
     v_probe.add_argument("audio", help="audio file path")
+    # -- live calls: Devon as a LiveKit room participant ---------------
+    v_live = voice_sub.add_parser(
+        "live", help="live voice call in a LiveKit room (WebRTC)")
+    live_sub = v_live.add_subparsers(dest="voice_live_action", required=True)
+    v_live_start = live_sub.add_parser(
+        "start", help="join a LiveKit room and talk live")
+    v_live_start.add_argument("--room", required=True,
+                              help="LiveKit room name to join")
+    v_live_start.add_argument("--turns", type=int, default=0,
+                              help="max turns (0 = until you say goodbye)")
+    v_live_start.add_argument("--profile", default="",
+                              help="TTS voice profile name")
+    v_live_start.add_argument("--device", default="",
+                              help="device id (conversation identity; "
+                                   "default livekit:<room>)")
+    v_live_start.add_argument("--stt", default="tools",
+                              choices=("tools", "local", "bridge"),
+                              help="speech-to-text backend (same as "
+                                   "nm voice call)")
+    v_live_start.add_argument("--max-wait-remote", type=float, default=120.0,
+                              help="seconds to wait for someone to join "
+                                   "before giving up (default 120)")
+    v_live_start.add_argument("--json", action="store_true",
+                              help="Output as JSON")
+    v_live_prov = live_sub.add_parser(
+        "provision", help="install the livekit SDK (livekit + livekit-api)")
+    v_live_prov.add_argument("--json", action="store_true",
+                             help="Output as JSON")
+    v_live_status = live_sub.add_parser(
+        "status", help="live-call readiness (SDK, config, last call)")
+    v_live_status.add_argument("--json", action="store_true",
+                               help="Output as JSON")
     v_probe.add_argument("--json", action="store_true",
                          help="Output as JSON")
 

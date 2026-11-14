@@ -114,14 +114,38 @@ def _cmd_voice(args: argparse.Namespace, context: Any) -> int:
         return _cmd_voice_match(args, context)
     if action == "probe":
         return _cmd_voice_probe(args, context)
+    if action == "live":
+        return _cmd_voice_live(args, context)
     print(f"unknown voice action: {action}", file=sys.stderr)
     return 2
 
 
-def _cmd_voice_call(args: argparse.Namespace, context: Any) -> int:
-    import time
-    from pathlib import Path
+def _voice_tts_callable(args: argparse.Namespace, settings: Any,
+                        data_dir: str) -> Any:
+    """The TTS callable the live loops share: (text, profile) -> wav.
 
+    Same engine as ``nm voice say`` (UniversalTTS, settings backend);
+    ``--no-tts`` (call only) degrades to a text-only stub.
+    """
+    if getattr(args, "no_tts", False):
+        def _silent(text: str, profile: str) -> dict:  # noqa: ARG001
+            return {"path": ""}
+
+        return _silent
+    from ...voice.tts import UniversalTTS
+
+    engine = UniversalTTS(backend=settings.audio.tts_engine or "auto")
+
+    def _tts(text: str, profile: str) -> dict:
+        out_path = str(Path(data_dir) / "tmp" /
+                       f"tts-{int(time.time() * 1000)}.wav")
+        return engine.speak(text, voice_name=profile or None,
+                            out_path=out_path)
+
+    return _tts
+
+
+def _cmd_voice_call(args: argparse.Namespace, context: Any) -> int:
     from ...voice.session import VoiceSession
 
     settings = context.settings
@@ -129,22 +153,7 @@ def _cmd_voice_call(args: argparse.Namespace, context: Any) -> int:
     audio_key = (_voice_read_key_file(args.audio_key_file)
                  if args.audio_key_file else None)
 
-    tts = None
-    if not args.no_tts:
-        from ...voice.tts import UniversalTTS
-
-        engine = UniversalTTS(backend=settings.audio.tts_engine or "auto")
-
-        def _tts(text: str, profile: str) -> dict:
-            out_path = str(Path(data_dir) / "tmp" /
-                           f"tts-{int(time.time() * 1000)}.wav")
-            return engine.speak(text, voice_name=profile or None,
-                                out_path=out_path)
-
-        tts = _tts
-    else:
-        def _tts(text: str, profile: str) -> dict:  # noqa: ARG001
-            return {"path": ""}
+    tts = _voice_tts_callable(args, settings, data_dir)
 
     def _deliver(turn_id: str, text: str) -> None:
         print(f"\n━━━ {turn_id} ━━━\n{text}\n")
@@ -197,6 +206,114 @@ def _cmd_voice_call(args: argparse.Namespace, context: Any) -> int:
         if report.error:
             print(f"error: {report.error}")
     return 0 if report.end_reason != "error" else 1
+
+
+def _cmd_voice_live(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm voice live` subcommands."""
+    action = args.voice_live_action
+    if action == "start":
+        return _cmd_voice_live_start(args, context)
+    if action == "provision":
+        return _cmd_voice_live_provision(args, context)
+    if action == "status":
+        return _cmd_voice_live_status(args, context)
+    print(f"unknown voice live action: {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_voice_live_start(args: argparse.Namespace, context: Any) -> int:
+    from ...voice.livekit_call import (
+        LiveKitCallSession,
+        LiveKitConfig,
+        LiveKitUnavailable,
+    )
+    from ...voice.session import (
+        make_default_bridge_stt,
+        make_local_stt,
+    )
+
+    settings = context.settings
+    data_dir = _voice_data_dir(args, settings)
+    stt_backend = getattr(args, "stt", "tools")
+    if stt_backend == "bridge":
+        stt_fn = make_default_bridge_stt()
+    elif stt_backend == "local":
+        stt_fn = make_local_stt()
+    else:
+        stt_fn = _voice_stt_from_tools(context)
+    session = LiveKitCallSession(
+        think=_voice_think_runtime(
+            context, args.device or f"livekit:{args.room}"),
+        stt=stt_fn,
+        tts=_voice_tts_callable(args, settings, data_dir),
+        config=LiveKitConfig.from_env(),
+        room=args.room,
+        data_dir=data_dir,
+        profile=args.profile,
+        silence_ms=settings.audio.voice_silence_ms,
+        speech_cap_secs=settings.audio.voice_speech_cap_secs,
+    )
+    print(f"Joining LiveKit room {args.room!r} — say \"goodbye\" to hang "
+          f"up.\n")
+    try:
+        report = session.start(max_turns=args.turns)
+    except LiveKitUnavailable as exc:
+        print(f"cannot start the live call: {exc}", file=sys.stderr)
+        if exc.missing:
+            print(f"missing: {exc.missing}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.format())
+    return 0 if report.end_reason != "error" else 1
+
+
+def _cmd_voice_live_provision(args: argparse.Namespace,
+                              context: Any) -> int:  # noqa: ARG001
+    from ...voice.livekit_call import provision_livekit
+
+    result = provision_livekit()
+    if args.json:
+        print(json.dumps(result, indent=2))
+    elif result.get("ok"):
+        if result.get("installed"):
+            print(f"livekit SDK installed ({result.get('version')}) — "
+                  f"set LIVEKIT_URL and LIVEKIT_API_KEY + "
+                  f"LIVEKIT_API_SECRET (or LIVEKIT_TOKEN), then "
+                  f"nm voice live start --room <name>")
+        else:
+            print(f"livekit SDK already installed "
+                  f"({result.get('version')})")
+    else:
+        print(f"provision failed: {result.get('error')}", file=sys.stderr)
+    return 0 if result.get("ok") else 1
+
+
+def _cmd_voice_live_status(args: argparse.Namespace,
+                           context: Any) -> int:
+    from ...voice.livekit_call import livekit_status
+
+    status = livekit_status(_voice_data_dir(args, context.settings))
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+    if status["sdk_installed"]:
+        print(f"livekit SDK: installed ({status['sdk_version']})")
+    else:
+        print("livekit SDK: NOT installed — "
+              "nm voice live provision")
+    if status["configured"]:
+        print("LiveKit server: configured")
+    else:
+        print("LiveKit server: NOT configured — missing: "
+              + "; ".join(status["missing"]))
+    last = status.get("last_call")
+    if last:
+        print(f"last call: room {last.get('room')} — "
+              f"{last.get('turns')} turns, {last.get('barge_ins')} "
+              f"barge-ins, ended {last.get('end_reason')}")
+    return 0
 
 
 def _cmd_voice_say(args: argparse.Namespace, context: Any) -> int:
