@@ -1,6 +1,6 @@
 """Models-into-classes ladder (Phase 1): registry, per-device selection,
-and the four wired jobs — character dialogue, character tactics, DJ sound
-selection, arena battle narration.
+and the six wired jobs — character dialogue, character tactics, DJ sound
+selection, DJ beat grid, DJ cue suggestion, arena battle narration.
 
 Failing-first: every test here names behaviour the ladder must provide.
 The code rung proves each job deterministically; the model rung proves
@@ -50,13 +50,21 @@ class _FakeBrain:
 def test_four_jobs_registered():
     from nomorals.llm.ladder import JOB_NAMES, list_jobs
 
-    # JOB_NAMES is the Phase-1 set (kept stable); the registry grew in
-    # Phase 2 with the real specialists (owner correction 2026-11-12:
-    # the brain is not a rung — the specialist is).
+    # JOB_NAMES is the pre-snapshot set, pinned exactly (not a count,
+    # so the next drift fails loudly). It was the four Phase-1 jobs
+    # (31346469) and stayed four through Phase 2 (46ab5bb3 added its
+    # nine specialists AFTER the snapshot). The DJ desk (390dd9bd,
+    # 2026-11-12) registered dj_beat_grid + dj_cue_suggest BEFORE the
+    # snapshot, so JOB_NAMES grew to six — both are real jobs
+    # (BeatGrid/madmom + CueBank/sklearn, wired in dj_desk.py and
+    # models_provision.py), and this test was never updated. The name
+    # "four_jobs" is kept for continuity; the set is the truth.
     assert set(JOB_NAMES) == {
         "character_dialogue",
         "character_tactics",
         "dj_sound_selection",
+        "dj_beat_grid",
+        "dj_cue_suggest",
         "arena_narration",
     }
     jobs = set(list_jobs())
