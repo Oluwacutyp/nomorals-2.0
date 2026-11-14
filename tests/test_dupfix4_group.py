@@ -483,27 +483,25 @@ def test_group_registry_resync_on_group_traffic(monkeypatch):
 
 def test_dm_command_ack_observed_without_registry(
         split_homes_broken_store):
-    """D1: the userbot defers a DM command — the deferral registers
-    on the echo's peer stamp, while the shared store is unreachable
-    so the runtime registry stays empty. The bot's ack then arrives
-    as an ORDINARY incoming DM message (no peer_post stamp, no
-    stamp, no registry, no shared store — the live gap). A pending
-    deferral certifies the chat is a bot DM, so the non-owner
-    sender IS the primary's answer: the deferral resolves, the
-    userbot never fails over into a second copy.
-
-    Failing-first: before the fix the ack becomes a turn (the
-    deferral stays pending) and the sweep fails over into a
-    second /chatmode answer."""
+    """D1, Route 1 (dupfix5): the userbot never executes — and
+    never defers — a DM command echo, so the ack-observation
+    machinery has nothing to resolve. The echo is ledger
+    bookkeeping only; the bot's ack arrives as an ordinary
+    incoming DM message and still produces no second copy, and
+    the sweep still has nothing to fail over into. The D1
+    deferral-certification path still exists for INCOMING command
+    copies (which can still defer); the echo simply never reaches
+    it."""
     (_rt_a, _ad_a, _ctx_a), (rt_b, ad_b, _ctx_b), _info = \
         split_homes_broken_store
     assert rt_b._claims_are_shared() is False
     text = "/chatmode games-only +2348164302080"
-    # Stamped echo: the peer is identified at intake (the stamp),
-    # so the deferral registers even with an empty registry.
+    # Stamped echo: before Route 1 the peer stamp identified the
+    # DM at intake and the deferral registered even with an empty
+    # registry. Now the echo is observe-only — no deferral.
     rt_b._process_inner(_echo_copy(text, "870", stamped=True))
     assert _texts(ad_b["telegram"]) == []
-    assert rt_b._peer_deferral().pending_count() == 1
+    assert rt_b._peer_deferral().pending_count() == 0
     # The bot's ack, as an ordinary incoming DM message from the
     # bot's id — no peer_post service, no stamp.
     ack = _msg("telegram", chat_id=str(PERSONAL_BOT_ID),
@@ -517,15 +515,16 @@ def test_dm_command_ack_observed_without_registry(
 
 
 def test_dm_command_sweep_stands_down_when_bot_claimed(split_homes):
-    """D3 backstop (regression pin — passes before the fix too):
-    the bot claimed the command key at intake, so the userbot's
-    sweep stands down instead of failing over into a second copy."""
+    """D3 backstop, Route 1 (dupfix5): the bot claimed the command
+    key at intake and answered; the userbot's echo never defers
+    (it is observe-only), so the sweep has nothing to stand down
+    — and still produces no second copy."""
     (rt_a, ad_a, _ctx_a), (rt_b, ad_b, _ctx_b) = split_homes
     rt_a._sync_bot_registry()
     rt_a._process_inner(_bot_copy("/ping", "880"))
     assert len(_texts(ad_a["telegram-personal"])) == 1
     rt_b._process_inner(_echo_copy("/ping", "880", stamped=False))
-    assert rt_b._peer_deferral().pending_count() == 1
+    assert rt_b._peer_deferral().pending_count() == 0
     rt_b._sweep_peer_deferrals(now=time.time() + 60)
     assert _texts(ad_b["telegram"]) == []
 
@@ -663,6 +662,15 @@ def test_play_download_bg_stands_down_when_sibling_claims(split_homes):
         time.sleep(0.05)
     assert produced_b == ["ran"], \
         "a self-held key must still produce"
+    # Drain this test's own download jobs out of the process-wide
+    # registry: the self-held job finished undelivered (empty
+    # result), so the next inbound turn in this chat in the same
+    # process would harvest it as a stray "report never reached
+    # this chat" notice (dupfix5: the corrected self-chat model
+    # IS an inbound turn, so it harvests). The sibling-held job
+    # is collected silently (skipped). Harvesting here keeps the
+    # jobs from leaking into later tests in the same process.
+    rt_b._harvest_play_downloads("telegram:4242", chat)
 
 
 def test_play_dispatch_sets_claim_var_without_changing_call_shape(

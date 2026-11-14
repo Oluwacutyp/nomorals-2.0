@@ -654,10 +654,14 @@ class OneCommandOneHandlingTests(unittest.TestCase):
 
     def test_personal_self_chat_command_stays_personal(self) -> None:
         calls = self._patch_play()
+        # Live shape: a self-chat command goes through
+        # _handle_inbound, which builds incoming=True — the
+        # outgoing event is converted to an inbound turn, never
+        # an echo — so the operator branch still takes it
+        # (Route 1, dupfix5).
         personal = self._owner_msg(
             "telegram", kind=ChatKind.DM, chat_id="4242",
-            text="/play fear by nf", incoming=False, message_id="56",
-            own=True)
+            text="/play fear by nf", incoming=True, message_id="56")
         self.runtime._process_inner(personal)
         self.assertEqual(len(calls), 1)
         sent = self._sent("telegram")

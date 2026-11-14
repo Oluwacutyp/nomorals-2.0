@@ -353,8 +353,10 @@ def test_split_instances_effect_runs_once(split_home):
 
 def test_split_instances_distinct_command_still_answers(split_home):
     """No over-suppression: a different command (new message id)
-    in the same chat pair is handled normally by the echo
-    surface when it is the only copy."""
+    still gets answered — by the owning surface. Route 1
+    (dupfix5): the echo copy never executes on the userbot
+    runtime, so the distinct command's answer comes from the
+    bot's incoming copy, exactly once."""
     rig_a, rig_b = _split_runtimes(split_home)
     rt_a, adapters_a, _ctx_a = rig_a
     rt_b, adapters_b, _ctx_b = rig_b
@@ -369,18 +371,27 @@ def test_split_instances_distinct_command_still_answers(split_home):
             text="/chatmode normal +2348164302080", incoming=False,
             message_id="101", own=True))
         sent_b = [t for t, _b in adapters_b["telegram"].sent]
-        assert len(sent_b) == 1, sent_b
-        assert "back to normal" in sent_b[0]
+        assert sent_b == [], sent_b
+        rt_a._process_inner(_owner_msg(
+            "telegram-personal", kind=ChatKind.DM, chat_id=OWNER_ID,
+            text="/chatmode normal +2348164302080",
+            incoming=True, message_id="101"))
+        sent_a = [t for t, _b in adapters_a["telegram-personal"].sent]
+        assert len(sent_a) == 2, sent_a
+        assert "back to normal" in sent_a[1]
     finally:
         _teardown(rig_a, rig_b)
 
 
 def test_split_instances_stale_claim_does_not_mute(split_home):
     """Crash TTL at the runtime seam: the bot claimed a command
-    and died mid-handling (the row is a full window old); the
-    echo copy must still be handled, not stood down forever."""
+    and died mid-handling (the row is a full window old). Route 1
+    (dupfix5): the echo copy never executes — the failover via
+    echo is gone with the echo-to-command path — but the stale
+    claim still does not mute the command: a live retry on the
+    owning surface reclaims the key and answers once."""
     rig_a, rig_b = _split_runtimes(split_home)
-    rt_a, _adapters_a, ctx_a = rig_a
+    rt_a, adapters_a, ctx_a = rig_a
     rt_b, adapters_b, _ctx_b = rig_b
     try:
         # The crashed surface had run: its ledger exists (the
@@ -400,7 +411,13 @@ def test_split_instances_stale_claim_does_not_mute(split_home):
             text="/chatmode normal +2348164302080", incoming=False,
             message_id="102", own=True))
         sent_b = [t for t, _b in adapters_b["telegram"].sent]
-        assert len(sent_b) == 1, sent_b
-        assert "back to normal" in sent_b[0]
+        assert sent_b == [], sent_b
+        rt_a._process_inner(_owner_msg(
+            "telegram-personal", kind=ChatKind.DM, chat_id=OWNER_ID,
+            text="/chatmode normal +2348164302080",
+            incoming=True, message_id="102"))
+        sent_a = [t for t, _b in adapters_a["telegram-personal"].sent]
+        assert len(sent_a) == 1, sent_a
+        assert "back to normal" in sent_a[0]
     finally:
         _teardown(rig_a, rig_b)

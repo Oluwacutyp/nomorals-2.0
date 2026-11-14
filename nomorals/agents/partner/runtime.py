@@ -2261,7 +2261,22 @@ class PartnerRuntime(
         # Control commands: from the console or the owner chat, a *known*
         # slash command is a command, not conversation. Unknown slashes and
         # stray / from non-operators fall through to her as ordinary text.
-        if message.text.strip().startswith("/") and self._is_operator(message):
+        # Route 1 (regression fix, 2026-11-14): the branch requires an
+        # INBOUND turn. An own-echo (incoming=False — the owner's own
+        # message as the MTProto stream reports it back) is ledger
+        # bookkeeping only (#28) and must never execute as a command:
+        # before 4f0f3518 the userbot adapter dropped non-self-chat
+        # outgoing events, so the userbot runtime never saw these
+        # commands at all. Every live command turn is inbound — the
+        # Bot API, the Telethon inbound path, the self-chat path
+        # (_handle_inbound builds incoming=True), the WhatsApp
+        # owner-command turn, the local console — so no carve-out
+        # is needed. The first slash branch above already requires
+        # incoming; this closes the same hole for the operator
+        # branch, the only turn consumer that did not.
+        if (message.incoming
+                and message.text.strip().startswith("/")
+                and self._is_operator(message)):
             from ...social.chat.control import parse_control
 
             _parsed = parse_control(message.text)

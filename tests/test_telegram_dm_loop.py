@@ -438,9 +438,11 @@ def test_loop_replay_seed_white_green(split_homes):
 def test_dm_command_answered_once_across_surfaces(split_homes):
     """A DM slash command with an UNSTAMPED echo (the live gap —
     the old test used a stamped echo): the bot answers once, the
-    bare userbot defers, the bot's answer observed in the room
-    resolves the deferral. Exactly one reply across both
-    surfaces."""
+    bare userbot never executes the echo. Route 1 (dupfix5): an
+    own-echo is ledger bookkeeping only, so no deferral is ever
+    registered for it — the bot's answer stands alone, and the
+    sweep has nothing to fail over into. Exactly one reply
+    across both surfaces."""
     (rt_a, ad_a, _ctx_a), (rt_b, ad_b, _ctx_b) = split_homes
     rt_a._sync_bot_registry()
     text = "/chatmode games-only +2348164302080"
@@ -448,7 +450,7 @@ def test_dm_command_answered_once_across_surfaces(split_homes):
     assert len(_texts(ad_a["telegram-personal"])) == 1
     rt_b._process_inner(_echo_copy(text, "700", stamped=False))
     assert _texts(ad_b["telegram"]) == []
-    assert rt_b._peer_deferral().pending_count() == 1
+    assert rt_b._peer_deferral().pending_count() == 0
     rt_b._process_inner(_peer_post(
         "whatsapp:2348164302080@s.whatsapp.net is now games-only",
         "701", reply_to="700"))
