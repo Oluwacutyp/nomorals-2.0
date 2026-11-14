@@ -76,10 +76,22 @@ def _charagent_save_graph(store: Any, graph: Any) -> None:
 class RuntimeGamesMixin:
     """RuntimeGamesMixin for :class:`PartnerRuntime`."""
 
-    #: Pending /game delete confirmations: player_key -> expiry timestamp.
-    #: In-memory is fine — if the bot restarts, the user just runs
-    #: /game delete again.  Mirrors the gift flow's 5-minute window.
-    _delete_pending: dict[str, float] = {}
+    @property
+    def _delete_pending(self) -> dict[str, float]:
+        """Pending /game delete confirmations: player_key -> expiry.
+
+        Per runtime instance, lazily created. This was a class
+        attribute shared by every runtime in the process — one
+        test's pending confirmation leaked into the next test's
+        "nothing to confirm" (and one runtime's into another's).
+        In-memory is fine — if the bot restarts, the user just
+        runs /game delete again. Mirrors the gift flow's
+        5-minute window.
+        """
+        pending = self.__dict__.get("_delete_pending")
+        if pending is None:
+            pending = self.__dict__["_delete_pending"] = {}
+        return pending
 
     def _group_system_blocked(self, chat_key: str) -> bool:
         """§33 for game surfaces: True when ``chat_key`` is a

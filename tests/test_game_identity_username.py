@@ -267,8 +267,14 @@ class GameDeleteCommandTests(unittest.TestCase):
         h = self._harness()
         out = h._control_game("delete", "telegram:dm:1",
                               player=_player("telegram:1", "Ada", "ada"))
-        self.assertIn("confirm", out)
-        self.assertIn("48 hours", out)
+        # _control_game returns an ActionableMessage here (text +
+        # buttons), not a plain string — assert on its text and its
+        # buttons, never on the object itself.
+        self.assertIn("delete your game profile", out.text)
+        self.assertIn("48 hours", out.text)
+        callbacks = [cb for row in out.buttons for _label, cb in row]
+        self.assertIn("game delete confirm", callbacks)
+        self.assertIn("game delete cancel", callbacks)
         # Not deleted yet.
         self.assertIn("telegram:1",
                       [p.key for p in h._engine.store.all()])
@@ -297,7 +303,10 @@ class GameDeleteCommandTests(unittest.TestCase):
         h = self._harness()
         out = h._control_game("delete confirm", "telegram:dm:1",
                               player=_player("telegram:1", "Ada", "ada"))
-        self.assertIn("nothing to confirm", out)
+        # An ActionableMessage, not a plain string — assert on its
+        # text. The pending confirmation is per runtime instance,
+        # so a fresh harness has nothing to confirm.
+        self.assertIn("nothing to confirm", out.text)
 
     def test_delete_empty_profile(self):
         h = self._harness()
