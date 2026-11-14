@@ -185,6 +185,29 @@ def _stage(tmp, inspector, *, payload, pid=4242, exe="", cmdline="",
 def _verified_payload(port, **over):
     payload = {"type": "status", "program": GO_PROGRAM, "port": port,
                "state": "open", "user": f"{DIGITS}@s.whatsapp.net",
+               "lid": "", "build": dict(_CURRENT_BUILD)}
+    payload.update(over)
+    return payload
+
+
+#: The build block a CURRENT bridge reports (2026-11-14 vvfix):
+#: adoption requires the unwrap_inbound capability proof, so
+#: the staged survivor must carry it — a payload without it
+#: stages a pre-fix binary, which adoption now refuses.
+_CURRENT_BUILD = {
+    "program": GO_PROGRAM,
+    "commit": "abc1234",
+    "built": "2026-11-12T00:00:00Z",
+    "unwrap_inbound": True,
+}
+
+
+def _stale_payload(port, **over):
+    """A verified-but-STALE survivor: the program marker and
+    account are right, but no build block — a pre-2026-11-12
+    binary, which adoption refuses and the lifecycle replaces."""
+    payload = {"type": "status", "program": GO_PROGRAM, "port": port,
+               "state": "open", "user": f"{DIGITS}@s.whatsapp.net",
                "lid": ""}
     payload.update(over)
     return payload
@@ -662,6 +685,114 @@ class TestAnnouncementOnce(unittest.TestCase):
         _replies, cards, _edits = self._drive(
             [self._msg("m-1"), self._msg("m-2")])
         self.assertEqual(len(cards), 2, cards)
+
+
+class TestStaleSurvivorReplacement(unittest.TestCase):
+    """The 2026-11-14 vvfix: adoption requires the bridge's build
+    to PROVE the view-once capability (the build block's
+    unwrap_inbound flag).  A verified-but-stale survivor — the
+    program marker and account are right, the build is absent —
+    is never adopted and never served through: it is stopped
+    and the current binary launched in its place.  The program
+    marker alone ("gobridge/1.0.0") is identical in every build
+    and proves nothing about age — that is the hole the earlier
+    diagnostic named but did not close: the supervisor adopted
+    the pre-fix orphan on the marker, reported "Serving", and
+    the current binary never launched, so no view-once event
+    ever arrived and the journal held zero rows."""
+
+    def test_adopt_refuses_stale_survivor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            insp = _FakeInspector()
+            sup, _reg, rec, bridge, _s = _stage(
+                tmp, insp, payload=None)
+            bridge.payload = _stale_payload(bridge.port)
+            try:
+                self.assertIsNone(sup.adopt(rec))
+                self.assertFalse(sup.is_running(ACCT))
+            finally:
+                bridge.close()
+            # Refusal does not kill anything — the stop belongs
+            # to the replacement path, not to adoption.
+            self.assertEqual(insp.terminated, [])
+
+    def test_adopt_refuses_build_without_flag(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            insp = _FakeInspector()
+            sup, _reg, rec, bridge, _s = _stage(
+                tmp, insp, payload=None)
+            payload = _verified_payload(bridge.port)
+            payload["build"] = dict(_CURRENT_BUILD)
+            payload["build"]["unwrap_inbound"] = False
+            bridge.payload = payload
+            try:
+                self.assertIsNone(sup.adopt(rec))
+            finally:
+                bridge.close()
+
+    def test_adopt_accepts_current_build(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            insp = _FakeInspector()
+            sup, _reg, rec, bridge, _s = _stage(
+                tmp, insp, payload=None)
+            bridge.payload = _verified_payload(bridge.port)
+            try:
+                ident = sup.adopt(rec)
+            finally:
+                bridge.close()
+            self.assertIsNotNone(ident)
+            assert ident is not None
+            self.assertTrue(ident.proves_view_once)
+            self.assertTrue(sup.is_running(ACCT))
+
+    def test_ensure_running_replaces_stale_survivor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            insp = _FakeInspector()
+            sup, _reg, rec, bridge, spawns = _stage(
+                tmp, insp, payload=None)
+            bridge.payload = _stale_payload(bridge.port)
+            try:
+                ok, why = sup.ensure_running(ACCT)
+            finally:
+                bridge.close()
+            self.assertTrue(ok, why)
+            # The stale process was terminated...
+            self.assertEqual(insp.terminated, [4242])
+            # ...and a fresh bridge was launched in its place.
+            self.assertTrue(spawns)
+            self.assertTrue(sup.is_running(ACCT))
+
+    def test_start_replaces_stale_survivor(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            insp = _FakeInspector()
+            sup, _reg, rec, bridge, spawns = _stage(
+                tmp, insp, payload=None)
+            bridge.payload = _stale_payload(bridge.port)
+            try:
+                out = sup.start(ACCT)
+            finally:
+                bridge.close()
+            self.assertIs(out, rec)
+            self.assertEqual(insp.terminated, [4242])
+            self.assertTrue(spawns)
+
+    def test_sweep_replaces_stale_survivor(self):
+        from nomorals.social.pairing import PoolSupervision
+
+        with tempfile.TemporaryDirectory() as tmp:
+            insp = _FakeInspector()
+            sup, registry, rec, bridge, spawns = _stage(
+                tmp, insp, payload=None)
+            bridge.payload = _stale_payload(bridge.port)
+            pool = PoolSupervision(registry, supervisor=sup)
+            try:
+                changes = pool.sweep()
+            finally:
+                bridge.close()
+            self.assertEqual(insp.terminated, [4242])
+            self.assertTrue(spawns)
+            self.assertTrue(any("relaunched" in c["change"]
+                                for c in changes), changes)
 
 
 if __name__ == "__main__":

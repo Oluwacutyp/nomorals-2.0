@@ -426,9 +426,13 @@ def test_whatsapp_adapter_view_once_missing_stamp():
     assert got[0].meta["view_once"] is True
     assert got[0].meta["view_once_media_missing"] is True
     got.clear()
+    # A fresh message id: the redelivery dedupe drops a second
+    # arrival of "m1" as a replay (exactly-once), so the
+    # media-present case needs its own id.
     adapter._dispatch(
-        dict(base, media=[{"path": "/tmp/y.jpg", "mime": "image/jpeg",
-                           "kind": "image"}]),
+        dict(base, id="m2",
+             media=[{"path": "/tmp/y.jpg", "mime": "image/jpeg",
+                     "kind": "image"}]),
         handler=got.append)
     assert got[0].meta["view_once"] is True
     assert "view_once_media_missing" not in got[0].meta

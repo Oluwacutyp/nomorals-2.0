@@ -1096,6 +1096,21 @@ class BridgeIdentity:
     via: tuple[str, ...] = ()
     reason: str = ""
 
+    @property
+    def proves_view_once(self) -> bool:
+        """True when the bridge's status proves the view-once
+        capability (2026-11-14 vvfix): the build block's
+        unwrap_inbound flag.  Both engines report it in current
+        builds; a pre-2026-11-12 binary sends no build block at
+        all, so it cannot prove the fix it predates.  The program
+        marker alone (\"gobridge/1.0.0\") is identical in every
+        build and proves nothing about age — that is the hole
+        this closes: adoption verified on the marker alone and
+        served through a pre-fix orphan forever, so no view-once
+        event ever arrived and the journal held zero rows."""
+        build = self.build or {}
+        return bool(build.get("unwrap_inbound"))
+
 
 @dataclass
 class _Live:
@@ -1894,13 +1909,32 @@ class BridgeSupervisor:
             return False, (f"{rec.id} has no bridge port "
                            "recorded — re-pair the account")
         if self._port_listening(rec):
-            # Serving.  When the survivor's identity verifies it
-            # is also ADOPTED — supervision gains a handle (the
-            # reap path, stop(), the update quiesce) instead of
-            # a by-port shrug; an unverifiable listener keeps the
+            # Serving.  When the survivor's identity verifies AND
+            # its build proves the current capability it is also
+            # ADOPTED — supervision gains a handle (the reap
+            # path, stop(), the update quiesce) instead of a
+            # by-port shrug; an unverifiable listener keeps the
             # passive behavior (it answers, it is left alone).
-            self.adopt(rec)
-            return True, ""
+            if self.adopt(rec) is not None:
+                return True, ""
+            # A verified-but-stale survivor is REPLACED, not
+            # served through: its recognition predates the
+            # view-once fix, so no view-once event ever arrives
+            # while it holds the port.  The stop frees the port;
+            # execution falls through to start() below, which
+            # launches the current binary.
+            status, why = self._replace_stale_survivor(rec)
+            if status == "replaced":
+                pass  # fall through to start() below
+            elif status == "blocked":
+                # The stale bridge could not be stopped: say so
+                # by name instead of serving through it or
+                # launching into its port.
+                return False, why
+            else:  # "current" (a current bridge landed
+                # meanwhile) or "stranger" (an unverifiable
+                # listener: passive behavior)
+                return True, ""
         with self._lock:
             live = self._live.get(account_id)
         if live is not None and relaunch_interval > 0 and \
@@ -1991,9 +2025,20 @@ class BridgeSupervisor:
             # launched (a second process could not bind the
             # port anyway, and two bridges on one account would
             # fight over the session).
-            if self._port_listening(rec) \
-                    and self.adopt(rec) is not None:
-                return rec
+            if self._port_listening(rec):
+                if self.adopt(rec) is not None:
+                    return rec
+                # A verified-but-stale survivor holds the port:
+                # stop it so the current binary can launch.  A
+                # stranger is left alone and _launch reports the
+                # bind failure as it always has; a current bridge
+                # that landed meanwhile serves, so there is
+                # nothing to launch.
+                status, why = self._replace_stale_survivor(rec)
+                if status == "blocked":
+                    raise PairingUnavailable(why)
+                if status == "current":
+                    return rec
             self._launch(rec)
         return rec
 
@@ -2293,18 +2338,32 @@ class BridgeSupervisor:
     def adopt(self, rec: AccountRecord) -> BridgeIdentity | None:
         """Bring a surviving bridge under supervision: when the
         process on the record's port verifies as this account's
-        bridge, it gains a live entry with an adopted-process
-        handle — health, the reap path and stop() (including
-        the update quiesce) work on it exactly as on a spawned
-        bridge.  Returns the verified identity, or None when
-        nothing verifiable is there (the caller keeps today's
-        passive by-port behavior)."""
+        bridge AND its build proves the current capability, it
+        gains a live entry with an adopted-process handle —
+        health, the reap path and stop() (including the update
+        quiesce) work on it exactly as on a spawned bridge.
+        Returns the verified identity, or None when nothing
+        verifiable is there (the caller keeps today's passive
+        by-port behavior) or when the survivor is verified but
+        stale — a pre-fix binary is never adopted, it is
+        replaced (see _replace_stale_survivor).  Identity for
+        STOPPING is untouched: stop_bridge_process still
+        verifies a stale survivor, so it can be stopped."""
         if rec.platform != "whatsapp" or not rec.port:
             return None
         if self._alive(rec.id):
             return None
         ident = self.verify_bridge_identity(rec)
         if not ident.verified or ident.pid is None:
+            return None
+        if not ident.proves_view_once:
+            # Verified as this account's bridge, but its build
+            # cannot prove the view-once capability (a
+            # pre-2026-11-12 binary: no build block).  NOT
+            # adopted: serving through it keeps the pre-fix
+            # recognition dead — no view-once event ever arrives
+            # — and ensure_running would report "Serving" while
+            # the current binary never launches.
             return None
         handle = AdoptedProcess(self._inspector, ident.pid)
         live = _Live(proc=handle,
@@ -2318,6 +2377,34 @@ class BridgeSupervisor:
                 return None  # a live entry landed meanwhile
             self._live[rec.id] = live
         return ident
+
+    def _replace_stale_survivor(
+            self, rec: AccountRecord) -> tuple[str, str]:
+        """Stop a verified-but-stale survivor so the current
+        bridge binary can launch in its place.
+
+        Returns (status, detail): \"replaced\" when a stale
+        survivor was stopped and the port is free; \"current\"
+        when the bridge on the port already proves the
+        capability (nothing to replace — reachable only when
+        the bridge changed between two probes); \"stranger\"
+        when nothing verifiable is there; \"blocked\" when the
+        survivor is stale but could not be stopped.  Identity
+        first: only a process verified as THIS account's bridge
+        is ever signalled — the stop runs through
+        stop_bridge_process, whose own identity check is the
+        gate.  A stale survivor is Devon's own bridge, so it is
+        stoppable; a stranger is never touched."""
+        ident = self.verify_bridge_identity(rec)
+        if not ident.verified or ident.pid is None:
+            return "stranger", (ident.reason or
+                                "nothing verifiable on the port")
+        if ident.proves_view_once:
+            return "current", ""
+        ok, detail = self.stop_bridge_process(rec)
+        if not ok:
+            return "blocked", detail
+        return "replaced", ""
 
     def stop_bridge_process(self, rec: AccountRecord, *,
                             timeout: float = 5.0,
@@ -2482,15 +2569,28 @@ class PoolSupervision:
         probed = sup.probe(rec)
         if probed == "linked":
             # A survivor answering as this account is ADOPTED
-            # when its identity verifies — supervision gains a
+            # when its identity verifies AND its build proves
+            # the current capability — supervision gains a
             # handle (health, reap, stop) instead of a by-port
             # shrug.  Unverifiable: today's passive behavior.
-            sup.adopt(rec)
-            if rec.status != "linked":
-                self.registry.set_status(rec.id, "linked")
-                return {"account": rec.id,
-                        "change": "probe found the bridge linked"}
-            return None
+            if sup.adopt(rec) is not None:
+                if rec.status != "linked":
+                    self.registry.set_status(rec.id, "linked")
+                    return {"account": rec.id,
+                            "change": "probe found the bridge linked"}
+                return None
+            # A verified-but-stale survivor is REPLACED, not
+            # adopted: serving through it keeps the pre-fix
+            # recognition dead (view-once never arrives).  The
+            # stop frees the port; fall through to the
+            # down+relaunch path below, which brings up the
+            # current binary (throttled, like any relaunch).  A
+            # stranger stays passive; a blocked stop retries on
+            # a later sweep.
+            status, _why = sup._replace_stale_survivor(rec)
+            if status != "replaced":
+                return None
+            # fall through to the down+relaunch path below
         change = None
         if rec.status != "down":
             self.registry.set_status(rec.id, "down")

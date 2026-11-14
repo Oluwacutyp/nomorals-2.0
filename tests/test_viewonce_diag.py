@@ -138,6 +138,24 @@ def test_bridge_identity_carries_build(tmp_path):
     assert ident.build["commit"] == "abc1234"
 
 
+def test_bridge_identity_proves_view_once_only_from_build():
+    """The 2026-11-14 vvfix: the capability proof comes from the
+    running bridge's build block, never from the program marker.
+    A pre-2026-11-12 binary sends no build block at all, and a
+    build without the flag proves nothing — both fail the proof
+    even though the marker reads "gobridge/1.0.0" in each case."""
+    from nomorals.social.pairing import BridgeIdentity
+
+    assert BridgeIdentity(build=dict(BUILD)).proves_view_once is True
+    assert BridgeIdentity(build={}).proves_view_once is False
+    no_flag = dict(BUILD)
+    del no_flag["unwrap_inbound"]
+    assert BridgeIdentity(build=no_flag).proves_view_once is False
+    false_flag = dict(BUILD)
+    false_flag["unwrap_inbound"] = False
+    assert BridgeIdentity(build=false_flag).proves_view_once is False
+
+
 # ── 3. /vv distinguishes the three states ────────────────────
 
 
