@@ -587,7 +587,7 @@ class ToolRegistry:
             "braineval",
             "accounts",
             "build_app", "captcha", "cipher", "code_executor", "compress",
-            "connectors", "code_indexer",
+            "connectors", "code_indexer", "code_graph",
             "computer",
             "database", "deals", "decoder", "decoder_agent", "deliver_report",
             "commerce", "filesend",

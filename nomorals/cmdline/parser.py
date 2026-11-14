@@ -61,6 +61,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "cards": ["cd"],
     "cipher": ["cip"],
     "code": ["c"],
+    "graph": [],
     "commands": ["cmd"],
     "connectors": ["conn"],
     "cookies": ["ck"],
@@ -853,6 +854,51 @@ def _parser() -> argparse.ArgumentParser:
                       choices=["auto", "always", "never"],
                       help="plan approval gate: auto (complex plans pause), "
                            "always, never (default: auto)")
+
+    graph = sub.add_parser("graph", aliases=CLI_ALIASES["graph"],
+        help="Queryable code graph: build, who-calls, calls, where, owner, search",
+        description=("nm graph build [--root DIR] [--force]\n"
+                     "nm graph status [--root DIR]\n"
+                     "nm graph who-calls <name> [--root DIR]\n"
+                     "nm graph calls <name> [--root DIR]\n"
+                     "nm graph where <name> [--root DIR]\n"
+                     "nm graph owner <path> [--root DIR]\n"
+                     "nm graph search <query> [--root DIR] [--limit N]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    graph_sub = graph.add_subparsers(dest="graph_action", required=True)
+
+    def _graph_common(sub_p: argparse.ArgumentParser, *,
+                      limit: bool = False) -> None:
+        # Common flags live on every subparser: argparse does not
+        # inherit parent-parser arguments into subparsers.
+        sub_p.add_argument("--root", default=".",
+                           help="repo root to graph (default: .)")
+        sub_p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+        if limit:
+            sub_p.add_argument("--limit", type=int, default=20,
+                               help="max rows (default: 20)")
+
+    g_build = graph_sub.add_parser("build", help="build/rebuild the code graph")
+    g_build.add_argument("--force", action="store_true",
+                         help="re-parse every file, ignore fingerprints")
+    _graph_common(g_build)
+    g_status = graph_sub.add_parser("status", help="graph status")
+    _graph_common(g_status)
+    for verb, help_txt in (
+            ("who-calls", "functions that call <name>"),
+            ("calls", "what <name> calls"),
+            ("where", "where <name> is defined"),
+            ("owner", "what owns <path>")):
+        sub_p = graph_sub.add_parser(verb, help=help_txt)
+        sub_p.add_argument("name",
+                           help="symbol name (owner: repo-relative path "
+                                "or dotted module)")
+        _graph_common(sub_p, limit=True)
+    g_search = graph_sub.add_parser("search", help="search names + docstrings")
+    g_search.add_argument("query", help="free-text query")
+    _graph_common(g_search, limit=True)
 
     media = sub.add_parser("media", aliases=CLI_ALIASES["media"],
         help="Edit images and video from plain language",
