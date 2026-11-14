@@ -589,6 +589,30 @@ def test_end_to_end_group_quit_exactly_one_reply(split_whatsapp):
                 if "table closed" in t]) == 1
 
 
+def test_end_to_end_group_quit_bot_owns_room(split_whatsapp):
+    """H7's other shape: the room lives in the BOT's engine
+    (it fails over first and starts the game), not the
+    userbot's. The owner types /game quit; the bot handles it
+    at once (rule 1.5 — it owns the room), the userbot defers
+    and stays silent, and the game stops. Exactly one reply
+    across both surfaces."""
+    (rt_a, ad_a, _ctx_a), (rt_b, ad_b, _ctx_b) = split_whatsapp
+    _start_room(rt_a)
+    _mark_group_known_blocked(rt_b)
+    baseline_a = len(_texts(ad_a["whatsapp"]))
+    baseline_b = len(_texts(ad_b["whatsapp"]))
+    # The owner's typed command reaches BOTH runtimes under the
+    # same per-chat message id.
+    rt_a._process_inner(_group_msg("/game quit", "q1"))
+    rt_b._process_inner(_group_msg("/game quit", "q1", own=True))
+    bot_replies = [t for t in _texts(ad_a["whatsapp"])[baseline_a:]
+                   if "table closed" in t]
+    assert len(bot_replies) == 1, _texts(ad_a["whatsapp"])[baseline_a:]
+    assert _texts(ad_b["whatsapp"])[baseline_b:] == []
+    assert rt_a._game_engine().live(GROUP_KEY) is None
+    assert rt_b._game_engine().live(GROUP_KEY) is None
+
+
 def test_end_to_end_group_fresh_game_exactly_one_reply(
         split_whatsapp):
     """No room anywhere: a group /game defers on both sides;
