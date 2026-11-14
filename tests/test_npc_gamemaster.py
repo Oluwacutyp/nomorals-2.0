@@ -238,11 +238,32 @@ class NarrationTests(unittest.TestCase):
     def test_empty_event_empty_out(self):
         self.assertEqual(self._gm().narrate("g", "   "), "")
 
-    def test_model_path_used_when_available(self):
+    def test_narrate_ignores_model_bridge(self):
+        # Regression trace: 46ab5bb3 (Small models Phase 2, 2026-11-12)
+        # removed the model path from narrate ON PURPOSE — "the brain
+        # never narrates as a rung; arena narration is honest-
+        # unavailable (no narration specialist exists)". The
+        # GameMaster's _suggest in production is the
+        # character_dialogue generator, and feeding it to narrate
+        # would make the brain narrate scenes — the exact thing
+        # Phase 2 removed. The ladder still agrees: the
+        # arena_narration job has specialist_exists=False ("Narration
+        # specialist — NOT BUILT ... the template bank carries until
+        # one lands"), and _game_suggest gives narration None. The
+        # test that lived here before
+        # (test_model_path_used_when_available, "MODEL SAID THINGS")
+        # pinned the pre-Phase-2 behavior and was never updated in
+        # that commit — it is the stale side, not the code. This test
+        # pins the current behavior: narrate never calls the bridge
+        # and always uses the template forge.
         gm = self._gm()
-        gm._suggest = lambda prompt: "MODEL SAID THINGS"
+        calls: list[str] = []
+        gm._suggest = lambda prompt: calls.append(prompt) or \
+            "MODEL SAID THINGS"
         out = gm.narrate("g", "a bell tolls", mood="grim")
-        self.assertEqual(out, "MODEL SAID THINGS")
+        self.assertEqual(calls, [])
+        self.assertNotEqual(out, "MODEL SAID THINGS")
+        self.assertIn("a bell tolls", out)
 
     def test_model_failure_falls_back(self):
         gm = self._gm()

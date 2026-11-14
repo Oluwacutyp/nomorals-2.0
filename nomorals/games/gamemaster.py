@@ -350,8 +350,11 @@ class GameMaster:
     ``suggest`` is the ``(prompt) -> text`` bridge from
     :mod:`nomorals.games.ai` (``RuntimeGamesMixin._game_suggest`` builds
     one from the LLM router). When it is None — or the model call fails
-    or returns junk — every method falls back to the template forge, so
-    games stay fully playable offline.
+    or returns junk — every method that takes the model path falls back
+    to the template forge, so games stay fully playable offline.
+    ``narrate`` is the exception: it never calls the model (Phase 2 —
+    no narration specialist exists yet; the template bank carries),
+    so it always uses the template forge; see :meth:`narrate`.
     """
 
     def __init__(self, npc_store: NPCStore | None = None,

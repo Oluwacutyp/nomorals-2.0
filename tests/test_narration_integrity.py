@@ -11,6 +11,13 @@ instead of narration. These tests pin the three guarantees:
   never repeats a line back-to-back;
 * the arena scores — a fight's score is the damage the player dealt
   (plus a finish bonus), not a flat inherited 0.
+
+Since 46ab5bb3 (Small models Phase 2, 2026-11-12) ``narrate`` never
+asks the model at all — the brain never narrates as a rung, no
+narration specialist exists yet — so the sanitizer guarantee for
+narration is pinned at the unit level (SanitizerUnitTests) and by
+``npc_speak``, while the narrate flow tests pin that the template
+forge carries and the bridge is never consulted.
 """
 
 from __future__ import annotations
@@ -122,27 +129,57 @@ class SanitizerFlowTests(unittest.TestCase):
     def setUp(self):
         engine_failures.clear_failures()
 
-    def test_narrate_pure_scaffold_falls_back_to_template(self):
-        gm = make_gm(lambda prompt: SCAFFOLD)
+    def test_narrate_ignores_scaffold_model_entirely(self):
+        # Regression trace: 46ab5bb3 (Small models Phase 2, 2026-11-12)
+        # removed the model path from narrate ON PURPOSE — "the brain
+        # never narrates as a rung; arena narration is honest-
+        # unavailable (no narration specialist exists)". The old test
+        # here (test_narrate_pure_scaffold_falls_back_to_template)
+        # pinned the pre-Phase-2 flow — model reply sanitized, pure
+        # scaffold rejected + journaled, template carrying — and was
+        # never updated in that commit. Narrate now never consults
+        # the bridge at all, so there is nothing to sanitize and no
+        # gamemaster.narrate_sanitized entry: the template forge
+        # carries, and the scaffold never reaches a table because it
+        # is never asked for. The sanitizer itself is still pinned
+        # at the unit level (SanitizerUnitTests).
+        calls: list[str] = []
+        gm = make_gm(lambda prompt: calls.append(prompt) or SCAFFOLD)
         line = gm.narrate("arena", EVENT)
+        self.assertEqual(calls, [])
         # the template forge speaks (it always carries the event);
         # the scaffold never does
         self.assertIn(EVENT, line)
         for junk in ("Analyze", "Constraint", "Confidence", "Role:"):
             self.assertNotIn(junk, line)
         sites = [f.site for f in engine_failures.recent_failures()]
-        self.assertIn("gamemaster.narrate_sanitized", sites)
+        self.assertNotIn("gamemaster.narrate_sanitized", sites)
 
-    def test_narrate_extracts_buried_narration(self):
+    def test_narrate_ignores_model_with_buried_narration(self):
+        # Same trace as above (46ab5bb3): narrate never asks the
+        # model, so a reply with narration buried after scaffold is
+        # never read — the template carries instead. The extraction
+        # itself is still pinned at the unit level by
+        # SanitizerUnitTests.test_scaffold_plus_narration_extracts.
         tail = ("Hope dies under a grey sky, and the arena holds "
                 "its breath. The silence after is total.")
-        gm = make_gm(lambda prompt: SCAFFOLD + "\n\n" + tail)
+        calls: list[str] = []
+        gm = make_gm(
+            lambda prompt: calls.append(prompt) or SCAFFOLD + "\n\n" + tail)
         line = gm.narrate("arena", EVENT)
-        self.assertEqual(line, tail)
+        self.assertEqual(calls, [])
+        self.assertIn(EVENT, line)
+        self.assertNotIn("Hope dies under a grey sky", line)
 
-    def test_narrate_clean_reply_passes_through(self):
-        gm = make_gm(lambda prompt: CLEAN_NARRATION)
-        self.assertEqual(gm.narrate("arena", EVENT), CLEAN_NARRATION)
+    def test_narrate_ignores_clean_model_reply(self):
+        # Same trace as above (46ab5bb3): even a clean model reply
+        # is never used — narrate always uses the template forge.
+        calls: list[str] = []
+        gm = make_gm(lambda prompt: calls.append(prompt) or CLEAN_NARRATION)
+        line = gm.narrate("arena", EVENT)
+        self.assertEqual(calls, [])
+        self.assertNotEqual(line, CLEAN_NARRATION)
+        self.assertIn(EVENT, line)
 
     def test_npc_speak_stage_direction_falls_back(self):
         sermon = (
