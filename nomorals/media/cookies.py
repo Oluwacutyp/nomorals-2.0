@@ -26,6 +26,9 @@ __all__ = [
     "ytdlp_cookie_args",
     "ytdlp_cookie_opts_for",
     "ytdlp_cookie_args_for",
+    "ensure_ytdlp_certs",
+    "ytdlp_hardened_opts",
+    "YT_DLP_SOCKET_TIMEOUT_S",
     "is_bot_detection_error",
     "cookies_status",
     "BOT_COOKIE_HELP",
@@ -347,6 +350,78 @@ def ytdlp_cookie_args_for(url: str, session_dir: str = "") -> list[str]:
     """Per-URL argv: companion to :func:`ytdlp_cookie_opts_for`."""
     path = cookies_file_for(url, session_dir)
     return ["--cookies", path] if path else []
+
+
+#: yt-dlp network bound (seconds) — every YoutubeDL in Devon sets it.
+#: The exploration sweep died 2026-11-14 when a yt-dlp socket read
+#: hung ~180s with no timeout; a sweep holds up to 12 beats, so 30s
+#: per call still fits the 1800s run wall with room to spare.
+YT_DLP_SOCKET_TIMEOUT_S = 30
+
+#: One certifi self-provision attempt per process (mirrors the
+#: yt-dlp provision flag in media/resolver.py).
+_CERTIFI_PROVISION_ATTEMPTED = False
+
+
+def ensure_ytdlp_certs() -> None:
+    """Make sure certifi is importable, installing it once if not.
+
+    yt-dlp's ``ssl_load_certs`` uses certifi's bundle FILE when it
+    can import it; without certifi it falls back to enumerating the
+    Windows certificate store, which hung ~125s per SSL context on
+    EC2 and killed the exploration sweep (morning) 2026-11-14 (the
+    job then timed out at 1800s while the DB actor close waited on
+    the stuck worker). Devon self-provisions (owner doctrine): one
+    bounded pip install, never under a test runner, never raises —
+    when it cannot install, the caller's honest failure stands.
+    """
+    global _CERTIFI_PROVISION_ATTEMPTED
+    try:
+        import certifi  # noqa: F401
+        return
+    except Exception:  # noqa: BLE001 — missing certifi is the trigger
+        pass
+    if _CERTIFI_PROVISION_ATTEMPTED:
+        return
+    _CERTIFI_PROVISION_ATTEMPTED = True
+    import sys
+    if "pytest" in sys.modules:
+        return
+    try:
+        import logging
+        import subprocess
+
+        proc = subprocess.run(
+            [sys.executable, "-m", "pip", "install", "certifi"],
+            capture_output=True, text=True, timeout=120)
+        if proc.returncode != 0:
+            logging.getLogger(__name__).info(
+                "certifi self-provision failed (pip rc=%s)",
+                proc.returncode)
+    except Exception as exc:  # noqa: BLE001 — provisioning is best-effort
+        logging.getLogger(__name__).info(
+            "certifi self-provision attempt failed: %s", exc)
+
+
+def ytdlp_hardened_opts(*, skip_download: bool = True) -> dict[str, Any]:
+    """Base opts every ``yt_dlp.YoutubeDL`` in Devon starts from.
+
+    ``socket_timeout`` bounds every network op (the sweep died when
+    a socket read hung ~180s with no timeout); :func:`ensure_ytdlp_certs`
+    keeps yt-dlp on certifi's bundle file so it never enumerates the
+    Windows cert store. Returns a fresh dict each call — callers
+    merge their own opts (cookies, format, outtmpl) on top.
+    ``skip_download=False`` is for the download sites, which need
+    the real bytes; the probe/search sites take the default.
+    """
+    ensure_ytdlp_certs()
+    opts: dict[str, Any] = {
+        "quiet": True, "no_warnings": True,
+        "socket_timeout": YT_DLP_SOCKET_TIMEOUT_S,
+    }
+    if skip_download:
+        opts["skip_download"] = True
+    return opts
 
 
 def is_bot_detection_error(message: Any) -> bool:

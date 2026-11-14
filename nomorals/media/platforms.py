@@ -234,16 +234,23 @@ def probe_info(url: str) -> dict | None:
     the TikTok watermark truth lives.  Never raises.
     """
     try:
-        from .cookies import ytdlp_cookie_args_for, ytdlp_cookie_opts_for
+        from .cookies import (
+            ytdlp_cookie_args_for,
+            ytdlp_cookie_opts_for,
+            ytdlp_hardened_opts,
+        )
     except Exception as exc:  # noqa: BLE001
         record_failure("platforms.probe_info.cookies", exc)
         ytdlp_cookie_args_for = None  # type: ignore[assignment]
         ytdlp_cookie_opts_for = None  # type: ignore[assignment]
+        ytdlp_hardened_opts = None  # type: ignore[assignment]
     try:
         import yt_dlp  # type: ignore[import-not-found]
 
-        opts: dict[str, Any] = {
-            "quiet": True, "no_warnings": True, "skip_download": True}
+        opts: dict[str, Any] = (
+            ytdlp_hardened_opts() if ytdlp_hardened_opts is not None
+            else {"quiet": True, "no_warnings": True,
+                  "skip_download": True})
         if ytdlp_cookie_opts_for is not None:
             try:
                 opts.update(ytdlp_cookie_opts_for(url))

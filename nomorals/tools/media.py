@@ -139,11 +139,15 @@ def _looks_like_media(head: bytes) -> bool:
 def probe(url: str, *, timeout: float = 60.0,
           cookies_file: str = "") -> dict[str, Any]:
     """Fetch metadata without downloading."""
-    from ..media.cookies import ytdlp_cookie_args_for, ytdlp_cookie_opts_for
+    from ..media.cookies import (
+        ytdlp_cookie_args_for,
+        ytdlp_cookie_opts_for,
+        ytdlp_hardened_opts,
+    )
     module = load_optional("yt_dlp")
     if module is not None:
         try:
-            opts = {"quiet": True, "no_warnings": True, "skip_download": True}
+            opts = ytdlp_hardened_opts()
             opts.update({"cookiefile": cookies_file} if cookies_file
                         else ytdlp_cookie_opts_for(url))
             with module.YoutubeDL(opts) as ydl:
@@ -248,6 +252,12 @@ def _download_python_api(
     progress_segments: Callable[[int, int], None] | None = None,
     proxy: str = "",
 ) -> dict[str, Any]:
+    from ..media.cookies import (
+        YT_DLP_SOCKET_TIMEOUT_S,
+        ensure_ytdlp_certs,
+        ytdlp_cookie_opts_for,
+    )
+    ensure_ytdlp_certs()
     options: dict[str, Any] = {
         "outtmpl": str(target_dir / "%(title).120B [%(id)s].%(ext)s"),
         "format": format_spec,
@@ -257,8 +267,11 @@ def _download_python_api(
         "retries": 3,
         "concurrent_fragment_downloads": 4,
         "continuedl": True,
+        # Bounded network ops (the sweep hang, 2026-11-14): a stalled
+        # socket fails fast and the retries above re-drive it, instead
+        # of one hung read eating the job's whole wall.
+        "socket_timeout": YT_DLP_SOCKET_TIMEOUT_S,
     }
-    from ..media.cookies import ytdlp_cookie_opts_for
     _cookie_opts = ({"cookiefile": cookies_file} if cookies_file
                     else ytdlp_cookie_opts_for(url))
     if _cookie_opts:

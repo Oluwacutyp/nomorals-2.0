@@ -119,10 +119,13 @@ def _ytdlp_download(url: str, wd: Path) -> str:
     if mod:
         try:
             import yt_dlp
-            opts = {"quiet": True, "no_warnings": True,
-                    "format": "bestaudio/best",
-                    "outtmpl": tmpl,
-                    "noplaylist": True}
+
+            from .cookies import ytdlp_hardened_opts as _hardened_opts_fn
+            opts = _hardened_opts_fn(skip_download=False)
+            opts.update({
+                "format": "bestaudio/best",
+                "outtmpl": tmpl,
+                "noplaylist": True})
             try:
                 from .cookies import ytdlp_cookie_opts as _co
                 opts.update(_co())

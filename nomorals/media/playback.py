@@ -609,8 +609,8 @@ class PlaybackEngine:
                 # pollute test output and CI logs. We raise ToolError on
                 # failure anyway.
                 from .cookies import ytdlp_cookie_opts as _cookie_opts_fn
-                _opts = {"quiet": True, "no_warnings": True,
-                         "skip_download": True}
+                from .cookies import ytdlp_hardened_opts as _hardened_opts_fn
+                _opts = _hardened_opts_fn()
                 _opts.update(_cookie_opts_fn())
                 with contextlib.redirect_stderr(io.StringIO()):
                     with yt_dlp.YoutubeDL(_opts) as ydl:
@@ -675,8 +675,8 @@ class PlaybackEngine:
             import io
             try:
                 from .cookies import ytdlp_cookie_opts as _cookie_opts_fn2
-                _opts2 = {"quiet": True, "no_warnings": True,
-                          "skip_download": True}
+                from .cookies import ytdlp_hardened_opts as _hardened_opts_fn2
+                _opts2 = _hardened_opts_fn2()
                 _opts2.update(_cookie_opts_fn2())
                 with contextlib.redirect_stderr(io.StringIO()):
                     with yt_dlp.YoutubeDL(_opts2) as ydl:
