@@ -16,8 +16,10 @@ Since 46ab5bb3 (Small models Phase 2, 2026-11-12) ``narrate`` never
 asks the model at all — the brain never narrates as a rung, no
 narration specialist exists yet — so the sanitizer guarantee for
 narration is pinned at the unit level (SanitizerUnitTests) and by
-``npc_speak``, while the narrate flow tests pin that the template
-forge carries and the bridge is never consulted.
+``npc_speak``. The narrate flow tests below pin the DESIRED behavior
+(model reply sanitized and used) and are marked xfail until a
+dedicated narration specialist lands and narrate gains a specialist
+bridge — the gap stays visible instead of being pinned away.
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+
+import pytest
 
 from nomorals.games import engine_failures
 from nomorals.games.engine import GameEngine, _collapse_dup_lines
@@ -129,57 +133,63 @@ class SanitizerFlowTests(unittest.TestCase):
     def setUp(self):
         engine_failures.clear_failures()
 
-    def test_narrate_ignores_scaffold_model_entirely(self):
-        # Regression trace: 46ab5bb3 (Small models Phase 2, 2026-11-12)
-        # removed the model path from narrate ON PURPOSE — "the brain
-        # never narrates as a rung; arena narration is honest-
-        # unavailable (no narration specialist exists)". The old test
-        # here (test_narrate_pure_scaffold_falls_back_to_template)
-        # pinned the pre-Phase-2 flow — model reply sanitized, pure
-        # scaffold rejected + journaled, template carrying — and was
-        # never updated in that commit. Narrate now never consults
-        # the bridge at all, so there is nothing to sanitize and no
-        # gamemaster.narrate_sanitized entry: the template forge
-        # carries, and the scaffold never reaches a table because it
-        # is never asked for. The sanitizer itself is still pinned
-        # at the unit level (SanitizerUnitTests).
-        calls: list[str] = []
-        gm = make_gm(lambda prompt: calls.append(prompt) or SCAFFOLD)
+    @pytest.mark.xfail(
+        reason="no narration specialist exists yet: 46ab5bb3 (Small models "
+        "Phase 2) removed narrate's model path on purpose ('the brain "
+        "never narrates as a rung'); a dedicated specialist bridge is "
+        "owed, not the dialogue _suggest",
+        strict=False,
+    )
+    def test_narrate_pure_scaffold_falls_back_to_template(self):
+        # Desired behavior, pinned as an expected failure — NOT
+        # re-targeted to the current limitation (that shape hid the
+        # gap; see ec8c6c38, reverted here). narrate never consults
+        # the bridge today, so there is nothing to sanitize and no
+        # gamemaster.narrate_sanitized entry. It goes green when a
+        # dedicated narration specialist lands and narrate gains a
+        # specialist bridge. The sanitizer itself is still pinned at
+        # the unit level (SanitizerUnitTests).
+        gm = make_gm(lambda prompt: SCAFFOLD)
         line = gm.narrate("arena", EVENT)
-        self.assertEqual(calls, [])
         # the template forge speaks (it always carries the event);
         # the scaffold never does
         self.assertIn(EVENT, line)
         for junk in ("Analyze", "Constraint", "Confidence", "Role:"):
             self.assertNotIn(junk, line)
         sites = [f.site for f in engine_failures.recent_failures()]
-        self.assertNotIn("gamemaster.narrate_sanitized", sites)
+        self.assertIn("gamemaster.narrate_sanitized", sites)
 
-    def test_narrate_ignores_model_with_buried_narration(self):
-        # Same trace as above (46ab5bb3): narrate never asks the
-        # model, so a reply with narration buried after scaffold is
-        # never read — the template carries instead. The extraction
-        # itself is still pinned at the unit level by
-        # SanitizerUnitTests.test_scaffold_plus_narration_extracts.
+    @pytest.mark.xfail(
+        reason="no narration specialist exists yet: 46ab5bb3 (Small models "
+        "Phase 2) removed narrate's model path on purpose ('the brain "
+        "never narrates as a rung'); a dedicated specialist bridge is "
+        "owed, not the dialogue _suggest",
+        strict=False,
+    )
+    def test_narrate_extracts_buried_narration(self):
+        # Desired behavior, pinned as an expected failure (see the
+        # comment on test_narrate_pure_scaffold_falls_back_to_template
+        # above). The extraction itself is still pinned at the unit
+        # level by SanitizerUnitTests.test_scaffold_plus_narration_extracts.
         tail = ("Hope dies under a grey sky, and the arena holds "
                 "its breath. The silence after is total.")
-        calls: list[str] = []
-        gm = make_gm(
-            lambda prompt: calls.append(prompt) or SCAFFOLD + "\n\n" + tail)
+        gm = make_gm(lambda prompt: SCAFFOLD + "\n\n" + tail)
         line = gm.narrate("arena", EVENT)
-        self.assertEqual(calls, [])
-        self.assertIn(EVENT, line)
-        self.assertNotIn("Hope dies under a grey sky", line)
+        self.assertEqual(line, tail)
 
-    def test_narrate_ignores_clean_model_reply(self):
-        # Same trace as above (46ab5bb3): even a clean model reply
-        # is never used — narrate always uses the template forge.
-        calls: list[str] = []
-        gm = make_gm(lambda prompt: calls.append(prompt) or CLEAN_NARRATION)
-        line = gm.narrate("arena", EVENT)
-        self.assertEqual(calls, [])
-        self.assertNotEqual(line, CLEAN_NARRATION)
-        self.assertIn(EVENT, line)
+    @pytest.mark.xfail(
+        reason="no narration specialist exists yet: 46ab5bb3 (Small models "
+        "Phase 2) removed narrate's model path on purpose ('the brain "
+        "never narrates as a rung'); a dedicated specialist bridge is "
+        "owed, not the dialogue _suggest",
+        strict=False,
+    )
+    def test_narrate_clean_reply_passes_through(self):
+        # Desired behavior, pinned as an expected failure (see the
+        # comment on test_narrate_pure_scaffold_falls_back_to_template
+        # above).
+        gm = make_gm(lambda prompt: CLEAN_NARRATION)
+        self.assertEqual(gm.narrate("arena", EVENT), CLEAN_NARRATION)
 
     def test_npc_speak_stage_direction_falls_back(self):
         sermon = (

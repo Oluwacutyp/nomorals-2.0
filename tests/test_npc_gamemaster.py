@@ -8,6 +8,8 @@ import json
 import unittest
 from pathlib import Path
 
+import pytest
+
 from nomorals.games.gamemaster import (
     DM_MOODS,
     GameMaster,
@@ -238,32 +240,25 @@ class NarrationTests(unittest.TestCase):
     def test_empty_event_empty_out(self):
         self.assertEqual(self._gm().narrate("g", "   "), "")
 
-    def test_narrate_ignores_model_bridge(self):
-        # Regression trace: 46ab5bb3 (Small models Phase 2, 2026-11-12)
-        # removed the model path from narrate ON PURPOSE — "the brain
-        # never narrates as a rung; arena narration is honest-
-        # unavailable (no narration specialist exists)". The
-        # GameMaster's _suggest in production is the
-        # character_dialogue generator, and feeding it to narrate
-        # would make the brain narrate scenes — the exact thing
-        # Phase 2 removed. The ladder still agrees: the
-        # arena_narration job has specialist_exists=False ("Narration
-        # specialist — NOT BUILT ... the template bank carries until
-        # one lands"), and _game_suggest gives narration None. The
-        # test that lived here before
-        # (test_model_path_used_when_available, "MODEL SAID THINGS")
-        # pinned the pre-Phase-2 behavior and was never updated in
-        # that commit — it is the stale side, not the code. This test
-        # pins the current behavior: narrate never calls the bridge
-        # and always uses the template forge.
+    @pytest.mark.xfail(
+        reason="no narration specialist exists yet: 46ab5bb3 (Small models "
+        "Phase 2) removed narrate's model path on purpose ('the brain "
+        "never narrates as a rung'); a dedicated specialist bridge is "
+        "owed, not the dialogue _suggest",
+        strict=False,
+    )
+    def test_model_path_used_when_available(self):
+        # Desired behavior, pinned as an expected failure — NOT
+        # re-targeted to the current limitation (that shape hid the
+        # gap; see ec8c6c38, reverted here). 46ab5bb3 removed the
+        # model path from narrate on purpose, so this fails today. It
+        # goes green when a dedicated narration specialist lands and
+        # narrate gains a specialist bridge. The ladder agrees:
+        # arena_narration has specialist_exists=False until one lands.
         gm = self._gm()
-        calls: list[str] = []
-        gm._suggest = lambda prompt: calls.append(prompt) or \
-            "MODEL SAID THINGS"
+        gm._suggest = lambda prompt: "MODEL SAID THINGS"
         out = gm.narrate("g", "a bell tolls", mood="grim")
-        self.assertEqual(calls, [])
-        self.assertNotEqual(out, "MODEL SAID THINGS")
-        self.assertIn("a bell tolls", out)
+        self.assertEqual(out, "MODEL SAID THINGS")
 
     def test_model_failure_falls_back(self):
         gm = self._gm()
