@@ -77,3 +77,62 @@ def read_events(*, limit: int = 50, event: str | None = None,
     if limit > 0:
         records = records[-limit:]
     return records[::-1]
+
+
+def latest_event(event: str, *, settings: Any = None,
+                 path: str | Path | None = None) -> dict[str, Any] | None:
+    """The newest record of one event kind, or None.
+
+    Scans the journal from the end (newest first) and stops at the
+    first match — it never parses the whole file. The journal is
+    append-only and time-ordered, so the newest record of a kind is
+    the first match from the end. Callers that only need the latest
+    record (e.g. the pipeline tick's already-ran check) must use
+    this, not :func:`read_events` with ``limit=0``: that parses every
+    line of an unbounded file on every call, and the parse cost grows
+    with the journal (the 2026-11-14 trading-pipeline timeout spent
+    ~15s in ``json.loads`` on this path alone).
+    """
+    target = Path(path) if path is not None else journal_path(settings)
+    if not target.exists():
+        return None
+    with target.open("rb") as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        # Walk backwards in chunks; a record is never larger than one
+        # chunk in practice (market-read snapshots are tens of KB),
+        # and the loop keeps going while no match is found, so a
+        # larger record is still found — just more slowly.
+        chunk = 65536
+        pos = size
+        tail = b""
+        while pos > 0:
+            step = min(chunk, pos)
+            pos -= step
+            fh.seek(pos)
+            tail = fh.read(step) + tail
+            lines = tail.split(b"\n")
+            # The first piece is a partial line (it continues in the
+            # earlier chunk) — hold it for the next round; the rest
+            # are complete lines, newest first.
+            tail = lines[0]
+            for raw in reversed(lines[1:]):
+                line = raw.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line.decode("utf-8"))
+                except ValueError:
+                    continue
+                if isinstance(rec, dict) and rec.get("event") == event:
+                    return rec
+        # The held first piece is the file's first line.
+        line = tail.strip()
+        if line:
+            try:
+                rec = json.loads(line.decode("utf-8"))
+            except ValueError:
+                rec = None
+            if isinstance(rec, dict) and rec.get("event") == event:
+                return rec
+    return None

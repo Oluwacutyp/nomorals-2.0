@@ -524,24 +524,52 @@ def bind_price_source_store(store: Any) -> bool:
     store's persisted state loads in (in-memory state, which is
     fresher, wins per source).  Returns True when the binding
     changed.  Never raises."""
-    global _price_store
+    global _price_store, _last_price_persist
     try:
         if store is None or _price_store is store:
             return False
         _price_store = store
+        # A rebind is a restart: the persist clock restarts too, so the
+        # first outcome after the bind is written out immediately
+        # (and a test that rebinds gets a fresh debounce window).
+        _last_price_persist = 0.0
         _load_price_state()
         return True
     except Exception:  # noqa: BLE001
         return False
 
 
+#: Minimum seconds between price-state persists. ``record_quote_outcome``
+#: calls :func:`_persist_price_state` on EVERY fetch outcome, so a tick
+#: that fetches 6 timeframes + 1 quote writes the whole learned state to
+#: the KV store (a DB write through the writer actor) 7+ times — each
+#: write a chance to queue behind another job's open transaction (the
+#: 2026-11-14 trading-pipeline timeout waited ~25s in the writer
+#: actor's queue). The state is a learned-health ledger, rebuilt from
+#: fresh outcomes within minutes, so persisting at most once a minute
+#: loses nothing that matters and cuts the tick's write rate to ~1.
+#: A rebind (restart) resets the clock — see ``bind_price_source_store``.
+PRICE_PERSIST_MIN_INTERVAL_S = 60.0
+_last_price_persist: float = 0.0
+
+
 def _persist_price_state() -> None:
     """Write the learned price state to the bound store.  Never
-    raises; a no-op when no store is bound (memory-only)."""
+    raises; a no-op when no store is bound (memory-only).
+
+    Debounced: at most one write per
+    :data:`PRICE_PERSIST_MIN_INTERVAL_S` — the in-memory state is
+    the source of truth, the store is only its restart copy.
+    """
+    global _last_price_persist
     if _price_store is None:
         return
     try:
+        now = time.monotonic()
         with _health_lock:
+            if now - _last_price_persist < PRICE_PERSIST_MIN_INTERVAL_S:
+                return
+            _last_price_persist = now
             payload = {"version": _PRICE_STATE_VERSION,
                        "sources": {src: dict(h) for src, h
                                    in _source_health.items()},

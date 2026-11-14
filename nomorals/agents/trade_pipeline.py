@@ -150,10 +150,12 @@ def control_state(settings: Any = None, journal_path: Any = None
                   ) -> dict[str, Any]:
     """Latest pipeline_control event wins; no event = running
     (the standing posture: the system runs unattended until the
-    owner stands it down)."""
-    for rec in trading_journal.read_events(
-            limit=0, event="pipeline_control", settings=settings,
-            path=journal_path):
+    owner stands it down). Reads just the newest control record
+    from the end of the journal — never the whole file.
+    """
+    rec = trading_journal.latest_event(
+        "pipeline_control", settings=settings, path=journal_path)
+    if rec is not None:
         return {"state": rec.get("state") or "running",
                 "since": rec.get("ts"), "actor": rec.get("actor"),
                 "reason": rec.get("reason") or "",
@@ -206,11 +208,17 @@ def _slot_for(taken: float, bucket_s: int) -> int:
 
 def _tick_seen(tick_id: str, *, settings: Any, journal_path: Any
                ) -> dict[str, Any] | None:
-    for rec in trading_journal.read_events(
-            limit=0, event="pipeline_tick", settings=settings,
-            path=journal_path):
-        if rec.get("tick_id") == tick_id:
-            return rec
+    """The tick's record if it already ran, else None. Tick ids are
+    bucketed, so a matching record can only be the NEWEST
+    pipeline_tick record: read just that one from the end of the
+    journal instead of parsing the whole (unbounded) file on every
+    tick — the full parse cost grows with the journal and cost the
+    2026-11-14 timeout ~15s in ``json.loads`` alone.
+    """
+    latest = trading_journal.latest_event(
+        "pipeline_tick", settings=settings, path=journal_path)
+    if latest is not None and latest.get("tick_id") == tick_id:
+        return latest
     return None
 
 
@@ -420,30 +428,27 @@ def pipeline_status(*, settings: Any = None, journal_path: Any = None,
                 if j.get("name") in ("trading pipeline",
                                      "trading audit")]
     last_tick = None
-    for rec in trading_journal.read_events(
-            limit=0, event="pipeline_tick", settings=settings,
-            path=journal_path):
+    rec = trading_journal.latest_event(
+        "pipeline_tick", settings=settings, path=journal_path)
+    if rec is not None:
         last_tick = {"tick_id": rec.get("tick_id"),
                      "state": rec.get("state"),
                      "taken_at": rec.get("ts"),
                      "actor": rec.get("actor")}
-        break
     last_audit = None
-    for rec in trading_journal.read_events(
-            limit=0, event="trade_audit", settings=settings,
-            path=journal_path):
+    rec = trading_journal.latest_event(
+        "trade_audit", settings=settings, path=journal_path)
+    if rec is not None:
         last_audit = {"taken_at": rec.get("taken_at"),
                       "symbol": rec.get("symbol"),
                       "verdicts": rec.get("verdicts")}
-        break
     last_training = None
-    for rec in trading_journal.read_events(
-            limit=0, event="forecast_training", settings=settings,
-            path=journal_path):
+    rec = trading_journal.latest_event(
+        "forecast_training", settings=settings, path=journal_path)
+    if rec is not None:
         last_training = {"trained_at": rec.get("trained_at"),
                          "symbol": rec.get("symbol"),
                          "horizons": rec.get("horizons")}
-        break
     return {"kind": "pipeline_status", "taken_at": taken,
             "state": control["state"], "control": control,
             "halted": halt_engaged(settings=settings,

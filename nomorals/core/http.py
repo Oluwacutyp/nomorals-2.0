@@ -313,13 +313,35 @@ def tls_cafile() -> str | None:
     return _certifi_cafile()
 
 
+#: One verifying TLS context per CA bundle, built once per process.
+#: ``ssl.create_default_context()`` with no cafile enumerates the
+#: platform certificate store — on Windows Server that enumeration
+#: costs seconds per call (the 2026-11-14 trading-pipeline timeout:
+#: every market-data fetch built a fresh HttpClient, and every
+#: HttpClient built a fresh context, so one tick paid the store
+#: enumeration 7+ times). An SSLContext is only ever read after
+#: creation (urllib wraps sockets from it; nothing mutates it), so
+#: sharing one per cafile is safe. Keyed by cafile: a client with an
+#: explicit bundle never shares with the platform-default one.
+_TLS_CONTEXT_CACHE: dict[str | None, ssl.SSLContext] = {}
+_TLS_CONTEXT_LOCK = threading.Lock()
+
+
 def _build_tls_context(cafile: str | None) -> "ssl.SSLContext":
     """A verifying client TLS context for ``cafile`` (or the platform
     default when ``cafile`` is None). Verification is always on — there is
     no path here that disables it; ``verify_tls=False`` is handled
     separately at the call site with an explicit CERT_NONE context.
+
+    Cached per cafile: the first build still pays the store
+    enumeration, every later build reuses the context.
     """
-    return ssl.create_default_context(cafile=cafile)
+    with _TLS_CONTEXT_LOCK:
+        ctx = _TLS_CONTEXT_CACHE.get(cafile)
+        if ctx is None:
+            ctx = ssl.create_default_context(cafile=cafile)
+            _TLS_CONTEXT_CACHE[cafile] = ctx
+        return ctx
 
 
 class HttpClient:
