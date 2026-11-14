@@ -44,6 +44,16 @@ if (empty($_SESSION['csrf'])) {
     $_SESSION['csrf'] = bin2hex(random_bytes(16));
 }
 
+// Security headers (MWG legacy-scan audit, 2026-11-14 — the page set
+// none before this). Sent once, up here, so they cover every response
+// (login, main, /state.json, redirects, errors). The page runs inline
+// scripts and fetches /state.json same-origin, so the policy allows
+// exactly that: no framing, no object/embed, no external anything.
+header("Content-Security-Policy: default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'");
+header('X-Content-Type-Options: nosniff');
+header('Referrer-Policy: no-referrer');
+header('X-Frame-Options: DENY');
+
 function h($v): string { return htmlspecialchars((string)$v, ENT_QUOTES, 'UTF-8'); }
 
 function api_call(string $method, string $path, ?array $payload = null): array
@@ -140,7 +150,7 @@ if ($path === '/login') {
     }
     if (authed()) { header('Location: /'); exit; }
     header('Content-Type: text/html; charset=utf-8');
-    ?><!doctype html><html><head><meta charset="utf-8">
+    ?><!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Devon — pairing page</title>
 <style>body{font-family:system-ui,sans-serif;margin:2rem auto;max-width:26rem;padding:0 1rem;
@@ -156,7 +166,7 @@ token Devon gave you in chat (<code>/pair page</code>).</p>
 <?php if (!empty($loginError)): ?><p class="err"><?= h($loginError) ?></p><?php endif; ?>
 <form method="post" action="/login">
 <input type="hidden" name="csrf" value="<?= h($_SESSION['csrf']) ?>">
-<input type="password" name="token" placeholder="page token" autocomplete="off" autofocus>
+<input type="password" name="token" placeholder="page token" autocomplete="current-password" autofocus>
 <button type="submit">Open the pool</button>
 </form></body></html><?php
     exit;
@@ -219,7 +229,7 @@ if ($path !== '/') {
 $state = api_state();
 $flash = (string)($_GET['flash'] ?? '');
 header('Content-Type: text/html; charset=utf-8');
-?><!doctype html><html><head><meta charset="utf-8">
+?><!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Devon — paired accounts</title>
 <style>
@@ -348,14 +358,14 @@ Linked Devices NOW; codes expire in minutes.</p>
 <input type="hidden" name="csrf" value="<?= h($_SESSION['csrf']) ?>">
 <input type="hidden" name="action" value="tgcode">
 <input type="hidden" name="id" value="<?= h($a['id']) ?>">
-<input name="code" placeholder="login code" required>
+<label>login code <input name="code" placeholder="login code" autocomplete="one-time-code" required></label>
 <button type="submit">Send code</button>
 </form>
 <form method="post" action="/action">
 <input type="hidden" name="csrf" value="<?= h($_SESSION['csrf']) ?>">
 <input type="hidden" name="action" value="tgpass">
 <input type="hidden" name="id" value="<?= h($a['id']) ?>">
-<input name="password" type="password" placeholder="2FA password (only if asked)">
+<label>2FA password <input name="password" type="password" placeholder="2FA password (only if asked)" autocomplete="current-password"></label>
 <button type="submit">Send password</button>
 </form>
 <?php endif; ?>

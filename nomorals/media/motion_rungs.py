@@ -114,6 +114,22 @@ _UMD_LIBS = ("lottie", "gsap", "tweakpane")
 #: Libs that need the ES-module import map.
 _IMPORTMAP_LIBS = ("three", "three-addons", "three-quarks", "quarks-core")
 
+#: Content-Security-Policy for the motion pages, kept in lock-step with
+#: ``bridge/motion-server.mjs``'s CSP (that file is the served copy;
+#: this one rides as a <meta> tag so the static files
+#: ``write_motion_page`` writes carry the same policy when opened from
+#: disk). The pages load their pinned CDNs and run inline scripts, so
+#: the policy allows exactly those and nothing else.
+MOTION_CSP = (
+    "default-src 'none'; "
+    "script-src 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; "
+    "style-src 'unsafe-inline'; "
+    "img-src 'self' data: https:; "
+    "connect-src https:; "
+    "font-src 'none'; object-src 'none'; base-uri 'none'; "
+    "form-action 'none'; frame-ancestors 'none'"
+)
+
 _HEX_COLOR_RE = re.compile(r"^#[0-9a-fA-F]{6}$")
 _PAGE_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
@@ -171,6 +187,7 @@ _LOTTIE_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="__CSP__">
 <title>__TITLE__</title>
 <style>
 body { margin: 0; background: #14141c; color: #eee; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; }
@@ -243,6 +260,7 @@ def lottie_player_page(animation: dict[str, Any], *, title: str = "Lottie",
     blob = json.dumps(animation, ensure_ascii=False).replace("</", "<\\/")
     page = _LOTTIE_PAGE
     page = page.replace("__TITLE__", html.escape(title))
+    page = page.replace("__CSP__", MOTION_CSP)
     page = page.replace("__HEAD__", motion_head("lottie"))
     page = page.replace("__WIDTH__", str(width))
     page = page.replace("__HEIGHT__", str(height))
@@ -258,6 +276,7 @@ _GSAP_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="__CSP__">
 <title>__TITLE__</title>
 <style>
 body { margin: 0; background: #14141c; color: #eee; font-family: system-ui, sans-serif; display: flex; flex-direction: column; align-items: center; justify-content: center; min-height: 100vh; overflow: hidden; }
@@ -300,6 +319,7 @@ def gsap_demo_page(*, title: str = "GSAP demo") -> str:
     """
     page = _GSAP_PAGE
     page = page.replace("__TITLE__", html.escape(title))
+    page = page.replace("__CSP__", MOTION_CSP)
     page = page.replace("__HEAD__", motion_head("gsap"))
     return page
 
@@ -711,6 +731,7 @@ _THREE_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="__CSP__">
 <title>__TITLE__</title>
 <style>
 body { margin: 0; background: #101018; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }
@@ -743,12 +764,20 @@ def three_scene_page(spec: dict[str, Any], *,
     """
     valid = validate_scene_spec(spec)
     builder = THREE_BUILDER_JS
+    # The spec/tweak JSON is user-supplied and tweak is NOT validated —
+    # escape `</` the way the Lottie page does, so a `</script>` inside
+    # a tweak string cannot break out of the module script
+    # (MWG audit H2, 2026-11-14).
     builder = builder.replace(
-        "__SPEC_JSON__", json.dumps(valid, ensure_ascii=False))
+        "__SPEC_JSON__",
+        json.dumps(valid, ensure_ascii=False).replace("</", "<\\/"))
     builder = builder.replace(
-        "__PARAMS_JSON__", json.dumps(valid["tweak"], ensure_ascii=False))
+        "__PARAMS_JSON__",
+        json.dumps(valid["tweak"], ensure_ascii=False).replace(
+            "</", "<\\/"))
     page = _THREE_PAGE
     page = page.replace("__TITLE__", html.escape(title))
+    page = page.replace("__CSP__", MOTION_CSP)
     page = page.replace(
         "__HEAD__",
         motion_head("three", "three-quarks", "tweakpane"))

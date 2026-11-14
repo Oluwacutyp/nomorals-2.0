@@ -198,7 +198,7 @@ class Resolution:
 
 
 _TAKEOVER_PAGE = """<!doctype html>
-<html><head><meta charset="utf-8">
+<html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Devon browser takeover</title>
 <style>
@@ -213,7 +213,7 @@ input{font-size:16px;padding:8px;width:70%}
 Type below to send text to the focused field.</p>
 <img id="frame" alt="live browser frame">
 <div>
-<input id="text" placeholder="type text…">
+<input id="text" placeholder="type text…" aria-label="Text to send to the browser">
 <button onclick="sendType()">Send text</button>
 <button onclick="sendKey('Enter')">Enter</button>
 <button onclick="sendKey('Tab')">Tab</button>
@@ -278,6 +278,20 @@ def _make_handler(manager: "TakeoverManager"):
                 self.send_response(code)
                 self.send_header("Content-Type", ctype)
                 self.send_header("Content-Length", str(len(body)))
+                # Security headers (MWG legacy-scan audit, 2026-11-14 —
+                # the takeover page set none before this). The page runs
+                # inline scripts and fetches its own frame/actions
+                # same-origin, so the policy allows exactly that.
+                self.send_header(
+                    "Content-Security-Policy",
+                    "default-src 'none'; script-src 'unsafe-inline'; "
+                    "style-src 'unsafe-inline'; img-src 'self'; "
+                    "connect-src 'self'; font-src 'none'; "
+                    "object-src 'none'; base-uri 'none'; "
+                    "form-action 'none'; frame-ancestors 'none'")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Frame-Options", "DENY")
                 self.end_headers()
                 self.wfile.write(body)
             except (BrokenPipeError, ConnectionResetError):

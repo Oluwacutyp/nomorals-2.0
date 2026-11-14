@@ -55,7 +55,7 @@ def pairing_page_html(registry: PairingRegistry, *,
             "dropped": sum(1 for r in rows if r.status == "down"),
         }
     parts = [
-        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,"
         "initial-scale=1'>"
         "<title>Devon — paired accounts</title></head><body>",

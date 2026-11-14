@@ -49,10 +49,26 @@ def _html() -> str:
 class Handler(BaseHTTPRequestHandler):
     server_version = f"{PROJECT}/{VERSION}"
 
+    # Content-Security-Policy for every response (MWG legacy-scan
+    # audit, 2026-11-14 — the template set none before this). The
+    # landing page runs one inline script and fetches /api/health
+    # same-origin, so the policy allows exactly that: no framing,
+    # no object/embed, no external anything.
+    CSP = (
+        "default-src 'none'; script-src 'unsafe-inline'; "
+        "style-src 'unsafe-inline'; img-src 'self'; "
+        "connect-src 'self'; font-src 'none'; object-src 'none'; "
+        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+    )
+
     def _send(self, code: int, body: bytes, content_type: str) -> None:
         self.send_response(code)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        self.send_header("Content-Security-Policy", self.CSP)
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
         self.end_headers()
         self.wfile.write(body)
 

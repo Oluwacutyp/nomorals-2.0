@@ -97,7 +97,7 @@ def devon_page_html(*, bot_username: str = "",
         oneliners = oneliners if oneliners is not None \
             else LIST_ONELINERS
     parts = [
-        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,"
         "initial-scale=1'>"
         "<title>Devon — a personal AI OS</title></head><body>",
@@ -187,7 +187,7 @@ def rules_page_html(surface: Any, group_key: str, *,
     name = title or "Group rules"
     mod = settings.get("moderation") or {}
     parts = [
-        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,"
         "initial-scale=1'>"
         f"<title>{_esc(name)} — rules</title></head><body>",
@@ -221,7 +221,7 @@ def rules_index_html(surface: Any, *,
     slugs = rules_slug_map(surface, titles=titles)
     titles = titles or {}
     parts = [
-        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
         "<meta name='viewport' content='width=device-width,"
         "initial-scale=1'>"
         "<title>Devon — group rules</title></head><body>",

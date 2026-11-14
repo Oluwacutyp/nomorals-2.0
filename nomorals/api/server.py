@@ -120,6 +120,19 @@ DEFAULT_MAX_JSON_TOTAL_STRING_BYTES = 4_194_304
 #: Default cap on the element count of any single JSON array or object.
 DEFAULT_MAX_JSON_ELEMENTS = 10_000
 
+#: Content-Security-Policy for every response (MWG legacy-scan audit,
+#: 2026-11-14 — the API set none before this). The HTML pages it serves
+#: (the public site pages, the read-only pairing page) carry no scripts
+#: and no styles, so the policy allows nothing at all; the JSON and SSE
+#: responses are unaffected by it. Applied at each inline send site
+#: below (``_respond``, the site page, the pairing page).
+CSP = (
+    "default-src 'none'; script-src 'none'; style-src 'none'; "
+    "img-src 'self' data:; connect-src 'none'; font-src 'none'; "
+    "object-src 'none'; base-uri 'none'; form-action 'none'; "
+    "frame-ancestors 'none'"
+)
+
 
 @dataclass
 class Principal:
@@ -1200,8 +1213,10 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                 self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(raw)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Security-Policy", CSP)
             self.send_header("X-Content-Type-Options", "nosniff")
             self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("X-Frame-Options", "DENY")
             request_id = getattr(self, "_request_id", "")
             if request_id:
                 self.send_header("X-Request-ID", request_id)
@@ -1379,8 +1394,10 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                                  "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(raw)))
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Security-Policy", CSP)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Frame-Options", "DENY")
                 request_id = getattr(self, "_request_id", "")
                 if request_id:
                     self.send_header("X-Request-ID", request_id)
@@ -1483,8 +1500,10 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                                  "text/html; charset=utf-8")
                 self.send_header("Content-Length", str(len(raw)))
                 self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Security-Policy", CSP)
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Frame-Options", "DENY")
                 request_id = getattr(self, "_request_id", "")
                 if request_id:
                     self.send_header("X-Request-ID", request_id)

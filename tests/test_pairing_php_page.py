@@ -372,3 +372,37 @@ def test_page_reports_an_unreachable_api_honestly(tmp_path):
         assert "not reachable" in html
     finally:
         page.close()
+
+
+def test_page_sets_security_headers_and_autofill(tmp_path):
+    """MWG legacy-scan audit (2026-11-14): the page sets a CSP (it
+    set none before this), the login token input lets the password
+    manager fill it, and the Telegram 2FA forms carry labels +
+    the right autocomplete tokens (the scan's one finding)."""
+    api = StubAPI()
+    api.state["accounts"][0]["tg_flow"] = {
+        "state": "waiting", "expires_in_s": 120}
+    page = PageServer(api.port, tmp_path)
+    try:
+        status, headers, html = page.request("GET", "/login")
+        assert status == 200
+        assert "Content-Security-Policy" in headers
+        assert "frame-ancestors 'none'" in headers["Content-Security-Policy"]
+        assert "script-src 'unsafe-inline'" in headers["Content-Security-Policy"]
+        assert headers["X-Content-Type-Options"] == "nosniff"
+        assert headers["Referrer-Policy"] == "no-referrer"
+        assert headers["X-Frame-Options"] == "DENY"
+        assert '<html lang="en">' in html
+        assert 'autocomplete="current-password"' in html
+        _login(page)
+        status, headers, html = page.request("GET", "/")
+        assert status == 200
+        assert "Content-Security-Policy" in headers
+        assert '<html lang="en">' in html
+        assert 'autocomplete="one-time-code"' in html
+        assert 'autocomplete="current-password"' in html
+        assert "<label>login code " in html
+        assert "<label>2FA password " in html
+    finally:
+        page.close()
+        api.close()

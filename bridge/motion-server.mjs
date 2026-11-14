@@ -50,10 +50,25 @@ const PORT = parseInt(process.env.NM_MOTION_PORT || '8788', 10) || 8788;
 const HOST = '127.0.0.1';
 const MAX_BODY = 1_000_000;
 
+// -- security headers (MWG legacy-scan audit, 2026-11-14) ------------------
+// Devon set no Content-Security-Policy anywhere before this. The pages
+// load their pinned CDNs (cdnjs + jsDelivr) and run inline scripts, so
+// the policy allows exactly those and nothing else: no framing, no
+// object/embed, no form posts, no font loads, no data:/blob: scripts.
+// The `?src=` fetch may go to any https URL, so connect-src allows it.
+const CSP = "default-src 'none'; script-src 'unsafe-inline' https://cdnjs.cloudflare.com https://cdn.jsdelivr.net; style-src 'unsafe-inline'; img-src 'self' data: https:; connect-src https:; font-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+
 function send(res, code, body, ctype = 'text/html; charset=utf-8') {
   try {
     const buf = Buffer.from(body, 'utf-8');
-    res.writeHead(code, { 'Content-Type': ctype, 'Content-Length': buf.length });
+    res.writeHead(code, {
+      'Content-Type': ctype,
+      'Content-Length': buf.length,
+      'Content-Security-Policy': CSP,
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
+      'X-Frame-Options': 'DENY',
+    });
     res.end(buf);
   } catch { /* client went away */ }
 }
@@ -315,9 +330,16 @@ window.addEventListener('resize', () => {
 
 function threePage(spec) {
   const params = spec.tweak || { speed: 1.0 };
+  // The spec/tweak JSON is user-supplied (?scene= / POST /scene) and
+  // tweak is NOT validated — embed it the way the Lottie page does:
+  // escape `</` so a `</script>` inside a tweak string cannot break
+  // out of the module script (MWG audit H2, 2026-11-14).
+  const safeJson = function (v) {
+    return JSON.stringify(v).replace(/<\//g, '<\\/');
+  };
   const builder = BUILDER
-    .replace('__SPEC_JSON__', JSON.stringify(spec))
-    .replace('__PARAMS_JSON__', JSON.stringify(params));
+    .replace('__SPEC_JSON__', safeJson(spec))
+    .replace('__PARAMS_JSON__', safeJson(params));
   return pageShell('Devon 3D scene',
     '<style>body { margin: 0; background: #101018; color: #eee; font-family: system-ui, sans-serif; overflow: hidden; }'
     + '#scene { display: block; width: 100vw; height: 100vh; }'

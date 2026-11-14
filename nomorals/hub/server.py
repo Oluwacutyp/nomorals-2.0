@@ -93,6 +93,12 @@ _AUTH_EXEMPT = {"/", "/health", "/ready"}
 _RATE_EXEMPT = {"/", "/health", "/ready"}
 
 #: Human-readable route index served at ``GET /``.
+#:
+#: Content-Security-Policy for every response (MWG legacy-scan audit,
+#: 2026-11-14 — the hub set none before this). The hub serves JSON
+#: only, so the policy allows nothing at all: no scripts, no styles,
+#: no framing. Applied in :meth:`HubServer._send`, the one send point.
+CSP = "default-src 'none'; frame-ancestors 'none'"
 ROUTE_INDEX = (
     "GET  /",
     "GET  /health",
@@ -413,6 +419,10 @@ class HubServer:
         handler.send_header("Content-Type", content_type)
         handler.send_header("Content-Length", str(len(raw)))
         handler.send_header("Cache-Control", "no-store")
+        handler.send_header("Content-Security-Policy", CSP)
+        handler.send_header("X-Content-Type-Options", "nosniff")
+        handler.send_header("Referrer-Policy", "no-referrer")
+        handler.send_header("X-Frame-Options", "DENY")
         for key, value in extra.items():
             handler.send_header(key, value)
         origin = handler.headers.get("Origin")
