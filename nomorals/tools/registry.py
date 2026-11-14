@@ -342,6 +342,13 @@ def _format_params(schema: dict[str, Any]) -> str:
     the actual parameter names in definition order: required params bare,
     optional params with their recorded default (repr, truncated to ~40
     chars), optional params without a recorded default bare.
+
+    A default whose repr contains the ``", "`` separator is rendered
+    bare instead: the separator inside a value would be misread as a
+    new parameter (musicgen_chain's lyrics default "Mo dé, ayọ dé"
+    rendered as a phantom ``ayọ dé'`` param once the chain was wired
+    into the registry). The name is still shown; the full default
+    lives in the schema.
     """
     params = schema.get("parameters") or {}
     properties = params.get("properties") or {}
@@ -352,6 +359,11 @@ def _format_params(schema: dict[str, Any]) -> str:
             parts.append(name)
         else:
             default = repr(spec["default"])
+            if ", " in default:
+                # Separator inside the value: render bare so the listing
+                # stays a clean comma-separated list of real params.
+                parts.append(name)
+                continue
             if len(default) > 40:
                 default = default[:37] + "..."
             parts.append(f"{name}={default}")
