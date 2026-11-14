@@ -15,6 +15,24 @@ Inventory (from the code, not a wishlist):
   from ``audio.pipeline._STT_ORDER``
 * voice TTS — chatterbox / kokoro / piper / f5tts, profile order from
   ``audio.pipeline._TTS_ORDER`` (xtts is the character backend)
+* audio — librosa (beat detection / tempo / chroma for the
+  content-edit engine, the DJ desk and the motion visualizer).
+  Pinned ``librosa==0.11.0``: librosa 1.0.1 needs Python >=3.12 and
+  numpy>=2.1 (measured from its PyPI metadata 2026-11-14) — it
+  cannot install on EC2's Python <=3.11 and would force a numpy
+  upgrade on this box. 0.11.0 is the newest librosa that runs on the
+  owner's stack (Python >=3.8, numpy>=1.22.3).
+* voice-diarize — whisperx (diarized transcription: word-timed STT +
+  speaker diarization via ``integrations.stt.transcribe_diarized``).
+  Pinned ``whisperx==3.3.0``: whisperx 3.4.2 needs numpy>=2.0.2 and
+  pandas>=2.2.3 (measured from its PyPI metadata 2026-11-14) — it
+  cannot install on the owner's stack. 3.3.0 is the newest whisperx
+  that runs on it (Python >=3.9,<3.13, no numpy pin). The warm load
+  installs the transcription model (``base``, the rung's default);
+  the pyannote diarization model stays gated on WHISPERX_HF_TOKEN
+  with the speaker-diarization-3.1 EULA accepted — the status and
+  the provision report say so, they never pretend diarization works
+  without the token.
 * image — sd15 (Stable Diffusion 1.5 weights) / ace-step (ACE-Step
   1.5 engine + weights)
 * image-3d — trellis (TRELLIS.2 image-to-3D, 4B, textured GLB + PBR),
@@ -80,6 +98,7 @@ BACKENDS: tuple[str, ...] = (
     "xtts", "rvc", "faceswap", "madmom",
     "faster-whisper", "parakeet", "whisper-cpp",
     "chatterbox", "kokoro", "piper", "f5tts",
+    "librosa", "whisperx",
     "sd15", "ace-step", "trellis", "unirig",
     "sklearn", "lightgbm", "xgboost", "catboost",
 )
@@ -141,6 +160,24 @@ _BACKEND_INFO: dict[str, dict[str, Any]] = {
     "f5tts": {"family": "voice-tts",
               "label": "F5-TTS voice cloning",
               "size_mb": 1000, "disk_gb": 2.0, "ram_gb": 2.0},
+    "librosa": {"family": "audio",
+                "label": "librosa audio analysis (beat detection, "
+                         "tempo, chroma)",
+                # Measured 2026-11-14 (pip download set): the wheel is
+                # 0.25 MB; the fresh download is ~123 MB — the bulk is
+                # llvmlite 57 MB + scipy 34 MB + numpy 16 MB +
+                # scikit-learn 9 MB. Boxes that already carry
+                # numpy/scipy/scikit-learn download only the rest.
+                "size_mb": 125, "disk_gb": 1.0, "ram_gb": 2.0},
+    "whisperx": {"family": "voice-diarize",
+                 "label": "WhisperX diarized transcription "
+                          "(word-timed STT + speaker diarization)",
+                 # Measured 2026-11-14: wheel 15.71 MB (PyPI) + the
+                 # base model 138.5 MB (Systran/faster-whisper-base
+                 # model.bin, HF API). Torch rides along with the pip
+                 # install as shared infra — the disk floor (2 GB)
+                 # covers it, the size is the backend's own download.
+                 "size_mb": 160, "disk_gb": 2.0, "ram_gb": 2.0},
     "sd15": {"family": "image",
              "label": "Stable Diffusion 1.5 weights",
              "size_mb": 4300, "disk_gb": 6.0, "ram_gb": 2.0},
@@ -199,6 +236,38 @@ _ENGINE_INSTALL: dict[str, dict[str, str]] = {
         "pip": "f5-tts", "module": "f5_tts",
         "warm": ("from f5_tts.api import F5TTS; "
                  "F5TTS(model='F5TTS_v1_Base')")},
+    "librosa": {
+        # Pinned: 1.0.1 needs Python >=3.12 and numpy>=2.1 — it cannot
+        # install on EC2 and would force a numpy upgrade here.
+        # 0.11.0 is the newest librosa on the owner's stack. No
+        # weights to download: the warm load proves the installed
+        # librosa actually runs the rung's calls (beat_track +
+        # frames_to_time on a synthetic tone), not just that it
+        # imports.
+        "pip": "librosa==0.11.0", "module": "librosa",
+        "warm": ("import librosa, numpy as np; "
+                 "assert callable(getattr(librosa.beat, 'beat_track', "
+                 "None)); "
+                 "assert callable(getattr(librosa, 'frames_to_time', "
+                 "None)); "
+                 "sr = 22050; "
+                 "t = np.linspace(0, 2, 2 * sr, endpoint=False); "
+                 "y = (0.5 * np.sin(2 * np.pi * 440.0 * t)"
+                 ").astype(np.float64); "
+                 "tempo, frames = librosa.beat.beat_track(y=y, sr=sr); "
+                 "librosa.frames_to_time(frames, sr=sr)")},
+    "whisperx": {
+        # Pinned: 3.4.2 needs numpy>=2.0.2 and pandas>=2.2.3 — it
+        # cannot install on the owner's stack. 3.3.0 is the newest
+        # whisperx on it. The warm load is the rung's own call
+        # (integrations/stt.transcribe_diarized, model "base" is its
+        # default) — it downloads the base model (~139 MB). The
+        # pyannote diarization half stays token-gated; see the note
+        # appended in provision_models.
+        "pip": "whisperx==3.3.0", "module": "whisperx",
+        "warm": ("import whisperx; "
+                 "whisperx.load_model('base', device='cpu', "
+                 "compute_type='int8')")},
     "sklearn": {"pip": "scikit-learn", "module": "sklearn", "warm": ""},
     "lightgbm": {"pip": "lightgbm", "module": "lightgbm", "warm": ""},
     "xgboost": {"pip": "xgboost", "module": "xgboost", "warm": ""},
@@ -335,6 +404,14 @@ def _detect_f5tts() -> bool:
     return _verify_import("f5_tts", [])
 
 
+def _detect_librosa() -> bool:
+    return _verify_import("librosa", [])
+
+
+def _detect_whisperx() -> bool:
+    return _verify_import("whisperx", [])
+
+
 def _piper_voice_path() -> Path:
     """Where the default Piper voice lives (backend's own resolution)."""
     from ..voice.fetch import default_cache_dir
@@ -446,6 +523,7 @@ _DETECTORS: dict[str, Any] = {
     "parakeet": _detect_parakeet, "whisper-cpp": _detect_whisper_cpp,
     "chatterbox": _detect_chatterbox, "kokoro": _detect_kokoro,
     "piper": _detect_piper, "f5tts": _detect_f5tts,
+    "librosa": _detect_librosa, "whisperx": _detect_whisperx,
     "sd15": _detect_sd15, "ace-step": _detect_ace_step,
     "trellis": _detect_trellis, "unirig": _detect_unirig,
     "sklearn": _detect_sklearn, "lightgbm": _detect_lightgbm,
@@ -511,6 +589,13 @@ def inventory(profile: str | None = None) -> list[dict[str, Any]]:
             detail = _trellis.install_detail()
         if name == "unirig":
             detail = _unirig.install_detail()
+        if name == "whisperx" and installed:
+            # The transcription model is installed; the diarization
+            # half stays gated on the token + EULA. Say so on the
+            # status line, never pretend diarization works without it.
+            detail = ("transcription ready — diarization needs "
+                      "WHISPERX_HF_TOKEN with the pyannote/"
+                      "speaker-diarization-3.1 EULA accepted")
         return {"id": name, "family": fam, "label": info["label"],
                 "installed": installed, "in_profile": in_profile,
                 "size_mb": info["size_mb"], "disk_gb": info["disk_gb"],
@@ -977,6 +1062,14 @@ def provision_models(backends: Any = None, *,
                 reports[name] = _provision_unirig(box)
             elif name in _ENGINE_INSTALL:
                 reports[name] = _provision_engine(name, box)
+                if name == "whisperx" and reports[name].get("ok"):
+                    # The warm load installed the transcription model
+                    # only. The diarization half needs a Hugging Face
+                    # token with the pyannote EULA accepted — say so
+                    # in the report, never pretend it works without it.
+                    reports[name]["steps"].append(
+                        "diarization needs WHISPERX_HF_TOKEN with the "
+                        "pyannote/speaker-diarization-3.1 EULA accepted")
             else:
                 reports[name] = _report(False, "failed",
                                         f"no provisioner for {name}")

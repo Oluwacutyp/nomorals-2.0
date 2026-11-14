@@ -15,6 +15,11 @@ Inventory (from the code, not a wishlist):
   from ``audio.pipeline._STT_ORDER``)
 * voice TTS — chatterbox / kokoro / piper / f5tts (profile order from
   ``audio.pipeline._TTS_ORDER``; xtts is the character backend)
+* audio — librosa (beat detection / tempo / chroma), pinned
+  ``librosa==0.11.0`` — 1.0.1 needs Python >=3.12 and numpy>=2.1
+* voice-diarize — whisperx (diarized transcription), pinned
+  ``whisperx==3.3.0`` — 3.4.2 needs numpy>=2.0.2 and pandas>=2.2.3;
+  the pyannote diarization half stays gated on WHISPERX_HF_TOKEN
 * image — sd15 (Stable Diffusion 1.5 weights) / ace-step (ACE-Step
   1.5 engine + weights)
 * small ML — sklearn / lightgbm / xgboost / catboost
@@ -34,6 +39,7 @@ weight downloads. The seams are module-level functions on
 from __future__ import annotations
 
 import json
+import sys
 import types
 
 BIG_BOX = {"ok": True, "total_ram_gb": 16.0, "free_ram_gb": 10.0,
@@ -48,6 +54,7 @@ EXPECTED_BACKENDS = (
     "xtts", "rvc", "faceswap", "madmom",
     "faster-whisper", "parakeet", "whisper-cpp",
     "chatterbox", "kokoro", "piper", "f5tts",
+    "librosa", "whisperx",
     "sd15", "ace-step", "trellis", "unirig",
     "sklearn", "lightgbm", "xgboost", "catboost",
 )
@@ -372,6 +379,113 @@ def test_control_learners_lists_jobs(monkeypatch, tmp_path):
     text = _control_models()("learners")
     for job in EXPECTED_LEARNERS:
         assert job in text, job
+
+
+# ── librosa + whisperx wiring ────────────────────────────────────────
+
+def test_new_backends_registered():
+    mp = _modelsprov()
+    assert "librosa" in mp.BACKENDS and "whisperx" in mp.BACKENDS
+    # Audio families sit between the voice rows and image.
+    fams = []
+    for name in mp.BACKENDS:
+        fam = mp._BACKEND_INFO[name]["family"]
+        if fam not in fams:
+            fams.append(fam)
+    assert fams.index("audio") > fams.index("voice-tts")
+    assert fams.index("voice-diarize") > fams.index("audio")
+    assert fams.index("image") > fams.index("voice-diarize")
+    for name in ("librosa", "whisperx"):
+        info = mp._BACKEND_INFO[name]
+        assert info["label"] and info["size_mb"] > 0
+        assert info["disk_gb"] >= 1.0 and info["ram_gb"] >= 1.0
+        spec = mp._ENGINE_INSTALL[name]
+        assert spec["pip"] and spec["module"] and spec["warm"]
+        assert mp._detector(name) is getattr(mp, f"_detect_{name}")
+    assert mp._BACKEND_INFO["librosa"]["family"] == "audio"
+    assert mp._BACKEND_INFO["whisperx"]["family"] == "voice-diarize"
+
+
+def test_new_backends_pinned_to_owner_stack_versions():
+    """The pins are the compatibility decision, not decoration.
+
+    librosa 1.0.1 needs Python >=3.12 and numpy>=2.1; whisperx 3.4.2
+    needs numpy>=2.0.2 and pandas>=2.2.3 (both measured from PyPI
+    metadata 2026-11-14) — neither installs on the owner's stack, so
+    the pins must stay at the newest versions that do.
+    """
+    mp = _modelsprov()
+    assert mp._ENGINE_INSTALL["librosa"]["pip"] == "librosa==0.11.0"
+    assert mp._ENGINE_INSTALL["whisperx"]["pip"] == "whisperx==3.3.0"
+
+
+def test_new_backends_provision_via_engine_path(monkeypatch):
+    mp = _modelsprov()
+    monkeypatch.setattr(mp, "_measure_box", lambda: dict(BIG_BOX))
+    calls = []
+    monkeypatch.setattr(mp, "_run",
+                        lambda a, timeout=None: calls.append(a)
+                        or _ok_run(a))
+    monkeypatch.setattr(mp, "_detect_librosa", lambda: False)
+    monkeypatch.setattr(mp, "_detect_whisperx", lambda: False)
+    result = mp.provision_models(["librosa", "whisperx"])
+    assert result["ok"] is True
+    for name in ("librosa", "whisperx"):
+        assert result["backends"][name]["status"] == "installed", name
+    pip_calls = [a for a in calls if a[:3] == [sys.executable, "-m", "pip"]]
+    assert any("librosa==0.11.0" in a for a in pip_calls)
+    assert any("whisperx==3.3.0" in a for a in pip_calls)
+
+
+def test_whisperx_provision_notes_token(monkeypatch):
+    mp = _modelsprov()
+    monkeypatch.setattr(mp, "_measure_box", lambda: dict(BIG_BOX))
+    monkeypatch.setattr(mp, "_run", _ok_run)
+    monkeypatch.setattr(mp, "_detect_whisperx", lambda: False)
+    result = mp.provision_models(["whisperx"])
+    rep = result["backends"]["whisperx"]
+    assert rep["status"] == "installed"
+    assert any("WHISPERX_HF_TOKEN" in s for s in rep["steps"])
+    assert any("pyannote" in s for s in rep["steps"])
+
+
+def test_whisperx_inventory_detail_names_token(monkeypatch):
+    mp = _modelsprov()
+    monkeypatch.setattr(mp, "_measure_box", lambda: dict(BIG_BOX))
+    monkeypatch.setattr(mp, "_detect_whisperx", lambda: True)
+    row = [r for r in mp.inventory() if r["id"] == "whisperx"][0]
+    assert row["installed"] is True
+    assert "WHISPERX_HF_TOKEN" in row["detail"]
+    assert "pyannote" in row["detail"]
+
+
+def test_librosa_warm_failure_reports_failed(monkeypatch):
+    mp = _modelsprov()
+    monkeypatch.setattr(mp, "_measure_box", lambda: dict(BIG_BOX))
+
+    def _run(args, timeout=None):
+        # pip install + import verify pass; only the warm load fails.
+        if args[:2] == [sys.executable, "-c"] and "beat_track" in " ".join(args):
+            return _fail_run(args)
+        return _ok_run(args)
+
+    monkeypatch.setattr(mp, "_run", _run)
+    monkeypatch.setattr(mp, "_detect_librosa", lambda: False)
+    result = mp.provision_models(["librosa"])
+    rep = result["backends"]["librosa"]
+    assert rep["status"] == "failed"
+    assert rep["ok"] is False
+
+
+def test_control_single_new_backend(monkeypatch):
+    mp = _modelsprov()
+    _mock_all_missing(monkeypatch, mp)
+    text = _control_models()("librosa")
+    assert "librosa" in text
+    assert "installed" in text
+    text = _control_models()("whisperx")
+    assert "whisperx" in text
+    assert "WHISPERX_HF_TOKEN" in text
 
 
 # ── registry wiring ────────────────────────────────────────────────────
