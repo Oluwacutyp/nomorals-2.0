@@ -34,6 +34,7 @@ from ..core.logging_setup import get_logger
 from .base import LLMResponse, Message, SamplingParams, Usage
 from .context_fit import DEFAULT_CONTEXT_TOKENS, fit_messages, fit_prompt
 from .failures import FailureClass, classify_failure
+from .guardrails import Guardrails
 from .prompts import render_prompt, system_prompt_for
 from .swallow_failures import record_failure
 
@@ -191,10 +192,20 @@ class Brain:
     brain builds the env-based default chain lazily on first use.
     """
 
-    def __init__(self, router: Any = None) -> None:
+    def __init__(self, router: Any = None,
+                 guardrails: Any = None) -> None:
         self._external_router = router
         self._router: Any = None
         self._lock = threading.Lock()
+        #: I/O guardrails (input / output / dialogue rails on this
+        #: brain's call path — see ``llm/guardrails.py``). Injected by
+        #: callers that own settings (``brain_for`` builds them from
+        #: the context's config); otherwise the defaults (every rail
+        #: on). Never None — the rails are the choke point, not an
+        #: option callers can forget to wire.
+        self.guardrails: Guardrails = (
+            guardrails if isinstance(guardrails, Guardrails)
+            else Guardrails())
         #: Preference-tuned adapter from ``training/preference.py``.
         #: Served for owner-directed work: ``chat`` callers may prepend
         #: :meth:`preference_lessons` for the action type.  ``None`` means
@@ -299,7 +310,7 @@ class Brain:
             return self._classify(self._call(
                 "chat", self._get_router().chat, msgs, params,
                 task_kind=task_kind, tier=tier, constraints=constraints,
-                timeout_s=timeout_s, route=route))
+                timeout_s=timeout_s, route=route), "chat")
 
         def _via_ladder() -> Any:
             from ..core.degradation import LadderExhausted
@@ -317,13 +328,14 @@ class Brain:
 
         if timeout_s is not None and timeout_s > 0:
             raw = self._call_bounded("chat", _via_ladder, timeout_s)
-            return self._classify(self._coerce_response("chat", raw))
+            return self._classify(self._coerce_response("chat", raw), "chat")
         try:
             raw = _via_ladder()
         except Exception as exc:  # noqa: BLE001 — the brain never raises
             return self._classify(LLMResponse(
-                text="", error=f"brain.chat failed before dispatch: {exc}"))
-        return self._classify(self._coerce_response("chat", raw))
+                text="", error=f"brain.chat failed before dispatch: {exc}"),
+                "chat")
+        return self._classify(self._coerce_response("chat", raw), "chat")
 
     # ── generation ───────────────────────────────────────────────────────
     @staticmethod
@@ -466,11 +478,72 @@ class Brain:
         except Exception:  # noqa: BLE001 — coercion never breaks the call
             return LLMResponse(text="", error=f"brain.{op} returned no response")
 
-    def _classify(self, resp: LLMResponse) -> LLMResponse:
-        """Attach the typed failure class to a failed response (in place).
+    # ── I/O guardrails (the choke point) ─────────────────────────────
+    def _guard_input(self, op: str, messages: Sequence[Message],
+                     ) -> tuple[list[Message] | None, str]:
+        """Run the input rails over a chat message list.
 
-        The modern router tags it; legacy routers do not — classify from
-        the error text so every caller sees the same contract.
+        Returns (sanitised messages, "") on allow/redact, or (None,
+        plain-words reason) when a rail blocks the call. Never raises:
+        a rail failure degrades to the unguarded input (logged), never
+        to a dropped call.
+        """
+        try:
+            verdict = self.guardrails.check_messages(
+                op, messages, budget=self._context_budget())
+        except Exception as exc:  # noqa: BLE001 — rails never break a call
+            _log.debug("brain: input rails failed: %s", exc)
+            return list(messages), ""
+        if verdict.verdict == "block":
+            return None, verdict.blocked_reason
+        return list(verdict.parts), ""
+
+    def _guard_prompt(self, op: str, text: str,
+                      ) -> tuple[str | None, str]:
+        """Run the input rails over a bare prompt (``complete`` /
+        ``describe_image``). Same contract as :meth:`_guard_input`."""
+        try:
+            verdict = self.guardrails.check_prompt(
+                op, text, budget=self._context_budget())
+        except Exception as exc:  # noqa: BLE001 — rails never break a call
+            _log.debug("brain: input rails failed: %s", exc)
+            return text, ""
+        if verdict.verdict == "block":
+            return None, verdict.blocked_reason
+        return str(verdict.parts), ""
+
+    def _guard_output(self, resp: LLMResponse, op: str = "chat",
+                      ) -> LLMResponse:
+        """Run the output rails over a model reply (in place).
+
+        Only successful replies with text are checked; error responses
+        pass through untouched. A blocked reply becomes an error
+        response carrying the rail's plain-words reason — never a
+        silent empty answer.
+        """
+        if not resp.ok or not (resp.text or "").strip():
+            return resp
+        try:
+            verdict = self.guardrails.check_output(op, resp.text)
+        except Exception as exc:  # noqa: BLE001 — rails never break a reply
+            _log.debug("brain: output rails failed: %s", exc)
+            return resp
+        if verdict.verdict == "block":
+            return LLMResponse(text="", error=verdict.blocked_reason)
+        if verdict.verdict == "redact":
+            resp.text = verdict.text
+        return resp
+
+    def _classify(self, resp: LLMResponse, op: str = "chat") -> LLMResponse:
+        """Finalise a response: attach the typed failure class to a
+        failed response (in place), then run the output guardrails on
+        a successful one.
+
+        The modern router tags the failure class; legacy routers do
+        not — classify from the error text so every caller sees the
+        same contract. Every response path funnels through here
+        (``_chat_dispatch`` both branches, ``complete``,
+        ``describe_image``), so this is the single output choke point.
         """
         try:
             if not resp.ok and not resp.failure_class and resp.error:
@@ -478,7 +551,7 @@ class Brain:
                     resp.error).failure_class.value
         except Exception as exc:  # noqa: BLE001 — tagging never breaks the call
             record_failure("brain._classify", exc)
-        return resp
+        return self._guard_output(resp, op)
 
     def context_window(self) -> int:
         """The active serving provider's advertised context window.
@@ -582,8 +655,11 @@ class Brain:
         the middle summarized - the caller never sees the raw 400.
         """
         msgs = self._fit_for_send(messages, task_kind or "chat")
+        guarded, blocked_reason = self._guard_input("chat", msgs)
+        if guarded is None:
+            return LLMResponse(text="", error=blocked_reason)
         resp = self._chat_dispatch(
-            msgs, params, task_kind=task_kind, tier=tier,
+            guarded, params, task_kind=task_kind, tier=tier,
             constraints=_with_quality(constraints, quality),
             timeout_s=timeout_s, route=route)
         if (not resp.ok
@@ -603,8 +679,14 @@ class Brain:
             if fitted.ok and fitted.messages != list(messages):
                 _log.info("brain: context overflow - retrying with fitted "
                           "context (%d est. tokens)", fitted.tokens)
+                # The retry is a second send — the rails run again so an
+                # unredacted message can never slip in through it.
+                guarded, blocked_reason = self._guard_input(
+                    "chat", fitted.messages)
+                if guarded is None:
+                    return LLMResponse(text="", error=blocked_reason)
                 resp = self._chat_dispatch(
-                    fitted.messages, params, task_kind=task_kind, tier=tier,
+                    guarded, params, task_kind=task_kind, tier=tier,
                     constraints=constraints, timeout_s=timeout_s)
         return resp
 
@@ -637,11 +719,14 @@ class Brain:
                 text = fit_prompt(text, budget, task_kind or "chat")
         except Exception:  # noqa: BLE001 — fitting is best-effort
             _log.debug("brain: complete pre-fit failed", exc_info=True)
+        guarded, blocked_reason = self._guard_prompt("complete", text)
+        if guarded is None:
+            return LLMResponse(text="", error=blocked_reason)
         return self._classify(self._call(
-            "complete", self._get_router().complete, text, params,
+            "complete", self._get_router().complete, guarded, params,
             task_kind=task_kind, tier=tier,
             constraints=_with_quality(constraints, quality),
-            timeout_s=timeout_s, route=route))
+            timeout_s=timeout_s, route=route), "complete")
 
     def describe_image(
         self,
@@ -654,11 +739,15 @@ class Brain:
         timeout_s: float | None = None,
     ) -> LLMResponse:
         """Vision.  Never raises; routes to a VL-capable model."""
+        guarded, blocked_reason = self._guard_prompt(
+            "describe_image", prompt or "")
+        if guarded is None:
+            return LLMResponse(text="", error=blocked_reason)
         return self._classify(self._call(
             "describe_image", self._get_router().describe_image,
-            image, prompt, params,
+            image, guarded, params,
             task_kind="vision", tier=tier, constraints=constraints,
-            timeout_s=timeout_s))
+            timeout_s=timeout_s), "describe_image")
 
     def embed(self, texts: Sequence[str], **kw: Any) -> tuple[list[list[float]], str]:
         """Embeddings.  Never raises — returns ``(vectors, error)``.
@@ -1046,9 +1135,15 @@ def brain_for(context: Any) -> Brain:
         if router is None:
             return get_brain()
         cached = getattr(context, "_brain_for_ctx", None)
+        settings = getattr(context, "settings", None)
         if isinstance(cached, Brain) and cached._external_router is router:
+            # Hot-reload: a config change under a running brain moves
+            # the rail switches; counts and the recent ring survive.
+            cached.guardrails.sync_settings(settings)
             return cached
-        brain = Brain(router=router)
+        brain = Brain(
+            router=router,
+            guardrails=Guardrails.from_settings(settings))
         try:
             context._brain_for_ctx = brain  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 — caching is a bonus

@@ -721,6 +721,17 @@ class RuntimeMemoryMixin:
         from ...tools.mcp_client import control_mcp
         return control_mcp(tail or "", self.settings)
 
+    def _control_llmguard(self, tail: str, *, chat_key: str = "") -> str:
+        """The LLM I/O guardrails in chat. Owner-only.
+
+        /llmguard — status · /llmguard status — rail switches + counts
+        · /llmguard recent [n] — the latest rail findings.
+        """
+        from ...llm.guardrails import control_llmguard
+        from ...llm.brain import brain_for
+        return control_llmguard(
+            tail or "", self.settings, brain=brain_for(self.context))
+
     def _control_character(self, tail: str, *, chat_key: str = "") -> str:
         """Conversational story characters — talk to them. Owner-only.
 

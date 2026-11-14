@@ -9350,6 +9350,15 @@ class PartnerRuntime(
         if kind == "mcp":
             return self._control_mcp(command.tail or arg,
                                      chat_key=chat_key)
+        if kind == "llmguard":
+            # LLM I/O guardrails — owner-only. The _is_control_command
+            # gate already routes CONTROL_COMMANDS kinds for the
+            # operator only; this inline check is belt-and-braces for
+            # direct _handle_control_inner callers.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_llmguard(command.tail or arg,
+                                          chat_key=chat_key)
         if kind == "notion":
             return self._control_notion(command.tail or arg)
         if kind == "gcal":

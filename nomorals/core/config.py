@@ -381,6 +381,31 @@ class MCPSettings:
 
 
 @dataclass
+class GuardrailSettings:
+    """LLM I/O guardrails (input / output / dialogue rails on the
+    brain's call path — see ``nomorals/llm/guardrails.py``).
+
+    Master switch ``enabled`` plus one boolean per rail; all default
+    ON. These rails are I/O hygiene (credential-shaped literals,
+    prompt-injection phrases in untrusted input, malformed tool
+    calls, runaway reply length, repeated outputs) — NOT a content
+    filter: they never judge what the owner may ask or what Devon may
+    say. A blocked call answers in plain words naming the rail.
+    """
+
+    enabled: bool = True
+    input_injection: bool = True
+    input_credentials: bool = True
+    input_size: bool = True
+    output_credentials: bool = True
+    output_tool_call: bool = True
+    output_length: bool = True
+    dialogue_loop: bool = True
+    max_output_chars: int = 20_000
+    loop_repeats: int = 3
+
+
+@dataclass
 class SocialSettings:
     enabled: bool = True
     dry_run: bool = False
@@ -947,6 +972,7 @@ class Settings:
     training: TrainingSettings = field(default_factory=TrainingSettings)
     tools: ToolSettings = field(default_factory=ToolSettings)
     mcp: MCPSettings = field(default_factory=MCPSettings)
+    guardrails: GuardrailSettings = field(default_factory=GuardrailSettings)
     social: SocialSettings = field(default_factory=SocialSettings)
     mission: MissionSettings = field(default_factory=MissionSettings)
     api: APISettings = field(default_factory=APISettings)

@@ -735,6 +735,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "provision": (0, None),  # /provision [service] | login <service> <username> — Devon fetches missing API keys herself (owner only)
     "models": (0, None),     # /models [all|status|learners|<name>] — install every missing model on this box (owner only)
     "mcp": (0, None),        # /mcp [status|list|tools [server]|call <server> <tool> [json]|close [server]] — the MCP client: call external MCP servers (owner only)
+    "llmguard": (0, None),   # /llmguard [status|recent [n]] — the LLM I/O guardrails: input / output / dialogue rails on the brain's call path (owner only). NOT the ad-spend /guardrails command.
     "pair": (0, None),        # /pair [whatsapp <number> [label]|code|start|stop|restart|remove <id>] — pairing-with-code account pool (§15; owner only)
     "massreact": (0, None),   # /massreact <post link> | <emoji> [| count] [| live] — react from every paired account (§14; owner only, arm-gated)
     "pollvote": (0, None),    # /pollvote <poll link> | <option> [| count] [| live] — vote from every paired account (§14; owner only, arm-gated)
@@ -3592,6 +3593,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/mcp | /mcp list | /mcp tools [server] | /mcp call <server> <tool> [json-args] | /mcp close [server]",
             "example": "/mcp tools context7",
             "related": "/models /connectors /provision"},
+    "llmguard": {"what": "the LLM I/O guardrails: the input / output / dialogue rails on the brain's call path. Input rails catch prompt-injection phrases in tool/system input and credential-shaped strings leaking into a prompt (redacted, never sent); an input still over the serving window after fitting is blocked in plain words. Output rails redact credential-shaped strings from a reply, journal malformed tool-call shapes, and cut runaway replies at the length limit. The dialogue rail stops the brain repeating the same answer over and over. Per-rail on/off lives in config ([guardrails]); this command only reports. These are I/O hygiene — never a content filter: they never judge what the owner may ask or what Devon may say. Owner only. (Not the ad-spend /guardrails command.)",
+            "usage": "/llmguard | /llmguard status | /llmguard recent [n]",
+            "example": "/llmguard status",
+            "related": "/mcp /models"},
     "pair": {"what": "pairing-with-code account pool (§15): pair your own WhatsApp accounts into Devon with an 8-character code — no QR — and Telegram accounts by phone + login code, all in one registry. Each account gets its own supervised session; per-account routing names a default; personal surfaces (status saving, view-once preservation, DM antidelete) toggle per account. The status_saving toggle covers channel posts on both platforms too: WhatsApp followed-channel posts saved by the sweep, and Telegram channel posts kept in the brain-isolated archive /channeltexts pulls from. The pool is the reach behind the group/channel tools. Owner only.",
             "usage": "/pair | /pair whatsapp <number> [label] | /pair telegram <number> [label] | /pair tgcode <id> <code> | /pair tgpass <id> <password> | /pair code <id> | /pair start|stop|restart|remove <id> | /pair use <id> | /pair route [platform] | /pair toggle <id> <status_saving|view_once|antidelete|always_online|status_viewing> <on|off> | /pair saved [id] | /pair recovered [id] | /pair journal [kind] [count] | /pair page",
             "example": "/pair whatsapp 2348012345678 main",
@@ -4549,7 +4554,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "caption", "imggen", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
+    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "llmguard", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
@@ -4880,7 +4885,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
-      "connectors", "provision", "models", "mcp", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
+      "connectors", "provision", "models", "mcp", "llmguard", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "worldmodel", "glossary", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
@@ -5346,6 +5351,7 @@ LIST_ONELINERS: dict[str, str] = {
     "provision": "self-provisioning: /provision [service] — Devon fetches a missing API key herself (login or account creation; key validated + vaulted, request retried); /provision login <service> <username> hands her an existing login",
     "models": "install every missing model: /models installs all of them (character voice/face, DJ madmom, voice STT/TTS, image, small-ML) that fit this box; /models status shows installed vs missing; /models learners shows the journal-trained learners' status (owner only)",
     "mcp": "the MCP client: /mcp status shows which external servers are enabled and connected; /mcp tools [server] lists a server's tools; /mcp call <server> <tool> [json-args] calls one (Context7, GitHub, Playwright, Serena, Graphify, Blender — opt-in in config, owner only)",
+    "llmguard": "the LLM I/O guardrails: /llmguard status shows each rail on/off plus how many inputs/outputs it allowed, redacted, or blocked; /llmguard recent [n] shows the latest rail findings (owner only; per-rail on/off is in config [guardrails])",
     "pair": "pairing-with-code pool: /pair whatsapp <number> [label] — pair a WhatsApp account by 8-char code (own bridge session each); /pair telegram <number> pairs Telegram by login code into the same pool; /pair lists the pool with Registered/Connected/Dropped counts (owner only)",
     "sudo": "sudo rung (§19): /sudo — who holds sudo, in plain words; /sudo add|remove <platform> <id> grants or drops it through the owner grammar (owner only)",
     "owner": "the owner system: /owner — the verification card (bound ids per platform + how each was proved + the seal's state); /owner status — uptime, version, pool counts, queues, last briefing; bind/unbind/sudo/deputy/mark edits and the sealed rebind (owner only, DM only — never editable from a group)",
