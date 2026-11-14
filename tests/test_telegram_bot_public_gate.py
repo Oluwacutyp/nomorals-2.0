@@ -136,7 +136,12 @@ class PublicBotGateTest(unittest.TestCase):
                          ["mocked gift\n<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>"])
 
     def test_unknown_slash_falls_through_to_chat(self) -> None:
-        # unknown slashes are ordinary text, not blocked
+        # Unknown slashes are ordinary text, not blocked. The
+        # example must be genuinely unregistered — "/shrug" was
+        # used here until the reaction commands landed (it is a
+        # real command now: control.py "shrug": (0, None)), so the
+        # runtime correctly routed it to handle_control and this
+        # test failed on a true premise.
         self._setup("telegram-bot")
         outcome = mock.Mock()
         outcome.parts = []
@@ -144,7 +149,7 @@ class PublicBotGateTest(unittest.TestCase):
         with mock.patch.object(self.runtime, "handle_control") as hc:
             with mock.patch.object(self.runtime.brain, "handle_message",
                                    return_value=outcome) as bm:
-                self.runtime._process(_msg("telegram-bot", "/shrug"))
+                self.runtime._process(_msg("telegram-bot", "/frobnicate"))
         hc.assert_not_called()
         bm.assert_called_once()
         self.assertEqual(self.adapter.sent, [])
