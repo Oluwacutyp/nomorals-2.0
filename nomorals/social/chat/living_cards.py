@@ -54,6 +54,7 @@ degrades to the plain send path, which is always available.
 
 from __future__ import annotations
 
+import inspect
 import json
 import logging
 import secrets
@@ -66,6 +67,7 @@ from typing import Any
 
 from ...core.progress_events import render_progress_text
 from .action_schema import Action, resolve_action
+from .gateway import present_outbound
 from .platform_limits import for_platform
 from .typography import Card as ThemeCard
 from .typography import card_text
@@ -607,6 +609,20 @@ def resolve_card_tap(store: CardStore, card_id: str, revision: int,
 # ── the host: publish / revise / deliver ────────────────────────
 
 
+def _mode_kwargs(fn: Any, parse_mode: str) -> dict[str, Any]:
+    """The parse-mode kwarg for an injected transport verb — only
+    when the verb declares it (the live-session convention:
+    detected by signature like every other surface).  Transports
+    that predate parse mode keep working untouched."""
+    if not parse_mode:
+        return {}
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    return {"parse_mode": parse_mode} if "parse_mode" in params else {}
+
+
 class CardHost:
     """Sends and updates cards through injected transport seams.
 
@@ -666,10 +682,17 @@ class CardHost:
         undeliverable card is still persisted — the retained
         record the startup journey promises."""
         rendered = render_card(card, card.platform)
+        # The edit must format exactly like the send it replaces:
+        # the render is house dialect, so present it once here —
+        # the same conversion the gateway applies on the send path
+        # — and carry the resulting parse mode into both verbs.
+        text, parse_mode = present_outbound(card.platform,
+                                            rendered.text)
         try:
             ok, message_id = self._send(
-                card.platform, chat, rendered.text,
-                rendered.keyboard or None)
+                card.platform, chat, text,
+                rendered.keyboard or None,
+                **_mode_kwargs(self._send, parse_mode))
         except Exception as exc:  # noqa: BLE001 - degrade, never die
             _log.debug("card publish failed for %s: %s",
                        card.card_id, exc)
@@ -718,12 +741,15 @@ class CardHost:
 
     def _deliver_now(self, card: Card, chat: Any) -> None:
         rendered = render_card(card, card.platform)
+        text, parse_mode = present_outbound(card.platform,
+                                            rendered.text)
         delivered = False
         if update_form(card.platform) == "edit" and card.message_id:
             try:
                 delivered = bool(self._edit(
-                    chat, card.message_id, rendered.text,
-                    rendered.keyboard or None))
+                    chat, card.message_id, text,
+                    rendered.keyboard or None,
+                    **_mode_kwargs(self._edit, parse_mode)))
             except Exception as exc:  # noqa: BLE001
                 _log.debug("card edit failed for %s: %s",
                            card.card_id, exc)
@@ -731,8 +757,9 @@ class CardHost:
         if not delivered:
             try:
                 ok, message_id = self._send(
-                    card.platform, chat, rendered.text,
-                    rendered.keyboard or None)
+                    card.platform, chat, text,
+                    rendered.keyboard or None,
+                    **_mode_kwargs(self._send, parse_mode))
             except Exception as exc:  # noqa: BLE001
                 _log.debug("card send failed for %s: %s",
                            card.card_id, exc)

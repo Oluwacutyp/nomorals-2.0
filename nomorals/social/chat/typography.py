@@ -49,7 +49,8 @@ from .present import render as _render_doc
 __all__ = [
     "SURFACE_CLASSES", "PRESETS", "THEMES", "CLASS_ICONS",
     "DEFAULT_PRESENTATION", "DEFAULT_STAMP_TEXT",
-    "STAMP_CLASSES", "STAMP_HTML", "apply_stamp",
+    "STAMP_CLASSES", "STAMP_HTML", "STAMP_HTML_LEGACY",
+    "STAMP_TEXT_STYLED", "apply_stamp",
     "ResolvedStyle", "resolve_style",
     "WATERMARK_MODES", "DEFAULT_WATERMARK_MODE",
     "MediaMark", "resolve_media_mark",
@@ -88,6 +89,38 @@ CLASS_ICONS: dict[str, str] = {
 #: owner's name as he wrote it.
 DEFAULT_STAMP_TEXT = "Powered by peacethefirst"
 
+#: The stamp's face: the brandmark policy
+#: (media/typography/policy.py "brandmark" — Montserrat / Inter /
+#: Poppins, weight 700) is a strong sans face; for chat TEXT the
+#: Unicode equivalent is the mathematical sans-bold alphabet
+#: (``text_styles`` catalogue "sansbold").  The stamp text is
+#: styled at the line, so a group-configured stamp text gets the
+#: same face — the face is the house style, not the default text.
+STAMP_STYLE = "sansbold"
+
+
+def _styled_stamp_text(stamp_text: str) -> str:
+    """The stamp text in the brandmark face.  Falls back to the
+    plain text when the style is unavailable — the stamp must
+    never disappear because a style lookup failed."""
+    try:
+        from .text_styles import apply_style as _apply_style
+
+        styled = _apply_style(str(stamp_text or ""), STAMP_STYLE)
+    except Exception:  # noqa: BLE001 - a style failure never eats the stamp
+        styled = None
+    return styled if styled else str(stamp_text or "")
+
+
+#: The stamp text in the brandmark face, for the detectors.
+STAMP_TEXT_STYLED = _styled_stamp_text(DEFAULT_STAMP_TEXT)
+
+#: The stamp in authored-HTML form before the strong face landed
+#: (2026-11-14): kept so the stamp detectors still recognise
+#: texts composed under the old face — a transition guard, not a
+#: form to render.
+STAMP_HTML_LEGACY = f"<i>{DEFAULT_STAMP_TEXT}</i>"
+
 #: Classes stamped under the shipped theme packs: the PRESENTED
 #: surfaces.  Moderation records, settings panels and chat are
 #: not presentation — no stamp.
@@ -108,7 +141,7 @@ STAMP_CLASSES: tuple[str, ...] = (
 #: it to the bare line.  Cards stamped upstream through
 #: :func:`render_card` keep their dialect-native line — the
 #: boundary never double-stamps (see :func:`apply_stamp`).
-STAMP_HTML = f"<i>{DEFAULT_STAMP_TEXT}</i>"
+STAMP_HTML = f"<i>{STAMP_TEXT_STYLED}</i>"
 
 
 def _closes_with_stamp(body: str) -> bool:
@@ -132,14 +165,16 @@ def _closes_with_stamp(body: str) -> bool:
     tail = body.rstrip()
     if not tail:
         return False
-    for form in (STAMP_HTML, f"_{DEFAULT_STAMP_TEXT}_",
-                 DEFAULT_STAMP_TEXT):
+    for form in (STAMP_HTML, STAMP_HTML_LEGACY,
+                 f"_{STAMP_TEXT_STYLED}_", f"_{DEFAULT_STAMP_TEXT}_",
+                 STAMP_TEXT_STYLED, DEFAULT_STAMP_TEXT):
         if tail == form or tail.endswith("\n" + form):
             return True
     for closer in ("</i>", "_"):
         if tail.endswith(closer):
             inner = tail[: -len(closer)].rstrip()
-            if inner.endswith(DEFAULT_STAMP_TEXT):
+            if inner.endswith(DEFAULT_STAMP_TEXT) or \
+                    inner.endswith(STAMP_TEXT_STYLED):
                 return True
     return False
 
@@ -564,11 +599,12 @@ def _dialect(platform: Any) -> str:
 
 
 def _stamp_line(stamp_text: str, dialect: str) -> str:
+    styled = _styled_stamp_text(stamp_text)
     if dialect == "html":
-        return f"<i>{_html.escape(stamp_text)}</i>"
+        return f"<i>{_html.escape(styled)}</i>"
     if dialect in ("whatsapp", "markdown", "canonical"):
-        return f"_{stamp_text}_"
-    return stamp_text
+        return f"_{styled}_"
+    return styled
 
 
 def _append_stamp(text: str, stamp_text: str, dialect: str) -> str:

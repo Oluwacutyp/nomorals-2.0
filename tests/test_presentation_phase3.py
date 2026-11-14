@@ -120,7 +120,7 @@ class CatalogCardTests(unittest.TestCase):
         for ln in rows:
             self.assertRegex(ln, r"<code>/[a-z0-9_]+</code> — .+")
         # a menu-class Card carries the stamp
-        self.assertIn("_Powered by peacethefirst_", catalog)
+        self.assertIn("_𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁_", catalog)
 
     def test_no_group_stays_plain(self):
         out = list_catalog("no-such-group-xyz")
@@ -146,7 +146,7 @@ class HelpOverviewCardTests(unittest.TestCase):
         self.assertIn("**everything else**", out)
         self.assertIn("how she works", out)
         self.assertIn("console:", out)
-        self.assertIn("_Powered by peacethefirst_", out)
+        self.assertIn("_𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁_", out)
 
     def test_public_overview(self):
         out = detailed_help("", public_only=True)
@@ -164,7 +164,7 @@ class GoalsBoardCardTests(unittest.TestCase):
         surface.run_sync(self.tracker.update_progress(goal.goal_id, 40.0))
         board = surface.render_class_board(self.tracker, UID)
         self.assertIn("**Goals**", board)
-        self.assertIn("_Powered by peacethefirst_", board)
+        self.assertIn("_𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁_", board)
         # the old pins, verbatim
         self.assertIn("**Finance** (`finance`)", board)
         self.assertIn("1 goal(s) · avg 40%", board)
@@ -217,7 +217,7 @@ class CanonicalStampTelegramTests(unittest.TestCase):
 
         out = to_telegram("**Title**\n\n_Powered by peacethefirst_")
         self.assertEqual(
-            out, "<b>Title</b>\n\n<i>Powered by peacethefirst</i>")
+            out, "<b>Title</b>\n\n<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>")
 
     def test_to_telegram_leaves_other_underscores_literal(self):
         from nomorals.social.chat.platforms import to_telegram

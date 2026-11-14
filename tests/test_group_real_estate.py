@@ -652,7 +652,7 @@ def test_handlers_property_map_balance_and_rent(tmp_path):
                            text="hello")
     out = _text(rt._control_property("", _msg()))
     assert "Old Town" in out and "The Heights" in out
-    assert "Powered by peacethefirst" in out  # the stamp (§27)
+    assert "𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁" in out  # the stamp (§27)
     bought = _text(rt._control_buyproperty("old_town room",
                                            _msg()))
     assert "Property bought" in bought

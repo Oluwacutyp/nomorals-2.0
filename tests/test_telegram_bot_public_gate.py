@@ -124,7 +124,7 @@ class PublicBotGateTest(unittest.TestCase):
         cg.assert_called_once()
         # the gate's redirect must NOT have been sent; the game reply was
         self.assertEqual(self.adapter.sent,
-                         ["mocked game\n<i>Powered by peacethefirst</i>"])
+                         ["mocked game\n<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>"])
 
     def test_gift_passes_gate_on_telegram_bot(self) -> None:
         self._setup("telegram-bot")
@@ -133,7 +133,7 @@ class PublicBotGateTest(unittest.TestCase):
             self.runtime._process(_msg("telegram-bot", "/gift @x 10"))
         cg.assert_called_once()
         self.assertEqual(self.adapter.sent,
-                         ["mocked gift\n<i>Powered by peacethefirst</i>"])
+                         ["mocked gift\n<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>"])
 
     def test_unknown_slash_falls_through_to_chat(self) -> None:
         # unknown slashes are ordinary text, not blocked
@@ -157,7 +157,7 @@ class PublicBotGateTest(unittest.TestCase):
             self.runtime._process(_msg("telegram", "/model", owner=True))
         hc.assert_called_once()
         self.assertEqual(self.adapter.sent,
-                         ["mocked control\n<i>Powered by peacethefirst</i>"])
+                         ["mocked control\n<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>"])
 
     def test_game_command_still_works_on_userbot(self) -> None:
         self._setup("telegram")
@@ -166,7 +166,7 @@ class PublicBotGateTest(unittest.TestCase):
             self.runtime._process(_msg("telegram", "/duel", owner=True))
         cg.assert_called_once()
         self.assertEqual(self.adapter.sent,
-                         ["mocked game\n<i>Powered by peacethefirst</i>"])
+                         ["mocked game\n<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>"])
 
 
 if __name__ == "__main__":

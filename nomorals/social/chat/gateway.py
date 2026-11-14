@@ -136,6 +136,17 @@ def _present_outbound(platform: str, text: str,
         return text, parse_mode
 
 
+def present_outbound(platform: str, text: str,
+                     parse_mode: str = "") -> tuple[str, str]:
+    """Present ``text`` for ``platform`` at the send boundary — the
+    public face of :func:`_present_outbound`, for callers that
+    deliver without going through :meth:`Gateway.send` (the living
+    card host's edit path): the edit must carry the same converted
+    text and parse mode the send would have used, so a card's first
+    edit formats exactly like its first send."""
+    return _present_outbound(platform, text, parse_mode)
+
+
 class _HourWindow:
     """A rolling per-hour counter for one platform.
 

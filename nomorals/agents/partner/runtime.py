@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import inspect
 import json
 import re
 import threading
@@ -3857,10 +3858,24 @@ class PartnerRuntime(
             from ...social.chat.living_cards import CardHost
 
             def _send(platform: str, chat: Any, text: str,
-                      buttons: Any = None) -> tuple[bool, str]:
+                      buttons: Any = None, parse_mode: str = ""
+                      ) -> tuple[bool, str]:
                 try:
+                    # The gateway's send declares parse_mode, but an
+                    # injected/fake gateway may not — pass it only
+                    # when the verb declares it (the live-session
+                    # convention: detected by signature).
+                    _send_kwargs: dict[str, Any] = {}
+                    if parse_mode:
+                        try:
+                            if "parse_mode" in inspect.signature(
+                                    self.gateway.send).parameters:
+                                _send_kwargs = {"parse_mode": parse_mode}
+                        except (TypeError, ValueError):
+                            _send_kwargs = {}
                     res = self.gateway.send(
-                        platform, chat, text, buttons=buttons)
+                        platform, chat, text, buttons=buttons,
+                        **_send_kwargs)
                 except Exception:  # noqa: BLE001 - host degrades
                     return (False, "")
                 if res is None or not getattr(res, "ok", False):
@@ -3869,12 +3884,14 @@ class PartnerRuntime(
                                   or ""))
 
             def _edit(chat: Any, message_id: str, text: str,
-                      buttons: Any = None) -> bool:
+                      buttons: Any = None, parse_mode: str = ""
+                      ) -> bool:
                 adapter = self._chat_adapter(chat.platform)
                 if adapter is None:
                     return False
                 return edit_session_message(
-                    adapter, chat, message_id, text, buttons=buttons)
+                    adapter, chat, message_id, text, buttons=buttons,
+                    parse_mode=parse_mode)
 
             def _register_picks(chat_key: str, commands: list,
                                 owner_key: str,
@@ -6831,10 +6848,11 @@ class PartnerRuntime(
                 and not buttons and reply_keyboard is None \
                 and _limits is not None \
                 and len(text) > _limits.max_text:
-            from ...social.chat.typography import DEFAULT_STAMP_TEXT, STAMP_HTML
+            from ...social.chat.typography import DEFAULT_STAMP_TEXT, STAMP_HTML, STAMP_HTML_LEGACY
 
             _body = text.rstrip()
-            for _form in (STAMP_HTML, f"_{DEFAULT_STAMP_TEXT}_",
+            for _form in (STAMP_HTML, STAMP_HTML_LEGACY,
+                          f"_{DEFAULT_STAMP_TEXT}_",
                           DEFAULT_STAMP_TEXT):
                 if _body.endswith(_form):
                     _body = _body[: -len(_form)]

@@ -249,7 +249,7 @@ class HelpMenuTests(unittest.TestCase):
         # layer's bold heads (previously a hand-parsed _HELP_TEXT
         # render through a separate style path: "<b>SEARCH</b>").
         self.assertIn("<b>🔍 search</b>", out)
-        self.assertIn("<i>Powered by peacethefirst</i>", out)
+        self.assertIn("<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>", out)
 
     def test_help_menu_coverage_matches_help_text(self):
         from nomorals.social.chat.control import (

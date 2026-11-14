@@ -125,14 +125,14 @@ def test_send_control_reply_unpacks_actionable():
     # The unpack contract stands; the always-present stamp (owner
     # law 2026-11-05) rides under the body.
     assert sent["text"] == (
-        "<b>hi</b>\n\n<i>Powered by peacethefirst</i>")
+        "<b>hi</b>\n\n<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>")
     assert sent["buttons"] == [[("Go", "go")]]
     assert sent["parse_mode"] == "HTML"
     rt._send_control_reply(msg, "plain reply")
     sent = gw.sent[-1]
     # A plain unadorned reply takes the stamp's lightest form.
     assert sent["text"] == (
-        "plain reply\n<i>Powered by peacethefirst</i>")
+        "plain reply\n<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>")
     assert sent["buttons"] is None
     # HTML because the stamp's italic rides — the transports render
     # it down per platform (Telegram entity, WhatsApp _…_).

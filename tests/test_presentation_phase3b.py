@@ -105,7 +105,7 @@ def _text(reply):
 def _assert_card(testcase, wrapped, title):
     """The canonical frame: title + house stamp."""
     testcase.assertIn("**" + title + "**", wrapped)
-    testcase.assertIn("_Powered by peacethefirst_", wrapped)
+    testcase.assertIn("_𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁_", wrapped)
 
 
 def _assert_lines_verbatim(testcase, raw, wrapped):

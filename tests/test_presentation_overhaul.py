@@ -169,15 +169,15 @@ def test_failed_scheduled_run_still_posts():
 
 
 def test_apply_stamp_full_and_light_forms():
-    from nomorals.social.chat.typography import DEFAULT_STAMP_TEXT, apply_stamp
+    from nomorals.social.chat.typography import STAMP_TEXT_STYLED, apply_stamp
 
     full = apply_stamp("body")
     assert full.startswith("body\n\n")
-    assert DEFAULT_STAMP_TEXT in full
+    assert STAMP_TEXT_STYLED in full
     light = apply_stamp("body", light=True)
     assert light.startswith("body\n")
     assert "\n\n" not in light
-    assert DEFAULT_STAMP_TEXT in light
+    assert STAMP_TEXT_STYLED in light
 
 
 def test_apply_stamp_idempotent_and_empty_safe():

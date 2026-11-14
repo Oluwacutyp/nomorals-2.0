@@ -132,7 +132,7 @@ def test_channel_post_is_stamped_announcement(tmp_path):
     surface.channel_cycle(C, now=NOW, send=send, force=True)
     text = send.sent[0][0]
     assert "gold is moving" in text
-    assert "Powered by peacethefirst" in text  # presented surface
+    assert "𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁" in text  # presented surface
 
 
 def test_unclaimed_channel_refuses(tmp_path):
@@ -246,7 +246,7 @@ def test_trigger_season_podium_crossposts(tmp_path):
     assert len(posts) == 1
     assert posts[0]["source"] == "trigger:season_podium"
     assert "champions" in send.sent[0][0]
-    assert "Powered by peacethefirst" in send.sent[0][0]
+    assert "𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁" in send.sent[0][0]
 
 
 def test_trigger_respects_link_and_source_claim(tmp_path):
@@ -439,7 +439,7 @@ def test_game_boards_from_provider_rows(tmp_path):
     assert surface.board_rows("games:xp") is None
     text = surface.render_board("games:xp",
                                 games_rows=games_rows)
-    assert "Bola" in text and "Powered by peacethefirst" in text
+    assert "Bola" in text and "𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁" in text
 
 
 def test_reputation_is_never_a_board(tmp_path):
@@ -656,7 +656,7 @@ def test_console_channel_flow(tmp_path):
     posted = [t for (_p, k, t) in rt.gateway.sent if k == C]
     assert len(posted) == 1
     assert "gold update for the week" in posted[0]
-    assert "Powered by peacethefirst" in posted[0]
+    assert "𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁" in posted[0]
     # analytics: the drive sampled the adapter's real count
     out = _text(rt._control_console("c1 analytics", _dm_msg()))
     assert "42" in out and "subscribers" in out

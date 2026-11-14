@@ -2399,6 +2399,30 @@ class RuntimeGamesMixin:
             else chat_key)
         sync_table_card(self._living_card_host(), self._game_engine(),
                         room, chat)
+        if event == "started":
+            self._start_table_ticker(chat_key)
+
+    def _start_table_ticker(self, chat_key: str) -> None:
+        """Start the clock that keeps a live table's card ticking
+        between game events (the countdown otherwise only moves on
+        a move).  One ticker per chat; a dead one is replaced on
+        the next game's "started" event."""
+        tickers = getattr(self, "_table_tickers", None)
+        if tickers is None:
+            tickers = self._table_tickers = {}
+        current = tickers.get(chat_key)
+        if current is not None and current.is_alive():
+            return
+        from ...games.table import TableCardTicker
+
+        def _forget(ticker):
+            tickers.pop(chat_key, None)
+
+        ticker = TableCardTicker(
+            self._game_engine(), self._game_table_sink,
+            self._living_card_host(), chat_key, on_stop=_forget)
+        tickers[chat_key] = ticker
+        ticker.start()
 
     def _relay_send(self, chat_key: str, text: str, *,
                     buttons=None) -> bool:

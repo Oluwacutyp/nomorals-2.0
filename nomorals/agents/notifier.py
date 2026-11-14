@@ -283,11 +283,12 @@ def _insert_before_stamp(text: str, line: str) -> str:
     peacethefirst" twice).  Insert before the stamp when one closes
     the text, else append plainly.
     """
-    from ..social.chat.typography import DEFAULT_STAMP_TEXT, STAMP_HTML
+    from ..social.chat.typography import DEFAULT_STAMP_TEXT, STAMP_HTML, STAMP_HTML_LEGACY
 
     body = str(text or "")
     tail = body.rstrip()
-    for form in (STAMP_HTML, f"_{DEFAULT_STAMP_TEXT}_",
+    for form in (STAMP_HTML, STAMP_HTML_LEGACY,
+                 f"_{DEFAULT_STAMP_TEXT}_",
                  DEFAULT_STAMP_TEXT):
         if tail == form or tail.endswith("\n" + form):
             head = tail[: -len(form)].rstrip("\n")

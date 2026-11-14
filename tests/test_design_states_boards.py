@@ -169,7 +169,7 @@ def test_card_state_section_renders_with_stamp():
                       settings=None).text
     assert "nothing here yet" in out
     assert "quests land when the first quest is posted." in out
-    assert "Powered by peacethefirst" in out
+    assert "𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁" in out
 
 
 def test_card_partial_mix_renders_both_halves():
@@ -251,7 +251,7 @@ def test_leaderboard_success_render_unchanged(tmp_path):
                                publish=True)
     assert "Bola" in out
     assert "nothing here yet" not in out
-    assert "Powered by peacethefirst" in out
+    assert "𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁" in out
 
 
 # ── /menu: the synchronous board ─────────────────────────────

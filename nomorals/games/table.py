@@ -22,6 +22,9 @@ keeps the room's card current on every table event.
 """
 from __future__ import annotations
 
+import contextlib
+import logging
+import threading
 import time
 from dataclasses import replace
 from typing import Any
@@ -37,8 +40,10 @@ from .games.base import MultiGame, Room
 __all__ = [
     "GAME_FAMILY_THEMES", "game_family", "timeout_policy",
     "stakes_label", "build_table_card", "sync_table_card",
-    "table_card_id",
+    "table_card_id", "TABLE_TICK_SECONDS", "TableCardTicker",
 ]
+
+_log = logging.getLogger("nomorals.games.table")
 
 #: family → (icon, banner). The banner is the family's face on the
 #: table; the machinery (card, fencing, rows) is shared.
@@ -257,3 +262,105 @@ def _render_game_table(card: Card) -> str:
 
 # the rich renderer owns the game family once this organ is loaded
 RENDERERS[FAMILY_GAME] = _render_game_table
+
+
+#: How often a live table's card re-renders on the clock (seconds).
+#: The countdown ("59s left") otherwise only moves on game events,
+#: so the card's clock is frozen between moves.  Five seconds is
+#: the sane cadence: a 1s ticker would hammer the adapter's edit
+#: rate limit and flood the edit log for a display that only
+#: resolves to whole seconds.
+TABLE_TICK_SECONDS = 5.0
+
+
+def _card_fingerprint(card: Card) -> tuple:
+    """The rendered content of a table card, for the tick's
+    identical-content skip: a tick that changes nothing must not
+    reach the adapter at all (an identical edit is refused and
+    falls back to a duplicate send)."""
+    rows = tuple((str(key), str(value))
+                 for key, value in (card.rows or ()))
+    actions = tuple((action.label, action.data, action.url,
+                     action.intent)
+                    for action in (card.actions or ()))
+    return (card.title, card.body, rows, card.status, actions)
+
+
+class TableCardTicker:
+    """Revises one chat's live table card on a clock.
+
+    The table sink only fires on game events — a live table's
+    countdown is otherwise frozen between moves.  The ticker
+    re-runs the EXISTING sink on a slow clock (``TABLE_TICK_SECONDS``)
+    while the room is live, and stops the moment the room closes,
+    times out, or the engine can no longer find it — no second card
+    path, no edit when the card is unchanged, no daemon left
+    running after the table is gone.
+    """
+
+    def __init__(self, engine: Any, sink: Any, host: Any,
+                 chat_key: str, *,
+                 interval: float = TABLE_TICK_SECONDS,
+                 on_stop: Any = None) -> None:
+        self._engine = engine
+        self._sink = sink
+        self._host = host
+        self._chat_key = str(chat_key)
+        self._interval = (float(interval) if interval
+                          else TABLE_TICK_SECONDS)
+        self._on_stop = on_stop
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def tick(self) -> bool:
+        """One clock pass.  Returns False when the table is gone
+        (stop the thread); True when the ticker should keep going."""
+        room = self._engine.live(self._chat_key)
+        if room is None:
+            return False
+        try:
+            card = build_table_card(self._engine, room)
+        except Exception as exc:  # noqa: BLE001 - a bad tick never kills the clock
+            _log.debug("table tick build failed for %s: %s",
+                       self._chat_key, exc)
+            return True
+        stored = None
+        if self._host is not None:
+            stored = self._host.store.get(card.card_id)
+        if stored is not None and \
+                _card_fingerprint(stored) == _card_fingerprint(card):
+            return True
+        try:
+            self._sink(room, "tick")
+        except Exception as exc:  # noqa: BLE001 - a bad tick never kills the clock
+            _log.debug("table tick sink failed for %s: %s",
+                       self._chat_key, exc)
+        return True
+
+    def start(self) -> threading.Thread:
+        if self._thread is not None and self._thread.is_alive():
+            return self._thread
+        self._stop.clear()
+        self._thread = threading.Thread(
+            target=self._run, name=f"table-tick-{self._chat_key}",
+            daemon=True)
+        self._thread.start()
+        return self._thread
+
+    def _run(self) -> None:
+        while not self._stop.wait(self._interval):
+            try:
+                if not self.tick():
+                    break
+            except Exception as exc:  # noqa: BLE001 - the clock never dies on a tick
+                _log.debug("table ticker failed for %s: %s",
+                           self._chat_key, exc)
+        if self._on_stop is not None:
+            with contextlib.suppress(Exception):
+                self._on_stop(self)
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def is_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()

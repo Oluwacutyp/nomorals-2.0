@@ -27,9 +27,10 @@ from nomorals.agents.notifier import Notifier
 from nomorals.agents.partner_runtime import PartnerRuntime
 from nomorals.agents.upgrade_queue import UpgradeQueue
 from nomorals.core.config import load_settings
+from nomorals.social.chat.typography import STAMP_TEXT_STYLED
 from nomorals.storage.db import Database
 
-STAMP = "Powered by peacethefirst"
+STAMP = STAMP_TEXT_STYLED
 
 
 # ── fixtures (the test_proposals_unified idiom) ─────────────────

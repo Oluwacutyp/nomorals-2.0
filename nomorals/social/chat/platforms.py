@@ -140,16 +140,32 @@ _MD_UNDER = re.compile(
     r"(?<![A-Za-z0-9_])__(?=\S)([^_\n]+?)(?<=\S)__(?![A-Za-z0-9_])")
 _MD_ITALIC = re.compile(r"(?<!\*)\*(?=\S)([^*\n]+?)(?<=\S)\*(?!\*)")
 #: The canonical stamp line (typography.card_text's dialect form —
-#: ``_<BRAND_TEXT>_``).  Telegram HTML has no underscore-italic,
-#: so without this the stamp on every card_text render would
-#: print raw on Telegram (the owner screenshot 2026-11-06 bug:
-#: the stamp printed literally on help page 2).  Only the exact
-#: trailing footer line converts — every other underscore pair
-#: in the body stays literal prose.  (typography cannot be
-#: imported here — present.py imports this module — so the text
-#: comes from core.branding, the same string.)
-_CANONICAL_STAMP = re.compile(
-    r"_" + re.escape(BRAND_TEXT) + r"_(\s*)$")
+#: ``_<BRAND_TEXT>_`` or the styled ``_<STAMP_TEXT_STYLED>_``).
+#: Telegram HTML has no underscore-italic, so without this the
+#: stamp on every card_text render would print raw on Telegram
+#: (the owner screenshot 2026-11-06 bug: the stamp printed
+#: literally on help page 2).  Only the exact trailing footer
+#: line converts — every other underscore pair in the body stays
+#: literal prose.  The styled face lives in typography, which
+#: cannot be imported at module level here (present.py imports
+#: this module), so it is resolved lazily at call time and cached;
+#: a style failure falls back to the plain text.
+_CANONICAL_STAMP_RE: re.Pattern[str] | None = None
+_STAMP_STYLED_TEXT: str | None = None
+
+
+def _canonical_stamp() -> tuple[re.Pattern[str], str]:
+    """(pattern, styled text) for the trailing stamp line, both faces."""
+    global _CANONICAL_STAMP_RE, _STAMP_STYLED_TEXT
+    if _CANONICAL_STAMP_RE is None or _STAMP_STYLED_TEXT is None:
+        try:
+            from .typography import STAMP_TEXT_STYLED as _styled
+        except Exception:  # noqa: BLE001 - style unavailable -> plain
+            _styled = BRAND_TEXT
+        _STAMP_STYLED_TEXT = _styled
+        _CANONICAL_STAMP_RE = re.compile(
+            r"_(?:" + re.escape(BRAND_TEXT) + r"|" + re.escape(_styled) + r")_(\s*)$")
+    return _CANONICAL_STAMP_RE, _STAMP_STYLED_TEXT
 
 
 def strip_html(text: str) -> str:
@@ -281,9 +297,10 @@ def to_telegram(text: str) -> str:
         #     card_text dialect's ``_…_`` form is not a house
         #     italic span (single-``*`` is), so it would otherwise
         #     survive step 5 as literal underscores on Telegram.
-        out = _CANONICAL_STAMP.sub(
+        _stamp_re, _styled = _canonical_stamp()
+        out = _stamp_re.sub(
             lambda m: _keep(
-                f"<i>{_html.escape(BRAND_TEXT)}</i>") + m.group(1),
+                f"<i>{_html.escape(_styled)}</i>") + m.group(1),
             out)
         # 5. Everything left is literal text: escape it.
         out = _html.escape(out)

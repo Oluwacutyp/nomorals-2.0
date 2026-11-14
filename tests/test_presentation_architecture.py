@@ -1015,7 +1015,7 @@ class PagedHelpMarkupTests(unittest.TestCase):
         # (no <b>/<code>/<i> in it → parse_mode "").  The HTML
         # form of the stamp appears only after that conversion,
         # asserted on the joined pages below.
-        self.assertIn("_Powered by peacethefirst_", text)
+        self.assertIn("_𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁_", text)
         chat = ChatRef(platform="telegram-bot", chat_id="42",
                        kind=ChatKind.DM)
         result = self.gateway.send("telegram-bot", chat, text,
@@ -1035,7 +1035,7 @@ class PagedHelpMarkupTests(unittest.TestCase):
         self.assertIn("&lt;command&gt;", joined,
                       "the placeholder displays as literal text")
         self.assertEqual(
-            joined.count("<i>Powered by peacethefirst</i>"), 1,
+            joined.count("<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>"), 1,
             "the stamp renders as markup, once")
 
 
@@ -1096,11 +1096,11 @@ class PresentedFamilyModeGuardTests(unittest.TestCase):
         card.line("pick a table to play")
         tg = render_card(card, platform="telegram-bot")
         self.assertEqual(tg.parse_mode, "HTML")
-        self.assertIn("<i>Powered by peacethefirst</i>", tg.text)
+        self.assertIn("<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>", tg.text)
         self.assertEqual(_tag_violations(tg.text), [])
         plain = render_card(card, platform="local")
         self.assertEqual(plain.parse_mode, "")
-        self.assertIn("Powered by peacethefirst", plain.text)
+        self.assertIn("𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁", plain.text)
         self.assertNotIn("<i>", plain.text)
         self.assertNotIn("<b>", plain.text)
 
@@ -1143,7 +1143,7 @@ class MenuFamilyGuardTests(unittest.TestCase):
 
         out = help_menu("telegram")
         # The layer's stamp, styled — not a literal, not missing.
-        self.assertIn("<i>Powered by peacethefirst</i>", out)
+        self.assertIn("<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>", out)
         self.assertEqual(_tag_violations(out), [])
         # Every declared section renders, emoji-headed, in order.
         from nomorals.social.chat.control import menu_sections
@@ -1218,7 +1218,7 @@ class PagedTelegramMenuTests(unittest.TestCase):
                              f"page invalid for the surface: {chunk[:80]}")
         joined = "".join(chunk for chunk, _mode in calls)
         self.assertEqual(
-            joined.count("<i>Powered by peacethefirst</i>"), 1,
+            joined.count("<i>𝗣𝗼𝘄𝗲𝗿𝗲𝗱 𝗯𝘆 𝗽𝗲𝗮𝗰𝗲𝘁𝗵𝗲𝗳𝗶𝗿𝘀𝘁</i>"), 1,
             "the stamp renders once across all pages")
 
 
