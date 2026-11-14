@@ -139,6 +139,20 @@ def test_reaction_rules_and_platform_sets():
     assert pick_reaction("that joke landed 😂") == "😂"
 
 
+def test_pick_reaction_default_is_opt_out():
+    # The 👍 default is for callers that always want a face
+    # (celebrations, /react with no emoji named).  A caller
+    # that must only react when the moment calls for one
+    # passes default="" and gets no reaction on unmatched
+    # text instead of a fixed face on every message.
+    assert pick_reaction("and another thing") == "👍"
+    assert pick_reaction("and another thing", default="") == ""
+    assert pick_reaction("we won the jackpot!",
+                         default="") == "🏆"
+    assert pick_reaction("that joke landed 😂",
+                         default="") == "😂"
+
+
 def test_custom_emoji_registry_render_order():
     from nomorals.social.chat.expression import CustomEmojiRegistry
 

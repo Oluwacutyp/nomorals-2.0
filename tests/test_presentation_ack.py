@@ -298,14 +298,18 @@ class ReceiptHookTests(_RuntimeRig):
         self.assertTrue(_wait(lambda: len(adapter.sends) >= 1),
                         "the reply itself never sent")
         # Exactly once: a second answered message is a NEW ack;
-        # the first message's ack never repeats.
+        # the first message's ack never repeats.  (The second
+        # message matches a rule too — an unmatched message
+        # earns the read rung, not a reaction; see
+        # test_unmatched_message_gets_read_not_reaction.)
         runtime.on_message(ChatMessage(
-            chat=chat, incoming=True, text="and another thing",
+            chat=chat, incoming=True, text="we won the jackpot!!",
             sender="someone", message_id="m2", ts=time.time()))
         self.assertTrue(_wait(lambda: len(adapter.reactions) == 2))
         time.sleep(0.3)
         self.assertEqual(
             [r[1] for r in adapter.reactions], ["m1", "m2"])
+        self.assertEqual(adapter.reactions[1][2], "🏆")
 
     def test_reaction_choice_comes_from_pick_reaction(self) -> None:
         adapter = _AckAdapter("whatsapp")
@@ -318,6 +322,24 @@ class ReceiptHookTests(_RuntimeRig):
             "whatsapp", "222", "that's funny lol", message_id="w2"))
         self.assertEqual([r[2] for r in adapter.reactions],
                          ["🏆", "😂"])
+
+    def test_unmatched_message_gets_read_not_reaction(self) -> None:
+        # The over-fire (2026-11-14): the receipt ack reacted
+        # to EVERY message she answered, because pick_reaction
+        # defaulted unmatched text to 👍.  A message no rule
+        # matches earns no reaction — the read rung is the ack.
+        adapter = _AckAdapter("telegram-bot")
+        runtime = self._runtime({"telegram-bot": adapter})
+        runtime._acknowledge_inbound(_msg(
+            "telegram-bot", "111", "and another thing",
+            message_id="m9"))
+        self.assertEqual(adapter.reactions, [])
+        self.assertEqual(adapter.reads, ["telegram-bot:111"])
+        # …and a rule-matching message still earns its face.
+        runtime._acknowledge_inbound(_msg(
+            "telegram-bot", "111", "we won the jackpot!!",
+            message_id="m10"))
+        self.assertEqual([r[2] for r in adapter.reactions], ["🏆"])
 
     def test_exactly_once_per_message_and_per_id(self) -> None:
         adapter = _AckAdapter("telegram-bot")
@@ -352,8 +374,12 @@ class ReceiptHookTests(_RuntimeRig):
             "telegram-bot", "111", "/status"))
         self.assertEqual(adapter.reactions, [])
         runtime._command_stands_down = lambda m, c: False
+        # "/help" matches the question rule (via "help") — a
+        # non-stood-down command she answers earns its face.
+        # ("/status" matches no rule and earns the read rung,
+        # not a reaction; the stand-down gate is the same.)
         runtime._acknowledge_inbound(_msg(
-            "telegram-bot", "111", "/status", message_id="m9"))
+            "telegram-bot", "111", "/help", message_id="m9"))
         self.assertEqual(len(adapter.reactions), 1)
 
     def test_owner_stop_blocks_and_skips_journal(self) -> None:
@@ -398,11 +424,15 @@ class ReceiptHookTests(_RuntimeRig):
         runtime._acknowledge_inbound(_msg("telegram", "333", "hi"))
         self.assertEqual(adapter.reads, ["telegram:333"])
         # Reaction refused at the adapter → same fallback.
+        # ("hello" matches the welcome rule, so the reaction
+        # is attempted and refused; an unmatched message earns
+        # no reaction attempt at all — see
+        # test_unmatched_message_gets_read_not_reaction.)
         refusing = _AckAdapter("whatsapp", react_ok=False)
         runtime2 = self._runtime({"whatsapp": refusing})
         self._pair_whatsapp()
         runtime2._acknowledge_inbound(_msg(
-            "whatsapp", "222", "hi", message_id="r1"))
+            "whatsapp", "222", "hello", message_id="r1"))
         self.assertEqual(len(refusing.reactions), 1)  # attempted
         self.assertEqual(refusing.reads, ["whatsapp:222"])
 

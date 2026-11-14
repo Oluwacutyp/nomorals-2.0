@@ -2616,12 +2616,21 @@ _REACTION_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
 )
 
 
-def pick_reaction(context: str, *, platform: str = "") -> str:
+def pick_reaction(context: str, *, platform: str = "",
+                  default: str = "👍") -> str:
     """Her reaction for a moment of text/context — the first
     matching rule, adjusted to what the platform allows (a
-    disallowed pick degrades to 👍, which every set holds)."""
+    disallowed pick degrades to 👍, which every set holds).
+    No rule matching returns ``default`` — a caller that must
+    only react when the moment calls for one passes
+    ``default=\"\"`` and gets no reaction instead of a fixed
+    face on every message (the receipt ack's over-fire,
+    2026-11-14: the 👍 default made it react to every message
+    she answered)."""
     low = str(context or "").lower()
     for words, emoji in _REACTION_RULES:
         if any(w in low for w in words):
             return emoji if reaction_allowed(platform, emoji) else "👍"
-    return "👍" if reaction_allowed(platform, "👍") else ""
+    if not default:
+        return ""
+    return default if reaction_allowed(platform, default) else ""

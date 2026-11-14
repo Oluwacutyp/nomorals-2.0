@@ -9817,9 +9817,14 @@ class PartnerRuntime(
         if reactions_on and getattr(message, "message_id", ""):
             try:
                 from ...social.chat.expression import pick_reaction
+                # No fixed default: the receipt reacts only when
+                # the moment calls for a face (a matching rule);
+                # an unmatched message falls through to the read
+                # rung below instead of landing a 👍 on every
+                # message she answers (over-fire, 2026-11-14).
                 emoji = pick_reaction(
                     str(getattr(message, "text", "") or ""),
-                    platform=platform)
+                    platform=platform, default="")
             except Exception as exc:  # noqa: BLE001 - a receipt is cosmetic
                 record_failure(
                     "runtime.PartnerRuntime._acknowledge_inbound:pick",
