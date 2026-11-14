@@ -548,8 +548,6 @@
 # Placeholder-example key used in config.py docs; no setting reads it.
 # NM_FLOAT=
 # Config key read by Devon code.
-# NM_BROWSER_PLAYWRIGHT=
-# Config key read by Devon code.
 # NM_CAPTCHA_API_MODE=
 # Config key read by Devon code.
 # NM_CAPTCHA_DAILY_CAP_USD=

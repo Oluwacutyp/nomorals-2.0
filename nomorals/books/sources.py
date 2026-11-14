@@ -28,7 +28,7 @@ Fetch strategy (per adapter, in order):
 2. on a block (403/503, Cloudflare "Just a moment" markers, empty body)
    the repo's :class:`nomorals.tools.browser.BrowserSession` is reused
    (persistent cookies under ``workspace/books/reader/sessions/``);
-   when ``NM_BROWSER_PLAYWRIGHT=1`` that session transparently uses
+   when ``playwright`` is installed that session transparently uses
    headless Chromium — the browser-context fallback for JS-walled pages;
 3. anything else raises :class:`SourceError` with an actionable message.
 
@@ -747,7 +747,7 @@ class Fetcher:
     # -- tier 2: browser context ----------------------------------------------
     def browser_get(self, url: str) -> tuple[str, str]:
         """Fetch through the repo's BrowserSession (headless Chromium when
-        ``NM_BROWSER_PLAYWRIGHT=1``).  The fallback for Cloudflare-ish
+        ``playwright`` is installed).  The fallback for Cloudflare-ish
         blocks and JS-rendered pages."""
         from ..tools.browser import BrowserSession
 

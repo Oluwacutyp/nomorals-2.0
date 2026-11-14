@@ -6,9 +6,9 @@ follow links, fill and submit forms — with a persistent identity across
 steps. Parsing uses ``html.parser`` (stdlib) into a small DOM; no
 BeautifulSoup, no Chromium.
 
-If ``playwright`` is installed **and** ``NM_BROWSER_PLAYWRIGHT=1``, sessions
-transparently use headless Chromium instead (for JS-heavy sites). Off by
-default: zero extra dependencies.
+If ``playwright`` is installed, sessions transparently use headless
+Chromium instead (for JS-heavy sites). Without it, sessions stay on
+the standard library — zero extra dependencies.
 
 One tool: ``browser(action, ...)`` behind ``NET_BROWSER``.
 """

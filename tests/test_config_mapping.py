@@ -32,7 +32,14 @@ TEMPLATE = REPO_ROOT / "scripts" / "devon_ec2_env.template"
 # pre-existing test_devon_ec2_deploy.py): the documented unknown-key
 # fixture, and prefix fragments (NM_HUB_ / NM_RUNTIME_ are prefixes,
 # not keys you can set).
-EXCLUDED = {"NM_FOO_BAR"}
+# NM_FLOAT and NM_STDIN are documented placeholders, not settable keys:
+# NM_FLOAT is the placeholder example in core/config.py's _coerce
+# docstring (the template itself says "no setting reads it"; it was
+# removed as a phantom in ef337425 and re-added as documentation in
+# 005c6b42). NM_STDIN is only the heredoc delimiter token in
+# execbox.py:233, never read as an environment variable (the template
+# marks it "TEST-ONLY / placeholder").
+EXCLUDED = {"NM_FOO_BAR", "NM_FLOAT", "NM_STDIN"}
 
 
 def _template_keys() -> list[str]:
