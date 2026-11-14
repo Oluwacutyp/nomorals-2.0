@@ -63,9 +63,12 @@ The contract pinned here:
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
 import sqlite3
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -75,7 +78,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import nomorals.agents.coding as coding_module
 from nomorals.agents.coding import CodingResult
-from nomorals.agents.role_specs import BUILTIN_ROLES
+from nomorals.agents.role_specs import (
+    BUILTIN_ROLES,
+    RoleEnforcingRegistry,
+)
 from nomorals.agents.roles import MissionCodingAgent
 from nomorals.missions.progress import payload_text
 from nomorals.storage.db import Database
@@ -345,6 +351,123 @@ class AllowlistDriftPinTests(unittest.TestCase):
                           f"{name} needs {spec.capability}, outside "
                           f"CODING_CAPABILITIES — it would silently "
                           f"vanish from the scoped registry's schemas")
+
+
+# ── code-graph tools on the coding surface ───────────────────────────
+#
+# Parent decision (2026-11-14): the coding loop gets the code graph —
+# graph_build / graph_query / graph_status join CODING_TOOLS and the
+# coder RoleSpec allowlist in the same change.  These tests prove the
+# wiring end-to-end, through the exact scoped registries the two
+# bridges build: the calls are admitted and return REAL answers from
+# a freshly built graph over a fixture repo, the loop's own scope
+# gate admits them, and the surface widened ONLY for the graph (a
+# registered but non-allowlisted tool is still refused on both
+# paths).
+
+_GRAPH_FILES = {
+    "pkg/__init__.py": '"""Package init."""\n',
+    "pkg/a.py": (
+        '"""Alpha module."""\n\n\n'
+        "def bar():\n"
+        '    """Bar the helper."""\n'
+        "    return 1\n\n\n"
+        "def foo():\n"
+        '    """Foo calls bar."""\n'
+        "    bar()\n"
+    ),
+    "pkg/b.py": (
+        "from pkg.a import bar\n\n\n"
+        "def helper():\n"
+        '    """Helper calls bar."""\n'
+        "    bar()\n"
+    ),
+}
+
+
+def _make_graph_repo() -> str:
+    root = tempfile.mkdtemp(prefix="graphallow_repo_")
+    for rel, content in _GRAPH_FILES.items():
+        p = Path(root) / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(content, encoding="utf-8")
+    return root
+
+
+class GraphToolsCodingSurfaceTests(unittest.TestCase):
+
+    def setUp(self):
+        self.repo = _make_graph_repo()
+        self.home = tempfile.mkdtemp(prefix="graphallow_home_")
+        self._env = mock.patch.dict(os.environ, {"NM_HOME": self.home})
+        self._env.start()
+        self.addCleanup(self._env.stop)
+        self.addCleanup(shutil.rmtree, self.repo, True)
+        self.addCleanup(shutil.rmtree, self.home, True)
+        registry = ToolRegistry()
+        ctx = SimpleNamespace(
+            db=None, tools=registry, memory=None, router=None,
+            settings=SimpleNamespace(workspace_dir=self.repo),
+            extras={})
+        # The graph tools capture registry.context at register time.
+        registry.context = ctx
+        registry.register_builtins()
+        self.ctx = ctx
+        self.registry = registry
+        self.role_scoped = CodingRoleAgent(ctx, registry).tools
+        self.mission_scoped = RoleEnforcingRegistry(
+            registry, BUILTIN_ROLES["coder"], ctx)
+
+    def _scoped_registries(self):
+        return (("role", self.role_scoped),
+                ("mission", self.mission_scoped))
+
+    def test_graph_tools_are_on_both_allowlists(self):
+        for name in ("graph_build", "graph_query", "graph_status"):
+            self.assertIn(name, CODING_TOOLS)
+            self.assertIn(name, BUILTIN_ROLES["coder"].tool_allowlist)
+        for label, scoped in self._scoped_registries():
+            self.assertIn("graph_query", scoped.names(), label)
+            # The brain is offered the graph: it appears in the
+            # tool surface the loop presents.
+            self.assertIn("graph_query", scoped.prompt_listing(), label)
+
+    def test_graph_calls_flow_through_both_scoped_registries(self):
+        for label, scoped in self._scoped_registries():
+            built = scoped.call("graph_build", path=".")
+            self.assertTrue(built.ok, f"{label}: {built.error}")
+            self.assertEqual(built.value["files_total"], 3)
+            queried = scoped.call(
+                "graph_query", path=".", op="who_calls", name="bar")
+            self.assertTrue(queried.ok, f"{label}: {queried.error}")
+            self.assertEqual(
+                {c["caller"] for c in queried.value["callers"]},
+                {"pkg.a.foo", "pkg.b.helper"}, label)
+            status = scoped.call("graph_status", path=".")
+            self.assertTrue(status.ok, f"{label}: {status.error}")
+            self.assertEqual(status.value["files"], 3)
+            self.assertGreater(status.value["nodes"], 0)
+
+    def test_loop_scope_gate_admits_graph_tools(self):
+        for label, scoped in self._scoped_registries():
+            loop = coding_module.CodingAgent(
+                self.ctx, root=self.repo, tools=scoped)
+            self.assertIs(loop._scoped_tools, scoped)
+            for name in ("graph_build", "graph_query", "graph_status"):
+                # No raise: the loop's own gate admits the graph tools.
+                loop._require_scope(name)
+            with self.assertRaises(coding_module._ScopeDenied,
+                                  msg=label):
+                loop._require_scope("browser")
+
+    def test_non_graph_tools_still_refused(self):
+        # "browser" is a real registered tool, just not on the coding
+        # surface — the refusal must come from the allowlist, not
+        # from the tool being unknown.
+        self.assertIsNotNone(self.registry.get("browser"))
+        for label, scoped in self._scoped_registries():
+            denied = scoped.call("browser", url="https://example.com")
+            self.assertFalse(denied.ok, label)
 
 
 # ── devon mission routing ────────────────────────────────────────────

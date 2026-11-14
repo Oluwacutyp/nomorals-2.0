@@ -147,6 +147,9 @@ CODING_TOOLS: tuple[str, ...] = (
     "index_repo",    # Phase D: warm the code index the coding loop searches
     "repo_map",      # structural repo map (tools/repo_index)
     "symbol_search", # ranked symbol search / who-imports / callers
+    "graph_build",   # build the queryable code graph (tools/code_graph)
+    "graph_query",   # who-calls / calls / where-defined / owner / search
+    "graph_status",  # code-graph status: files/nodes/edges, parser
     "show_diff",     # the working-tree diff as one read (fs.read)
     "fs_list",       # workspace navigation (fs.read)
     "fs_glob",
@@ -160,10 +163,11 @@ CODING_TOOLS: tuple[str, ...] = (
 #: Capability grant covering exactly the allowlisted tools' capabilities:
 #: fs.read (fs_read, fs_list, fs_glob, fs_info, fs_search, fs_read_range,
 #: fs_hash, git_status, git_diff, show_diff, index_repo, repo_map,
-#: symbol_search),
+#: symbol_search, graph_build),
 #: fs.write (edit_file, apply_patch),
 #: exec.shell (shell_run, run_tests, lint),
-#: mem.read (search_code, get_symbol — read the code index).
+#: mem.read (search_code, get_symbol — read the code index; graph_query,
+#: graph_status — read the code graph).
 #: The name check in RoleScopedRegistry still denies every non-allowlisted
 #: tool, whatever its capability.
 CODING_CAPABILITIES: CapabilitySet = CapabilitySet.of(

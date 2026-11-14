@@ -291,6 +291,7 @@ BUILTIN_ROLES: dict[str, RoleSpec] = {
             "show_diff", "fs_list", "fs_glob", "fs_info", "fs_search",
             "fs_read_range", "fs_hash", "get_symbol",
             "repo_map", "symbol_search",
+            "graph_build", "graph_query", "graph_status",
         ),
         budget=_budget(1200, 500_000),
         output_contract=("files_changed", "tests_run", "tests_passed", "notes"),
