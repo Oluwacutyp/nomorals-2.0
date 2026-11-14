@@ -306,6 +306,81 @@ class ToolSettings:
 
 
 @dataclass
+class MCPServerEntry:
+    """One MCP server entry in the ``mcp.servers`` TOML table.
+
+    A server is a spawn command (stdio) or an endpoint URL (http).
+    ``enabled`` is per-server and defaults to False: nothing connects
+    unless the operator enables it in config. ``env`` names
+    environment variables passed to the spawned server (values come
+    from the process environment / vault at spawn time — never from
+    the config file itself, so no token ever lands in a TOML).
+    """
+
+    command: str = ""
+    args: list[str] = field(default_factory=list)
+    env: list[str] = field(default_factory=list)
+    transport: str = "stdio"  # stdio | http
+    url: str = ""
+    enabled: bool = False
+    timeout_s: float = 0.0  # 0 = the mcp.default_timeout_s
+
+
+@dataclass
+class MCPSettings:
+    """The MCP CLIENT (Devon calling external MCP servers).
+
+    Master switch ``enabled`` is False by default and every known
+    server is disabled by default: the client connects to nothing
+    until the operator opts in, per server, in config. ``servers``
+    is a TOML table keyed by server name; an entry with a known name
+    overrides that server's shipped default, and a new name adds a
+    server. See ``nomorals/tools/mcp_client.py`` (DEFAULT_MCP_SERVERS)
+    for the shipped defaults.
+    """
+
+    enabled: bool = False
+    default_timeout_s: float = 30.0
+    max_payload_bytes: int = 1_000_000
+    max_servers: int = 8
+    servers: dict[str, MCPServerEntry] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # _build passes the TOML table through as plain dicts; coerce
+        # each entry to MCPServerEntry here (unknown keys are a config
+        # error, never silently dropped — a mistyped server entry must
+        # not vanish into a default).
+        coerced: dict[str, MCPServerEntry] = {}
+        for name, entry in dict(self.servers).items():
+            if isinstance(entry, MCPServerEntry):
+                coerced[name] = entry
+                continue
+            if not isinstance(entry, dict):
+                from nomorals.core.errors import ConfigError
+                raise ConfigError(
+                    f"mcp.servers.{name} must be a table, got "
+                    f"{type(entry).__name__}")
+            unknown = set(entry) - {
+                "command", "args", "env", "transport", "url",
+                "enabled", "timeout_s"}
+            if unknown:
+                from nomorals.core.errors import ConfigError
+                raise ConfigError(
+                    f"mcp.servers.{name}: unknown key(s) "
+                    f"{sorted(unknown)}")
+            coerced[name] = MCPServerEntry(
+                command=str(entry.get("command") or ""),
+                args=[str(a) for a in (entry.get("args") or [])],
+                env=[str(e) for e in (entry.get("env") or [])],
+                transport=str(entry.get("transport") or "stdio"),
+                url=str(entry.get("url") or ""),
+                enabled=bool(entry.get("enabled", False)),
+                timeout_s=float(entry.get("timeout_s") or 0.0),
+            )
+        self.servers = coerced
+
+
+@dataclass
 class SocialSettings:
     enabled: bool = True
     dry_run: bool = False
@@ -871,6 +946,7 @@ class Settings:
     memory: MemorySettings = field(default_factory=MemorySettings)
     training: TrainingSettings = field(default_factory=TrainingSettings)
     tools: ToolSettings = field(default_factory=ToolSettings)
+    mcp: MCPSettings = field(default_factory=MCPSettings)
     social: SocialSettings = field(default_factory=SocialSettings)
     mission: MissionSettings = field(default_factory=MissionSettings)
     api: APISettings = field(default_factory=APISettings)

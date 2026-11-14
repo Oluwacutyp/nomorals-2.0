@@ -711,6 +711,16 @@ class RuntimeMemoryMixin:
         from ...audio.models import control_models
         return control_models(tail or "")
 
+    def _control_mcp(self, tail: str, *, chat_key: str = "") -> str:
+        """The MCP client in chat. Owner-only.
+
+        /mcp — status · /mcp list — servers · /mcp tools [server] —
+        tool lists · /mcp call <server> <tool> [json-args] — one call ·
+        /mcp close [server] — drop connections.
+        """
+        from ...tools.mcp_client import control_mcp
+        return control_mcp(tail or "", self.settings)
+
     def _control_character(self, tail: str, *, chat_key: str = "") -> str:
         """Conversational story characters — talk to them. Owner-only.
 
