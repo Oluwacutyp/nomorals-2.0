@@ -604,6 +604,19 @@ def fit_scorer(char_id: str, *, store: LearnStore | None = None,
 # on, compiled into a versioned prompt instead of a fitted model.
 # The persona block (Character.persona_block) is prepended by the
 # caller at USE time, not compiled in.
+#
+# Runtime use is DELIBERATELY not wired here (unlike npc_dialogue,
+# which GameMaster._npc_speak_prompt resolves): Character.speak builds
+# its prompt from CharacterContextBuilder + "Situation: {context}\n
+# {name}:" — there is NO base instruction in the runtime prompt for
+# the compiled prompt to substitute into, the compiled render's
+# "Line:" completion label differs from the "{name}:" turn label the
+# speak path uses, and the compiler's validation compares
+# render_base_prompt against render_prompt — not the persona +
+# context-builder runtime prompt — so the measured gain would not
+# transfer to the prompt that actually runs. Wiring it in would be a
+# prompt redesign, not a substitution; it needs its own lane that
+# first gives the speak path a real instruction slot to swap.
 
 #: The character dialogue task: one line, in character, from a context.
 CHARACTER_DIALOGUE_SIGNATURE = {

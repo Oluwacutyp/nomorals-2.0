@@ -223,12 +223,16 @@ class NPCJournal:
 
     def journal(self, game_id: str, npc_id: str, *, line: str,
                 candidates: list[dict[str, Any]],
-                chosen: int, situation: str = "") -> str:
+                chosen: int, situation: str = "",
+                prompt_version: str = "base") -> str:
         """Journal one spoken NPC line with its scored candidates.
         ``candidates`` are the ``score_npc_candidates_full`` dicts
         (text + score + REAL feature vector) — the batch fit trains on
-        these, so placeholders are never stored. Returns the entry id.
-        Never raises."""
+        these, so placeholders are never stored. ``prompt_version`` is
+        the prompt that produced the line — "base" or "npc_dialogue
+        v<N>" — recorded with the entry so a grade earned by the line
+        attributes to the prompt that produced it. Returns the entry
+        id. Never raises."""
         try:
             with self._lock:
                 doc = self._load(game_id, npc_id)
@@ -237,6 +241,7 @@ class NPCJournal:
                     "id": f"{int(time.time() * 1000)}-{len(entries)}",
                     "ts": time.time(), "line": line,
                     "situation": (situation or "")[:200],
+                    "prompt_version": str(prompt_version or "base"),
                     "candidates": [{"text": str(c.get("text", "")),
                                     "score": float(c.get("score", 0.0)),
                                     "features": dict(c.get("features") or {})}
@@ -388,6 +393,60 @@ def compile_npc_prompt(game_id: str, npc_id: str, *, suggest: Any = None,
     signature = PromptSignature(**NPC_DIALOGUE_SIGNATURE)
     return compile_prompt(signature, examples, suggest=suggest,
                           metric=metric, store=store, settings=settings)
+
+
+def resolve_npc_prompt(npc_id: str, situation: str, *,
+                       settings: Any = None,
+                       store: Any = None
+                       ) -> tuple[str, str] | None:
+    """The compiled npc_dialogue prompt for one new situation, or None.
+
+    Returns ``(rendered_text, version_label)`` when the task's latest
+    compiled prompt is USABLE at runtime, else None — and the caller
+    uses the base instruction exactly as today. Usable means:
+    compiling is enabled, a compiled prompt exists, its report is
+    present, and it is either VALIDATED — or unvalidated with the
+    config flag ``use_unvalidated`` on (``[prompt_compiler]``,
+    default off). The gate lives in config, never in a hardcoded
+    boolean here. ``settings`` is a ``PromptCompilerSettings`` (or
+    any object with ``enabled`` / ``use_unvalidated``); when None it
+    is read from the config file, the same pattern the ``nm prompt``
+    CLI and the ``prompt_compile`` tool use — so the flag is live
+    without the caller threading settings through. The caller
+    prepends the persona block (``NPCProfile.to_prompt``) at USE
+    time; the compiled prompt is the task instruction + demos, never
+    the persona. ``npc_id`` is accepted for symmetry with
+    :func:`compile_npc_prompt` — the store is per-task, not per-NPC.
+    Never raises: any failure is None, and the base carries.
+    """
+    try:
+        from ..llm.prompt_compiler import (
+            PromptSignature,
+            PromptStore,
+            render_prompt,
+        )
+
+        if settings is None:
+            from ..core.config import load_settings
+
+            settings = load_settings().prompt_compiler
+        if settings is not None and not getattr(settings, "enabled",
+                                                True):
+            return None
+        compiled = (store or PromptStore()).load("npc_dialogue")
+        if compiled is None or compiled.report is None:
+            return None
+        if not compiled.report.validated and not getattr(
+                settings, "use_unvalidated", False):
+            return None
+        signature = PromptSignature(**NPC_DIALOGUE_SIGNATURE)
+        text = render_prompt(
+            signature, compiled.demos, compiled.counter_examples,
+            compiled.instruction_note, {"situation": situation or ""})
+        return text, f"npc_dialogue v{compiled.version}"
+    except Exception:  # noqa: BLE001 - a bad store never kills a line
+        _log.debug("npc compiled prompt resolve failed", exc_info=True)
+        return None
 
 
 # ── combat policy ───────────────────────────────────────────────────────

@@ -356,11 +356,19 @@ class GameMaster:
 
     def __init__(self, npc_store: NPCStore | None = None,
                  suggest: Callable[[str], str] | None = None,
-                 seed: int | None = None) -> None:
+                 seed: int | None = None,
+                 prompt_settings: Any = None,
+                 prompt_store: Any = None) -> None:
         self.store = npc_store or NPCStore()
         self._suggest = suggest
         self.rng = random.Random(seed)
         self._lock = threading.RLock()
+        # Compiled-prompt wiring (see _npc_speak_prompt): the resolver
+        # reads the config file when these are None, so a plain
+        # GameMaster() still honours [prompt_compiler]. Tests inject
+        # a scratch store + explicit settings here.
+        self._prompt_settings = prompt_settings
+        self._prompt_store = prompt_store
         # per-game index of the last narration template used (no repeats)
         self._last_template: dict[str, int] = {}
 
@@ -481,22 +489,12 @@ class GameMaster:
         n = max(1, int(candidates or 1))
         if n == 1:
             line = self._npc_speak_one(npc, situation)
-            self._journal_npc_line(npc, situation, [line])
             return line
+        prompt, version = self._npc_speak_prompt(npc, situation)
         cands: list[str] = []
         if self.model_on:
             for _ in range(n):
-                reply = self._ask(
-                    f"{npc.to_prompt()}\n\n"
-                    f"Situation: {situation}\n"
-                    f"Relevant memories:\n"
-                    + "\n".join(f"- {m['text']}"
-                                for m in npc.recall(situation, limit=3))
-                    + f"\n\nSpeak as {npc.name}: one or two sentences, in your "
-                    f"voice. Stay in character. Reply with the line only — "
-                    f"no analysis, no preamble, no stage directions.",
-                    max_len=800,
-                )
+                reply = self._ask(prompt, max_len=800)
                 if reply:
                     clean, reason = _sanitize_model_line(reply,
                                                          kind="speak")
@@ -506,6 +504,7 @@ class GameMaster:
                         _journal_sanitize_reject("npc_speak", reason, reply)
         if not cands:
             cands = self._npc_forge_lines(npc, situation, n)
+            version = "forge"
         if not cands:
             return f"{npc.name} waits, saying nothing."
         try:
@@ -522,7 +521,8 @@ class GameMaster:
             try:
                 NPCJournal().journal(
                     game_id=npc.game_id, npc_id=npc.id, line=line,
-                    candidates=scored, chosen=best, situation=situation)
+                    candidates=scored, chosen=best, situation=situation,
+                    prompt_version=version)
             except Exception:  # noqa: BLE001 - journaling never kills a line
                 _log.debug("npc journal failed", exc_info=True)
             return line
@@ -530,28 +530,64 @@ class GameMaster:
             _log.debug("npc scorer failed", exc_info=True)
             return cands[0]
 
-    def _npc_speak_one(self, npc: NPCProfile, situation: str) -> str:
-        """The v1 single-line path, unchanged: one brain line, else
-        one template line."""
-        if self.model_on:
-            reply = self._ask(
-                f"{npc.to_prompt()}\n\n"
+    def _npc_speak_prompt(self, npc: NPCProfile,
+                          situation: str) -> tuple[str, str]:
+        """Build the speak prompt: persona + memories + task instruction.
+
+        Returns ``(prompt, version_label)``. The task instruction is
+        the compiled ``npc_dialogue`` prompt when one is usable
+        (validated by default; unvalidated only under the
+        ``[prompt_compiler]`` ``use_unvalidated`` flag), else the base
+        instruction exactly as today — byte-for-byte the v1 prompt.
+        The persona block is always prepended at use time — the
+        compiled prompt never replaces it — and the boundary-filtered
+        memories stay in the prompt either way. ``version_label`` is
+        "base" or "npc_dialogue v<N>": the journal records it with
+        the line, so a grade earned by the line attributes to the
+        prompt that produced it.
+        """
+        from .npc_learn import resolve_npc_prompt
+
+        persona = npc.to_prompt()
+        memories = "\n".join(f"- {m['text']}"
+                             for m in npc.recall(situation, limit=3))
+        resolved = resolve_npc_prompt(
+            npc.id, situation, settings=self._prompt_settings,
+            store=self._prompt_store)
+        if resolved is not None:
+            text, version = resolved
+            return (f"{persona}\n\nRelevant memories:\n{memories}\n\n"
+                    f"{text}", version)
+        return (f"{persona}\n\n"
                 f"Situation: {situation}\n"
-                f"Relevant memories:\n"
-                + "\n".join(f"- {m['text']}"
-                            for m in npc.recall(situation, limit=3))
-                + f"\n\nSpeak as {npc.name}: one or two sentences, in your "
+                f"Relevant memories:\n{memories}"
+                f"\n\nSpeak as {npc.name}: one or two sentences, in your "
                 f"voice. Stay in character. Reply with the line only — "
                 f"no analysis, no preamble, no stage directions.",
-                max_len=800,  # sanitizer bounds the output, not the cap
-            )
+                "base")
+
+    def _npc_speak_one(self, npc: NPCProfile, situation: str) -> str:
+        """The v1 single-line path, unchanged: one brain line, else
+        one template line. The line is journaled with the prompt
+        version that produced it — a template line records "forge",
+        never a prompt version it did not come from."""
+        prompt, version = self._npc_speak_prompt(npc, situation)
+        line = ""
+        if self.model_on:
+            reply = self._ask(prompt, max_len=800)
             if reply:
                 clean, reason = _sanitize_model_line(reply, kind="speak")
                 if clean:
-                    return clean
-                _journal_sanitize_reject("npc_speak", reason, reply)
-        # — template forge —
-        return self._npc_forge_lines(npc, situation, 1)[0]
+                    line = clean
+                else:
+                    _journal_sanitize_reject("npc_speak", reason, reply)
+        if not line:
+            # — template forge —
+            line = self._npc_forge_lines(npc, situation, 1)[0]
+            version = "forge"
+        self._journal_npc_line(npc, situation, [line],
+                               prompt_version=version)
+        return line
 
     def _npc_forge_lines(self, npc: NPCProfile, situation: str,
                          n: int) -> list[str]:
@@ -570,17 +606,22 @@ class GameMaster:
                 for line in picked]
 
     def _journal_npc_line(self, npc: NPCProfile, situation: str,
-                          texts: list[str]) -> None:
+                          texts: list[str],
+                          prompt_version: str = "base") -> None:
         """Journal one spoken line (best-effort). The single-line path
         scores its own line so the journal carries a real feature
-        vector for the retrain loop."""
+        vector for the retrain loop. ``prompt_version`` is the prompt
+        that produced the line ("base", "npc_dialogue v<N>", or
+        "forge") — recorded with the entry so a grade attributes to
+        its prompt."""
         try:
             from .npc_learn import NPCJournal, score_npc_candidates_full
 
             scored = score_npc_candidates_full(texts, npc, situation)
             NPCJournal().journal(
                 game_id=npc.game_id, npc_id=npc.id, line=texts[0],
-                candidates=scored, chosen=0, situation=situation)
+                candidates=scored, chosen=0, situation=situation,
+                prompt_version=prompt_version)
         except Exception:  # noqa: BLE001 - journaling never kills a line
             _log.debug("npc journal failed", exc_info=True)
 

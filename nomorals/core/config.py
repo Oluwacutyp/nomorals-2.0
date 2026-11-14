@@ -415,13 +415,17 @@ class PromptCompilerSettings:
     its signature and those win. ``enabled`` is the master switch —
     off means compiling refuses plainly. Compiles never invent a
     grade and never pad with made-up examples: too few graded rows
-    is a refusal, not a guess.
+    is a refusal, not a guess. ``use_unvalidated`` is the RUNTIME
+    gate — off by default: only VALIDATED compiles replace the base
+    instruction at runtime; an unvalidated compile is used only when
+    this is on. Compiling itself is unaffected.
     """
 
     enabled: bool = True
     default_min_examples: int = 8
     default_max_demos: int = 4
     default_max_counter_examples: int = 2
+    use_unvalidated: bool = False
 
 
 @dataclass
