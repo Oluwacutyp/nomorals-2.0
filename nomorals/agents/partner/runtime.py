@@ -7918,9 +7918,35 @@ class PartnerRuntime(
                     else f"{arg}: {result.get('error', 'could not start')}")
 
         if kind == "stop":
-            result = self.stop_platform(arg)
-            return (f"{arg}: stopped" if result.get("ok")
-                    else f"{arg}: {result.get('error', 'could not stop')}")
+            # Bare /stop stops the platform this command arrived on;
+            # "/stop all" stops every running platform. Extra words
+            # after the platform are ignored (the platform is one
+            # word) — a stop that refuses to stop is the bug
+            # (owner 2026-11-14: "/stop takes at most 1 argument(s)").
+            target = (arg or "").strip().lower()
+            if not target:
+                if message is not None:
+                    try:
+                        target = str(
+                            getattr(message.chat, "platform", "") or ""
+                        ).strip().lower()
+                    except Exception:  # noqa: BLE001 - no message shape, no stop
+                        target = ""
+                if not target:
+                    return ("stop what? /stop <platform> — "
+                            "/platforms lists what's running")
+            if target == "all":
+                try:
+                    names = list(self.gateway._snapshot_adapters().keys())
+                except Exception:  # noqa: BLE001 - no gateway, nothing to stop
+                    names = []
+                stopped = [n for n in names if self.stop_platform(n).get("ok")]
+                if not stopped:
+                    return "nothing is running to stop"
+                return f"stopped: {', '.join(stopped)}"
+            result = self.stop_platform(target)
+            return (f"{target}: stopped" if result.get("ok")
+                    else f"{target}: {result.get('error', 'could not stop')}")
 
         if kind in {"update", "pull", "deploy", "restart"}:
             # Step 9: chat self-update — drain → checkpoint → restart → resume.

@@ -318,5 +318,75 @@ class StackRunTests(unittest.TestCase):
         self.assertEqual(self._owner("hello there"), "")
 
 
+class StopTests(unittest.TestCase):
+    """Bare /stop stops the platform the command arrived on; /stop
+    all stops every running platform; trailing words never refuse
+    the stop (owner 2026-11-14: "/stop takes at most 1
+    argument(s)")."""
+
+    def setUp(self):
+        self.rt = _bare_runtime()
+        self.rt._owner_chats = {"telegram:1", "whatsapp:1"}
+        self.stopped = []
+        self.running = {"telegram": True, "whatsapp": True}
+
+        def stop_one(name):
+            name = name.strip().lower()
+            if name not in self.running:
+                return {"ok": False, "error": f"{name} is not running"}
+            del self.running[name]
+            self.stopped.append(name)
+            return {"ok": True, "platform": name}
+
+        self.rt.gateway = SimpleNamespace(
+            stop_one=stop_one,
+            _snapshot_adapters=lambda: dict(self.running))
+
+    def _owner(self, text, platform="telegram"):
+        chat = SimpleNamespace(key=f"{platform}:1", platform=platform)
+        return self.rt.handle_control(text, f"{platform}:1",
+                                       message=_msg(chat, text))
+
+    def test_bare_stop_stops_the_arriving_platform(self):
+        from nomorals.social.chat.control import parse_control
+        cmd = parse_control("/stop")
+        self.assertEqual(cmd.kind, "stop")
+        self.assertEqual(cmd.arg, "")
+        out = self._owner("/stop", platform="whatsapp")
+        self.assertEqual(out, "whatsapp: stopped")
+        self.assertEqual(self.stopped, ["whatsapp"])
+
+    def test_stop_platform_still_works(self):
+        self.assertEqual(self._owner("/stop whatsapp"), "whatsapp: stopped")
+        self.assertEqual(self.stopped, ["whatsapp"])
+
+    def test_stop_trailing_words_do_not_refuse(self):
+        from nomorals.social.chat.control import parse_control
+        cmd = parse_control("/stop telegram bot")
+        self.assertEqual(cmd.kind, "stop")
+        self.assertEqual(cmd.arg, "telegram")
+        out = self._owner("/stop telegram bot")
+        self.assertEqual(out, "telegram: stopped")
+        self.assertEqual(self.stopped, ["telegram"])
+
+    def test_stop_all_stops_every_running_platform(self):
+        out = self._owner("/stop all")
+        self.assertEqual(out, "stopped: telegram, whatsapp")
+        self.assertEqual(sorted(self.stopped), ["telegram", "whatsapp"])
+
+    def test_stop_all_when_nothing_runs(self):
+        self.running.clear()
+        self.assertEqual(self._owner("/stop all"), "nothing is running to stop")
+
+    def test_stop_unknown_platform_reports_it(self):
+        self.assertEqual(self._owner("/stop discord"),
+                         "discord: discord is not running")
+
+    def test_bare_stop_without_a_message_names_a_platform(self):
+        out = self.rt.handle_control("/stop", "telegram:1")
+        self.assertIn("stop what?", out)
+        self.assertIn("/platforms", out)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -372,7 +372,11 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "ping": (0, 0),
     "platforms": (0, 0),
     "start": (1, 1),
-    "stop": (1, 1),
+    "stop": (0, None),  # /stop [platform|all] — bare stops the platform
+    # this command arrived on; extra words after the platform are
+    # ignored (the platform is one word). The owner typed /stop
+    # with trailing words and got "takes at most 1 argument(s)"
+    # (2026-11-14) — a stop that refuses to stop is the bug.
     "mood": (0, 10),  # label, or several dim=NN pairs
     "mode": (1, 1),
     "agent": (0, None),  # /agent [adaptive|autonomous|planning|+x|-x|status|off|tick]
@@ -2200,8 +2204,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "start": {"what": "hot-start a chat platform without restarting the system.",
               "usage": "/start <platform>", "example": "/start telegram",
               "related": "/stop /platforms"},
-    "stop": {"what": "hot-stop a chat platform (it keeps running data on disk).",
-             "usage": "/stop <platform>", "example": "/stop whatsapp",
+    "stop": {"what": "hot-stop a chat platform (it keeps running data on disk). "
+             "Bare /stop stops the platform this command arrived on; "
+             "/stop all stops every running platform.",
+             "usage": "/stop [platform|all]", "example": "/stop whatsapp",
              "related": "/start /platforms"},
     "mood": {"what": "set her mood — a label (happy, tired, playful, calm, …), or set "
                    "dimensions directly (0-100): affection, happiness, energy, "
