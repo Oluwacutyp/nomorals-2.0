@@ -1397,6 +1397,8 @@ class RuntimeMetaMixin:
         "quit", "upgrade", "train", "repair", "trial",
         # starts background work
         "mission", "schedule", "routine", "monitor", "watch", "track",
+        # installs software / downloads multi-GB weights (minutes-long)
+        "models",
         # state toggles / autonomous loops
         "proactive", "model", "features", "arena",
         # money

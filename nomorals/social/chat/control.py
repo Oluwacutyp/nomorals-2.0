@@ -729,6 +729,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "api": (0, None),        # /api list | <connector> [json params]
     "connectors": (0, 2),   # /connectors [list|status|connect] [name] — manage the service connectors
     "provision": (0, None),  # /provision [service] | login <service> <username> — Devon fetches missing API keys herself (owner only)
+    "models": (0, None),     # /models [all|status|learners|<name>] — install every missing model on this box (owner only)
     "pair": (0, None),        # /pair [whatsapp <number> [label]|code|start|stop|restart|remove <id>] — pairing-with-code account pool (§15; owner only)
     "massreact": (0, None),   # /massreact <post link> | <emoji> [| count] [| live] — react from every paired account (§14; owner only, arm-gated)
     "pollvote": (0, None),    # /pollvote <poll link> | <option> [| count] [| live] — vote from every paired account (§14; owner only, arm-gated)
@@ -1322,7 +1323,7 @@ NON_STACKABLE_COMMANDS: frozenset[str] = frozenset({
     *GAME_COMMANDS,
     "game", "npc", "charagent", "dm", "predict",
     "quit", "forget", "restart", "deploy", "update", "pull",
-    "provision",
+    "provision", "models",
 })
 
 #: The exact owner-grant denial :func:`handle_control` returns. The stack
@@ -3576,6 +3577,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/provision [service] | /provision login <service> <username>",
             "example": "/provision hf",
             "related": "/connectors /browser watch"},
+    "models": {"what": "one command that installs every missing model on this box: the character backends (XTTS / RVC / face swap), the DJ beat tracker (madmom), the voice STT/TTS engines, the image models (Stable Diffusion 1.5, ACE-Step 1.5) and the small-ML backends (scikit-learn, LightGBM, XGBoost, CatBoost). Bare installs everything missing that fits this box; the journal-trained learners are status only (they train from journal rows, not downloads). Owner only; never offered on the public bot.",
+            "usage": "/models | /models status | /models learners | /models <name>",
+            "example": "/models",
+            "related": "/character provision /dj desk provision /provision"},
     "pair": {"what": "pairing-with-code account pool (§15): pair your own WhatsApp accounts into Devon with an 8-character code — no QR — and Telegram accounts by phone + login code, all in one registry. Each account gets its own supervised session; per-account routing names a default; personal surfaces (status saving, view-once preservation, DM antidelete) toggle per account. The status_saving toggle covers channel posts on both platforms too: WhatsApp followed-channel posts saved by the sweep, and Telegram channel posts kept in the brain-isolated archive /channeltexts pulls from. The pool is the reach behind the group/channel tools. Owner only.",
             "usage": "/pair | /pair whatsapp <number> [label] | /pair telegram <number> [label] | /pair tgcode <id> <code> | /pair tgpass <id> <password> | /pair code <id> | /pair start|stop|restart|remove <id> | /pair use <id> | /pair route [platform] | /pair toggle <id> <status_saving|view_once|antidelete|always_online|status_viewing> <on|off> | /pair saved [id] | /pair recovered [id] | /pair journal [kind] [count] | /pair page",
             "example": "/pair whatsapp 2348012345678 main",
@@ -4533,7 +4538,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "caption", "imggen", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
+    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
@@ -4864,7 +4869,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
-      "connectors", "provision", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
+      "connectors", "provision", "models", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "worldmodel", "glossary", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
@@ -5328,6 +5333,7 @@ LIST_ONELINERS: dict[str, str] = {
     "checksms": "read SMS on your temp number: /checksms [code | forget]",
     "browser": "the browser tool in chat: /browser open|text|links|forms|headings <url> | takeover [url] | run <url> [goal] (owner-only, background job) | run status [job] | watch [session] — attach a live view to a running browser session (owner-only)",
     "provision": "self-provisioning: /provision [service] — Devon fetches a missing API key herself (login or account creation; key validated + vaulted, request retried); /provision login <service> <username> hands her an existing login",
+    "models": "install every missing model: /models installs all of them (character voice/face, DJ madmom, voice STT/TTS, image, small-ML) that fit this box; /models status shows installed vs missing; /models learners shows the journal-trained learners' status (owner only)",
     "pair": "pairing-with-code pool: /pair whatsapp <number> [label] — pair a WhatsApp account by 8-char code (own bridge session each); /pair telegram <number> pairs Telegram by login code into the same pool; /pair lists the pool with Registered/Connected/Dropped counts (owner only)",
     "sudo": "sudo rung (§19): /sudo — who holds sudo, in plain words; /sudo add|remove <platform> <id> grants or drops it through the owner grammar (owner only)",
     "owner": "the owner system: /owner — the verification card (bound ids per platform + how each was proved + the seal's state); /owner status — uptime, version, pool counts, queues, last briefing; bind/unbind/sudo/deputy/mark edits and the sealed rebind (owner only, DM only — never editable from a group)",

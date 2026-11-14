@@ -700,6 +700,17 @@ class RuntimeMemoryMixin:
         from ...audio.overview import control_overview
         return control_overview(tail or "")
 
+    def _control_models(self, tail: str, *, chat_key: str = "") -> str:
+        """One command that installs every missing model. Owner-only.
+
+        /models — install everything missing that fits this box
+        /models status — installed vs missing per model
+        /models learners — the journal-trained learners' status
+        /models <name> — install just that one backend
+        """
+        from ...audio.models import control_models
+        return control_models(tail or "")
+
     def _control_character(self, tail: str, *, chat_key: str = "") -> str:
         """Conversational story characters — talk to them. Owner-only.
 

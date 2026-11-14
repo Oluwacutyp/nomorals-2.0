@@ -9285,6 +9285,9 @@ class PartnerRuntime(
             return self._control_provision(command.tail or arg,
                                            chat_key=chat_key,
                                            message=message)
+        if kind == "models":
+            return self._control_models(command.tail or arg,
+                                        chat_key=chat_key)
         if kind == "notion":
             return self._control_notion(command.tail or arg)
         if kind == "gcal":
