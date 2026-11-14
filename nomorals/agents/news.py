@@ -80,8 +80,8 @@ from .search.engine import SearchEngine
 from .failures import record_failure
 
 __all__ = ["DEFAULT_FEEDS", "DEFAULT_CATEGORIES", "FEED_CATEGORIES",
-           "FEED_REGIONS", "NEWS_GLOBAL_REGIONS", "feeds_for",
-           "news_covered_regions", "feed_health_key",
+           "FEED_REGIONS", "NEWS_GLOBAL_REGIONS", "NEWS_FEED_TIMEOUT_S",
+           "feeds_for", "news_covered_regions", "feed_health_key",
            "NewsAgent", "parse_feed", "publisher_of"]
 
 #: Sane keyless defaults when settings.news.feeds is empty.
@@ -261,6 +261,21 @@ DEFAULT_CATEGORIES: tuple[str, ...] = (
 #: ``DEFAULT_FEEDS`` is the general-interest flattening.
 DEFAULT_FEEDS: tuple[tuple[str, str], ...] = tuple(
     feeds_for(*DEFAULT_CATEGORIES))
+
+#: Per-feed timeout for the news poll (2026-11-14 incident): the poll
+#: fetches ~86 feeds sequentially, and several slow feeds at the
+#: shared ``http_timeout`` (30-60s) ate ~140s of SSL time against the
+#: 300s job wall. RSS feeds answer in seconds or not at all, so a 10s
+#: cap makes slow feeds fail fast; the existing SourceHealth
+#: stand-down records them and re-activates them on recovery. This is
+#: news-specific — the shared ``http_timeout`` and the HttpClient
+#: default are untouched.
+NEWS_FEED_TIMEOUT_S = 10.0
+
+#: Chunk size for the batched URL-known check (``_known_urls``).
+#: SQLite's variable limit is 999 by default; 500 keeps one IN list
+#: well under it on both the native and the rowstore paths.
+_NEWS_URL_IN_CHUNK = 500
 
 #: The six world regions coverage is measured against.  Nigeria/Africa
 #: is ONE region among many — the owner rule is GLOBAL coverage.
@@ -720,7 +735,7 @@ class NewsAgent:
         self._interest_state: str | None = None
         tools = getattr(self.settings, "tools", None)
         self._client = HttpClient(
-            timeout=getattr(tools, "http_timeout", 30.0),
+            timeout=NEWS_FEED_TIMEOUT_S,
             user_agent=getattr(tools, "user_agent", "NoMoralsCore/0.1"),
             proxy_url=getattr(tools, "proxy_url", ""),
         )
@@ -805,6 +820,45 @@ class NewsAgent:
             if 0 <= idx < len(items) and sentence.strip():
                 out[items[idx]["url"]] = sentence.strip()
         return out
+
+    def _known_urls(self, urls: list[str]) -> set[str]:
+        """URLs in ``urls`` that are already stored in news_items.
+
+        ONE batched lookup per 500 URLs (``SELECT url ... WHERE url
+        IN (...)`` on SQLite, one ``find({"url": {"$in": [...]}})``
+        on the rowstore path) instead of the old one-query-per-item
+        loop — ~86 feeds x ~10-20 items each was ~1000-2000 round
+        trips through ``execute`` -> ``_with_lock_retry`` per poll,
+        the ~70s DB sink in the 2026-11-14 `news poll` timeout.
+        Matching is on the exact stored URL string, exactly as the
+        per-item check did.
+        """
+        wanted = {u for u in urls if u}
+        if not wanted:
+            return set()
+        ordered = sorted(wanted)
+        known: set[str] = set()
+        items = self._items() if self.db is not None else None
+        if items is not None:
+            for i in range(0, len(ordered), _NEWS_URL_IN_CHUNK):
+                chunk = ordered[i:i + _NEWS_URL_IN_CHUNK]
+                for row in items.find({"url": {"$in": chunk}}):
+                    url = row.get("url") if hasattr(row, "get") else None
+                    if url:
+                        known.add(url)
+            return known
+        for i in range(0, len(ordered), _NEWS_URL_IN_CHUNK):
+            chunk = ordered[i:i + _NEWS_URL_IN_CHUNK]
+            placeholders = ",".join("?" * len(chunk))
+            rows = self.db.query(
+                "SELECT url FROM news_items "
+                f"WHERE url IN ({placeholders})",
+                tuple(chunk))
+            for row in rows:
+                url = row.get("url") if hasattr(row, "get") else row[0]
+                if url:
+                    known.add(url)
+        return known
 
     # ── poll: fetch + store + score + tier (pass #85) ──────────────────
     def poll(self) -> dict[str, Any]:
@@ -942,19 +996,23 @@ class NewsAgent:
                 record_failure("news.known_titles", exc)
                 known_titles = set()
 
+        # The URL-known check is ONE batched lookup for the whole run
+        # (``_known_urls``), not one query per item — the per-item loop
+        # was ~1000-2000 DB round trips per poll and the ~70s DB sink
+        # in the 2026-11-14 timeout. A failed batch keeps every item
+        # (unknown) exactly as a failed per-item check did.
+        known_urls: set[str] = set()
+        if self.db is not None:
+            try:
+                known_urls = self._known_urls([it["url"] for it in fetched])
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.url_known", exc)
+                known_urls = set()
+
         fresh: list[dict[str, str]] = []
         for it in fetched:
             if self.db is not None:
-                try:
-                    items = self._items()
-                    if items is not None:
-                        known = items.find_one({"url": it["url"]})
-                    else:
-                        known = self.db.query_one("SELECT id FROM news_items WHERE url = ?", (it["url"],))
-                except Exception as exc:  # noqa: BLE001
-                    record_failure("news.url_known", exc)
-                    known = None
-                if known is not None:
+                if it["url"] in known_urls:
                     continue
                 title_key = re.sub(
                     r"\W+", " ", (it.get("title") or "").lower()).strip()
