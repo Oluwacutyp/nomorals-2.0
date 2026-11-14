@@ -239,7 +239,12 @@ class BackendProbeTests(unittest.TestCase):
     def _broken_probe(*args, **kwargs):
         return SimpleNamespace(
             returncode=1,
-            stderr="unshare: mount /proc failed: Operation not permitted",
+            # bytes, not str: the real subprocess.run in _run_probe_argv
+            # has no text=True, so CompletedProcess.stderr is bytes.
+            # The str form predates 0370fc90, when the probe detail was
+            # (probe.stderr or "").strip() — type-agnostic — and broke
+            # when the probe switched to bytes .decode().
+            stderr=b"unshare: mount /proc failed: Operation not permitted",
         )
 
     def test_present_but_broken_backend_is_skipped_not_chosen(self):
