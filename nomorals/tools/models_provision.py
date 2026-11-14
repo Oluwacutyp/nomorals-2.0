@@ -18,8 +18,10 @@ Inventory (from the code, not a wishlist):
 * image — sd15 (Stable Diffusion 1.5 weights) / ace-step (ACE-Step
   1.5 engine + weights)
 * image-3d — trellis (TRELLIS.2 image-to-3D, 4B, textured GLB + PBR),
-  GPU-gated: Linux + NVIDIA GPU 24 GB+ VRAM, honestly refuses on
-  EC2/phone — see ``media.trellis.gpu_gate``
+  unirig (UniRig auto-rigging, skeleton + skinning, FBX out),
+  GPU-gated: Linux + NVIDIA GPU (24 GB+ VRAM trellis, 8 GB+ VRAM
+  unirig), honestly refuses on EC2/phone — see
+  ``media.trellis.gpu_gate`` / ``media.unirig.gpu_gate``
 * small ML — sklearn / lightgbm / xgboost / catboost, via
   ``llm.specialists.backend_available``
 
@@ -55,6 +57,7 @@ from ..characters.store import default_character_dir
 from ..llm.specialists import backend_available, default_models_dir
 from ..media import dj_desk as _dj_desk
 from ..media import trellis as _trellis
+from ..media import unirig as _unirig
 from ..media.ace_step import CHECKPOINT_ENV
 from ..media.dj_engine import read_feedback_log
 from ..media.imggen import checkpoint_dir as _imggen_checkpoint_dir
@@ -77,7 +80,7 @@ BACKENDS: tuple[str, ...] = (
     "xtts", "rvc", "faceswap", "madmom",
     "faster-whisper", "parakeet", "whisper-cpp",
     "chatterbox", "kokoro", "piper", "f5tts",
-    "sd15", "ace-step", "trellis",
+    "sd15", "ace-step", "trellis", "unirig",
     "sklearn", "lightgbm", "xgboost", "catboost",
 )
 
@@ -88,6 +91,7 @@ BACKENDS: tuple[str, ...] = (
 #: floor is hardware (not disk/RAM) carry a gate.
 _GATES: dict[str, Any] = {
     "trellis": _trellis.gpu_gate,
+    "unirig": _unirig.gpu_gate,
 }
 
 #: Order-name (as the pipeline spells it) -> backend id.
@@ -146,6 +150,13 @@ _BACKEND_INFO: dict[str, dict[str, Any]] = {
     "trellis": {"family": "image-3d",
                 "label": "TRELLIS.2 image-to-3D (4B, textured GLB + PBR)",
                 "size_mb": 12000, "disk_gb": 20.0, "ram_gb": 4.0},
+    "unirig": {"family": "image-3d",
+               "label": "UniRig auto-rigging (skeleton + skinning, "
+                        "FBX out)",
+               # Checkpoints alone are ~5.8 GB (measured from the HF
+               # API); the torch/spconv/flash_attn conda env adds
+               # several GB more.
+               "size_mb": 10000, "disk_gb": 14.0, "ram_gb": 4.0},
     "sklearn": {"family": "small-ml",
                 "label": "scikit-learn (small-ML default)",
                 "size_mb": 30, "disk_gb": 1.0, "ram_gb": 1.0},
@@ -393,6 +404,13 @@ def _detect_trellis() -> bool:
         return False
 
 
+def _detect_unirig() -> bool:
+    try:
+        return bool(_unirig.is_installed())
+    except Exception:  # noqa: BLE001 - detection is best-effort
+        return False
+
+
 def _detect_sklearn() -> bool:
     try:
         return bool(backend_available("gradboost")[0])
@@ -429,7 +447,7 @@ _DETECTORS: dict[str, Any] = {
     "chatterbox": _detect_chatterbox, "kokoro": _detect_kokoro,
     "piper": _detect_piper, "f5tts": _detect_f5tts,
     "sd15": _detect_sd15, "ace-step": _detect_ace_step,
-    "trellis": _detect_trellis,
+    "trellis": _detect_trellis, "unirig": _detect_unirig,
     "sklearn": _detect_sklearn, "lightgbm": _detect_lightgbm,
     "xgboost": _detect_xgboost, "catboost": _detect_catboost,
 }
@@ -491,6 +509,8 @@ def inventory(profile: str | None = None) -> list[dict[str, Any]]:
                           "generation")
         if name == "trellis":
             detail = _trellis.install_detail()
+        if name == "unirig":
+            detail = _unirig.install_detail()
         return {"id": name, "family": fam, "label": info["label"],
                 "installed": installed, "in_profile": in_profile,
                 "size_mb": info["size_mb"], "disk_gb": info["disk_gb"],
@@ -736,6 +756,133 @@ def _provision_trellis(box: dict[str, Any]) -> dict[str, Any]:
                    f"image-to-3D via /models trellis, GLB out", steps)
 
 
+def _provision_unirig(box: dict[str, Any]) -> dict[str, Any]:
+    """UniRig: clone + conda env + pip stack + checkpoint download.
+
+    Upstream's own install: ``git clone`` then ``conda create -n
+    UniRig python=3.11``, then torch/torchvision, ``pip install -r
+    requirements.txt``, spconv + torch_scatter/torch_cluster (CUDA
+    matched), numpy==1.26.4. The warm load is upstream's own
+    ``src/inference/download.py`` — it downloads both checkpoints
+    (~5.8 GB) from VAST-AI/UniRig. The GPU gate already ran in
+    ``provision_models``; it is re-checked here so a direct call
+    refuses too.
+    """
+    steps: list[str] = []
+    import shutil
+
+    gate_ok, gate_reason = _unirig.gpu_gate(box)
+    if not gate_ok:
+        return _report(False, "unavailable", gate_reason, steps)
+    if not shutil.which("git"):
+        return _report(False, "unavailable",
+                       "git is not on this box — UniRig clones from "
+                       "github.com/VAST-AI-Research/UniRig", steps)
+    if not shutil.which("conda"):
+        return _report(False, "unavailable",
+                       "conda is not on this box — upstream creates the "
+                       "UniRig env with it", steps)
+    repo = _unirig.unirig_dir()
+    scripts = repo / "launch" / "inference"
+    if (scripts / "generate_skeleton.sh").is_file():
+        steps.append("repo already present, skipping clone")
+    else:
+        proc = _run(["git", "clone",
+                     _unirig.UNIRIG_REPO, str(repo)], timeout=900)
+        steps.append(f"git clone: rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"clone stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed", "UniRig clone failed",
+                           steps)
+    python = _unirig._unirig_python()
+    if python is None:
+        return _report(False, "failed",
+                       "conda is present but no UniRig env exists yet",
+                       steps)
+    envs = _run(["conda", "env", "list"], timeout=120)
+    if _unirig.UNIRIG_CONDA_ENV not in (envs.stdout or ""):
+        proc = _run(["conda", "create", "-n", _unirig.UNIRIG_CONDA_ENV,
+                     "python=3.11", "-y"], timeout=1800)
+        steps.append(f"conda create: rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"create stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed",
+                           "UniRig conda env creation failed", steps)
+        python = _unirig._unirig_python()
+    pip_installs = [
+        ["torch", "torchvision"],
+        ["-r", str(repo / "requirements.txt")],
+        ["numpy==1.26.4"],
+    ]
+    for spec in pip_installs:
+        proc = _run([*python, "-m", "pip", "install", "-q", *spec],
+                    timeout=1800, cwd=repo)
+        steps.append(f"pip install {' '.join(spec)}: "
+                     f"rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"pip stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed",
+                           f"pip install {' '.join(spec)} failed", steps)
+    # CUDA-matched extras (README): spconv + torch_scatter /
+    # torch_cluster from the PyG wheel index. The CUDA version comes
+    # from the env's own torch — never guessed.
+    cuda = _run([*python, "-c",
+                 "import torch; print(torch.version.cuda or '')"],
+                timeout=300)
+    cuda_ver = (cuda.stdout or "").strip()
+    if cuda.returncode == 0 and cuda_ver:
+        cu = cuda_ver.replace(".", "")
+        torch_ver = _run([*python, "-c",
+                          "import torch; print(torch.__version__"
+                          ".split('+')[0])"], timeout=300)
+        torch_v = (torch_ver.stdout or "").strip()
+        extras = [f"spconv-cu{cu}"]
+        if torch_v:
+            pyg = (f"https://data.pyg.org/whl/torch-{torch_v}"
+                   f"+cu{cu}.html")
+            proc = _run([*python, "-m", "pip", "install", "-q",
+                         "torch_scatter", "torch_cluster",
+                         "-f", pyg, "--no-cache-dir"],
+                        timeout=1800, cwd=repo)
+            steps.append(f"pip install torch_scatter torch_cluster "
+                         f"(cu{cu}): rc={proc.returncode}")
+            if proc.returncode != 0:
+                steps.append(f"pip stderr: {(proc.stderr or '')[-300:]}")
+                return _report(False, "failed",
+                               "torch_scatter/torch_cluster install "
+                               "failed", steps)
+        proc = _run([*python, "-m", "pip", "install", "-q", *extras],
+                    timeout=1800, cwd=repo)
+        steps.append(f"pip install {' '.join(extras)}: "
+                     f"rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"pip stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed",
+                           f"pip install {' '.join(extras)} failed — "
+                           f"see the flash-attn/spconv notes in the "
+                           f"UniRig README", steps)
+    else:
+        steps.append("CUDA version unknown — skipping CUDA-matched "
+                     "extras (spconv, torch_scatter, torch_cluster)")
+    warm = ("from src.inference.download import download; "
+            f"download({_unirig.UNIRIG_SKELETON_CKPT!r}); "
+            f"download({_unirig.UNIRIG_SKIN_CKPT!r})")
+    proc = _run([*python, "-c", warm], timeout=3600, cwd=repo)
+    steps.append("warm load (downloads ~5.8 GB checkpoints): "
+                 f"rc={proc.returncode}")
+    if proc.returncode != 0:
+        steps.append(f"warm stderr: {(proc.stderr or '')[-300:]}")
+        return _report(False, "failed",
+                       "UniRig checkpoints did not download", steps)
+    if not _unirig.is_installed():
+        return _report(False, "failed",
+                       "checkpoints downloaded but the install cannot "
+                       "be verified", steps)
+    return _report(True, "installed",
+                   f"UniRig installed in {repo} — "
+                   f"auto-rigging via /models unirig, FBX out", steps)
+
+
 # ── the command ──────────────────────────────────────────────────────
 
 def _floor_refusal(name: str, box: dict[str, Any],
@@ -826,6 +973,8 @@ def provision_models(backends: Any = None, *,
                 reports[name] = _provision_ace_step(box)
             elif name == "trellis":
                 reports[name] = _provision_trellis(box)
+            elif name == "unirig":
+                reports[name] = _provision_unirig(box)
             elif name in _ENGINE_INSTALL:
                 reports[name] = _provision_engine(name, box)
             else:
@@ -902,6 +1051,7 @@ def models_report_text(result: dict[str, Any]) -> str:
                  "(private use only). Face swap runs outside the game "
                  "only — NPCs get no faces.")
     lines.append(_trellis.TRELLIS_TERMS_NOTE)
+    lines.append(_unirig.UNIRIG_TERMS_NOTE)
     return "\n".join(lines)
 
 

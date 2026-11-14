@@ -48,7 +48,7 @@ EXPECTED_BACKENDS = (
     "xtts", "rvc", "faceswap", "madmom",
     "faster-whisper", "parakeet", "whisper-cpp",
     "chatterbox", "kokoro", "piper", "f5tts",
-    "sd15", "ace-step", "trellis",
+    "sd15", "ace-step", "trellis", "unirig",
     "sklearn", "lightgbm", "xgboost", "catboost",
 )
 
@@ -158,6 +158,16 @@ def _mock_all_missing(monkeypatch, mp):
         lambda box: {"ok": True, "status": "installed",
                      "detail": "trellis installed",
                      "steps": ["trellis: ok"]})
+    # UniRig's GPU gate and its clone/env/pip/download provisioner
+    # are stubbed the same way — the real gate + provisioner have
+    # their own suite (test_unirig.py).
+    monkeypatch.setitem(mp._GATES, "unirig",
+                        lambda box: (True, "mock GPU"))
+    monkeypatch.setattr(
+        mp, "_provision_unirig",
+        lambda box: {"ok": True, "status": "installed",
+                     "detail": "unirig installed",
+                     "steps": ["unirig: ok"]})
     monkeypatch.setattr(
         mp, "_char_provision_backends",
         lambda backends=None: {
@@ -209,8 +219,14 @@ def test_unmet_floor_refuses_with_numbers(monkeypatch):
     # TRELLIS.2's GPU gate is the hardware floor: mock only the probe
     # (no real nvidia-smi/torch subprocess), keep the gate logic real —
     # on this tiny Linux box it refuses with the measured numbers.
+    # UniRig shares TRELLIS.2's probe (one GPU probe in the codebase),
+    # so the same mock covers its gate too.
     monkeypatch.setattr(
         mp._trellis, "probe_gpu",
+        lambda: {"has_gpu": False, "name": "", "vram_gb": 0.0,
+                 "source": "", "detail": "no NVIDIA GPU detected"})
+    monkeypatch.setattr(
+        mp._unirig, "_trellis_probe_gpu",
         lambda: {"has_gpu": False, "name": "", "vram_gb": 0.0,
                  "source": "", "detail": "no NVIDIA GPU detected"})
     calls = []
