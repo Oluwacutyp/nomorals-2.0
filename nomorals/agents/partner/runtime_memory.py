@@ -708,6 +708,8 @@ class RuntimeMemoryMixin:
         /character add <name> [book] [--cutoff N] — add a character
         /character cutoff <name> <chapter> — move their knowledge cutoff
         /character forget <name> — remove a character
+        /character provision [xtts|rvc|faceswap|all|status] — install
+        the character voice/face models on this box
         """
         from ...audio.characters import control_character
         return control_character(tail or "")

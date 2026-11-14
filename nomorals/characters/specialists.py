@@ -61,7 +61,9 @@ def character_voice(char: Any, line: str, *, out_path: str = "",
             return {"ok": False,
                     "reason": "no TTS backend installed on this box — "
                               "XTTS (and every other TTS backend) is "
-                              "unavailable until one is installed"}
+                              "unavailable until one is installed — run "
+                              "/character provision in Devon's chat to "
+                              "install the voice backends"}
         from ..voice.catalogue import VoiceCatalogue
 
         entry = VoiceCatalogue().get(name)
@@ -109,7 +111,9 @@ def swap_voice(char: Any, wav_path: str, *, out_path: str = "",
         probe = rvc_bridge.detect_rvc()
         if not probe.get("ok"):
             return {"ok": False,
-                    "reason": f"RVC unavailable: {probe.get('detail')}"}
+                    "reason": f"RVC unavailable: {probe.get('detail')} — "
+                              "run /character provision rvc in Devon's "
+                              "chat to install the RVC runtime"}
         result = rvc_bridge.convert(wav_path, model,
                                     f0_up_key=f0_up_key,
                                     out_path=out_path)
@@ -186,4 +190,8 @@ def swap_face(char: Any, target_path: str, *,
                 "sidecar": str(result.get("sidecar", ""))}
     except Exception as exc:  # noqa: BLE001 - a swap failure is a wall
         _log.debug("character face swap failed", exc_info=True)
-        return {"ok": False, "reason": f"face swap failed: {exc}"}
+        reason = f"face swap failed: {exc}"
+        if "pip install" in str(exc):
+            reason += (" — run /character provision faceswap in Devon's "
+                       "chat to install the face-swap backend")
+        return {"ok": False, "reason": reason}

@@ -3357,7 +3357,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "example": "/overview make deep-dive yo-ekiti \"Lagos rents :: notes here\"",
               "related": "/audio"},
     "character": {"what": "Conversational story characters — interview the people in your books, in character, with a hard knowledge cutoff. Spoiler discipline: the character only knows up to their chapter cutoff, enforced in the system prompt.",
-              "usage": "/character list | /character talk <name> <question> | /character add <name> [book] [--cutoff N] | /character cutoff <name> <chapter> | /character forget <name>",
+              "usage": "/character list | /character talk <name> <question> | /character add <name> [book] [--cutoff N] | /character cutoff <name> <chapter> | /character forget <name> | /character provision [xtts|rvc|faceswap|all|status]",
               "example": "/character talk Renfield what do you want most?",
               "related": "/overview"},
     "audiobook": {"what": "EPUB → audiobook, one click — chaptered TTS in your cloned voice, LUFS-mastered, with AI-disclosure metadata attached per store (ACX, Spotify, Kobo).",

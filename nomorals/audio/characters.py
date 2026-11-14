@@ -823,8 +823,42 @@ def _usage() -> str:
         "/character mood <name> <mood...> — shift their current state\n"
         "/character card <name> — the shareable character card\n"
         "/character forget <name> — remove a character\n"
+        "/character provision [xtts|rvc|faceswap|all|status] — install "
+        "the voice/face models on this box\n"
         "Spoiler rule: a character only knows up to their chapter cutoff."
     )
+
+
+def _control_provision(rest: str) -> str:
+    """Install the character generative backends on this box.
+
+    /character provision [xtts|rvc|faceswap|all] — install (slow, the
+    weights are hundreds of MB); /character provision status — what is
+    installed now. Never raises — the provision reports per backend.
+    """
+    from ..characters import provision as _prov
+
+    args = (rest or "").strip().lower().split()
+    if not args:
+        args = ["all"]
+    if args[0] == "status":
+        status = _prov.backend_status()
+        lines = ["🎭 character models — installed now:"]
+        for name in _prov.BACKENDS:
+            info = status.get(name) or {}
+            state = ("installed" if info.get("installed")
+                     else "not installed")
+            lines.append(f"• {name}: {state} — {info.get('detail', '')}")
+        lines.append("run /character provision "
+                     "[xtts|rvc|faceswap|all] to install.")
+        return "\n".join(lines)
+    wanted = (list(_prov.BACKENDS) if args[0] == "all"
+              else [a for a in args if a in _prov.BACKENDS])
+    if not wanted:
+        return ("🎭 which model? /character provision "
+                "[xtts|rvc|faceswap|all|status]")
+    result = _prov.provision_backends(wanted)
+    return _prov.provision_report_text(result)
 
 
 def _fmt_character(ch: Character) -> str:
@@ -997,6 +1031,9 @@ def control_character(tail: str, context=None, chat=None,
             if store.remove(name):
                 return f"🎭 {name} is gone."
             return f"🎭 no character named '{name}'."
+
+        if head == "provision":
+            return _control_provision(rest)
 
         return _usage()
     except Exception as exc:  # noqa: BLE001
