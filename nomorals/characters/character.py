@@ -494,26 +494,13 @@ class Character:
         When a learn handle is attached (see ``learn.attach``), every
         spoken line — utterance or fallback — is journaled, and
         candidate sets are journaled with their scores. Journaling is
-        best-effort and never changes the returned line.
+        best-effort and never changes the returned line. The journal
+        entry carries the prompt version that produced the line
+        ("base", "character_dialogue v<N>", or "fallback" for a
+        model-free line) — see :meth:`_speak_prompt`.
         """
         self.last_active = time.time()
-        try:
-            from .context import CharacterContextBuilder
-            mems = [memories] if memories else []
-            # pull the character's own relevant memories for depth
-            try:
-                own = self.recall(context, limit=3)
-                mems.extend(m for m in own if m not in mems)
-            except Exception as e:
-                record_failure("character.speak:recall", e)
-            prompt = (CharacterContextBuilder().build(self, memories=mems)
-                      + f"\n\nSituation: {context}\n{self.name}:")
-        except Exception as e:
-            # builder is best-effort; fall back to the simple block
-            record_failure("character.speak:build", e)
-            prompt = (self.persona_block() + "\n"
-                      + (f"Relevant memories:\n{memories}\n" if memories else "")
-                      + f"Situation: {context}\n{self.name}:")
+        prompt, version = self._speak_prompt(context, memories)
         line = ""
         kind = "fallback"
         cand_texts: list[str] = []
@@ -555,10 +542,66 @@ class Character:
                 learn.journal_line(
                     line, context=context, kind=kind,
                     candidates=cand_texts if len(cand_texts) > 1 else None,
-                    chosen=chosen)
+                    chosen=chosen,
+                    prompt_version=(version if kind == "utterance"
+                                    else "fallback"))
         except Exception as e:
             record_failure("character.speak:learn", e)
         return line
+
+    def _speak_prompt(self, context: str,
+                      memories: str) -> tuple[str, str]:
+        """Build the speak prompt: persona/context + the task instruction.
+
+        Returns ``(prompt, version_label)``. The task instruction is
+        the compiled ``character_dialogue`` prompt when one is usable
+        (validated by default; unvalidated only under the
+        ``[prompt_compiler]`` ``use_unvalidated`` flag), else the base
+        prompt exactly as today — byte-for-byte the v1 prompt. The
+        persona block / context builder / memories stay in the prompt
+        either way. ``version_label`` is "base" or
+        "character_dialogue v<N>": the journal records it with the
+        line, so a grade earned by the line attributes to the prompt
+        that produced it.
+
+        The instruction slot is the prompt's tail: the base tail is
+        ``"Situation: {context}\\n{name}:"`` and the compiled render
+        ends on the same tail with the same labels (see
+        ``learn.resolve_character_prompt``), so the compiled prompt
+        substitutes into the slot without redesigning the prompt the
+        model completes. Prompt settings / store ride on
+        ``_prompt_settings`` / ``_prompt_store`` when set (tests and
+        embedders); otherwise the resolver reads the config file and
+        the default prompt store.
+        """
+        try:
+            from .context import CharacterContextBuilder
+            mems = [memories] if memories else []
+            # pull the character's own relevant memories for depth
+            try:
+                own = self.recall(context, limit=3)
+                mems.extend(m for m in own if m not in mems)
+            except Exception as e:
+                record_failure("character.speak:recall", e)
+            prefix = CharacterContextBuilder().build(self, memories=mems)
+            sep = "\n\n"
+        except Exception as e:
+            # builder is best-effort; fall back to the simple block
+            record_failure("character.speak:build", e)
+            prefix = (self.persona_block() + "\n"
+                      + (f"Relevant memories:\n{memories}\n" if memories else ""))
+            sep = ""
+        from .learn import resolve_character_prompt
+
+        resolved = resolve_character_prompt(
+            self.id, context, character_name=self.name,
+            settings=getattr(self, "_prompt_settings", None),
+            store=getattr(self, "_prompt_store", None))
+        if resolved is not None:
+            text, version = resolved
+            return f"{prefix}{sep}{text}", version
+        return (f"{prefix}{sep}Situation: {context}\n{self.name}:",
+                "base")
 
     def _pick_candidate(self, texts: list[str]) -> tuple[str, int]:
         """Score candidates with the character's own scorer; ties go to

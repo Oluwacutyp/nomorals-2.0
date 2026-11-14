@@ -167,6 +167,16 @@ class PromptSignature:
     are per-task config: a task declares its own, and the compiler
     falls back to the ``[prompt_compiler]`` settings defaults, then
     to the module defaults.
+
+    ``input_label`` / ``output_label`` are the labels rendering uses
+    for the input / output lines, when they differ from the field
+    names: the label is what the model actually completes after, so
+    it must be the label the runtime prompt carries. A character
+    dialogue render ends on ``"Situation: ..."`` / ``"{name}:"``
+    (the speak path's turn label), while the fields stay
+    ``"context"`` / ``"line"`` (the journal keys). ``None`` keeps the
+    historical capitalized-field labels — NPC dialogue renders
+    ``"Situation:"`` / ``"Line:"`` exactly as before.
     """
 
     task: str
@@ -176,6 +186,8 @@ class PromptSignature:
     min_examples: int | None = None
     max_demos: int | None = None
     max_counter_examples: int | None = None
+    input_label: str | None = None
+    output_label: str | None = None
 
     def effective(self, settings: Any = None) -> PromptSignature:
         """The signature with every ``None`` floor resolved."""
@@ -201,6 +213,8 @@ class PromptSignature:
                 self.max_counter_examples,
                 "default_max_counter_examples",
                 DEFAULT_MAX_COUNTER_EXAMPLES),
+            input_label=self.input_label,
+            output_label=self.output_label,
         )
 
 
@@ -407,6 +421,25 @@ def _clip(text: str, limit: int = MAX_EXAMPLE_CHARS) -> str:
     return body[:limit] + " […]"
 
 
+def _in_label(signature: PromptSignature) -> str:
+    """The rendered input label: the signature's override when set,
+    else the capitalized field name (the historical behavior)."""
+    if signature.input_label:
+        return signature.input_label
+    in_field = signature.input_fields[0] if signature.input_fields else ""
+    return in_field.capitalize()
+
+
+def _out_label(signature: PromptSignature) -> str:
+    """The rendered output label: the signature's override when set,
+    else the capitalized field name (the historical behavior)."""
+    if signature.output_label:
+        return signature.output_label
+    out_field = signature.output_fields[0] if signature.output_fields \
+        else ""
+    return out_field.capitalize()
+
+
 def _demo_block(examples: list[GradedExample],
                 signature: PromptSignature, label: str) -> str:
     """One few-shot block: each demo as input fields + output field."""
@@ -414,11 +447,10 @@ def _demo_block(examples: list[GradedExample],
         return ""
     parts = [label]
     in_field = signature.input_fields[0] if signature.input_fields else ""
-    out_field = signature.output_fields[0] if signature.output_fields else ""
     for ex in examples:
         given = ex.inputs.get(in_field, "")
-        parts.append(f"{in_field.capitalize()}: {_clip(given, 400)}")
-        parts.append(f"{out_field.capitalize()}: {_clip(ex.output)} "
+        parts.append(f"{_in_label(signature)}: {_clip(given, 400)}")
+        parts.append(f"{_out_label(signature)}: {_clip(ex.output)} "
                      f"(graded {ex.grade:+.2f})")
     return "\n".join(parts)
 
@@ -433,7 +465,6 @@ def _assemble(signature: PromptSignature,
     renders as a ``{field}`` placeholder, so the stored artifact reads
     as a template the caller fills at use time."""
     in_field = signature.input_fields[0] if signature.input_fields else ""
-    out_field = signature.output_fields[0] if signature.output_fields else ""
     chunks = [signature.instruction.strip()]
     if instruction_note:
         chunks.append("\nWhat the graded record shows:\n"
@@ -450,8 +481,8 @@ def _assemble(signature: PromptSignature,
         chunks.append("\n" + counter_text)
     given = (inputs or {}).get(in_field) or (f"{{{in_field}}}" if in_field
                                              else "")
-    chunks.append(f"\n{in_field.capitalize()}: {given}\n"
-                  f"{out_field.capitalize()}:")
+    chunks.append(f"\n{_in_label(signature)}: {given}\n"
+                  f"{_out_label(signature)}:")
     return "\n".join(c for c in chunks if c)
 
 
@@ -504,12 +535,11 @@ def render_base_prompt(signature: PromptSignature,
     """The base prompt for one input: instruction only, no demos —
     the comparison point for validation."""
     in_field = signature.input_fields[0] if signature.input_fields else ""
-    out_field = signature.output_fields[0] if signature.output_fields else ""
     given = (inputs or {}).get(in_field) or (f"{{{in_field}}}" if in_field
                                              else "")
     return (f"{signature.instruction.strip()}\n\n"
-            f"{in_field.capitalize()}: {given}\n"
-            f"{out_field.capitalize()}:")
+            f"{_in_label(signature)}: {given}\n"
+            f"{_out_label(signature)}:")
 
 
 # ── validation metric ───────────────────────────────────────────────────

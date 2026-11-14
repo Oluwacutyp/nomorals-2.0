@@ -45,8 +45,11 @@ import time
 from pathlib import Path
 from typing import Any
 
+from ..core.logging_setup import get_logger
 from .failures import record_failure
 from .voice import VoiceFingerprint, consistency, fingerprint
+
+_log = get_logger(__name__)
 
 __all__ = [
     "LearnStore", "LearnHandle", "ScoredCandidate",
@@ -605,20 +608,24 @@ def fit_scorer(char_id: str, *, store: LearnStore | None = None,
 # The persona block (Character.persona_block) is prepended by the
 # caller at USE time, not compiled in.
 #
-# Runtime use is DELIBERATELY not wired here (unlike npc_dialogue,
-# which GameMaster._npc_speak_prompt resolves): Character.speak builds
-# its prompt from CharacterContextBuilder + "Situation: {context}\n
-# {name}:" — there is NO base instruction in the runtime prompt for
-# the compiled prompt to substitute into, the compiled render's
-# "Line:" completion label differs from the "{name}:" turn label the
-# speak path uses, and the compiler's validation compares
-# render_base_prompt against render_prompt — not the persona +
-# context-builder runtime prompt — so the measured gain would not
-# transfer to the prompt that actually runs. Wiring it in would be a
-# prompt redesign, not a substitution; it needs its own lane that
-# first gives the speak path a real instruction slot to swap.
+# Runtime use is wired through :func:`resolve_character_prompt`,
+# called by ``Character._speak_prompt`` (the same shape as
+# ``GameMaster._npc_speak_prompt`` for npc_dialogue). The redesign
+# that made it a substitution instead of a prompt rewrite: the speak
+# prompt's tail IS the instruction slot — the base tail is
+# ``"Situation: {context}\n{name}:"`` and the compiled render ends
+# on the same tail with the same labels (``input_label``
+# ``"Situation"``, ``output_label`` the character's own name), so
+# validation measures the prompt that actually runs and the base
+# prompt is byte-for-byte the v1 prompt when no compile is usable.
+# The persona block (Character.persona_block) is prepended by the
+# caller at USE time, not compiled in.
 
 #: The character dialogue task: one line, in character, from a context.
+#: ``input_label`` is "Situation" — the label the speak path's tail
+#: carries — while the field stays "context" (the journal key the
+#: examples are keyed by). The output label is per-character (the
+#: speak path's "{name}:" turn label); see _character_signature.
 CHARACTER_DIALOGUE_SIGNATURE = {
     "task": "character_dialogue",
     "instruction": ("Speak as the character, in your own voice, in "
@@ -626,13 +633,43 @@ CHARACTER_DIALOGUE_SIGNATURE = {
                     "no preamble, no stage directions."),
     "input_fields": ("context",),
     "output_fields": ("line",),
+    "input_label": "Situation",
 }
+
+
+def _character_signature(character_name: str | None = None) -> Any:
+    """The character_dialogue signature for one character: the task
+    instruction with the runtime labels — "Situation:" for the input
+    and the character's own name for the completion label (the speak
+    path's "{name}:" turn label). A missing name renders the generic
+    "Line:" label. Validation and runtime use the same signature, so
+    the measured gain is the gain of the prompt that actually runs."""
+    from ..llm.prompt_compiler import PromptSignature
+
+    data = dict(CHARACTER_DIALOGUE_SIGNATURE)
+    if (character_name or "").strip():
+        data["output_label"] = (character_name or "").strip()
+    return PromptSignature(**data)
+
+
+def _character_name(char_id: str) -> str:
+    """Best-effort name for a character id, for the compile-time
+    render label. The character store is the authority; an unknown
+    id renders the generic label. Never raises."""
+    try:
+        from .store import CharacterStore
+
+        char = CharacterStore().get(char_id)
+        return str(getattr(char, "name", "") or "") if char else ""
+    except Exception:  # noqa: BLE001 - a bad store never kills a compile
+        return ""
 
 
 def compile_character_prompt(char_id: str, *, suggest: Any = None,
                              metric: Any = None, store: Any = None,
                              settings: Any = None,
-                             learn_store: LearnStore | None = None
+                             learn_store: LearnStore | None = None,
+                             character_name: str | None = None
                              ) -> Any:
     """Compile the character dialogue prompt from this character's
     graded journal.
@@ -643,19 +680,85 @@ def compile_character_prompt(char_id: str, *, suggest: Any = None,
     runs only when a runner AND a metric are both supplied; the CLI
     passes the brain + the imitation metric for ``--validate``.
     Never raises for an empty journal: that is "insufficient".
+
+    ``character_name`` names the completion label validation renders
+    with (the speak path's "{name}:" turn label); when omitted it is
+    resolved best-effort from the character store, and an unknown
+    character renders the generic "Line:" label.
     """
     from ..llm.prompt_compiler import (
         GradedExample,
-        PromptSignature,
         compile_prompt,
     )
 
     rows = (learn_store or LearnStore()).export_training_data(char_id)
     examples = [ex for ex in (GradedExample.from_row(r) for r in rows)
                 if ex is not None]
-    signature = PromptSignature(**CHARACTER_DIALOGUE_SIGNATURE)
+    name = (character_name or "").strip() or _character_name(char_id)
+    signature = _character_signature(name or None)
     return compile_prompt(signature, examples, suggest=suggest,
                           metric=metric, store=store, settings=settings)
+
+
+def resolve_character_prompt(char_id: str, context: str, *,
+                             character_name: str | None = None,
+                             settings: Any = None,
+                             store: Any = None
+                             ) -> tuple[str, str] | None:
+    """The compiled character_dialogue prompt for one new context, or None.
+
+    Returns ``(rendered_text, version_label)`` when the task's latest
+    compiled prompt is USABLE at runtime, else None — and the caller
+    uses the base prompt exactly as today. Usable means: compiling
+    is enabled, a compiled prompt exists, its report is present, and
+    it is either VALIDATED — or unvalidated with the config flag
+    ``use_unvalidated`` on (``[prompt_compiler]``, default off). The
+    gate lives in config, never in a hardcoded boolean here.
+    ``settings`` is a ``PromptCompilerSettings`` (or any object with
+    ``enabled`` / ``use_unvalidated``); when None it is read from the
+    config file, the same pattern the ``nm prompt`` CLI and the
+    ``prompt_compile`` tool use — so the flag is live without the
+    caller threading settings through. The caller prepends the
+    persona / context-builder prefix at USE time; the compiled prompt
+    is the task instruction + demos, never the persona. The render
+    ends on the same ``"Situation: {context}\\n{name}:"`` tail the
+    base prompt ends on — the labels come from the signature
+    (``input_label`` "Situation", ``output_label`` the character's
+    name), so the prompt the model completes is the prompt validation
+    measured. ``char_id`` is accepted for symmetry with
+    :func:`compile_character_prompt` — the store is per-task, not
+    per-character. Never raises: any failure is None, and the base
+    carries.
+    """
+    try:
+        from ..llm.prompt_compiler import (
+            PromptStore,
+            render_prompt,
+        )
+
+        if settings is None:
+            from ..core.config import load_settings
+
+            settings = load_settings().prompt_compiler
+        if settings is not None and not getattr(settings, "enabled",
+                                                True):
+            return None
+        compiled = (store or PromptStore()).load("character_dialogue")
+        if compiled is None or compiled.report is None:
+            return None
+        if not compiled.report.validated and not getattr(
+                settings, "use_unvalidated", False):
+            return None
+        name = (character_name or "").strip() or _character_name(char_id)
+        signature = _character_signature(name or None)
+        text = render_prompt(
+            signature, compiled.demos, compiled.counter_examples,
+            compiled.instruction_note, {"context": context or ""})
+        return text, f"character_dialogue v{compiled.version}"
+    except Exception:  # noqa: BLE001 - a bad store never kills a line
+        _log.debug("character compiled prompt resolve failed",
+                   exc_info=True)
+        return None
 
 
 # ── handle: the runtime object attached to a Character ────────────────
@@ -711,10 +814,15 @@ class LearnHandle:
     def journal_line(self, line: str, *, context: str = "",
                      kind: str = "utterance",
                      candidates: list[str] | None = None,
-                     chosen: int = 0) -> str:
+                     chosen: int = 0,
+                     prompt_version: str = "base") -> str:
         """Journal one spoken line. ``candidates`` (when given) are the
         scored candidate texts with the chosen index; otherwise the
-        line is journaled alone with its own feature vector."""
+        line is journaled alone with its own feature vector.
+        ``prompt_version`` is the prompt that produced the line
+        ("base", "character_dialogue v<N>", or "fallback" for a
+        model-free line) — a grade earned by the line attributes to
+        that prompt, never to one it did not come from."""
         try:
             d = self.store.doc(self.char_id)
             weights = d.get("weights") or dict(DEFAULT_WEIGHTS)
@@ -736,6 +844,7 @@ class LearnHandle:
                 "context": (context or "")[:200], "line": line,
                 "candidates": cand_dicts, "chosen": chosen,
                 "grade": None, "grades": [],
+                "prompt_version": str(prompt_version or "base"),
             }
             entry_id = self.store.journal(self.char_id, entry)
             self._pending.append(entry_id)
