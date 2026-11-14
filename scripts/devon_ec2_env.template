@@ -666,6 +666,197 @@
 # Config key read by Devon code.
 # NM_WHISPER_CPP_MODEL=
 
+# Account password for nm account store-login (read from env, secure entry only).
+# NM_ACCOUNT_PASSWORD=
+# Blender binary path override (else PATH / the provisioned Blender).
+# NM_BLENDER_BIN=
+# 1 = never try to provision Blender (managed hosts).
+# NM_BLENDER_NO_PROVISION=
+# 1 = clear the provision marker and re-provision Blender.
+# NM_BLENDER_REPROVISION=
+# Blender render timeout, in seconds (default 1800).
+# NM_BLENDER_TIMEOUT=
+# CMU pronouncing-dictionary path for English G2P.
+# NM_CMUDICT_PATH=
+# Computer-organ bridge binary override (the path must exist).
+# NM_COMPUTER_BRIDGE=
+# Display for the computer organ (else DISPLAY).
+# NM_COMPUTER_DISPLAY=
+# TrueType font path for the embedded-PDF row (else fontconfig / known paths).
+# NM_CORPUS_FONT=
+# Storage backend: sqlite (default, every domain on SQLite) | mongo (the document-store seam serves ported domains from MongoDB when reachable).
+# NM_DB_BACKEND=
+# 1 = decoder auto-crack on (owner's setting; off when unset).
+# NM_DECODER_AUTO_CRACK=
+# Decoder's own ceiling on decompressed bytes (owner override).
+# NM_DECODER_MAX_DECOMPRESSED_BYTES=
+# Decoder minimum free disk bytes (owner override).
+# NM_DECODER_MIN_FREE_DISK_BYTES=
+# Decoder quarantine budget, in bytes (owner override).
+# NM_DECODER_QUARANTINE_BUDGET_BYTES=
+# Decoder staging dir (else decoder-staging under the data home).
+# NM_DECODER_STAGING_DIR=
+# LUT cache dir for baked colour grades (default ~/.devon/lut_cache).
+# NM_DEVON_LUT_CACHE=
+# DJ desk store path override (default ~/.cache/nomorals/dj/desk.json).
+# NM_DJ_DESK_PATH=
+# DJ feedback log path override.
+# NM_DJ_FEEDBACK_PATH=
+# Failure-grades store path override.
+# NM_FAILURE_GRADES=
+# Font discovery roots, path-separated (else vendored + platform font dirs).
+# NM_FONT_DIRS=
+# Owner-extended video-format dirs, path-separated (data files, validated like shipped formats).
+# NM_FORMAT_DIRS=
+# Giphy API key for GIF replies.
+# NM_GIPHY_API_KEY=
+# Ordered Groq fallback models, comma-separated. Empty = the provider's built-in known-good roster.
+# NM_GROQ_MODELS=
+# Max simultaneously-outstanding self-heal probe threads (positive int).
+# NM_HEAL_PROBE_MAX_OUTSTANDING=
+# Hugging Face account name for provisioning flows.
+# NM_HF_ACCOUNT=
+# Home-control gate file path (default ~/.nomorals/home_control_gate.json).
+# NM_HOME_CONTROL_GATE=
+# i18n message-catalog dirs (TSV catalogs; later dirs add locales).
+# NM_I18N_CATALOG_DIRS=
+# Immune antibodies store path (absolute as-is, relative against the settings home).
+# NM_IMMUNE_ANTIBODIES_STORE=
+# Immune baseline store path (absolute as-is, relative against the settings home).
+# NM_IMMUNE_BASELINE_STORE=
+# Immune corpus store path (absolute as-is, relative against the settings home).
+# NM_IMMUNE_CORPUS_STORE=
+# Immune feed minimum failures before a feed is considered (env-overridable).
+# NM_IMMUNE_FEED_MIN_FAILURES=
+# Immune feed window, in seconds (env-overridable).
+# NM_IMMUNE_FEED_WINDOW_S=
+# Immune observations log path (absolute as-is, relative against the settings home).
+# NM_IMMUNE_OBSERVATIONS_LOG=
+# Immune antibody promotion minimum matches.
+# NM_IMMUNE_PROMOTION_MIN_MATCHES=
+# Immune antibody promotion window, in seconds.
+# NM_IMMUNE_PROMOTION_WINDOW_S=
+# Jamendo client ID (free). Without it Jamendo search returns nothing.
+# NM_JAMENDO_CLIENT_ID=
+# madmom venv python path (else ~/.nomorals/dj/madmom-venv/bin/python).
+# NM_MADMOM_VENV=
+# Maps surface on/off (a second gate; the flag alone does not light the surface).
+# NM_MAPS_ENABLED=
+# Maps geocode federation on/off (only when this permits).
+# NM_MAPS_GEOCODE_FEDERATION=
+# Java executable for the maps pipeline (else PATH / a JRE under the tools dir).
+# NM_MAPS_JAVA=
+# Maps live-share posture on/off (default OFF).
+# NM_MAPS_LIVE_SHARE=
+# Atlas maps packs dir.
+# NM_MAPS_PACKS_DIR=
+# Planetiler jar path for the maps pipeline.
+# NM_MAPS_PLANETILER_JAR=
+# Maps routing federation on/off (only when this permits).
+# NM_MAPS_ROUTING_FEDERATION=
+# Maps tools dir.
+# NM_MAPS_TOOLS_DIR=
+# Seconds a queued mind send may wait before its record reads overdue (0 = the mind's default).
+# NM_MIND_QUEUE_OVERDUE_S=
+# Extra model-cache dir (searched for model weights).
+# NM_MODEL_CACHE=
+# Mongo database name (default nomorals).
+# NM_MONGO_DB=
+# Mongo shadow mode: true dual-writes Mongo + SQLite while Mongo is configured (default false).
+# NM_MONGO_SHADOW=
+# Mongo endpoint. Empty = local default mongodb://127.0.0.1:27017.
+# NM_MONGO_URI=
+# Motion host port (default 8788).
+# NM_MOTION_PORT=
+# NASA API key (astronomy picture of the day).
+# NM_NASA_API_KEY=
+# News translation on/off. Defaults OFF - news is never silently translated.
+# NM_NEWS_TRANSLATION_ENABLED=
+# News translation target language code. Empty = the translation organ's owner language.
+# NM_NEWS_TRANSLATION_TARGET=
+# Niche-adoption DRAFT plugins dir (else drafts/ beside the niches package).
+# NM_NICHE_DRAFTS_DIR=
+# NPC learn data dir override.
+# NM_NPC_LEARN_DIR=
+# Ordered OpenRouter fallback models, comma-separated. Empty = the provider's built-in fallback.
+# NM_OPENROUTER_MODELS=
+# Explicit PHP binary path (wins outright; then PATH, then Devon's provisioned copy).
+# NM_PHP_BINARY=
+# Compiled-prompts home (default ~/.nomorals/prompts).
+# NM_PROMPTS_DIR=
+# Provision live view on/off. Default ON; 0 opts out.
+# NM_PROVISION_LIVE_VIEW=
+# Rust 3D renderer binary path override.
+# NM_RENDER3D_BIN=
+# 1 = never provision the Rust 3D toolchain.
+# NM_RENDER3D_NO_PROVISION=
+# Rust 3D renderer crate dir override.
+# NM_RENDER3D_SOURCE_DIR=
+# Rust 3D renderer tools dir override (default ~/workspace/tools).
+# NM_RENDER3D_TOOLS_DIR=
+# Reverse-engineering tools root (default ~/workspace/tools).
+# NM_RE_TOOLS_DIR=
+# Env name holding the sandbox-proof token.
+# NM_SANDBOX_PROOF_SECRET=
+# Shadow-parity housekeeping cadence, in seconds (the durable storage-shadow-parity job sweeps + parity-checks the two stores).
+# NM_SHADOW_PARITY_INTERVAL_SECONDS=
+# Shared claims file path override (default <home>/shared/claims.db).
+# NM_SHARED_CLAIMS=
+# NPC tactics data dir override.
+# NM_TACTICS_DIR=
+# Tenor API key for GIF replies.
+# NM_TENOR_API_KEY=
+# Local NMT weights for the translation ladder's local rung (a path or an HF repo id). Empty = the default drop-in location.
+# NM_TRANSLATE_MODEL=
+# Owner language for translation (default en).
+# NM_TRANSLATE_OWNER_LANGUAGE=
+# Lingva-compatible translation instance base URLs, comma-separated (added to the provider seed list).
+# NM_TRANSLATE_PROVIDERS=
+# TRELLIS.2 repo dir override.
+# NM_TRELLIS_DIR=
+# TRELLIS.2 python override.
+# NM_TRELLIS_PYTHON=
+# TRELLIS.2 weights dir override.
+# NM_TRELLIS_WEIGHTS=
+# Typography cache cap, in MB.
+# NM_TYPOGRAPHY_CACHE_MB=
+# UniRig repo dir override.
+# NM_UNIRIG_DIR=
+# UniRig python override.
+# NM_UNIRIG_PYTHON=
+# Max webnav sessions (default 3; the profile runtime lowers it on small devices).
+# NM_WEBNAV_MAX_SESSIONS=
+# Devon's web base URL.
+# NM_WEB_BASE_URL=
+# Devon's web bot username.
+# NM_WEB_BOT_USERNAME=
+# WeMo smart-home backend on/off.
+# NM_WEMO_ENABLED=
+# WeMo hosts (smart-home backend).
+# NM_WEMO_HOSTS=
+# WhatsApp bridge engine pick (go | node) - which bridge launches.
+# NM_WHATSAPP_BRIDGE_ENGINE=
+# World-model board path override (default <home>/data/worldmodel-board.json).
+# NM_WORLDMODEL_BOARD=
+# WordPress application password for Devon's own page.
+# NM_WP_PAGE_PASSWORD=
+# WordPress URL of Devon's own page.
+# NM_WP_PAGE_URL=
+# WordPress user for Devon's own page.
+# NM_WP_PAGE_USER=
+# WordPress application password for the group-rules page.
+# NM_WP_RULES_PASSWORD=
+# WordPress URL of the group-rules page.
+# NM_WP_RULES_URL=
+# WordPress user for the group-rules page.
+# NM_WP_RULES_USER=
+# Z-Wave password (smart-home backend).
+# NM_ZWAVE_PASSWORD=
+# Z-Wave URL (smart-home backend).
+# NM_ZWAVE_URL=
+# Z-Wave username (smart-home backend).
+# NM_ZWAVE_USER=
+
 # ── APPENDIX B — REMAINING PLAIN ENV KEYS READ BY CODE ─────────────────────────────────────────────────────────────
 
 # Non-NM_ env vars read by Devon code (LLM libs, media libs, OS).
