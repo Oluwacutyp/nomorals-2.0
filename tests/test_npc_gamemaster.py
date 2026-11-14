@@ -8,8 +8,6 @@ import json
 import unittest
 from pathlib import Path
 
-import pytest
-
 from nomorals.games.gamemaster import (
     DM_MOODS,
     GameMaster,
@@ -240,23 +238,13 @@ class NarrationTests(unittest.TestCase):
     def test_empty_event_empty_out(self):
         self.assertEqual(self._gm().narrate("g", "   "), "")
 
-    @pytest.mark.xfail(
-        reason="no narration specialist exists yet: 46ab5bb3 (Small models "
-        "Phase 2) removed narrate's model path on purpose ('the brain "
-        "never narrates as a rung'); a dedicated specialist bridge is "
-        "owed, not the dialogue _suggest",
-        strict=False,
-    )
     def test_model_path_used_when_available(self):
-        # Desired behavior, pinned as an expected failure — NOT
-        # re-targeted to the current limitation (that shape hid the
-        # gap; see ec8c6c38, reverted here). 46ab5bb3 removed the
-        # model path from narrate on purpose, so this fails today. It
-        # goes green when a dedicated narration specialist lands and
-        # narrate gains a specialist bridge. The ladder agrees:
-        # arena_narration has specialist_exists=False until one lands.
+        # The narration specialist landed: narrate reads the DEDICATED
+        # narration bridge (_narration_suggest), never the dialogue
+        # bridge — the bridge here is the narration bridge, and the
+        # dialogue bridge stays None.
         gm = self._gm()
-        gm._suggest = lambda prompt: "MODEL SAID THINGS"
+        gm._narration_suggest = lambda prompt: "MODEL SAID THINGS"
         out = gm.narrate("g", "a bell tolls", mood="grim")
         self.assertEqual(out, "MODEL SAID THINGS")
 

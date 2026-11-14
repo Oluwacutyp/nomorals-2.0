@@ -12,14 +12,12 @@ instead of narration. These tests pin the three guarantees:
 * the arena scores — a fight's score is the damage the player dealt
   (plus a finish bonus), not a flat inherited 0.
 
-Since 46ab5bb3 (Small models Phase 2, 2026-11-12) ``narrate`` never
-asks the model at all — the brain never narrates as a rung, no
-narration specialist exists yet — so the sanitizer guarantee for
-narration is pinned at the unit level (SanitizerUnitTests) and by
-``npc_speak``. The narrate flow tests below pin the DESIRED behavior
-(model reply sanitized and used) and are marked xfail until a
-dedicated narration specialist lands and narrate gains a specialist
-bridge — the gap stays visible instead of being pinned away.
+Since the narration specialist landed (narratespec lane) ``narrate``
+consults the DEDICATED narration bridge (``narration_suggest``, ladder
+job ``arena_narration``) and the narration line scorer picks the line;
+the sanitizer guarantee for narration is pinned here at the flow
+level, and at the unit level by SanitizerUnitTests. The dialogue
+bridge (``suggest``) is never consulted for narration.
 """
 
 from __future__ import annotations
@@ -28,8 +26,6 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
-
-import pytest
 
 from nomorals.games import engine_failures
 from nomorals.games.engine import GameEngine, _collapse_dup_lines
@@ -64,7 +60,11 @@ EVENT = "Ada obliterates the Hollow Warden — a BRUTAL FINISH"
 
 def make_gm(suggest, seed=7):
     store = NPCStore(Path(tempfile.mkdtemp()))
-    return GameMaster(store, suggest=suggest, seed=seed)
+    # The stub plays BOTH bridges: the dialogue bridge for npc_speak
+    # and the dedicated narration bridge for narrate — two bridges,
+    # same stub, so each path is exercised through its own bridge.
+    return GameMaster(store, suggest=suggest, narration_suggest=suggest,
+                      seed=seed)
 
 
 def _npc(gm):
@@ -133,22 +133,10 @@ class SanitizerFlowTests(unittest.TestCase):
     def setUp(self):
         engine_failures.clear_failures()
 
-    @pytest.mark.xfail(
-        reason="no narration specialist exists yet: 46ab5bb3 (Small models "
-        "Phase 2) removed narrate's model path on purpose ('the brain "
-        "never narrates as a rung'); a dedicated specialist bridge is "
-        "owed, not the dialogue _suggest",
-        strict=False,
-    )
     def test_narrate_pure_scaffold_falls_back_to_template(self):
-        # Desired behavior, pinned as an expected failure — NOT
-        # re-targeted to the current limitation (that shape hid the
-        # gap; see ec8c6c38, reverted here). narrate never consults
-        # the bridge today, so there is nothing to sanitize and no
-        # gamemaster.narrate_sanitized entry. It goes green when a
-        # dedicated narration specialist lands and narrate gains a
-        # specialist bridge. The sanitizer itself is still pinned at
-        # the unit level (SanitizerUnitTests).
+        # The narration bridge answers with pure scaffold: the
+        # sanitizer rejects it, the failure is journaled, and the
+        # template forge carries.
         gm = make_gm(lambda prompt: SCAFFOLD)
         line = gm.narrate("arena", EVENT)
         # the template forge speaks (it always carries the event);
@@ -159,35 +147,19 @@ class SanitizerFlowTests(unittest.TestCase):
         sites = [f.site for f in engine_failures.recent_failures()]
         self.assertIn("gamemaster.narrate_sanitized", sites)
 
-    @pytest.mark.xfail(
-        reason="no narration specialist exists yet: 46ab5bb3 (Small models "
-        "Phase 2) removed narrate's model path on purpose ('the brain "
-        "never narrates as a rung'); a dedicated specialist bridge is "
-        "owed, not the dialogue _suggest",
-        strict=False,
-    )
     def test_narrate_extracts_buried_narration(self):
-        # Desired behavior, pinned as an expected failure (see the
-        # comment on test_narrate_pure_scaffold_falls_back_to_template
-        # above). The extraction itself is still pinned at the unit
-        # level by SanitizerUnitTests.test_scaffold_plus_narration_extracts.
+        # The narration bridge buries the narration under its scaffold:
+        # the sanitizer extracts the narration and the specialist path
+        # uses it.
         tail = ("Hope dies under a grey sky, and the arena holds "
                 "its breath. The silence after is total.")
         gm = make_gm(lambda prompt: SCAFFOLD + "\n\n" + tail)
         line = gm.narrate("arena", EVENT)
         self.assertEqual(line, tail)
 
-    @pytest.mark.xfail(
-        reason="no narration specialist exists yet: 46ab5bb3 (Small models "
-        "Phase 2) removed narrate's model path on purpose ('the brain "
-        "never narrates as a rung'); a dedicated specialist bridge is "
-        "owed, not the dialogue _suggest",
-        strict=False,
-    )
     def test_narrate_clean_reply_passes_through(self):
-        # Desired behavior, pinned as an expected failure (see the
-        # comment on test_narrate_pure_scaffold_falls_back_to_template
-        # above).
+        # A clean narration reply from the narration bridge passes
+        # through the specialist path untouched.
         gm = make_gm(lambda prompt: CLEAN_NARRATION)
         self.assertEqual(gm.narrate("arena", EVENT), CLEAN_NARRATION)
 

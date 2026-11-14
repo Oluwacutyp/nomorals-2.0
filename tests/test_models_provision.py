@@ -64,6 +64,7 @@ EXPECTED_LEARNERS = (
     "dj_sound_selection", "dj_cue_suggest",
     "npc_line_scorer", "npc_tactics",
     "pumpdesk_win", "error_triage", "morning_rank",
+    "arena_narration",
 )
 
 
@@ -329,11 +330,13 @@ def test_journal_paths_match_learner_modules():
     mp = _modelsprov()
     from nomorals.agents.failure_models import DEFAULT_GRADES_PATH
     from nomorals.agents.pumpdesk.store import pumpdesk_dir
+    from nomorals.games.narration_learn import _default_narration_dir
     from nomorals.games.npc_learn import _default_npc_dir
 
     assert str(mp._failure_grades_path()) == DEFAULT_GRADES_PATH
     assert str(mp._pumpdesk_dir()) == pumpdesk_dir()
     assert str(mp._npc_learn_dir()) == str(_default_npc_dir())
+    assert str(mp._narration_learn_dir()) == str(_default_narration_dir())
 
 
 # ── control surface ────────────────────────────────────────────────────

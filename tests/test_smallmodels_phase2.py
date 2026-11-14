@@ -599,16 +599,22 @@ def test_ladder_brain_is_generator_not_rung():
     assert "policy" in res.model_rung.lower()
 
 
-def test_ladder_arena_narration_never_model_rung():
+def test_ladder_arena_narration_model_rung_when_specialist_available():
     from nomorals.llm.ladder import resolve
 
+    # the narration specialist exists now: untrained, the job is the
+    # code rung; trained (specialist available), the model rung is the
+    # narration line scorer. The brain alone never promotes it.
     res = resolve("arena_narration", brain=lambda p: "a tale",
                   specialist_available=False)
     assert res.rung == "code"
-    assert "narration" in res.reason.lower()
-    # even with the brain present there is no narration specialist
+    assert "specialist" in res.reason.lower()
     res = resolve("arena_narration", brain=lambda p: "a tale")
-    assert res.rung == "code"
+    assert res.rung == "code"  # no specialist availability supplied
+    res = resolve("arena_narration", brain=lambda p: "a tale",
+                  specialist_available=True)
+    assert res.rung == "model"
+    assert "scorer" in res.model_rung.lower()
 
 
 def test_ladder_dialogue_specialist_replaces_brain_rung():

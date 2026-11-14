@@ -247,6 +247,9 @@ _SPAN_RE = re.compile(r"(?<!\w)_[^_\n]+_(?!\w)|\*[^*\n]+\*")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+")
 #: per-kind survival limits: (max sentences, max chars)
 _PROSE_LIMITS = {"narrate": (3, 400), "speak": (2, 180)}
+#: How many candidate lines the narration bridge is asked for before
+#: the narration specialist picks one.
+_NARRATE_CANDIDATES = 3
 
 
 def _is_scaffold_line(line: str) -> bool:
@@ -352,18 +355,31 @@ class GameMaster:
     one from the LLM router). When it is None — or the model call fails
     or returns junk — every method that takes the model path falls back
     to the template forge, so games stay fully playable offline.
-    ``narrate`` is the exception: it never calls the model (Phase 2 —
-    no narration specialist exists yet; the template bank carries),
-    so it always uses the template forge; see :meth:`narrate`.
+    ``narrate`` reads a SEPARATE bridge, ``narration_suggest`` (ladder
+    job ``arena_narration``) — the dialogue bridge is never consulted
+    for narration. The narration specialist (``games/narration_learn``)
+    scores the bridge's candidates and picks the line; without a
+    narration bridge the template bank carries; see :meth:`narrate`.
     """
 
     def __init__(self, npc_store: NPCStore | None = None,
                  suggest: Callable[[str], str] | None = None,
                  seed: int | None = None,
                  prompt_settings: Any = None,
-                 prompt_store: Any = None) -> None:
+                 prompt_store: Any = None,
+                 narration_suggest: Callable[[str], str] | None = None,
+                 ) -> None:
+        """``suggest`` is the character_dialogue bridge (NPC speech);
+        ``narration_suggest`` is the DEDICATED narration bridge
+        (ladder job ``arena_narration``) — narrate reads ONLY that
+        bridge, never ``suggest``. The brain is the candidate generator
+        for dialogue; the narration specialist scores narration lines.
+        Two bridges, separate by design: feeding the dialogue bridge
+        to narrate would make the brain narrate scenes — the Phase 2
+        removal."""
         self.store = npc_store or NPCStore()
         self._suggest = suggest
+        self._narration_suggest = narration_suggest
         self.rng = random.Random(seed)
         self._lock = threading.RLock()
         # Compiled-prompt wiring (see _npc_speak_prompt): the resolver
@@ -380,6 +396,12 @@ class GameMaster:
     def model_on(self) -> bool:
         return self._suggest is not None
 
+    @property
+    def narration_on(self) -> bool:
+        """Is the dedicated narration bridge connected? (The dialogue
+        bridge is never consulted for narration.)"""
+        return self._narration_suggest is not None
+
     def _ask(self, prompt: str, max_len: int = 400) -> str:
         """One model call. Returns "" on any failure — callers fall through
         to the template forge."""
@@ -391,6 +413,43 @@ class GameMaster:
             _log.debug("gamemaster model call failed", exc_info=True)
             return ""
         return raw[:max_len].rstrip() if len(raw) > max_len else raw
+
+    def _ask_narration(self, prompt: str, max_len: int = 4000) -> str:
+        """One narration-bridge call. Returns "" on any failure — the
+        caller falls through to the template forge. The dialogue bridge
+        is never read here.
+
+        The cap is generous on purpose: a narration reply may carry
+        reasoning scaffold AROUND the narration, and the sanitizer —
+        not the transport — enforces the (3 sentences, 400 chars)
+        prose limit on what survives. Capping the raw reply at 400
+        would amputate a buried narration (the scaffold alone is
+        ~380 chars)."""
+        if self._narration_suggest is None:
+            return ""
+        try:
+            raw = (self._narration_suggest(prompt) or "").strip().strip('"').strip()
+        except Exception:  # noqa: BLE001 - the model must never kill a game
+            _log.debug("gamemaster narration call failed", exc_info=True)
+            return ""
+        return raw[:max_len].rstrip() if len(raw) > max_len else raw
+
+    def _narration_prompt(self, event: str, mood: str,
+                          npcs: list[NPCProfile] | None) -> str:
+        """The narration prompt: DM persona + event + cast, asking for
+        1-3 vivid sentences. The cast block is the old v1 shape
+        (13f31164) — the NPCs present shape the scene."""
+        npc_block = ""
+        if npcs:
+            bits = []
+            for npc in npcs[:3]:
+                bits.append(f"- {npc.name} ({npc.voice_style or 'natural'}), "
+                            f"feeling {npc.mood_word()}")
+            npc_block = "Cast present:\n" + "\n".join(bits) + "\n"
+        return (f"You are the dungeon master of a chat game, narrating in a "
+                f"{mood} tone. Event: {event}\n{npc_block}"
+                f"Write 1-3 vivid sentences. Stay in a {mood} voice. "
+                f"No stage directions, no fourth-wall breaks.")
 
     # ── DM persona ────────────────────────────────────────────────────────
     def _dm_path(self, game_id: str) -> Path:
@@ -430,11 +489,17 @@ class GameMaster:
 
         ``mood`` overrides the game's DM mood for this one narration.
 
-        Phase 2 (2026-11-12): there is NO narration specialist — the
-        brain never narrates as a rung — so the template bank carries,
-        parameterized by mood, with no immediate repeats. A narration
-        specialist lands later in the programme; until then this is
-        the honest-unavailable rung, not a silent brain call.
+        The dedicated narration specialist bridge (``narration_suggest``,
+        ladder job ``arena_narration``) generates candidate lines and
+        the narration specialist — a learned scorer over graded
+        narration lines (``games/narration_learn.py``) — picks the
+        line; the sanitizer validates it before it reaches a table.
+        The brain GENERATES candidates; the scorer DECIDES. The
+        dialogue bridge (``suggest``, the character_dialogue
+        generator) is never consulted here — narrate reads only the
+        narration bridge. Without a narration bridge, or when every
+        candidate fails, the template bank carries, parameterized by
+        mood, with no immediate repeats.
         """
         event = (event_text or "").strip()
         if not event:
@@ -442,6 +507,51 @@ class GameMaster:
         mood = (mood or self.get_dm_mood(game_id)).lower()
         if mood not in DM_MOODS:
             mood = "neutral"
+
+        # — specialist path: candidates, scored, sanitized —
+        if self._narration_suggest is not None:
+            prompt = self._narration_prompt(event, mood, npcs)
+            cands: list[str] = []
+            for _ in range(_NARRATE_CANDIDATES):
+                reply = self._ask_narration(prompt)
+                if not reply:
+                    continue
+                clean, reason = _sanitize_model_line(reply,
+                                                     kind="narrate")
+                if clean:
+                    cands.append(clean)
+                else:
+                    _journal_sanitize_reject("narrate", reason, reply)
+            if cands:
+                try:
+                    from .narration_learn import (
+                        NarrationJournal,
+                        load_narration_scorer,
+                        score_narration_candidates_full,
+                    )
+
+                    journal = NarrationJournal()
+                    model = load_narration_scorer()
+                    recent = [e.get("line", "")
+                              for e in journal.entries(game_id)[-5:]]
+                    scored = score_narration_candidates_full(
+                        cands, event, mood, recent_lines=recent,
+                        model=model)
+                    best = 0
+                    for i in range(1, len(scored)):
+                        if scored[i]["score"] > scored[best]["score"]:
+                            best = i
+                    line = scored[best]["text"]
+                    try:
+                        journal.journal(
+                            game_id=game_id, line=line, candidates=scored,
+                            chosen=best, event=event, mood=mood)
+                    except Exception:  # noqa: BLE001 - journaling never kills a line
+                        _log.debug("narration journal failed", exc_info=True)
+                    return line
+                except Exception:  # noqa: BLE001 - a bad scorer never kills a line
+                    _log.debug("narration scorer failed", exc_info=True)
+                    return cands[0]
 
         # — template forge —
         with self._lock:

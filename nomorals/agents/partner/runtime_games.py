@@ -2124,7 +2124,8 @@ class RuntimeGamesMixin:
         from ...games.gamemaster import GameMaster
         from ...games.npc import NPCStore
         return GameMaster(NPCStore(),
-                          suggest=self._game_suggest("character_dialogue"))
+                          suggest=self._game_suggest("character_dialogue"),
+                          narration_suggest=self._game_suggest("arena_narration"))
 
     def _npc_game_id(self, chat_key: str) -> tuple[str | None, str]:
         """(game_id, error). The NPC cast belongs to the live game in
@@ -2492,10 +2493,11 @@ class RuntimeGamesMixin:
         the returned fn is the candidate GENERATOR (the brain), never
         the rung — the rung is the job's specialist (the NPC's learned
         line scorer for dialogue, the learned combat policy for
-        tactics), decided where the decision is made. Dialogue gets
-        the generator whenever a brain exists (the scorer picks its
-        candidates); tactics and narration get None (the brain never
-        picks an action or narrates as a rung). An empty job keeps the
+        tactics, the narration line scorer for narration), decided
+        where the decision is made. Dialogue and narration get the
+        generator whenever a brain exists (the scorer picks its
+        candidates); tactics gets None (the brain never picks an
+        action as a rung). An empty job keeps the
         exact legacy behaviour (brain if a router exists, else None)
         for callers that predate the ladder.
         """

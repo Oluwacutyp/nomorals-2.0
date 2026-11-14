@@ -308,6 +308,8 @@ LEARNER_JOBS: tuple[dict[str, Any], ...] = (
      "floor": 30},
     {"job": "morning_rank", "store": "morning-rank", "prefix": None,
      "floor": 30},
+    {"job": "arena_narration", "store": "narration-line", "prefix": None,
+     "floor": 30},
 )
 
 OUT_OF_SCOPE_NOTE = (
@@ -1200,6 +1202,17 @@ def _tactics_dir() -> Path:
     return Path.home() / ".nomorals" / "tactics"
 
 
+def _narration_learn_dir() -> Path:
+    """The narration journal dir — the learner's own path.
+
+    Mirrors games/narration_learn._default_narration_dir (pinned by test).
+    """
+    override = (os.environ.get("NM_NARRATION_LEARN_DIR") or "").strip()
+    if override:
+        return Path(os.path.expanduser(override))
+    return Path.home() / ".nomorals" / "narration_learn"
+
+
 def _pumpdesk_dir() -> Path:
     """The PumpDesk desk dir — the learner's own path.
 
@@ -1347,6 +1360,9 @@ def _learner_rows(job: str) -> int | None:
         return _dj_taste_rows()
     if job == "npc_line_scorer":
         return _count_json_docs(_npc_learn_dir(), "entries",
+                                graded_key="grade")
+    if job == "arena_narration":
+        return _count_json_docs(_narration_learn_dir(), "entries",
                                 graded_key="grade")
     if job in ("npc_tactics", "character_tactics"):
         return _count_json_docs(_tactics_dir(), "rounds")

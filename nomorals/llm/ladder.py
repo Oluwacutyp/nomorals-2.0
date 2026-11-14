@@ -38,8 +38,8 @@ Phase 2 (2026-11-12, owner correction): Phase 1 registered the brain
 itself as the model rung for dialogue/tactics/narration — a design-down.
 The four Phase-1 jobs now name their REAL specialist as the model rung
 (the character's learned line scorer, the learned combat policy, the
-trained taste model, and — for narration — a specialist that does NOT
-exist yet, so the template bank carries and the reason says so). Nine
+trained taste model, and the narration line scorer — the narration
+specialist landed in the narratespec lane). Nine
 further specialist jobs are registered below.
 """
 
@@ -152,8 +152,8 @@ def list_jobs() -> list[str]:
 # ── the four Phase-1 jobs ─────────────────────────────────────────────────
 # Phase 2 (2026-11-12): the model rung is the REAL specialist, never the
 # brain. The brain generates candidates (dialogue) or directs; the
-# specialist decides. A job whose specialist does not exist yet
-# (narration) names that wall and the code rung carries.
+# specialist decides. For narration the brain generates candidate
+# lines and the narration line scorer picks one (games/narration_learn).
 
 register_job(JobSpec(
     name="character_dialogue",
@@ -217,12 +217,15 @@ register_job(JobSpec(
     name="arena_narration",
     description="Dynamic arena battle narration illustrating the actual "
                 "battle, in the table's DM mood — like a movie.",
-    model_rung="Narration specialist — NOT BUILT: no narration model "
-               "exists yet; the template bank carries until one lands",
+    model_rung="Narration line scorer — sklearn regressor on the "
+               "narration journal (games/narration_learn.py "
+               "fit_narration_scorer); the brain only generates "
+               "candidate lines, the scorer picks the line",
     code_rung="GameMaster template bank, mood-parameterized, no immediate "
               "repeats",
-    model_needs_brain=False,
-    specialist_exists=False,
+    # model_needs_brain defaults True: the brain generates narration
+    # candidates; the scorer decides. specialist_exists defaults True:
+    # the narration specialist landed (games/narration_learn.py).
 ))
 
 JOB_NAMES: tuple[str, ...] = tuple(_JOBS)

@@ -242,10 +242,11 @@ class GameEngine:
         self._send = send
         self._suggest = suggest
         #: The arena narrator's own model bridge (ladder job
-        #: "arena_narration"). None = the narrator falls back to
-        #: ``suggest``, and when both are None the template forge
-        #: carries the narration. Tactics and narration resolve as
-        #: separate ladder jobs, so the two bridges stay distinct.
+        #: "arena_narration"). None = the narrator has no narration
+        #: bridge and the template forge carries the narration. The
+        #: dialogue bridge (``suggest``) is never consulted for
+        #: narration. Tactics and narration resolve as separate ladder
+        #: jobs, so the two bridges stay distinct.
         self._dm_suggest = dm_suggest
         #: Optional §33 gate: callable(chat_key) -> True when the
         #: room's chat is a group Devon's bot systems must not
@@ -340,14 +341,16 @@ class GameEngine:
         :func:`nomorals.games.gamemaster.feed`; the engine drains the
         feed after moves and at finish. Created on first use. The
         narrator's model bridge is ``dm_suggest`` (ladder job
-        "arena_narration"), falling back to the tactics bridge, then to
-        the template forge when neither is set."""
+        "arena_narration"); when it is None the template forge carries
+        the narration. The dialogue bridge is never consulted for
+        narration."""
         gm = self._dm_obj
         if gm is None:
             from .gamemaster import GameMaster
             from .npc import NPCStore
             gm = GameMaster(NPCStore(),
-                            suggest=self._dm_suggest or self._suggest)
+                            suggest=self._dm_suggest or self._suggest,
+                            narration_suggest=self._dm_suggest)
             self._dm_obj = gm
         return gm
 

@@ -154,7 +154,11 @@ def test_resolve_code_rung_brain_unavailable():
     res = resolve("arena_narration", brain=brain,
                   profile=resolve_profile("workstation"))
     assert res.rung == "code"
-    assert res.suggest is None
+    # the generator still flows — it is not the rung; an unavailable
+    # brain yields no candidates, so the caller falls to the template
+    # forge (a template line, never a brain line)
+    assert res.suggest is not None
+    assert res.suggest("hi") == ""
 
 
 def test_resolve_suggest_never_raises():
@@ -413,21 +417,32 @@ def test_narration_template_bank_when_no_model():
 
 
 def test_narration_via_ladder_resolve():
-    # Phase 2 correction: arena_narration is honestly unavailable —
-    # no narration specialist exists — so the ladder resolves to the
-    # code rung even with a brain present, and the reason says so.
+    # The narration specialist landed: arena_narration's model rung is
+    # the narration line scorer, and the brain is its candidate
+    # generator — the generator flows on either rung (it is not the
+    # rung). The GameMaster's narrate reads ONLY the narration bridge,
+    # never the dialogue bridge: the same brain wired to the dialogue
+    # slot does not narrate.
     from nomorals.games.gamemaster import GameMaster
     from nomorals.llm.ladder import resolve
 
     brain = _FakeBrain(available=True, replies=["Dust settles. Ada stands."])
     res = resolve("arena_narration", brain=brain,
                   profile=resolve_profile("pc"))
-    assert res.rung == "code"
-    assert "narration" in res.reason.lower()
-    assert res.suggest is None
+    assert res.rung == "code"  # no specialist availability supplied
+    assert res.suggest is not None  # the generator flows on either rung
     gm = GameMaster(suggest=res.suggest)
     assert "Dust settles" not in gm.narrate(
         "arena", "Ada lands a killing crit on the Hollow Warden")
+    gm = GameMaster(narration_suggest=res.suggest)
+    assert "Dust settles" in gm.narrate(
+        "arena", "Ada lands a killing crit on the Hollow Warden")
+    # with the specialist available, the job promotes to the model rung
+    res = resolve("arena_narration", brain=brain,
+                  profile=resolve_profile("pc"),
+                  specialist_available=True)
+    assert res.rung == "model"
+    assert "scorer" in res.model_rung.lower()
 
 
 def test_narration_code_rung_when_no_brain():
