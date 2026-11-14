@@ -17,6 +17,9 @@ Inventory (from the code, not a wishlist):
   ``audio.pipeline._TTS_ORDER`` (xtts is the character backend)
 * image — sd15 (Stable Diffusion 1.5 weights) / ace-step (ACE-Step
   1.5 engine + weights)
+* image-3d — trellis (TRELLIS.2 image-to-3D, 4B, textured GLB + PBR),
+  GPU-gated: Linux + NVIDIA GPU 24 GB+ VRAM, honestly refuses on
+  EC2/phone — see ``media.trellis.gpu_gate``
 * small ML — sklearn / lightgbm / xgboost / catboost, via
   ``llm.specialists.backend_available``
 
@@ -51,6 +54,7 @@ from ..characters import provision as _char_provision
 from ..characters.store import default_character_dir
 from ..llm.specialists import backend_available, default_models_dir
 from ..media import dj_desk as _dj_desk
+from ..media import trellis as _trellis
 from ..media.ace_step import CHECKPOINT_ENV
 from ..media.dj_engine import read_feedback_log
 from ..media.imggen import checkpoint_dir as _imggen_checkpoint_dir
@@ -73,9 +77,18 @@ BACKENDS: tuple[str, ...] = (
     "xtts", "rvc", "faceswap", "madmom",
     "faster-whisper", "parakeet", "whisper-cpp",
     "chatterbox", "kokoro", "piper", "f5tts",
-    "sd15", "ace-step",
+    "sd15", "ace-step", "trellis",
     "sklearn", "lightgbm", "xgboost", "catboost",
 )
+
+#: Per-backend hardware gates: name -> callable(box) -> (ok, reason).
+#: A failing gate reports "unavailable" before the disk/RAM floor
+#: check — the gate names the measured numbers, so a refusal on a
+#: weak host says exactly what is missing. Only backends whose real
+#: floor is hardware (not disk/RAM) carry a gate.
+_GATES: dict[str, Any] = {
+    "trellis": _trellis.gpu_gate,
+}
 
 #: Order-name (as the pipeline spells it) -> backend id.
 _ORDER_TO_BACKEND = {
@@ -130,6 +143,9 @@ _BACKEND_INFO: dict[str, dict[str, Any]] = {
     "ace-step": {"family": "image",
                  "label": "ACE-Step 1.5 music engine + weights",
                  "size_mb": 15000, "disk_gb": 16.0, "ram_gb": 4.0},
+    "trellis": {"family": "image-3d",
+                "label": "TRELLIS.2 image-to-3D (4B, textured GLB + PBR)",
+                "size_mb": 12000, "disk_gb": 20.0, "ram_gb": 4.0},
     "sklearn": {"family": "small-ml",
                 "label": "scikit-learn (small-ML default)",
                 "size_mb": 30, "disk_gb": 1.0, "ram_gb": 1.0},
@@ -370,6 +386,13 @@ def _detect_ace_step() -> bool:
     return _ace_state() == "installed"
 
 
+def _detect_trellis() -> bool:
+    try:
+        return bool(_trellis.is_installed())
+    except Exception:  # noqa: BLE001 - detection is best-effort
+        return False
+
+
 def _detect_sklearn() -> bool:
     try:
         return bool(backend_available("gradboost")[0])
@@ -406,6 +429,7 @@ _DETECTORS: dict[str, Any] = {
     "chatterbox": _detect_chatterbox, "kokoro": _detect_kokoro,
     "piper": _detect_piper, "f5tts": _detect_f5tts,
     "sd15": _detect_sd15, "ace-step": _detect_ace_step,
+    "trellis": _detect_trellis,
     "sklearn": _detect_sklearn, "lightgbm": _detect_lightgbm,
     "xgboost": _detect_xgboost, "catboost": _detect_catboost,
 }
@@ -465,6 +489,8 @@ def inventory(profile: str | None = None) -> list[dict[str, Any]]:
             if state == "engine-only":
                 detail = ("engine installed, weights download on first "
                           "generation")
+        if name == "trellis":
+            detail = _trellis.install_detail()
         return {"id": name, "family": fam, "label": info["label"],
                 "installed": installed, "in_profile": in_profile,
                 "size_mb": info["size_mb"], "disk_gb": info["disk_gb"],
@@ -639,6 +665,77 @@ def _provision_ace_step(box: dict[str, Any]) -> dict[str, Any]:
                    f"download on first generation{gpu_note}", steps)
 
 
+def _provision_trellis(box: dict[str, Any]) -> dict[str, Any]:
+    """TRELLIS.2: clone --recursive + setup.sh + warm load.
+
+    Upstream's own install: ``git clone --recursive`` then
+    ``. ./setup.sh --new-env --basic --flash-attn --nvdiffrast
+    --nvdiffrec --cumesh --o-voxel --flexgemm`` (conda env
+    ``trellis2``, torch 2.6.0 + CUDA 12.4). The warm load is the
+    ``from_pretrained`` call — it downloads the ~8 GB TRELLIS.2-4B
+    weights. The GPU gate already ran in ``provision_models``; it is
+    re-checked here so a direct call refuses too.
+    """
+    steps: list[str] = []
+    import shutil
+
+    gate_ok, gate_reason = _trellis.gpu_gate(box)
+    if not gate_ok:
+        return _report(False, "unavailable", gate_reason, steps)
+    if not shutil.which("git"):
+        return _report(False, "unavailable",
+                       "git is not on this box — TRELLIS.2 clones from "
+                       "github.com/microsoft/TRELLIS.2", steps)
+    if not shutil.which("conda"):
+        return _report(False, "unavailable",
+                       "conda is not on this box — upstream's setup.sh "
+                       "creates the trellis2 env with it", steps)
+    repo = _trellis.trellis_dir()
+    if (repo / "trellis2" / "pipelines"
+            / "trellis2_image_to_3d.py").is_file():
+        steps.append("repo already present, skipping clone")
+    else:
+        proc = _run(["git", "clone", "--recursive",
+                     _trellis.TRELLIS_REPO, str(repo)], timeout=900)
+        steps.append(f"git clone --recursive: rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"clone stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed", "TRELLIS.2 clone failed",
+                           steps)
+    setup = (". ./setup.sh --new-env --basic --flash-attn "
+             "--nvdiffrast --nvdiffrec --cumesh --o-voxel --flexgemm")
+    proc = _run(["bash", "-lc", f"cd {repo} && {setup}"], timeout=3600)
+    steps.append(f"setup.sh: rc={proc.returncode}")
+    if proc.returncode != 0:
+        steps.append(f"setup stderr: {(proc.stderr or '')[-300:]}")
+        return _report(False, "failed",
+                       "TRELLIS.2 setup.sh failed — see the steps above",
+                       steps)
+    warm = ("from trellis2.pipelines import "
+            "Trellis2ImageTo3DPipeline; "
+            "Trellis2ImageTo3DPipeline.from_pretrained("
+            f"{_trellis.TRELLIS_HF_REPO!r})")
+    python = _trellis._trellis_python()
+    if python is None:
+        return _report(False, "failed",
+                       "the trellis2 conda env did not appear after "
+                       "setup.sh", steps)
+    proc = _run([*python, "-c", warm], timeout=3600, cwd=repo)
+    steps.append(f"warm load (downloads ~8 GB weights): "
+                 f"rc={proc.returncode}")
+    if proc.returncode != 0:
+        steps.append(f"warm stderr: {(proc.stderr or '')[-300:]}")
+        return _report(False, "failed",
+                       "TRELLIS.2-4B weights did not download", steps)
+    if not _trellis.is_installed():
+        return _report(False, "failed",
+                       "weights downloaded but the install cannot be "
+                       "verified", steps)
+    return _report(True, "installed",
+                   f"TRELLIS.2 installed in {repo} — "
+                   f"image-to-3D via /models trellis, GLB out", steps)
+
+
 # ── the command ──────────────────────────────────────────────────────
 
 def _floor_refusal(name: str, box: dict[str, Any],
@@ -696,6 +793,12 @@ def provision_models(backends: Any = None, *,
             reports[name] = _report(True, "already-installed",
                                     f"{name} already installed")
             continue
+        gate = _GATES.get(name)
+        if gate is not None:
+            gate_ok, gate_reason = gate(box)
+            if not gate_ok:
+                reports[name] = _report(False, "unavailable", gate_reason)
+                continue
         if total_ram < info["ram_gb"] or disk_left < info["disk_gb"]:
             reports[name] = _floor_refusal(name, box, disk_left)
             continue
@@ -721,6 +824,8 @@ def provision_models(backends: Any = None, *,
                 reports[name] = _provision_sd15(box)
             elif name == "ace-step":
                 reports[name] = _provision_ace_step(box)
+            elif name == "trellis":
+                reports[name] = _provision_trellis(box)
             elif name in _ENGINE_INSTALL:
                 reports[name] = _provision_engine(name, box)
             else:
@@ -796,6 +901,7 @@ def models_report_text(result: dict[str, Any]) -> str:
     lines.append("XTTS speaks only for the owner's own characters "
                  "(private use only). Face swap runs outside the game "
                  "only — NPCs get no faces.")
+    lines.append(_trellis.TRELLIS_TERMS_NOTE)
     return "\n".join(lines)
 
 

@@ -48,7 +48,7 @@ EXPECTED_BACKENDS = (
     "xtts", "rvc", "faceswap", "madmom",
     "faster-whisper", "parakeet", "whisper-cpp",
     "chatterbox", "kokoro", "piper", "f5tts",
-    "sd15", "ace-step",
+    "sd15", "ace-step", "trellis",
     "sklearn", "lightgbm", "xgboost", "catboost",
 )
 
@@ -148,6 +148,16 @@ def _mock_all_missing(monkeypatch, mp):
     for name in EXPECTED_BACKENDS:
         monkeypatch.setattr(mp, f"_detect_{name.replace('-', '_')}",
                             lambda: False)
+    # TRELLIS.2's GPU gate and its clone/setup/warm-load provisioner
+    # are stubbed here like the character delegate and madmom — the
+    # real gate + provisioner have their own suite (test_trellis.py).
+    monkeypatch.setitem(mp._GATES, "trellis",
+                        lambda box: (True, "mock GPU"))
+    monkeypatch.setattr(
+        mp, "_provision_trellis",
+        lambda box: {"ok": True, "status": "installed",
+                     "detail": "trellis installed",
+                     "steps": ["trellis: ok"]})
     monkeypatch.setattr(
         mp, "_char_provision_backends",
         lambda backends=None: {
@@ -196,6 +206,13 @@ def test_unmet_floor_refuses_with_numbers(monkeypatch):
     for name in EXPECTED_BACKENDS:
         monkeypatch.setattr(mp, f"_detect_{name.replace('-', '_')}",
                             lambda: False)
+    # TRELLIS.2's GPU gate is the hardware floor: mock only the probe
+    # (no real nvidia-smi/torch subprocess), keep the gate logic real —
+    # on this tiny Linux box it refuses with the measured numbers.
+    monkeypatch.setattr(
+        mp._trellis, "probe_gpu",
+        lambda: {"has_gpu": False, "name": "", "vram_gb": 0.0,
+                 "source": "", "detail": "no NVIDIA GPU detected"})
     calls = []
     monkeypatch.setattr(
         mp, "_char_provision_backends",
