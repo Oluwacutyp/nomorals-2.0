@@ -601,6 +601,7 @@ class ToolRegistry:
             "music", "studio",
             "network", "osint", "osint_people", "parsers",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
+            "trace_view",
             "sceneintel", "directed", "seer", "shell", "side_chats", "ssh_socks", "traindata", "translate", "vision", "web", "weather",
             "security",
             "wisdom", "social", "whatsapp",

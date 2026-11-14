@@ -94,6 +94,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "swarm": ["sw"],
     "tools": ["t"],
     "trade": ["td"],
+    "trace": [],
     "trial": ["trl"],
     "tui": ["ui"],
     "timeline": ["tl"],
@@ -899,6 +900,47 @@ def _parser() -> argparse.ArgumentParser:
     g_search = graph_sub.add_parser("search", help="search names + docstrings")
     g_search.add_argument("query", help="free-text query")
     _graph_common(g_search, limit=True)
+
+    trace = sub.add_parser("trace", aliases=CLI_ALIASES["trace"],
+        help="Journal trace/replay view: list, show, replay one conversation",
+        description=("nm trace list [--limit N] [--channel X] [--agent Y]\n"
+                     "nm trace show <conversation-id> [--html [DIR]]\n"
+                     "nm trace replay <conversation-id> [--max-spans N] "
+                     "[--timeout S] [--allow-tools] [--tool-args JSON|FILE]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    trace_sub = trace.add_subparsers(dest="trace_action", required=True)
+
+    def _trace_common(sub_p: argparse.ArgumentParser) -> None:
+        # Common flags live on every subparser: argparse does not
+        # inherit parent-parser arguments into subparsers.
+        sub_p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+
+    t_list = trace_sub.add_parser("list", help="recent traces, newest first")
+    t_list.add_argument("--limit", type=int, default=10,
+                        help="max traces (default: 10)")
+    t_list.add_argument("--channel", default="",
+                        help="only this channel (default: all)")
+    t_list.add_argument("--agent", default="",
+                        help="only this agent (default: all)")
+    _trace_common(t_list)
+    t_show = trace_sub.add_parser("show", help="show one trace")
+    t_show.add_argument("conversation_id", help="conversation id (the trace id)")
+    t_show.add_argument("--html", nargs="?", const="", default=None,
+                        help="also write the HTML page (optional: out dir)")
+    _trace_common(t_show)
+    t_replay = trace_sub.add_parser("replay", help="replay one trace")
+    t_replay.add_argument("conversation_id", help="conversation id (the trace id)")
+    t_replay.add_argument("--max-spans", type=int, default=50,
+                          help="max spans replayed (default: 50)")
+    t_replay.add_argument("--timeout", type=float, default=30.0,
+                          help="seconds per span (default: 30)")
+    t_replay.add_argument("--allow-tools", action="store_true",
+                          help="permit read-only tool re-runs (needs --tool-args)")
+    t_replay.add_argument("--tool-args", default="",
+                          help="JSON object (or a JSON file) keyed by span id")
+    _trace_common(t_replay)
 
     media = sub.add_parser("media", aliases=CLI_ALIASES["media"],
         help="Edit images and video from plain language",

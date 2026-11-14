@@ -36,6 +36,7 @@ from .commands.cards import _cmd_cards
 from .commands.browse import _cmd_browse
 from .commands.code import _cmd_code
 from .commands.graph import _cmd_graph
+from .commands.trace import _cmd_trace
 from .commands.doc import _cmd_doc
 from .commands.data import _cmd_data
 from .commands.datasci import _cmd_datasci
@@ -386,6 +387,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "research-loop": _CommandSpec(_cmd_research_loop),
     "code": _CommandSpec(_cmd_code),
     "graph": _CommandSpec(_cmd_graph),
+    "trace": _CommandSpec(_cmd_trace),
     "doc": _CommandSpec(_cmd_doc),
     "wisdom": _CommandSpec(_cmd_wisdom),
     "mesh": _CommandSpec(_cmd_mesh),
