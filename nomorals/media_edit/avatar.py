@@ -18,17 +18,19 @@ this drives its documented inference entry point::
         --video_out_path <out.mp4> \\
         --inference_steps 20 --guidance_scale 1.5
 
-Setup (fail-closed with these exact steps when missing):
-
-    git clone https://github.com/bytedance/LatentSync
-    cd LatentSync && pip install -r requirements.txt
-    # download checkpoints/latentsync_unet.pt + whisper tiny.pt
-    # (see the repo README) then:
-    export LATENTSYNC_REPO=/path/to/LatentSync
-
-Optional env overrides: ``LATENTSYNC_PYTHON`` (python to run the repo
-with — use the repo's venv when deps live there), ``LATENTSYNC_UNET_CONFIG``,
-``LATENTSYNC_CKPT``, ``LATENTSYNC_STEPS``, ``LATENTSYNC_GUIDANCE``.
+Setup is self-provisioned — Devon installs both backends herself
+(``provision_backends()``): she clones the repos into
+``~/LatentSync`` / ``~/Wav2Lip``, creates a venv in each repo,
+installs the deps, downloads the checkpoints and wires the paths.
+No setup is asked of the owner. LatentSync needs a GPU host (18 GB+
+VRAM for the 1.6 512 config — its inference hardcodes CUDA), so on a
+box without one it is honestly refused with the measured numbers;
+Wav2Lip runs on CPU and is the fallback there. Optional env
+overrides: ``LATENTSYNC_REPO`` / ``WAV2LIP_REPO`` (a checkout
+elsewhere), ``LATENTSYNC_PYTHON`` / ``WAV2LIP_PYTHON`` (the python
+to run the repo with — the repo's own ``.venv`` when deps live
+there), ``LATENTSYNC_UNET_CONFIG``, ``LATENTSYNC_CKPT``,
+``LATENTSYNC_STEPS``, ``LATENTSYNC_GUIDANCE``, ``WAV2LIP_CKPT``.
 
 Upgrade path: ``backend="echomimic"`` (EchoMimicV2, half-body gestures)
 is an honest stub — raises with setup steps, never fake video.
@@ -71,33 +73,60 @@ DEFAULT_CKPT = "checkpoints/latentsync_unet.pt"
 DEFAULT_STEPS = 20
 DEFAULT_GUIDANCE = 1.5
 
-LATENTSYNC_SETUP = """LatentSync is not configured. Set it up:
-  git clone https://github.com/bytedance/LatentSync
-  cd LatentSync && pip install -r requirements.txt
-  # download checkpoints/latentsync_unet.pt and whisper tiny.pt
-  # (see the LatentSync README "Download checkpoints" section)
-  export LATENTSYNC_REPO=/path/to/LatentSync
-  # if the repo lives in its own venv:
-  export LATENTSYNC_PYTHON=/path/to/LatentSync/.venv/bin/python"""
+#: Canonical homes for the provisioned checkouts (trellis/unirig/
+#: ace-step shape: ~/Repo, env var overrides).
+LATENTSYNC_DIR_NAME = "LatentSync"
+WAV2LIP_DIR_NAME = "Wav2Lip"
+
+LATENTSYNC_SETUP = (
+    "LatentSync is not installed on this box — Devon installs it "
+    "herself with the avatar provision (clone + deps + checkpoints, "
+    "no setup needed from you). It needs a GPU host (18 GB+ VRAM), "
+    "so on a box without one it is honestly refused instead.")
+
+
+def latentsync_dir() -> Path:
+    """Where the LatentSync checkout lives (env override or canonical)."""
+    raw = (os.environ.get("LATENTSYNC_REPO") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / LATENTSYNC_DIR_NAME
+
+
+def wav2lip_dir() -> Path:
+    """Where the Wav2Lip checkout lives (env override or canonical)."""
+    raw = (os.environ.get("WAV2LIP_REPO") or "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / WAV2LIP_DIR_NAME
+
+
+def _venv_python(repo: Path) -> str | None:
+    """The repo's own venv python, when the provision created one."""
+    if os.name == "nt":
+        candidate = repo / ".venv" / "Scripts" / "python.exe"
+    else:
+        candidate = repo / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.is_file() else None
 
 
 def latentsync_repo() -> Path:
     """Resolve the LatentSync checkout. Raises NotConfigured when missing."""
-    raw = (os.environ.get("LATENTSYNC_REPO") or "").strip()
-    if not raw:
-        raise NotConfigured(LATENTSYNC_SETUP)
-    repo = Path(raw).expanduser()
+    repo = latentsync_dir()
     script = repo / "scripts" / "inference.py"
     if not script.exists():
         raise NotConfigured(
-            f"LATENTSYNC_REPO={repo} has no scripts/inference.py — "
-            "is it a real LatentSync checkout?\n" + LATENTSYNC_SETUP)
+            f"no LatentSync checkout at {repo} "
+            "(no scripts/inference.py) — " + LATENTSYNC_SETUP)
     return repo
 
 
 def latentsync_python() -> str:
     """Python interpreter to run the repo with (venv-aware)."""
-    return (os.environ.get("LATENTSYNC_PYTHON") or "").strip() or sys.executable
+    env = (os.environ.get("LATENTSYNC_PYTHON") or "").strip()
+    if env:
+        return env
+    return _venv_python(latentsync_dir()) or sys.executable
 
 
 def avatar_available() -> tuple[bool, str]:
@@ -267,33 +296,32 @@ def _run_latentsync(video: Path, audio: Path, out: Path) -> Path:
 # diffusing the whole frame). Pick it when the GPU can't run LatentSync.
 # License note: Wav2Lip's weights bar commercial use — the backend warns.
 
-WAV2LIP_SETUP = """Wav2Lip is not configured. Set it up:
-  git clone https://github.com/Rudrabha/Wav2Lip
-  cd Wav2Lip && pip install -r requirements.txt
-  # download checkpoints/wav2lip_gan.pth (see the Wav2Lip README)
-  export WAV2LIP_REPO=/path/to/Wav2Lip
-  # if the repo lives in its own venv:
-  export WAV2LIP_PYTHON=/path/to/Wav2Lip/.venv/bin/python"""
+WAV2LIP_SETUP = (
+    "Wav2Lip is not installed on this box — Devon installs it "
+    "herself with the avatar provision (clone + deps + checkpoints, "
+    "no setup needed from you). It runs on CPU, so it fits boxes "
+    "without a GPU.")
 WAV2LIP_CKPT = "checkpoints/wav2lip_gan.pth"
+WAV2LIP_S3FD = "face_detection/detection/sfd/s3fd.pth"
 
 
 def wav2lip_repo() -> Path:
     """Resolve the Wav2Lip checkout. Raises NotConfigured when missing."""
-    raw = (os.environ.get("WAV2LIP_REPO") or "").strip()
-    if not raw:
-        raise NotConfigured(WAV2LIP_SETUP)
-    repo = Path(raw).expanduser()
+    repo = wav2lip_dir()
     script = repo / "inference.py"
     if not script.exists():
         raise NotConfigured(
-            f"WAV2LIP_REPO={repo} has no inference.py — "
-            "is it a real Wav2Lip checkout?\n" + WAV2LIP_SETUP)
+            f"no Wav2Lip checkout at {repo} (no inference.py) — "
+            + WAV2LIP_SETUP)
     return repo
 
 
 def wav2lip_python() -> str:
     """Python interpreter to run the repo with (venv-aware)."""
-    return (os.environ.get("WAV2LIP_PYTHON") or "").strip() or sys.executable
+    env = (os.environ.get("WAV2LIP_PYTHON") or "").strip()
+    if env:
+        return env
+    return _venv_python(wav2lip_dir()) or sys.executable
 
 
 def wav2lip_available() -> tuple[bool, str]:
@@ -305,6 +333,9 @@ def wav2lip_available() -> tuple[bool, str]:
     ckpt = repo / WAV2LIP_CKPT
     if not ckpt.exists():
         return (False, f"Wav2Lip checkpoint missing at {ckpt}")
+    s3fd = repo / WAV2LIP_S3FD
+    if not s3fd.exists():
+        return (False, f"Wav2Lip face detector missing at {s3fd}")
     return (True, f"Wav2Lip ready at {repo}")
 
 
@@ -423,6 +454,442 @@ def talking_head(photo: str | os.PathLike[str],
     result = _run_latentsync(still, audio_path, dest)
     _log.info("avatar: done → %s", result)
     return result
+
+
+# ---------------------------------------------------------------------------
+# self-provision: Devon installs both backends herself
+# ---------------------------------------------------------------------------
+# Same honest-reporting shape as /models (tools/models_provision):
+# per-backend report dicts, statuses installed / already-installed /
+# unavailable / failed, never raises, never a manual-step list.
+# Seams are module attributes so tests can replace them.
+# The owner is never asked to clone, install or export anything:
+# the only genuine walls are a GPU the box does not have (LatentSync
+# on a CPU-only box) and a login or payment (neither backend needs
+# one — both repos and checkpoints are public).
+
+LATENTSYNC_REPO_URL = "https://github.com/bytedance/LatentSync"
+WAV2LIP_REPO_URL = "https://github.com/Rudrabha/Wav2Lip"
+LATENTSYNC_HF_REPO = "ByteDance/LatentSync-1.6"
+LATENTSYNC_MIN_VRAM_GB = 18.0
+WAV2LIP_GAN_DRIVE_URL = (
+    "https://drive.google.com/file/d/15G3U08c8xsCkOqQxE38Z2XXDnPcOptNk/view")
+WAV2LIP_S3FD_URL = (
+    "https://www.adrianbulat.com/downloads/python-fan/s3fd-619a316812.pth")
+
+#: family, label, download MB, disk floor GB, RAM floor GB.
+_BACKEND_INFO: dict[str, dict[str, Any]] = {
+    "latentsync": {"family": "talking-head",
+                   "label": "LatentSync 1.6 lip-sync (diffusion, GPU)",
+                   "size_mb": 9000, "disk_gb": 12.0, "ram_gb": 4.0},
+    "wav2lip": {"family": "talking-head",
+                "label": "Wav2Lip lip-sync (lightweight, CPU)",
+                "size_mb": 2000, "disk_gb": 4.0, "ram_gb": 2.0},
+}
+
+BACKENDS: tuple[str, ...] = ("latentsync", "wav2lip")
+
+#: Modern deps for Wav2Lip's venv. Upstream's requirements.txt pins
+#: torch==1.1.0 / numpy==1.17.1 (2020, Python 3.6) — no wheels exist
+#: for the owner's stack, so the provision installs the current set
+#: instead. The first real render is the live proof it runs the
+#: 2020-era inference code.
+WAV2LIP_PIP_PACKAGES: tuple[str, ...] = (
+    "torch", "librosa", "opencv-python", "scipy", "numpy", "tqdm",
+    "face-detection", "Pillow",
+)
+
+
+def _run(args: list[str], timeout: int | None = None,
+         cwd: str | Path | None = None) -> Any:
+    """Subprocess seam (same shape as tools/models_provision._run)."""
+    return subprocess.run(args, capture_output=True, text=True,
+                          timeout=timeout,
+                          cwd=str(cwd) if cwd is not None else None)
+
+
+def _measure_box() -> dict[str, Any]:
+    """Box measure seam — the characters provision's, lazily imported
+    so this module stays importable without the characters organ."""
+    from ..characters.provision import _measure_box as _mb
+
+    return _mb()
+
+
+def _probe_gpu() -> dict[str, Any]:
+    """GPU probe seam — trellis's, the one GPU probe in the codebase."""
+    from ..media.trellis import probe_gpu
+
+    return probe_gpu()
+
+
+def _download_url(url: str, dest: Path) -> Path:
+    """Download a URL to dest (stdlib urllib). Returns dest."""
+    import urllib.request
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    req = urllib.request.Request(url, headers={"User-Agent": "Devon/1.0"})
+    with urllib.request.urlopen(req, timeout=900) as resp, \
+            open(dest, "wb") as fh:
+        while True:
+            chunk = resp.read(1024 * 1024)
+            if not chunk:
+                break
+            fh.write(chunk)
+    return dest
+
+
+def _report(ok: bool, status: str, detail: str,
+            steps: list[str] | None = None) -> dict[str, Any]:
+    return {"ok": ok, "status": status, "detail": detail,
+            "steps": list(steps or [])}
+
+
+def _latentsync_installed() -> bool:
+    """Repo + inference entry + both checkpoints present."""
+    repo = latentsync_dir()
+    return ((repo / "scripts" / "inference.py").is_file()
+            and (repo / "checkpoints" / "latentsync_unet.pt").is_file()
+            and (repo / "checkpoints" / "whisper" / "tiny.pt").is_file())
+
+
+def _wav2lip_installed() -> bool:
+    """Repo + inference entry + both checkpoints present."""
+    repo = wav2lip_dir()
+    return ((repo / "inference.py").is_file()
+            and (repo / "checkpoints" / "wav2lip_gan.pth").is_file()
+            and (repo / "face_detection" / "detection" / "sfd"
+                 / "s3fd.pth").is_file())
+
+
+def latentsync_gate(box: dict[str, Any]) -> tuple[bool, str]:
+    """The install gate: Linux + NVIDIA GPU + 18 GB VRAM + Python 3.9-3.12.
+
+    Returns (ok, reason) — the reason always names the measured
+    numbers, so a refusal on EC2 (Windows, no GPU) or this box (no
+    GPU) says exactly what is missing. Upstream's inference hardcodes
+    device="cuda", so CPU is not a degraded path — it is a refusal.
+    """
+    box = dict(box or {})
+    profile = str(box.get("profile") or "")
+    if profile == "termux":
+        return (False, "LatentSync cannot install on termux — talking "
+                       "head needs a GPU host; use the API fallback")
+    platform = str(box.get("platform") or sys.platform)
+    cpus = box.get("cpus", "?")
+    ram = box.get("total_ram_gb", "?")
+    if not platform.startswith("linux"):
+        return (False, f"LatentSync is tested only on Linux — this box "
+                       f"runs {platform} ({cpus} CPUs, {ram} GB RAM); "
+                       f"it cannot install here")
+    gpu = _probe_gpu()
+    if not gpu.get("has_gpu"):
+        return (False, f"LatentSync needs an NVIDIA GPU with "
+                       f"{LATENTSYNC_MIN_VRAM_GB:.0f} GB+ VRAM — no "
+                       f"NVIDIA GPU detected on this box (0 GB VRAM, "
+                       f"{cpus} CPUs, {ram} GB RAM)")
+    vram = float(gpu.get("vram_gb") or 0.0)
+    if vram < LATENTSYNC_MIN_VRAM_GB:
+        return (False, f"LatentSync needs an NVIDIA GPU with "
+                       f"{LATENTSYNC_MIN_VRAM_GB:.0f} GB+ VRAM — this "
+                       f"box has {gpu.get('name')} with {vram} GB")
+    major, minor = sys.version_info[:2]
+    if (major, minor) < (3, 9) or (major, minor) >= (3, 13):
+        return (False, f"LatentSync's torch 2.5.1 needs Python 3.9-3.12 "
+                       f"— this box runs Python {major}.{minor}")
+    return (True, f"GPU {gpu.get('name')} with {vram} GB VRAM — meets "
+                  f"the {LATENTSYNC_MIN_VRAM_GB:.0f} GB floor")
+
+
+def wav2lip_gate(box: dict[str, Any]) -> tuple[bool, str]:
+    """The install gate: not termux. No GPU gate — upstream runs on
+    CPU (device falls back when CUDA is absent)."""
+    profile = str((box or {}).get("profile") or "")
+    if profile == "termux":
+        return (False, "Wav2Lip cannot install on termux — talking "
+                       "head needs a GPU host; use the API fallback")
+    return (True, "CPU install — no GPU needed")
+
+
+def _floor_refusal(name: str, box: dict[str, Any],
+                   disk_left: float) -> dict[str, Any]:
+    info = _BACKEND_INFO[name]
+    return _report(False, "unavailable",
+                   f"needs {info['disk_gb']} GB free disk and "
+                   f"{info['ram_gb']} GB RAM; box has {disk_left} GB disk "
+                   f"free and {box.get('total_ram_gb', '?')} GB RAM total")
+
+
+def _pip_into(package: str, steps: list[str]) -> bool:
+    """pip install one package into Devon's own interpreter."""
+    proc = _run([sys.executable, "-m", "pip", "install", "-q", package],
+                timeout=1200)
+    steps.append(f"pip install {package}: rc={proc.returncode}")
+    if proc.returncode != 0:
+        steps.append(f"pip stderr: {(proc.stderr or '')[-300:]}")
+    return proc.returncode == 0
+
+
+def _make_venv(repo: Path, steps: list[str]) -> str | None:
+    """Create the repo's .venv (or reuse it). Returns its python."""
+    venv_python = _venv_python(repo)
+    if venv_python is not None:
+        steps.append("venv already present, reusing it")
+        return venv_python
+    proc = _run([sys.executable, "-m", "venv", str(repo / ".venv")],
+                timeout=600)
+    steps.append(f"venv create: rc={proc.returncode}")
+    if proc.returncode != 0:
+        steps.append(f"venv stderr: {(proc.stderr or '')[-300:]}")
+        return None
+    return _venv_python(repo)
+
+
+def _provision_latentsync(box: dict[str, Any]) -> dict[str, Any]:
+    """LatentSync: clone + venv + requirements + HF checkpoints."""
+    steps: list[str] = []
+    import shutil
+
+    gate_ok, gate_reason = latentsync_gate(box)
+    if not gate_ok:
+        return _report(False, "unavailable", gate_reason, steps)
+    if not shutil.which("git"):
+        return _report(False, "unavailable",
+                       "git is not on this box — LatentSync clones from "
+                       "github.com/bytedance/LatentSync", steps)
+    repo = latentsync_dir()
+    if (repo / "scripts" / "inference.py").is_file():
+        steps.append("repo already present, skipping clone")
+    else:
+        proc = _run(["git", "clone", "--depth", "1",
+                     LATENTSYNC_REPO_URL, str(repo)], timeout=900)
+        steps.append(f"git clone: rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"clone stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed", "LatentSync clone failed",
+                           steps)
+    venv_python = _make_venv(repo, steps)
+    if venv_python is None:
+        return _report(False, "failed",
+                       "LatentSync venv creation failed", steps)
+    req = repo / "requirements.txt"
+    proc = _run([venv_python, "-m", "pip", "install", "-q",
+                 "-r", str(req)], timeout=1800, cwd=str(repo))
+    steps.append(f"pip install -r requirements.txt: rc={proc.returncode}")
+    if proc.returncode != 0:
+        steps.append(f"pip stderr: {(proc.stderr or '')[-300:]}")
+        return _report(False, "failed",
+                       "LatentSync requirements install failed", steps)
+    ckpt_dir = repo / "checkpoints"
+    unet = ckpt_dir / "latentsync_unet.pt"
+    tiny = ckpt_dir / "whisper" / "tiny.pt"
+    if unet.is_file() and tiny.is_file():
+        steps.append("checkpoints already present, skipping download")
+    else:
+        probe = _run([sys.executable, "-c", "import huggingface_hub"],
+                     timeout=120)
+        if probe.returncode != 0 and not _pip_into("huggingface-hub",
+                                                   steps):
+            return _report(False, "failed",
+                           "huggingface_hub is needed for the "
+                           "checkpoint download", steps)
+        snippet = (
+            "from huggingface_hub import snapshot_download; "
+            f"snapshot_download(repo_id={LATENTSYNC_HF_REPO!r}, "
+            "allow_patterns=['latentsync_unet.pt', 'whisper/tiny.pt'], "
+            f"local_dir={str(ckpt_dir)!r})")
+        proc = _run([sys.executable, "-c", snippet], timeout=1800)
+        steps.append(f"download checkpoints: rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"download stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed",
+                           "LatentSync checkpoints did not download", steps)
+    if not _latentsync_installed():
+        return _report(False, "failed",
+                       "checkpoints downloaded but the install cannot "
+                       "be verified", steps)
+    verify = _run([venv_python, "-c",
+                   "import torch, diffusers, omegaconf"], timeout=300)
+    steps.append("import torch, diffusers, omegaconf: "
+                 f"rc={verify.returncode}")
+    if verify.returncode != 0:
+        return _report(False, "failed",
+                       "LatentSync deps installed but do not import — "
+                       "see the steps above", steps)
+    return _report(True, "installed",
+                   f"LatentSync installed in {repo} — lip-sync via the "
+                   f"talking head; the VAE downloads on first render",
+                   steps)
+
+
+def _provision_wav2lip(box: dict[str, Any]) -> dict[str, Any]:
+    """Wav2Lip: clone + venv + modern deps + both checkpoints."""
+    steps: list[str] = []
+    import shutil
+
+    gate_ok, gate_reason = wav2lip_gate(box)
+    if not gate_ok:
+        return _report(False, "unavailable", gate_reason, steps)
+    if not shutil.which("git"):
+        return _report(False, "unavailable",
+                       "git is not on this box — Wav2Lip clones from "
+                       "github.com/Rudrabha/Wav2Lip", steps)
+    repo = wav2lip_dir()
+    if (repo / "inference.py").is_file():
+        steps.append("repo already present, skipping clone")
+    else:
+        proc = _run(["git", "clone", "--depth", "1",
+                     WAV2LIP_REPO_URL, str(repo)], timeout=900)
+        steps.append(f"git clone: rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"clone stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed", "Wav2Lip clone failed", steps)
+    venv_python = _make_venv(repo, steps)
+    if venv_python is None:
+        return _report(False, "failed",
+                       "Wav2Lip venv creation failed", steps)
+    proc = _run([venv_python, "-m", "pip", "install", "-q",
+                 "--extra-index-url",
+                 "https://download.pytorch.org/whl/cpu",
+                 *WAV2LIP_PIP_PACKAGES], timeout=1800, cwd=str(repo))
+    steps.append(f"pip install deps: rc={proc.returncode}")
+    if proc.returncode != 0:
+        steps.append(f"pip stderr: {(proc.stderr or '')[-300:]}")
+        return _report(False, "failed",
+                       "Wav2Lip deps install failed", steps)
+    ckpt = repo / "checkpoints" / "wav2lip_gan.pth"
+    if ckpt.is_file():
+        steps.append("wav2lip_gan.pth already present, skipping download")
+    else:
+        probe = _run([sys.executable, "-c", "import gdown"], timeout=120)
+        if probe.returncode != 0 and not _pip_into("gdown", steps):
+            return _report(False, "failed",
+                           "gdown is needed for the checkpoint "
+                           "download", steps)
+        proc = _run([sys.executable, "-m", "gdown", "--fuzzy",
+                     WAV2LIP_GAN_DRIVE_URL, "-O", str(ckpt)],
+                    timeout=1800)
+        steps.append(f"gdown wav2lip_gan.pth: rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"gdown stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed",
+                           "wav2lip_gan.pth did not download", steps)
+    s3fd = repo / "face_detection" / "detection" / "sfd" / "s3fd.pth"
+    if s3fd.is_file():
+        steps.append("s3fd.pth already present, skipping download")
+    else:
+        try:
+            _download_url(WAV2LIP_S3FD_URL, s3fd)
+            steps.append("download s3fd.pth: ok")
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            return _report(False, "failed",
+                           f"s3fd.pth did not download: {exc}", steps)
+    if not _wav2lip_installed():
+        return _report(False, "failed",
+                       "checkpoints downloaded but the install cannot "
+                       "be verified", steps)
+    verify = _run([venv_python, "-c",
+                   "import torch, cv2, librosa, face_detection"],
+                  timeout=300)
+    steps.append("import torch, cv2, librosa, face_detection: "
+                 f"rc={verify.returncode}")
+    if verify.returncode != 0:
+        return _report(False, "failed",
+                       "Wav2Lip deps installed but do not import — "
+                       "see the steps above", steps)
+    return _report(True, "installed",
+                   f"Wav2Lip installed in {repo} — lip-sync via the "
+                   f"talking head (CPU); research-only weights, no "
+                   f"commercial use", steps)
+
+
+def provision_backends(backends: Any = None, *,
+                       box: dict[str, Any] | None = None
+                       ) -> dict[str, Any]:
+    """Provision the named talking-head backends (default: both).
+
+    Returns ``{"ok", "box", "backends"}`` in the /models report shape.
+    Never raises — a backend that blows up reports ``failed``. Never
+    emits a manual-step list: the owner is never asked to clone,
+    install or export anything.
+    """
+    wanted = list(BACKENDS if backends is None else backends)
+    box = dict(box) if box is not None else _measure_box()
+    try:
+        disk_left = float(box.get("free_disk_gb") or 0)
+    except (TypeError, ValueError):
+        disk_left = 0.0
+    try:
+        total_ram = float(box.get("total_ram_gb") or 0)
+    except (TypeError, ValueError):
+        total_ram = 0.0
+
+    reports: dict[str, dict[str, Any]] = {}
+    unknown = [b for b in wanted if b not in _BACKEND_INFO]
+    for name in wanted:
+        if name in unknown:
+            continue
+        installed = (_latentsync_installed() if name == "latentsync"
+                     else _wav2lip_installed())
+        if installed:
+            reports[name] = _report(True, "already-installed",
+                                    f"{name} already installed")
+            continue
+        gate = (latentsync_gate if name == "latentsync"
+                else wav2lip_gate)
+        gate_ok, gate_reason = gate(box)
+        if not gate_ok:
+            reports[name] = _report(False, "unavailable", gate_reason)
+            continue
+        info = _BACKEND_INFO[name]
+        if total_ram < info["ram_gb"] or disk_left < info["disk_gb"]:
+            reports[name] = _floor_refusal(name, box, disk_left)
+            continue
+        try:
+            if name == "latentsync":
+                reports[name] = _provision_latentsync(box)
+            else:
+                reports[name] = _provision_wav2lip(box)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            _log.debug("avatar provision %s failed", name, exc_info=True)
+            reports[name] = _report(False, "failed",
+                                    f"provision crashed: {exc}")
+        if reports[name].get("ok"):
+            disk_left = max(0.0, disk_left - info["size_mb"] / 1024.0)
+    ok = bool(reports) and all(r["ok"] for r in reports.values()) \
+        and not unknown
+    result: dict[str, Any] = {"ok": ok, "box": box, "backends": reports}
+    if unknown:
+        result["error"] = "unknown backend(s): " + ", ".join(unknown)
+    return result
+
+
+def provision_report_text(result: dict[str, Any]) -> str:
+    """Plain-text per-backend report for the chat reply."""
+    box = result.get("box") or {}
+    lines = ["🗣️ talking-head backends — provision"]
+    if box:
+        lines.append(
+            f"box: {box.get('total_ram_gb', '?')} GB RAM "
+            f"({box.get('free_ram_gb', '?')} GB free), "
+            f"{box.get('free_disk_gb', '?')} GB disk free, "
+            f"profile {box.get('profile') or '?'}")
+    for name in BACKENDS:
+        rep = (result.get("backends") or {}).get(name)
+        if rep is None:
+            continue
+        lines.append(f"• {name}: {rep.get('status')} — "
+                     f"{rep.get('detail')}")
+        for step in rep.get("steps") or []:
+            lines.append(f"    {step}")
+    if result.get("error"):
+        lines.append(str(result["error"]))
+    lines.append("")
+    lines.append("Wav2Lip weights are research-only (no commercial "
+                 "use) — prefer LatentSync for anything public.")
+    lines.append("LatentSync's VAE downloads on first render "
+                 "(~335 MB, public).")
+    return "\n".join(lines)
 
 
 def list_backends() -> list[dict[str, Any]]:

@@ -3179,10 +3179,12 @@ class CoreMind:
                          message: Any) -> str:
         """NL talking head (#27): photo + text → lip-synced video.
 
-        Runs on a background thread (TTS + LatentSync are SLOW), delivers
+        Runs on a background thread (TTS + lip-sync are SLOW), delivers
         via send_media(kind="video"). Needs an attached photo; the text
-        comes from the intent. Nothing is faked: a missing LatentSync
-        setup raises with the exact setup steps, and the reply says so.
+        comes from the intent. Nothing is faked: a missing backend is
+        self-provisioned (Devon installs it herself, LatentSync first,
+        Wav2Lip fallback on a box without a GPU); when neither can
+        install, the reply is the plain-words provision report.
         """
         from pathlib import Path
         from ..social.chat.base import MediaRef
@@ -3201,15 +3203,36 @@ class CoreMind:
         photo_path = photos[0].path
 
         def job() -> str:
-            from ..media_edit.avatar import talking_head
+            from ..media_edit.avatar import (
+                NotConfigured,
+                provision_backends,
+                provision_report_text,
+                talking_head,
+            )
             stamp = time.strftime("%Y%m%d-%H%M%S")
             out_dir = Path(self.context.settings.resolve(
                 "data/generations"))
             out_dir.mkdir(parents=True, exist_ok=True)
+            dest = str(out_dir / f"talking-head-{stamp}.mp4")
             try:
-                out = talking_head(
-                    photo_path, said,
-                    out_path=str(out_dir / f"talking-head-{stamp}.mp4"))
+                out = talking_head(photo_path, said, out_path=dest)
+            except NotConfigured:
+                # Self-provision: Devon installs the backends herself
+                # instead of handing the owner a manual-step list.
+                # LatentSync first; Wav2Lip is the CPU fallback when
+                # the GPU box is absent.
+                result = provision_backends()
+                if result["backends"].get("latentsync", {}).get("ok"):
+                    backend = "latentsync"
+                elif result["backends"].get("wav2lip", {}).get("ok"):
+                    backend = "wav2lip"
+                else:
+                    return provision_report_text(result)
+                try:
+                    out = talking_head(photo_path, said, backend=backend,
+                                       out_path=dest)
+                except Exception as exc:  # noqa: BLE001 - report honestly
+                    return f"❌ talking head failed: {exc}"
             except Exception as exc:  # noqa: BLE001 - report honestly
                 return f"❌ talking head failed: {exc}"
             if self.runtime is None:
