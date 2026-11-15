@@ -287,6 +287,13 @@ def test_avatar_available_termux(monkeypatch):
     monkeypatch.setenv("NM_PROFILE", "termux")
     ok, reason = avatar_available()
     assert ok is False and "GPU host" in reason
+    # Fixed 2026-11-15 (avatar leftovers): the old reason pointed at the
+    # API fallback (backend='api', PrunaAI P-Video) as if it worked — it
+    # is not implemented and raises NotConfigured, so the pointer was a
+    # dead end. The reason now says plainly that it is not available
+    # either, and names no backend as a working fallback.
+    assert "backend='api'" not in reason
+    assert "not available" in reason
     monkeypatch.delenv("NM_PROFILE", raising=False)
 
 
@@ -311,7 +318,24 @@ def test_list_backends(fake_repo, monkeypatch):
     assert backends["latentsync"]["available"] is True
     assert backends["echomimic"]["available"] is False
     assert backends["api"]["available"] is False
+    # Fixed 2026-11-15 (avatar leftovers): the api backend's cost was
+    # "~$0.025/sec" — an unverified price with no test, doc, or upstream
+    # backing, and no consumer of list_backends() reads the cost field.
+    # The honest value for an unimplemented, unpriced backend is unknown.
+    assert backends["api"]["cost"] == "unknown"
     monkeypatch.delenv("NM_PROFILE", raising=False)
+
+
+def test_docstring_no_setup_steps():
+    # Fixed 2026-11-15 (avatar leftovers): the module docstring said the
+    # EchoMimic stub "raises with setup steps" — stale since the 70f74e93
+    # rewrite removed its manual-step list. The docstring now carries the
+    # honest-stub wording (no install path yet), like the api line.
+    import nomorals.media_edit.avatar as avatar_mod
+
+    doc = avatar_mod.__doc__ or ""
+    assert "setup steps" not in doc
+    assert "no install path" in doc
 
 
 # ── NL intent ────────────────────────────────────────────────────────

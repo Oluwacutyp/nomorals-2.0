@@ -33,7 +33,8 @@ there), ``LATENTSYNC_UNET_CONFIG``, ``LATENTSYNC_CKPT``,
 ``LATENTSYNC_STEPS``, ``LATENTSYNC_GUIDANCE``, ``WAV2LIP_CKPT``.
 
 Upgrade path: ``backend="echomimic"`` (EchoMimicV2, half-body gestures)
-is an honest stub — raises with setup steps, never fake video.
+is an honest stub — not implemented, no install path yet, never fake
+video.
 API fallback: ``backend="api"`` (PrunaAI P-Video) is an honest stub —
 not wired, no install path yet — the termux path.
 
@@ -134,8 +135,8 @@ def avatar_available() -> tuple[bool, str]:
     from ..core.profiles import get_profile_kind
     kind = get_profile_kind()
     if kind == "termux":
-        return (False, "talking head needs a GPU host — use the API "
-                       "fallback (backend='api', PrunaAI P-Video)")
+        return (False, "talking head needs a GPU host — the API "
+                       "fallback (PrunaAI P-Video) is not available either")
     try:
         repo = latentsync_repo()
     except NotConfigured as exc:
@@ -902,7 +903,7 @@ def list_backends() -> list[dict[str, Any]]:
         {"name": "echomimic", "kind": "local", "cost": "free",
          "available": False,
          "note": "upgrade path (half-body) — not implemented"},
-        {"name": "api", "kind": "api", "cost": "~$0.025/sec",
+        {"name": "api", "kind": "api", "cost": "unknown",
          "available": False,
          "note": "PrunaAI P-Video — not implemented"},
     ]
