@@ -85,7 +85,7 @@ PLATFORMS = ("telegram", "discord", "whatsapp", "local")
 WHATSAPP_UNSUPPORTED_KINDS: frozenset[str] = frozenset(
     {"mute", "unmute", "cleanup", "rmdeleted", "rminactive",
      "tag", "bansender", "unbansender", "reactwipe", "boosters",
-     "slowmode"})
+     "slowmode", "massreport"})
 
 #: The Telegram-only member-cleanup kinds — on WhatsApp they get
 #: their own dispatch truth line (see the constant above).
@@ -248,7 +248,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "listproperty", "auctions", "mortgage", "insure",
     "drop", "claim",
     "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
-    "unpin", "purge", "slowmode", "report",
+    "unpin", "purge", "slowmode", "report", "appeal", "massreport",
     "cleanup", "rmdeleted", "rminactive",
     "tag", "bansender", "unbansender", "reactwipe", "boosters",
     "party", "ajo", "cgroup", "room", "challenge", "match",
@@ -817,6 +817,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "purge": (0, 0),          # /purge — admin: delete the message you reply to
     "slowmode": (0, None),    # /slowmode [30s|5m|1h|off] — admin: set the group's slow-mode delay (Telegram only; MTProto) (DESIGN §4)
     "report": (0, None),      # /report [@member] [reason] — member: flag something for the admins (held log)
+    "appeal": (0, None),      # /appeal [ban-id] [reason] — member: appeal your ban; admins review with /appeal ok|no <id> (DESIGN §32)
+    "massreport": (0, None),  # /massreport [run|dry] — admin: submit Telegram reports for the evidence-gated candidate set (DESIGN §32)
     "cleanup": (0, 1),        # /cleanup [page] — admin: Telegram group cleanup SCAN (dry run, removes nothing): deleted accounts + members inactive past the window
     "rmdeleted": (0, 0),      # /rmdeleted — admin: remove the deleted accounts the scan finds (kick, not ban; journaled per member)
     "rminactive": (0, 1),     # /rminactive [days] — admin: remove members inactive past the window (setting, or days for this run)
@@ -3957,10 +3959,18 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/slowmode 30s | 5m | 1h | off",
             "example": "/slowmode 30s",
             "related": "/gsettings /console /groups"},
-    "report": {"what": "report a member or message to the group admins. The report goes into the held group log with the author's name attached when you reply to their message; admins read it with /glog.",
+    "report": {"what": "report a member or message to the group admins. The report goes into the held group log with the author's name attached when you reply to their message; admins read it with /glog. It also opens a durable report record the admins act on from the console or with /report <id> warn|mute|ban|dismiss; three open reports on one account make them a mass-report candidate.",
             "usage": "/report as a reply, or /report @member [reason]",
             "example": "/report @ada spamming",
             "related": "/glog"},
+    "appeal": {"what": "appeal your ban. In the group's DM or in the group itself: /appeal lists the bans on record for you, /appeal <ban-id> <reason> files one. Admins review it in the console with the full record (the ban, the reports, the evidence) and approve or deny it there, or in-group with /appeal ok|no <id>. An appeal is a review, never a free pass — approval unbans you on the platform, denial keeps the ban. Bans from before this system shipped have no record to appeal; ask a group admin.",
+            "usage": "/appeal | /appeal <ban-id> <reason> | /appeal ok|no <id> (admins)",
+            "example": "/appeal ban-000001 I was added by a friend and didn't know the rules",
+            "related": "/console"},
+    "massreport": {"what": "mass report (admins, Telegram only): submit Telegram's own reports for the whole evidence-gated candidate set in one action — accounts Devon's moderation pipeline already caught, with evidence attached (confirmed reputation records, staged flags, 3+ open reports, sensor bans). There is no free-form list. Bare /massreport lists the set; /massreport dry previews it; /massreport run submits it, paced 20s+ apart, at most 10 per run, each submission journaled. Telegram never reports back what it did — 'submitted' means accepted, not acted on. The Bot API surface can't report (user-only method), and WhatsApp has no equivalent.",
+            "usage": "/massreport | /massreport dry | /massreport run",
+            "example": "/massreport run",
+            "related": "/console"},
     "cleanup": {"what": "scan this Telegram group for cleanup (admins, claimed groups): deleted accounts (Telegram's own marker) and members with no activity past the group's inactivity window (default 90 days, /gsettings cleanup days N). The scan is a DRY RUN — it removes nothing; it reports who, on what evidence, and what it could not judge. Activity truth is Devon's own member ledger plus Telegram last-seen from her userbot session; the Bot API alone has neither a member list nor last-seen, so on that surface the scan covers the members Devon has records of and says so. Deleted accounts do not wait for this scan: her upkeep cycle removes them automatically in claimed groups where she holds admin power (default on — /gsettings cleanup auto off stops it; the defense autonomy switch governs it like every automatic admin action). Inactive members are removed by command only, never automatically.",
             "usage": "/cleanup [page]",
             "example": "/cleanup",
@@ -4666,7 +4676,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "webrec",
                             "mute", "unmute", "ban", "unban", "kick",
                             "warn", "pin", "unpin", "purge", "slowmode",
-                            "report",
+                            "report", "appeal", "massreport",
                             "cleanup", "rmdeleted", "rminactive",
                             "tag", "bansender", "unbansender",
                             "reactwipe", "boosters", "party", "ajo"]),
@@ -4990,7 +5000,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "poll", "vote", "milestones", "contributions", "boards",
       "webshot", "webrec",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
-      "unpin", "purge", "slowmode", "report",
+      "unpin", "purge", "slowmode", "report", "appeal", "massreport",
       "cleanup", "rmdeleted", "rminactive",
       "tag", "bansender", "unbansender", "reactwipe", "boosters",
       "party", "ajo"]),

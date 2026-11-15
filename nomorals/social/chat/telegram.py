@@ -4120,6 +4120,45 @@ class TelegramAdapter(ChatAdapter):
         """Unban a user."""
         return self._admin(self._unban_coro(chat, user_id), "unban")
 
+    async def _report_peer_coro(self, user_id: str, reason: str,
+                                message: str) -> None:
+        """MTProto account.reportPeer — the platform's own
+        reporting route, the one Telegram Web's Report button
+        calls. Only users can use this method: the userbot is the
+        account, so it lives here and nowhere else. The reason
+        names are Telegram's own ten ReportReason values
+        (core.telegram.org/schema, account.reportPeer)."""
+        from telethon.tl import functions, types
+        reasons = {
+            "spam": types.InputReportReasonSpam(),
+            "violence": types.InputReportReasonViolence(),
+            "pornography": types.InputReportReasonPornography(),
+            "child_abuse": types.InputReportReasonChildAbuse(),
+            "copyright": types.InputReportReasonCopyright(),
+            "fake": types.InputReportReasonFake(),
+            "illegal_drugs": types.InputReportReasonIllegalDrugs(),
+            "personal_details": types.InputReportReasonPersonalDetails(),
+            "geo_irrelevant": types.InputReportReasonGeoIrrelevant(),
+            "other": types.InputReportReasonOther(),
+        }
+        if reason not in reasons:
+            raise ValueError(f"unknown report reason {reason!r}")
+        user = await self._client.get_entity(int(user_id))
+        await self._client(functions.account.ReportPeerRequest(
+            peer=user, reason=reasons[reason],
+            message=str(message or "")[:400]))
+
+    def admin_report_peer(self, user_id: str, reason: str = "other",
+                          message: str = "") -> dict[str, Any]:
+        """Report a user to Telegram for a Terms-of-Service
+        violation. Telegram never tells the reporter the outcome —
+        the returned Bool says only that the report was submitted,
+        so the journal records the submission, never a claimed
+        platform action."""
+        return self._admin(
+            self._report_peer_coro(user_id, reason, message),
+            "report peer")
+
     async def _promote_coro(self, chat: ChatRef, user_id: str) -> None:
         from telethon.tl import functions
         from telethon.tl.types import ChatAdminRights

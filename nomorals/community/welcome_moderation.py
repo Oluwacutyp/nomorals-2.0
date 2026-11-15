@@ -41,11 +41,13 @@ vaults, or connectors — the community isolation test is the gate.
 
 from __future__ import annotations
 
+import json
 import re
 import time
 import urllib.parse
 from collections import defaultdict, deque
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from ..core.logging_setup import get_logger
@@ -63,6 +65,7 @@ __all__ = [
     "Ban",
     "Appeal",
     "BanList",
+    "BanListStoreError",
     "Moderator",
     "Roster",
     "render_welcome",
@@ -358,18 +361,84 @@ def _normalise(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().lower())
 
 
+class BanListStoreError(RuntimeError):
+    """The bans file is unreadable — quarantined, never silently reset."""
+
+
+def _dataclass_from(raw: dict[str, Any], cls: Any) -> Any:
+    """Rebuild a dataclass from a stored dict, ignoring unknown keys
+    (forward-compatible with fields added after the row was written)."""
+    known = {f.name for f in fields(cls)}
+    return cls(**{k: v for k, v in (raw or {}).items() if k in known})
+
+
 class BanList:
     """Cross-group ban list. One list, shared across groups.
 
     A ``global`` ban applies everywhere; a ``group`` ban applies to
     one group. Appeals live here too so the appeal path is never
     lost when a moderator rotates.
+
+    Durable when constructed with a ``path``: bans + appeals live in
+    one JSON file beside the group store (``bans.json``), saved on
+    every mutation, loaded at construction. A corrupt file is
+    quarantined and construction raises — bans are enforcement
+    state, never silently reset (the ReputationBook's rule).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, path: str | Path | None = None) -> None:
         self._bans: dict[str, Ban] = {}
         self._appeals: dict[str, Appeal] = {}
         self._seq = 0
+        self.path = Path(path) if path is not None else None
+        if self.path is not None:
+            self.load()
+
+    # ── persistence ────────────────────────────────────────────────
+
+    def load(self) -> None:
+        if self.path is None or not self.path.exists():
+            return
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            if not isinstance(raw, dict) \
+                    or not isinstance(raw.get("bans"), dict) \
+                    or not isinstance(raw.get("appeals"), dict):
+                raise ValueError("ban list shape is wrong")
+            self._bans = {
+                k: _dataclass_from(v, Ban)
+                for k, v in raw["bans"].items()}
+            self._appeals = {
+                k: _dataclass_from(v, Appeal)
+                for k, v in raw["appeals"].items()}
+            self._seq = int(raw.get("seq") or 0)
+        except (OSError, ValueError) as exc:
+            stamp = int(time.time())
+            aside = self.path.with_suffix(f".corrupt-{stamp}")
+            try:
+                self.path.replace(aside)
+            except OSError:
+                aside = self.path
+            raise BanListStoreError(
+                f"ban list at {self.path} is unreadable "
+                f"({exc}); quarantined to {aside}, NOT reset — "
+                f"restore or adjudicate it by hand") from exc
+
+    def save(self) -> None:
+        if self.path is None:
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({
+            "seq": self._seq,
+            "bans": {k: v.to_dict() for k, v in self._bans.items()},
+            "appeals": {k: v.to_dict()
+                        for k, v in self._appeals.items()},
+        }, indent=1), encoding="utf-8")
+        tmp.replace(self.path)
+
+    def _persist(self) -> None:
+        self.save()
 
     def _next_id(self, prefix: str) -> str:
         self._seq += 1
@@ -388,6 +457,7 @@ class BanList:
             created_at=time.time(),
         )
         self._bans[ban.id] = ban
+        self._persist()
         return ban
 
     def is_banned(self, user_id: str, group_id: str = "") -> Ban | None:
@@ -405,6 +475,7 @@ class BanList:
         if ban and ban.active:
             ban.lifted_at = time.time()
             ban.lifted_by = by
+            self._persist()
         return ban
 
     def bans_for(self, user_id: str) -> list[Ban]:
@@ -418,12 +489,18 @@ class BanList:
             raise ValueError("no such ban for this user — cannot appeal")
         if not ban.active:
             raise ValueError("ban already lifted — nothing to appeal")
+        for other in self._appeals.values():
+            if other.ban_id == ban_id and other.status == "open":
+                raise ValueError(
+                    f"that ban already has an open appeal "
+                    f"({other.id}) — one appeal at a time")
         appeal = Appeal(
             id=self._next_id("appeal"), ban_id=ban_id, user_id=user_id,
             group_id=ban.group_id, reason=reason, created_at=time.time(),
         )
         self._appeals[appeal.id] = appeal
         ban.appeal_id = appeal.id
+        self._persist()
         return appeal
 
     def review_appeal(
@@ -440,6 +517,7 @@ class BanList:
         appeal.reviewed_at = time.time()
         if approve:
             self.lift(appeal.ban_id, by=reviewer)
+        self._persist()
         return appeal
 
     def appeals(self, *, status: str | None = None) -> list[Appeal]:

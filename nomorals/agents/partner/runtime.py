@@ -7859,6 +7859,12 @@ class PartnerRuntime(
         if kind == "report":
             return self._control_report(command.tail, message)
 
+        if kind == "appeal":
+            return self._control_appeal(command.tail, message)
+
+        if kind == "massreport":
+            return self._control_massreport(command.tail, message)
+
         if kind == "tag":
             return self._control_tag(command.tail, message)
 

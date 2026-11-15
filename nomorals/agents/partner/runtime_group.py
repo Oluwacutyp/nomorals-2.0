@@ -6068,6 +6068,9 @@ class RuntimeGroupMixin:
         flags = len(surface.flag_proposals(key))
         if flags:
             parts.append(f"flags {flags}")
+        reports = len(surface.open_reports(key))
+        if reports:
+            parts.append(f"reports {reports}")
         proposals = len(surface.open_proposals(key))
         if proposals:
             parts.append(f"proposals {proposals}")
@@ -6927,6 +6930,9 @@ class RuntimeGroupMixin:
             rep = s.get("reputation") or {}
             stats = surface.reputation.stats()
             pending = surface.flag_proposals(key)
+            reports = surface.open_reports(key)
+            appeals = [a for a in surface.bans.appeals(status="open")
+                       if a.group_id == key or not a.group_id]
             card.block_lines([
                 f"join warnings: "
                 f"{rep.get('warning', 'public')} — public posts "
@@ -6940,12 +6946,60 @@ class RuntimeGroupMixin:
                 f"flag proposals waiting here: {len(pending)}"
                 + (" — decide them in the group with /flag"
                    if pending else ""),
+                f"open reports here: {len(reports)}"
+                + (" — decide them below, or in the group with "
+                   "/report queue" if reports else ""),
+                f"open appeals: {len(appeals)}"
+                + (" — review them below" if appeals else ""),
                 "a record never decides admission — the door "
                 "rules do; it only warns, and dismissal here "
                 "never deletes another group's record",
             ])
+            for report in reports[:5]:
+                who = report.get("label") or report.get("user_id") \
+                    or "?"
+                reason = str(report.get("reason") or "")[:60]
+                rid = str(report.get("id") or "")
+                card.line(f"{rid} — {who} · {reason} · by "
+                          f"{report.get('by_label') or report.get('by')}")
+                buttons.append([
+                    (f"⚠️ warn {rid}"[:24],
+                     f"console {token} reputation report {rid} warn"),
+                    (f"🔇 mute {rid}"[:24],
+                     f"console {token} reputation report {rid} mute")])
+                buttons.append([
+                    (f"🔨 ban {rid}"[:24],
+                     f"console {token} reputation report {rid} ban"),
+                    (f"🚫 dismiss {rid}"[:24],
+                     f"console {token} reputation report {rid} dismiss")])
+            for appeal in appeals[:5]:
+                ban = next(
+                    (b for b in surface.bans.bans_for(appeal.user_id)
+                     if b.id == appeal.ban_id), None)
+                who = appeal.user_id
+                why = (ban.reason if ban else "")
+                where = ("global" if not appeal.group_id
+                         else "here")
+                card.line(f"{appeal.id} — {who} · {where} · "
+                          f"banned for: {why} · appeals: "
+                          f"{appeal.reason[:80]}")
+                if appeal.group_id:
+                    buttons.append([
+                        (f"✅ approve {appeal.id}"[:24],
+                         f"console {token} reputation appeal ok "
+                         f"{appeal.id}"),
+                        (f"🚫 deny {appeal.id}"[:24],
+                         f"console {token} reputation appeal no "
+                         f"{appeal.id}")])
+                else:
+                    card.line("  global ban — review it in-group "
+                              "with /appeal ok|no "
+                              f"{appeal.id} (no single group to "
+                              "unban from here)")
             card.block_lines([
                 "`public|admins|restricted|off`",
+                "`report <id> dismiss|warn|mute|ban` · "
+                "`appeal ok|no <id>`",
             ], title="Grammar")
         elif section == "conflict":
             con = s.get("conflict") or {}
@@ -7540,8 +7594,13 @@ class RuntimeGroupMixin:
             return self._apply_expression_grammar(
                 surface, key, list(words))
         if section == "reputation":
-            # Same rule (§32): the console's words are the
-            # gsettings grammar.
+            # Report + appeal decisions ride the console's own
+            # grammar (the session holds the group); the settings
+            # words still route to the §32 grammar below.
+            words = list(words)
+            if words and words[0].lower() in ("report", "appeal"):
+                return self._apply_report_appeal_console(
+                    surface, key, message, sender, words)
             return self._apply_reputation_grammar(
                 surface, key, list(words))
         if section == "conflict":
@@ -9652,7 +9711,8 @@ class RuntimeGroupMixin:
         "gsettings", "glog", "member", "rules", "strikes",
         "recheck", "joinq", "console", "undonotice", "flag",
         "rep", "mute", "unmute", "ban", "unban", "kick", "warn",
-        "pin", "unpin", "purge", "report", "cleanup",
+        "pin", "unpin", "purge", "report", "appeal", "massreport",
+        "cleanup",
         "rmdeleted", "rminactive", "tag", "bansender",
         "unbansender", "reactwipe", "boosters", "grant", "tax",
         "treasury")
@@ -11525,6 +11585,13 @@ class RuntimeGroupMixin:
         if not self._mod_run(surface, key, message, "ban", user_id,
                              call):
             return "the ban didn't go through — the platform refused it (it's in /glog)."
+        # The BanList record: the ban survives restarts now, and
+        # carries the appeal path — a ban with no record had no
+        # appeal at all.
+        surface.bans.ban(user_id, reason=rest.strip(),
+                         group_id=key,
+                         banned_by=str(message.sender_id
+                                       or message.sender or ""))
         # A TYPED ban lands with the same theatre the automod
         # path fires (§21) — until 2026-11-11 only sensor bans
         # reached the moment, and an admin's own /ban went out
@@ -11557,6 +11624,14 @@ class RuntimeGroupMixin:
         if not self._mod_run(surface, key, message, "unban",
                              user_id, call):
             return "the unban didn't go through — the platform refused it (it's in /glog)."
+        # Lift the matching BanList records, so the ban is gone
+        # from the record the appeal path reads, not just from
+        # the platform.
+        actor = str(message.sender_id or message.sender or "")
+        for ban in surface.bans.bans_for(user_id):
+            if ban.active and (ban.scope == "global"
+                               or ban.group_id == key):
+                surface.bans.lift(ban.id, by=actor)
         return f"{label} is unbanned — they can rejoin."
 
     def _control_kick(self, tail, message) -> str:  # type: ignore[no-untyped-def]
@@ -11864,11 +11939,24 @@ class RuntimeGroupMixin:
     def _control_report(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         """Member-side /report: filed into the held audit log with
         the reported member + the reporter's words; admins pull it
-        with /glog.  Not admin-gated — reporting is for everyone."""
+        with /glog.  Not admin-gated — reporting is for everyone.
+        Filing also opens a durable report RECORD (the console
+        lists it with one-tap actions; three open reports on one
+        account make them a mass-report candidate).  Admins review
+        in-group with /report <id> <dismiss|warn|mute|ban>, or
+        list the queue with /report queue."""
         key = self._group_key_or_none(message)
         if key is None:
             return "that's a group command — run it inside the group."
         surface = self._group_surface()
+        parts = str(tail or "").split()
+        low = [p.lower() for p in parts]
+        if parts and parts[0].lower().startswith("rp-"):
+            return self._report_review_in_group(
+                surface, key, message, parts[0],
+                low[1] if len(low) > 1 else "")
+        if parts and low[0] in ("queue", "list"):
+            return self._report_queue_text(surface, key, message)
         res = self._mod_target(surface, key, tail, message)
         user_id = res.member.user_id if res.found else ""
         label = res.member.label if res.found else (
@@ -11881,6 +11969,19 @@ class RuntimeGroupMixin:
                            (message.meta or {}).get(
                                "reply_to_text") or "")[:200])
         surface.store.save()
+        if user_id and user_id != reporter:
+            # The durable record: the report the console acts on,
+            # carrying the evidence (the replied-to text + its
+            # message id) so the reviewer never has to take the
+            # reporter's word for what happened.
+            surface.file_report(
+                key, user_id=user_id, label=label, by=reporter,
+                by_label=str(message.sender or ""),
+                reason=str(tail or "")[:300],
+                evidence_text=str(
+                    (message.meta or {}).get("reply_to_text") or ""),
+                message_id=str(
+                    getattr(message, "reply_to", "") or ""))
         if user_id and user_id != reporter:
             # §32: a report also PROPOSES a reputation flag into
             # this group's queue — an admin confirms or discards
@@ -11913,6 +12014,660 @@ class RuntimeGroupMixin:
         return ("📣 reported — it's in the group log for the "
                 "admins (/glog). Reply to the message next time "
                 "and I'll attach who wrote it.")
+
+    def _report_queue_text(self, surface, key, message) -> str:  # type: ignore[no-untyped-def]
+        """The open-report queue, in-group: one line per report
+        with its id, target, reason and reporter, plus the review
+        buttons (the /flag queue's shape)."""
+        pending = surface.open_reports(key)
+        if not pending:
+            return ("no open reports here. /report @member [reason] "
+                    "files one — reply to their message and the "
+                    "evidence rides along.")
+        from ...social.chat.typography import Card
+
+        card = Card("moderation", title="Open reports", icon="📣")
+        lines = []
+        buttons = []
+        for report in pending:
+            who = report.get("label") or report.get("user_id") or "?"
+            reason = str(report.get("reason") or "")[:60]
+            lines.append(
+                f"{report.get('id')} — {who} · {reason} · "
+                f"by {report.get('by_label') or report.get('by')}")
+            rid = str(report.get("id") or "")
+            buttons.append([
+                (f"⚠️ warn {rid}"[:24], f"report {rid} warn"),
+                (f"🔇 mute {rid}"[:24], f"report {rid} mute")])
+            buttons.append([
+                (f"🔨 ban {rid}"[:24], f"report {rid} ban"),
+                (f"🚫 dismiss {rid}"[:24],
+                 f"report {rid} dismiss")])
+        card.lines(lines)
+        card.note("review verbs: /report <id> warn|mute|ban|dismiss "
+                  "— warn/mute/ban mark the report acted")
+        return self._card(message, card, buttons)
+
+    def _report_review_in_group(self, surface, key, message,
+                                report_id, verb) -> str:  # type: ignore[no-untyped-def]
+        """One report decision in-group (admin-gated — reporting
+        is for everyone, deciding is not). The action runs through
+        the command's own handler, so the warn ladder, the mute
+        ask and the ban theatre all behave exactly as if the admin
+        had typed the command directly. The report closes only
+        when the action actually landed — the handler's own audit
+        row is the verdict; a refusal leaves the report open."""
+        _key, err = self._mod_gate(message)
+        if err:
+            return err
+        report = surface.get_report(key, report_id)
+        if report is None:
+            return ("that report isn't waiting anymore — /report "
+                    "queue shows what's live.")
+        user_id = str(report.get("user_id") or "")
+        label = report.get("label") or user_id
+        reason = str(report.get("reason") or "")
+        by = str(message.sender_id or message.sender or "")
+        by_label = str(message.sender or "")
+        if verb == "dismiss":
+            surface.decide_report(key, report_id, action="dismissed",
+                                  by=by, by_label=by_label)
+            return (f"dismissed — {label}'s report is closed, "
+                    f"nothing was done to them.")
+        if verb not in ("warn", "mute", "ban"):
+            return ("review verbs: /report <id> "
+                    "warn|mute|ban|dismiss.")
+        handler = {"warn": self._control_warn,
+                   "mute": self._control_mute,
+                   "ban": self._control_ban}[verb]
+        tail = (f"{user_id} 1h {reason}".strip() if verb == "mute"
+                else f"{user_id} {reason}".strip())
+        out = handler(tail, message)
+        landed = any(
+            (row.get("kind") == "warn" and verb == "warn")
+            or (row.get("kind") == "admin_action"
+                and row.get("action") == verb)
+            for row in surface.audit(key, limit=8)
+            if str(row.get("user_id")) == user_id)
+        if not landed:
+            return out + " — the report stays open."
+        if verb == "ban":
+            surface.bans.ban(user_id, reason=reason, group_id=key,
+                             banned_by=by)
+        surface.decide_report(key, report_id, action="acted",
+                              by=by, by_label=by_label)
+        return out + " — report closed."
+
+    def _console_mod_call(self, surface, key, action, user_id, by,
+                          call) -> bool:  # type: ignore[no-untyped-def]
+        """One adapter admin call from the console (no group
+        message in hand): the ChatRef is built from the key — the
+        slow-mode console path's construction — and the audit rows
+        are the same shapes _mod_run writes, so /glog reads one
+        story whichever surface acted."""
+        from ...social.chat.base import ChatKind, ChatRef
+
+        plat = key.partition(":")[0].strip()
+        chat_id = key.split(":", 1)[1] if ":" in key else ""
+        adapter = self._group_adapter(plat)
+        if adapter is None:
+            surface._audit(key, "admin_action_failed", action=action,
+                           user_id=user_id, by=by,
+                           reason="no adapter for this platform")
+            surface.store.save()
+            return False
+        chat = ChatRef(platform=plat, chat_id=chat_id,
+                       kind=ChatKind.GROUP)
+        try:
+            result = call(adapter, chat)
+            if isinstance(result, dict) \
+                    and result.get("ok") is False:
+                raise RuntimeError(str(result.get("error")
+                                       or "platform refused"))
+        except Exception as exc:  # noqa: BLE001 - audited, not raised
+            surface._audit(key, "admin_action_failed", action=action,
+                           user_id=user_id, by=by,
+                           reason=f"{type(exc).__name__}: {exc}")
+            surface.store.save()
+            return False
+        surface._audit(key, "admin_action", action=action,
+                       user_id=user_id, by=by)
+        surface.store.save()
+        return True
+
+    def _console_warn_step(self, surface, key, user_id, count,
+                           by) -> str:  # type: ignore[no-untyped-def]
+        """The ladder step a console warn landed on: executed
+        through the console's adapter path (no group message in
+        hand) and returned as the phrase for the reply. A step
+        that refuses is named, not hidden — the warning itself
+        already landed. The final-step bookkeeping mirrors
+        _control_warn exactly."""
+        esc = surface.escalation_config(key)
+        step = esc.action_at(count)
+        if step is None:
+            return ""
+        is_final = count >= esc.warn_limit and \
+            step.get("action") == esc.final_action
+        if is_final:
+            surface.clear_warns(key, user_id)
+        else:
+            surface.reset_warn_bookkeeping(key, user_id)
+        action = str(step.get("action") or "")
+        if action == "fine":
+            paid = surface.apply_fine(
+                key, user_id, amount=int(step.get("amount") or 0))
+            if paid:
+                return f" — that's the step: fined {paid} sparks"
+            return (f" — that's the step: a "
+                    f"{int(step.get('amount') or 0)}-spark fine "
+                    f"(nothing to collect)")
+        if action == "mute":
+            minutes = int(step.get("minutes") or 60)
+
+            def mute_call(adapter, chat):  # type: ignore[no-untyped-def]
+                fn = getattr(adapter, "admin_restrict", None)
+                if fn is None:
+                    raise RuntimeError(
+                        "this platform path cannot mute")
+                try:
+                    return fn(chat, user_id, minutes=minutes)
+                except TypeError:
+                    return fn(chat, user_id,
+                              until=int(time.time()) + minutes * 60)
+
+            ok = self._console_mod_call(
+                surface, key, "mute", user_id, by, mute_call)
+            phrase = ("muted for an hour" if minutes == 60
+                      else f"muted for {minutes} min")
+            return (f" — that's the step: {phrase}" if ok else
+                    f" — that's the step ({phrase}), but it was "
+                    f"refused (see /glog)")
+        if action == "ban":
+            def ban_call(adapter, chat):  # type: ignore[no-untyped-def]
+                fn = getattr(adapter, "admin_ban", None)
+                if fn is None:
+                    raise RuntimeError(
+                        "this platform path cannot ban")
+                return fn(chat, user_id)
+
+            ok = self._console_mod_call(
+                surface, key, "ban", user_id, by, ban_call)
+            if ok:
+                surface.bans.ban(user_id, reason="ladder ban",
+                                 group_id=key, banned_by=by)
+            return (" — that's the step: banned from the group"
+                    if ok else
+                    " — that's the step (banned from the group), "
+                    "but it was refused (see /glog)")
+        if action == "kick":
+            def kick_call(adapter, chat):  # type: ignore[no-untyped-def]
+                ban = getattr(adapter, "admin_ban", None)
+                unban = getattr(adapter, "admin_unban", None)
+                if ban is None or unban is None:
+                    raise RuntimeError("platform can't kick")
+                out = ban(chat, user_id)
+                unban(chat, user_id)
+                return out
+
+            ok = self._console_mod_call(
+                surface, key, "kick", user_id, by, kick_call)
+            return (" — that's the step: removed from the group"
+                    if ok else
+                    " — that's the step (removed from the group), "
+                    "but it was refused (see /glog)")
+        if action == "restrict":
+            def restrict_call(adapter, chat):  # type: ignore[no-untyped-def]
+                if not self._acceptance_restrict(
+                        adapter, chat, user_id, on=True):
+                    raise RuntimeError("restrict refused")
+                return {"ok": True}
+
+            ok = self._console_mod_call(
+                surface, key, "restrict", user_id, by,
+                restrict_call)
+            return (" — that's the step: restricted until an admin "
+                    "lifts it" if ok else
+                    " — that's the step (restricted until an admin "
+                    "lifts it), but it was refused (see /glog)")
+        return f" — that's the step: {action}"
+
+    def _appeal_notify(self, surface, key, appeal,
+                       *, approved, by) -> bool:  # type: ignore[no-untyped-def]
+        """Tell the appellant the outcome in their DM. Best
+        effort — a banned member may never have opened a DM with
+        the bot, and the platform may refuse; the outcome is
+        already durable in the appeal record and the audit, and
+        the appellant sees it on their next /appeal either way."""
+        from ...social.chat.base import ChatKind, ChatRef
+
+        platform = key.partition(":")[0].strip()
+        group_title = ""
+        try:
+            group_title = str(
+                surface.store.group(key).get("title") or "")
+        except Exception:  # noqa: BLE001 - the key is enough
+            group_title = ""
+        where = group_title or key
+        text = (
+            f"your appeal in {where} was "
+            f"{'APPROVED' if approved else 'DENIED'} — "
+            f"{'you are unbanned and can rejoin.' if approved else 'the ban stands.'}")
+        try:
+            result = self._send(
+                ChatRef(platform=platform,
+                        chat_id=str(appeal.user_id),
+                        kind=ChatKind.DM), text)
+            return bool(getattr(result, "ok", False))
+        except Exception:  # noqa: BLE001 - reported, not raised
+            return False
+
+    def _appeal_decide_console(self, surface, key, appeal_id, *,
+                               approve, by,
+                               by_label="") -> str:  # type: ignore[no-untyped-def]
+        """Review one appeal: the full record is in front of the
+        reviewer (the console lists it with the ban, the reports
+        and the evidence). Approve unbans on the platform FIRST —
+        the BanList lift follows only when the platform actually
+        let them back in. The decision journals and the appellant
+        is told the outcome."""
+        appeal = surface.bans.get_appeal(appeal_id)
+        if appeal is None:
+            return "that appeal isn't waiting anymore."
+        if appeal.status != "open":
+            return f"that appeal is already {appeal.status}."
+        if appeal.group_id and appeal.group_id != key:
+            return ("that appeal belongs to another group — "
+                    "review it from that group's console, or "
+                    "in-group there.")
+        if approve and appeal.group_id:
+            # A global ban has no platform ban to lift — the
+            # record IS the ban, enforced at the join hook — so
+            # its approval is a record lift alone.
+            def unban_call(adapter, chat):  # type: ignore[no-untyped-def]
+                fn = getattr(adapter, "admin_unban", None)
+                if fn is None:
+                    raise RuntimeError(
+                        "this platform path cannot unban")
+                return fn(chat, appeal.user_id)
+
+            if not self._console_mod_call(
+                    surface, key, "unban", appeal.user_id, by,
+                    unban_call):
+                return ("the unban didn't go through — the "
+                        "platform refused it (it's in /glog). The "
+                        "appeal stays open.")
+        try:
+            surface.bans.review_appeal(
+                appeal_id, approve=approve, reviewer=by, note="")
+        except ValueError as exc:
+            return str(exc)
+        surface._audit(key, "appeal_reviewed", appeal=appeal_id,
+                       user_id=appeal.user_id, ban=appeal.ban_id,
+                       decision=("approved" if approve
+                                 else "rejected"),
+                       by=by, by_label=by_label)
+        surface.store.save()
+        notified = self._appeal_notify(
+            surface, key, appeal, approved=approve, by=by)
+        surface._audit(key, "appeal_notified", appeal=appeal_id,
+                       user_id=appeal.user_id, ok=notified)
+        surface.store.save()
+        return (f"appeal {appeal_id} "
+                f"{'approved — they are unbanned' if approve else 'denied — the ban stands'}"
+                f"{' and were told' if notified else ', but the DM to tell them did not land (the decision is in the record)'}.")
+
+    def _apply_report_appeal_console(self, surface, key, message,
+                                     sender,
+                                     words) -> str | None:  # type: ignore[no-untyped-def]
+        """Report + appeal decisions from the console (DM): the
+        session already proved this sender admins the group, and
+        the gate is re-checked here because these are enforcement
+        actions, not settings. Grammar: `report <id>
+        dismiss|warn|mute|ban` · `appeal ok|no <id>`."""
+        if not self._console_is_admin(key, sender):
+            return ("that's an admin decision — the console proved "
+                    "you admin this group when you opened it, and "
+                    "the platform just said otherwise. Nothing "
+                    "was changed.")
+        by = str(sender or "")
+        by_label = str(getattr(message, "sender", "") or "")
+        head = (words[0] or "").lower() if words else ""
+        if head == "report":
+            if len(words) < 3:
+                return ("usage: report <id> "
+                        "dismiss|warn|mute|ban.")
+            report_id, verb = words[1], words[2].lower()
+            report = surface.get_report(key, report_id)
+            if report is None:
+                return ("that report isn't waiting anymore — the "
+                        "reputation section shows what's live.")
+            user_id = str(report.get("user_id") or "")
+            label = report.get("label") or user_id
+            reason = str(report.get("reason") or "")
+            if verb == "dismiss":
+                surface.decide_report(key, report_id,
+                                      action="dismissed", by=by,
+                                      by_label=by_label)
+                return (f"dismissed — {label}'s report is closed, "
+                        f"nothing was done to them.")
+            if verb == "warn":
+                count = surface.record_warn(key, user_id, by=by,
+                                            reason=reason)
+                step_note = self._console_warn_step(
+                    surface, key, user_id, count, by)
+                surface.decide_report(key, report_id,
+                                      action="acted", by=by,
+                                      by_label=by_label)
+                return (f"⚠️ {label} — warning {count} recorded "
+                        f"from the report{step_note} — report "
+                        f"closed.")
+            if verb == "mute":
+                def mute_call(adapter, chat):  # type: ignore[no-untyped-def]
+                    fn = getattr(adapter, "admin_restrict", None)
+                    if fn is None:
+                        raise RuntimeError(
+                            "this platform path cannot mute")
+                    try:
+                        return fn(chat, user_id, minutes=60)
+                    except TypeError:
+                        return fn(chat, user_id,
+                                  until=int(time.time()) + 3600)
+
+                if not self._console_mod_call(
+                        surface, key, "mute", user_id, by, mute_call):
+                    return ("the mute didn't go through — the "
+                            "platform refused it (it's in /glog). "
+                            "The report stays open.")
+                surface.decide_report(key, report_id,
+                                      action="acted", by=by,
+                                      by_label=by_label)
+                return (f"🔇 {label} muted for an hour — report "
+                        f"closed.")
+            if verb == "ban":
+                def ban_call(adapter, chat):  # type: ignore[no-untyped-def]
+                    fn = getattr(adapter, "admin_ban", None)
+                    if fn is None:
+                        raise RuntimeError(
+                            "this platform path cannot ban")
+                    return fn(chat, user_id)
+
+                if not self._console_mod_call(
+                        surface, key, "ban", user_id, by, ban_call):
+                    return ("the ban didn't go through — the "
+                            "platform refused it (it's in /glog). "
+                            "The report stays open.")
+                surface.bans.ban(user_id, reason=reason,
+                                 group_id=key, banned_by=by)
+                surface.decide_report(key, report_id,
+                                      action="acted", by=by,
+                                      by_label=by_label)
+                return f"🔨 {label} is banned — report closed."
+            return ("review verbs: report <id> "
+                    "dismiss|warn|mute|ban.")
+        if head == "appeal":
+            if len(words) < 3 \
+                    or words[1].lower() not in ("ok", "no"):
+                return "usage: appeal ok|no <appeal-id>."
+            return self._appeal_decide_console(
+                surface, key, words[2],
+                approve=words[1].lower() == "ok", by=by,
+                by_label=by_label)
+        return None
+
+    def _control_appeal(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """Appeals: anyone restricted or banned can appeal; the
+        appeal lands in the group console for admins to review
+        with the full record attached. DM-first — a banned member
+        can't speak in the group. In-group, /appeal targets your
+        own ban here. Review verbs (admins): /appeal ok|no <id>
+        in-group, or the console's Approve/Deny buttons. An
+        appeal is a review with the evidence in front of the
+        reviewer — never a free pass."""
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        parts = str(tail or "").split()
+        low = [p.lower() for p in parts]
+        if parts and low[0] in ("ok", "no") and len(parts) >= 2:
+            key, err = self._mod_gate(message)
+            if err:
+                return err
+            return self._appeal_decide_console(
+                surface, key, parts[1],
+                approve=low[0] == "ok", by=sender,
+                by_label=str(message.sender or ""))
+        key = self._group_key_or_none(message)
+        if key is None:
+            # DM: list my appealable bans, or file by ban id.
+            bans = [b for b in surface.bans.bans_for(sender)
+                    if b.active]
+            appeals = {a.ban_id: a
+                       for a in surface.bans.appeals()
+                       if a.user_id == sender}
+            if not parts:
+                if not bans:
+                    return ("no ban on record for you — if you "
+                            "were banned before this system "
+                            "shipped, there's no record to appeal; "
+                            "ask a group admin.")
+                lines = ["your bans — appeal one with "
+                         "/appeal <ban-id> <your reason>:"]
+                for ban in bans:
+                    where = ("everywhere" if ban.scope == "global"
+                             else ban.group_id)
+                    ap = appeals.get(ban.id)
+                    state = (f" — appeal {ap.id}: {ap.status}"
+                             if ap else "")
+                    lines.append(
+                        f"{ban.id} · {where} · {ban.reason}"
+                        f"{state}")
+                return "\n".join(lines)
+            ban_id = parts[0]
+            reason = " ".join(parts[1:]).strip()
+            if not reason:
+                return "say why — /appeal <ban-id> <your reason>."
+            try:
+                appeal = surface.bans.file_appeal(
+                    sender, ban_id, reason)
+            except ValueError as exc:
+                return str(exc)
+            if appeal.group_id:
+                surface._audit(appeal.group_id, "appeal_filed",
+                               appeal=appeal.id, user_id=sender,
+                               ban=ban_id, by=sender)
+                surface.store.save()
+            return (f"appeal filed [{appeal.id}] — the admins "
+                    f"will review it with the full record. "
+                    f"You'll hear the outcome here.")
+        # In-group: appeal your own ban here (a banned member
+        # can't speak, so this is for the restricted/muted — and
+        # for a global ban, which is appealable from any group).
+        bans = [b for b in surface.bans.bans_for(sender)
+                if b.active
+                and (b.scope == "global" or b.group_id == key)]
+        appeals = {a.ban_id: a
+                   for a in surface.bans.appeals()
+                   if a.user_id == sender}
+        if not parts:
+            if not bans:
+                return ("no ban on record for you here — a mute "
+                        "or restriction isn't a ban, it lifts on "
+                        "its own. If you were banned before this "
+                        "system shipped, there's no record to "
+                        "appeal; ask an admin.")
+            lines = ["your bans here — appeal one with "
+                     "/appeal <ban-id> <your reason>:"]
+            for ban in bans:
+                ap = appeals.get(ban.id)
+                state = (f" — appeal {ap.id}: {ap.status}"
+                         if ap else "")
+                lines.append(f"{ban.id} · {ban.reason}{state}")
+            return "\n".join(lines)
+        ban_id = parts[0]
+        reason = " ".join(parts[1:]).strip()
+        if not reason:
+            return "say why — /appeal <ban-id> <your reason>."
+        try:
+            appeal = surface.bans.file_appeal(sender, ban_id, reason)
+        except ValueError as exc:
+            return str(exc)
+        surface._audit(appeal.group_id or key, "appeal_filed",
+                       appeal=appeal.id, user_id=sender,
+                       ban=ban_id, by=sender)
+        surface.store.save()
+        return (f"appeal filed [{appeal.id}] — the admins will "
+                f"review it with the full record. You'll hear "
+                f"the outcome here.")
+
+    #: Mass-report run cap: at most this many submissions per run.
+    #: 10 × (20s floor + ≤5s jitter) ≈ 4 minutes worst case —
+    #: inside the scheduler's 300s wall, and a run can never
+    #: hammer the platform.
+    MASS_REPORT_MAX_PER_RUN = 10
+
+    #: Reputation category → Telegram's ReportReason
+    #: (account.reportPeer). Scam/fraud are fake accounts; raid
+    #: and spam-ring are spam; harassment has no dedicated reason
+    #: — Other, with the evidence as the message.
+    _MASSREPORT_REASONS = {
+        "scam": "fake", "fraud": "fake", "raid": "spam",
+        "harassment": "other", "spam-ring": "spam", "other": "other",
+    }
+
+    def _control_massreport(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """Mass report (admins): submit Telegram reports for the
+        whole evidence-gated candidate set in one action. The set
+        comes ONLY from Devon's own moderation pipeline —
+        confirmed records, staged flags, ≥3 open reports, sensor
+        bans — never a free-form list. Bare /massreport lists the
+        set; /massreport dry previews it without submitting;
+        /massreport run executes it, paced 20s+ apart, each
+        submission journaled with target, reason, evidence and
+        outcome. Telegram never tells the reporter the outcome —
+        'submitted' means Telegram accepted the report, not that
+        it acted."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        surface = self._group_surface()
+        platform = str(message.chat.platform or "")
+        if not platform.startswith("telegram"):
+            return ("mass reporting rides Telegram's own reporting "
+                    "routes (the userbot's account.reportPeer) — "
+                    "there's no equivalent on this platform.")
+        parts = str(tail or "").split()
+        low = [p.lower() for p in parts]
+        candidates = surface.mass_report_candidates(key)
+        if not candidates:
+            return ("nothing to mass-report here — the candidate "
+                    "set is empty. Candidates come only from the "
+                    "moderation pipeline: confirmed reputation "
+                    "records, staged flags, accounts with 3+ open "
+                    "reports, sensor bans.")
+        verb = low[0] if low else ""
+        if verb in ("", "list", "dry"):
+            from ...social.chat.typography import Card
+
+            card = Card("moderation",
+                        title="Mass-report candidates",
+                        icon="📣")
+            lines = []
+            for cand in candidates:
+                evidence = str(cand.get("evidence") or "")[:80]
+                lines.append(
+                    f"{cand.get('label') or cand.get('user_id')} "
+                    f"[{cand.get('user_id')}] · "
+                    f"{cand.get('category')} · "
+                    f"{cand.get('source')} · {evidence}")
+            card.lines(lines)
+            card.note(
+                "evidence-gated only — every account here was "
+                "caught by the moderation pipeline with its "
+                "evidence attached; there is no free-form list. "
+                "Telegram never reports back what it did with a "
+                "report — 'submitted' means accepted, not acted on."
+                + (" Dry run — nothing submitted."
+                   if verb == "dry" else ""))
+            buttons = [[("📣 Report all "
+                         f"({len(candidates)})"[:24],
+                         "massreport run")]]
+            return self._card(message, card, buttons)
+        if verb != "run":
+            return ("usage: /massreport — list the set · "
+                    "/massreport dry — preview without submitting "
+                    "· /massreport run — submit them.")
+        adapter = self._group_adapter("telegram")
+        fn = (getattr(adapter, "admin_report_peer", None)
+              if adapter is not None else None)
+        if fn is None:
+            return ("the userbot path can't report here — mass "
+                    "reporting needs the Telegram userbot adapter "
+                    "(account.reportPeer is a user-only method). "
+                    "Nothing was submitted.")
+        import random as _random
+
+        from ...social.mass_actions import PACING_FLOOR_S
+
+        by = str(message.sender_id or message.sender or "")
+        run_set = candidates[:self.MASS_REPORT_MAX_PER_RUN]
+        results: list = []
+        for index, cand in enumerate(run_set):
+            if index:
+                time.sleep(PACING_FLOOR_S
+                           + _random.uniform(0, 5))
+            reason = self._MASSREPORT_REASONS.get(
+                cand.get("category") or "other", "other")
+            evidence = (f"{cand.get('source')}: "
+                        f"{cand.get('evidence') or ''}")[:400]
+            try:
+                out = fn(str(cand.get("user_id") or ""), reason,
+                         evidence)
+                ok = not (isinstance(out, dict)
+                          and out.get("ok") is False)
+                err_text = ("" if ok else str(
+                    out.get("error") or "refused"))
+            except Exception as exc:  # noqa: BLE001 - journaled
+                ok, err_text = False, f"{type(exc).__name__}: {exc}"
+            results.append({
+                "user_id": str(cand.get("user_id") or ""),
+                "label": cand.get("label") or "",
+                "category": cand.get("category") or "other",
+                "reason": reason, "evidence": evidence,
+                "outcome": "submitted" if ok else "failed",
+                "error": err_text,
+            })
+            surface._audit(
+                key,
+                "mass_report_submitted" if ok
+                else "mass_report_failed",
+                user_id=str(cand.get("user_id") or ""),
+                reason=reason, evidence=evidence, by=by,
+                error=err_text)
+        surface.store.save()
+        run = surface.record_mass_report_run(
+            key, by=by, results=results)
+        submitted = run["submitted"]
+        failed = run["failed"]
+        skipped = len(candidates) - len(run_set)
+        lines = [
+            f"mass report run {run['id']}: {submitted} submitted, "
+            f"{failed} failed"
+            + (f", {skipped} skipped (cap "
+               f"{self.MASS_REPORT_MAX_PER_RUN} per run — run "
+               f"/massreport run again for the rest)"
+               if skipped else ""),
+        ]
+        for result in results:
+            who = result.get("label") or result.get("user_id")
+            lines.append(
+                f"{who} · {result.get('reason')} · "
+                f"{result.get('outcome')}"
+                + (f" — {result.get('error')}"
+                   if result.get("error") else ""))
+        lines.append("Telegram never reports back what it did "
+                     "with a report — 'submitted' means accepted, "
+                     "not acted on.")
+        return "\n".join(lines)
 
     def _control_purge(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)

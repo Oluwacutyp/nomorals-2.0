@@ -4601,6 +4601,205 @@ class GroupSurface:
         self.store.save()
         return {"ok": True, "record": record, "proposal": prop}
 
+    # ── reports: one member's report, accumulated per account ─────
+    # A report is a durable record in the group's own store entry,
+    # not a chat message: it survives restarts, it accumulates (the
+    # third open report on the same account is what turns a grumble
+    # into a mass-report candidate), and the console lists it with
+    # one-tap actions. Filing is one command; acting on it is a
+    # decision the admin makes with the record in front of them.
+
+    def _report_state(self, entry: dict[str, Any]) -> dict[str, Any]:
+        return entry.setdefault("report_state", {"seq": 0})
+
+    def file_report(self, group_key: str, *, user_id: str, label: str,
+                    by: str, by_label: str = "", reason: str,
+                    evidence_text: str = "", message_id: str = "",
+                    now: float | None = None) -> dict[str, Any]:
+        """File one report against an account in this group."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        state = self._report_state(entry)
+        state["seq"] = int(state.get("seq") or 0) + 1
+        rid = f"rp-{state['seq']:04d}"
+        report = {
+            "id": rid, "user_id": str(user_id), "label": label or "",
+            "by": str(by), "by_label": by_label,
+            "reason": str(reason or "")[:400],
+            "evidence_text": str(evidence_text or "")[:1000],
+            "message_id": str(message_id or ""),
+            "status": "open", "ts": now,
+            "decided_by": "", "decided_ts": 0.0,
+        }
+        entry.setdefault("reports", {})[rid] = report
+        self._audit(group_key, "report_filed", report=rid,
+                    user_id=str(user_id), by=by,
+                    reason=str(reason or "")[:120])
+        self.store.save()
+        return dict(report)
+
+    def open_reports(self, group_key: str) -> list[dict[str, Any]]:
+        """Open reports, oldest first."""
+        entry = self.store.group(group_key)
+        rows = [r for r in (entry.get("reports") or {}).values()
+                if r.get("status") == "open"]
+        rows.sort(key=lambda r: float(r.get("ts") or 0))
+        return [dict(r) for r in rows]
+
+    def get_report(self, group_key: str,
+                   report_id: str) -> dict[str, Any] | None:
+        report = (self.store.group(group_key).get("reports") or {}).get(
+            report_id)
+        return dict(report) if report else None
+
+    def decide_report(self, group_key: str, report_id: str, *,
+                      action: str, by: str, by_label: str = "",
+                      now: float | None = None) -> dict[str, Any]:
+        """Mark a report acted or dismissed. The decision is the
+        audit line — the action itself (warn/mute/ban) is taken by
+        the moderation path that called this, so the record and the
+        action can never drift apart."""
+        if action not in ("acted", "dismissed"):
+            return {"ok": False}
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        report = (entry.get("reports") or {}).get(report_id)
+        if report is None or report.get("status") != "open":
+            return {"ok": False}
+        report["status"] = action
+        report["decided_by"] = str(by)
+        report["decided_ts"] = now
+        self._audit(group_key, "report_decided", report=report_id,
+                    user_id=str(report.get("user_id") or ""),
+                    action=action, by=by, by_label=by_label)
+        self.store.save()
+        return {"ok": True, "report": dict(report)}
+
+    def report_count_for(self, group_key: str, user_id: str, *,
+                         status: str = "open") -> int:
+        entry = self.store.group(group_key)
+        return sum(
+            1 for r in (entry.get("reports") or {}).values()
+            if str(r.get("user_id")) == str(user_id)
+            and r.get("status") == status)
+
+    # ── mass-report candidates: evidence-gated, never free-form ───
+    # A candidate is an account Devon's own moderation pipeline
+    # already caught, with the evidence attached. There is no
+    # free-form list of usernames to blast: the four sources are
+    # (a) admin-confirmed reputation records this group sourced,
+    # (b) staged flag proposals with their notes, (c) accounts with
+    # ≥3 open reports in this group, (d) accounts the sensors
+    # banned here (audit admin_action ban rows). First evidence
+    # wins; the strongest category wins the mapping.
+
+    def mass_report_candidates(self, group_key: str, *,
+                               now: float | None = None
+                               ) -> list[dict[str, Any]]:
+        now = now if now is not None else time.time()
+        platform = group_key.split(":", 1)[0]
+        by_user: dict[str, dict[str, Any]] = {}
+
+        def _add(user_id: str, label: str, category: str,
+                 evidence: str, source: str, source_id: str) -> None:
+            user_id = str(user_id or "")
+            if not user_id:
+                return
+            cur = by_user.get(user_id)
+            if cur is None:
+                by_user[user_id] = {
+                    "user_id": user_id, "label": label or "",
+                    "category": category or "other",
+                    "evidence": str(evidence or "")[:400],
+                    "source": source, "source_id": source_id}
+                return
+            if not cur.get("evidence") and evidence:
+                cur["evidence"] = str(evidence or "")[:400]
+            if not cur.get("label") and label:
+                cur["label"] = label
+
+        for record in self.reputation.data.get("records", {}).values():
+            if record.get("status") != "live" \
+                    or record.get("source_group") != group_key:
+                continue
+            if now > float(record.get("expires_ts") or 0):
+                continue
+            person = record.get("person") or {}
+            user_id = (person.get("ids") or {}).get(platform) or ""
+            label = (person.get("usernames") or [None])[0] or \
+                (person.get("names") or [None])[0] or ""
+            _add(user_id, label, record.get("category") or "other",
+                 record.get("note") or "", "reputation",
+                 record.get("id") or "")
+
+        for prop in self.flag_proposals(group_key, now=now):
+            person = prop.get("person") or {}
+            user_id = str(prop.get("user_id") or "")
+            label = (person.get("usernames") or [None])[0] or \
+                (person.get("names") or [None])[0] or ""
+            _add(user_id, label, prop.get("category") or "other",
+                 prop.get("note") or "", "flag",
+                 prop.get("id") or "")
+
+        entry = self.store.group(group_key)
+        open_counts: dict[str, int] = {}
+        for report in (entry.get("reports") or {}).values():
+            if report.get("status") != "open":
+                continue
+            uid = str(report.get("user_id") or "")
+            open_counts[uid] = open_counts.get(uid, 0) + 1
+        for uid, count in open_counts.items():
+            if count < 3:
+                continue
+            first = next(
+                (r for r in (entry.get("reports") or {}).values()
+                 if str(r.get("user_id")) == uid
+                 and r.get("status") == "open"),
+                None)
+            _add(uid, (first or {}).get("label") or "",
+                 "other",
+                 f"{count} open reports: "
+                 f"{(first or {}).get('reason') or ''}",
+                 "reports", (first or {}).get("id") or "")
+
+        for row in self.audit(group_key, limit=500):
+            if row.get("kind") != "admin_action" \
+                    or row.get("action") != "ban":
+                continue
+            _add(str(row.get("user_id") or ""),
+                 str(row.get("label") or ""), "other",
+                 f"sensor ban: {row.get('reason') or ''}",
+                 "sensor-ban", "")
+
+        out = sorted(by_user.values(),
+                     key=lambda c: (c["user_id"]))
+        return out
+
+    def record_mass_report_run(self, group_key: str, *,
+                               by: str, results: list[dict[str, Any]],
+                               now: float | None = None
+                               ) -> dict[str, Any]:
+        """Persist one mass-report run record (the run report the
+        admin sees, plus the per-target outcomes) in the group's
+        store entry, newest first, capped at the last 20 runs."""
+        now = now if now is not None else time.time()
+        entry = self.store.group(group_key)
+        runs = entry.setdefault("mass_report_runs", [])
+        run = {
+            "id": f"mr-{int(now)}", "ts": now, "by": str(by),
+            "submitted": sum(1 for r in results
+                             if r.get("outcome") == "submitted"),
+            "failed": sum(1 for r in results
+                          if r.get("outcome") == "failed"),
+            "skipped": sum(1 for r in results
+                           if r.get("outcome") == "skipped"),
+            "results": results,
+        }
+        runs.insert(0, run)
+        del runs[20:]
+        self.store.save()
+        return dict(run)
+
     def reputation_retract_for(self, group_key: str, user_id: str,
                                *, by: str, by_label: str = "",
                                any_source: bool = False,
@@ -9511,4 +9710,5 @@ def default_surface(workspace_dir: str | Path) -> GroupSurface:
     root = Path(workspace_dir) / "data" / "social"
     return GroupSurface(
         GroupStore(root / "groups.json").load(),
+        ban_list=BanList(root / "bans.json"),
         owner_registry=default_registry(workspace_dir))
