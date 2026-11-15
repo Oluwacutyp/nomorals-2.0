@@ -799,13 +799,18 @@ class RuntimeSystemMixin:
             record_failure("runtime_system._hub_proxy_line", exc)
             return None
 
-    def _hub_proxy_flow(self, chat_key: str) -> str:
+    def _hub_proxy_flow(self, chat_key: str) -> Any:
         """Proxy screen: cooldown → live progress → file → summary.
 
         Cooldown is checked FIRST (no wasted scrape on a cooled-down
         user). Progress edits are best-effort: if the progress
         message or adapter edit fails, the flow continues and the
         summary still returns — progress never blocks results.
+
+        Every terminal screen is wrapped (register #27) so the
+        surfaces without derivation (WhatsApp/userbot) get their
+        buttons: cooldown → proxy_cooldown, every result (failed
+        refresh, no working proxies, success) → proxy_result.
         """
         from ...social.chat.hub import PROXY_COOLDOWN_S, CooldownStore, proxy_intro_text
         from ...social.chat.progress import ProgressReporter
@@ -814,10 +819,13 @@ class RuntimeSystemMixin:
         store = CooldownStore(self._hub_home() / "hub" / "cooldowns.json")
         left = store.remaining(chat_key, "proxy", PROXY_COOLDOWN_S)
         if left > 0:
-            return ("🌐 Proxy lab\n\n"
-                    f"⏳ cooling down — try again in "
-                    f"{CooldownStore.remaining_text(left)}.\n"
-                    "(one generation per hour per chat)")
+            return self._hub_wrap(
+                chat_key,
+                ("🌐 Proxy lab\n\n"
+                 f"⏳ cooling down — try again in "
+                 f"{CooldownStore.remaining_text(left)}.\n"
+                 "(one generation per hour per chat)"),
+                "proxy_cooldown")
         store.mark(chat_key, "proxy")
 
         chat = self._ref_from_key(chat_key)
@@ -867,15 +875,20 @@ class RuntimeSystemMixin:
         except Exception as exc:  # noqa: BLE001 - named, not swallowed
             if progress is not None:
                 progress.fail(f"failed: {exc}")
-            return f"🌐 Proxy lab — refresh failed: {exc}"
+            return self._hub_wrap(
+                chat_key, f"🌐 Proxy lab — refresh failed: {exc}",
+                "proxy_result")
 
         file_out = lab.active_file()
         if not file_out.get("written"):
             if progress is not None:
                 progress.finish("no working proxies")
-            return ("🌐 Proxy lab — no working proxies right now\n"
-                    f"({file_out.get('note', 'refresh found nothing alive')})\n"
-                    "Free proxies rot fast — try again later.")
+            return self._hub_wrap(
+                chat_key,
+                ("🌐 Proxy lab — no working proxies right now\n"
+                 f"({file_out.get('note', 'refresh found nothing alive')})\n"
+                 "Free proxies rot fast — try again later."),
+                "proxy_result")
         sent = False
         try:
             result = self.gateway.send_file(
@@ -914,7 +927,7 @@ class RuntimeSystemMixin:
         else:
             lines.append(f"file: {file_out['path']} "
                          "(plain chat — no file sending on this adapter)")
-        return "\n".join(lines)
+        return self._hub_wrap(chat_key, "\n".join(lines), "proxy_result")
 
     def _control_macro(self, tail: str, chat_key: str) -> str:
         parts = (tail or "").split(None, 1)

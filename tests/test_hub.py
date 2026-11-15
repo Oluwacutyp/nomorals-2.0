@@ -37,6 +37,7 @@ from nomorals.social.chat.progress import ProgressReporter, render_bar
 from nomorals.social.chat.progress_throttle import ProgressThrottler
 from nomorals.social.chat.telegram import TelegramBotAdapter
 from nomorals.social.chat.tgbot_buttons import (
+    ActionableMessage,
     buttons_for_text,
     check_callback_data,
     personal_buttons_for,
@@ -364,6 +365,21 @@ class _FakeLab:
                 "fastest": "http://1.2.3.4:8080"}
 
 
+class _FakeLabEmpty(_FakeLab):
+    """Same lab, but the refresh finds nothing alive."""
+
+    def active_file(self):
+        return {"written": False, "count": 0,
+                "note": "refresh found nothing alive"}
+
+
+class _FakeLabBroken(_FakeLab):
+    """Same lab, but the refresh itself raises."""
+
+    def refresh(self, *, on_scrape_source=None, on_test_progress=None):
+        raise RuntimeError("scraper exploded")
+
+
 def _runtime(tmp_home, gateway):
     rt = object.__new__(RuntimeSystemMixin)
     rt.context = SimpleNamespace(
@@ -503,6 +519,79 @@ class ControlHubTests(unittest.TestCase):
         text = rt._control_toolhub("proxy run", "tg:1")
         self.assertIn("file: /tmp/x.txt", text)
         self.assertNotIn("File sent above", text)
+
+
+# ── proxy flow screens carry authored buttons (F3, nav audit) ─────────
+
+class ProxyFlowWrapTests(unittest.TestCase):
+    """F3: the proxy flow's terminal screens must carry authored
+    buttons on surfaces without derivation (WhatsApp/userbot) — the
+    same register #27 wrap every other hub screen gets. On the
+    derivation surfaces the plain-string path is unchanged."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        import nomorals.tools.proxylab as proxylab_mod
+
+        self._proxylab_mod = proxylab_mod
+        self._orig_lab = proxylab_mod.ProxyLab
+        _FakeLab.constructed = []
+
+    def tearDown(self):
+        self._proxylab_mod.ProxyLab = self._orig_lab
+
+    def _patch_lab(self, lab_cls=_FakeLab):
+        self._proxylab_mod.ProxyLab = lab_cls
+
+    def _authored(self, reply):
+        self.assertIsInstance(reply, ActionableMessage)
+        return reply.buttons
+
+    def test_result_no_proxies_carries_proxy_result_buttons(self):
+        self._patch_lab(_FakeLabEmpty)
+        rt = _runtime(self._tmp.name, _FakeGateway())
+        reply = rt._control_toolhub("proxy run", "whatsapp:1")
+        self.assertIn("no working proxies", reply.text)
+        self.assertEqual(self._authored(reply),
+                         keyboard_for_screen("proxy_result"))
+
+    def test_cooldown_carries_proxy_cooldown_buttons(self):
+        self._patch_lab()
+        rt = _runtime(self._tmp.name, _FakeGateway())
+        store = CooldownStore(f"{self._tmp.name}/hub/cooldowns.json")
+        store.mark("whatsapp:1", "proxy")
+        reply = rt._control_toolhub("proxy run", "whatsapp:1")
+        self.assertIn("cooling down", reply.text)
+        self.assertEqual(self._authored(reply),
+                         keyboard_for_screen("proxy_cooldown"))
+
+    def test_success_carries_proxy_result_buttons(self):
+        self._patch_lab()
+        rt = _runtime(self._tmp.name, _FakeGateway())
+        reply = rt._control_toolhub("proxy run", "whatsapp:1")
+        self.assertIn("3 working proxies", reply.text)
+        self.assertEqual(self._authored(reply),
+                         keyboard_for_screen("proxy_result"))
+
+    def test_refresh_failure_carries_proxy_result_buttons(self):
+        self._patch_lab(_FakeLabBroken)
+        rt = _runtime(self._tmp.name, _FakeGateway())
+        reply = rt._control_toolhub("proxy run", "whatsapp:1")
+        self.assertIn("refresh failed", reply.text)
+        self.assertEqual(self._authored(reply),
+                         keyboard_for_screen("proxy_result"))
+
+    def test_derivation_surfaces_keep_plain_text(self):
+        # The Bot API personal bot derives the keyboard from the
+        # reply text — the wrap must not change its plain-string path.
+        self._patch_lab(_FakeLabEmpty)
+        rt = _runtime(self._tmp.name, _FakeGateway())
+        reply = rt._control_toolhub("proxy run", "tg:1")
+        self.assertIsInstance(reply, str)
+        self.assertIn("no working proxies", reply)
 
 
 # ── adapter navigation edit ──────────────────────────────────────────────
