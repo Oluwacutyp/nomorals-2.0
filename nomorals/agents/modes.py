@@ -89,6 +89,8 @@ __all__ = [
     "parse_agent_command",
     "parse_mode_phrase",
     "proactive_source",
+    "file_initiative_proposal",
+    "with_production_sources",
     "ensure_agent_modes_tick_job",
     "AGENT_MODES_TICK_JOB",
     "AGENT_MODES_TICK_TOOL",
@@ -248,9 +250,13 @@ def _default_store_path(settings: Any = None) -> Path:
 class ModeStore:
     """Per-chat mode defaults + adaptive learning records, persisted as JSON.
 
-    File shape: ``{"chats": {chat_key: [modes]}, "learning": {...}}``.
-    Thread-safe, atomic writes (tmp + replace).  A corrupt file starts
-    fresh rather than taking chat down.
+    File shape: ``{"chats": {chat_key: [modes]}, "learning": {...},
+    "pending": {proposal_id: held-record}}`` — the ``pending`` section
+    is the durable half of a held initiative (see
+    :meth:`AutonomousEngine.restore_pending`): a restart rehydrates
+    held work from it instead of orphaning it.  Thread-safe, atomic
+    writes (tmp + replace).  A corrupt file starts fresh rather than
+    taking chat down.
     """
 
     def __init__(self, path: str | Path | None = None, *,
@@ -258,7 +264,8 @@ class ModeStore:
         self.path = (Path(path) if path is not None
                      else _default_store_path(settings))
         self._lock = threading.Lock()
-        self._data: dict[str, Any] = {"chats": {}, "learning": {}}
+        self._data: dict[str, Any] = {"chats": {}, "learning": {},
+                                      "pending": {}}
         self._load()
 
     def _load(self) -> None:
@@ -276,6 +283,8 @@ class ModeStore:
                 self._data["chats"] = data["chats"]
             if isinstance(data.get("learning"), dict):
                 self._data["learning"] = data["learning"]
+            if isinstance(data.get("pending"), dict):
+                self._data["pending"] = data["pending"]
 
     def _save(self) -> None:
         try:
@@ -325,6 +334,42 @@ class ModeStore:
         with self._lock:
             self._data["learning"] = learning
             self._save()
+
+    # ── held initiatives (durable half of the approval queue) ───────────
+
+    def pending_records(self) -> list[dict[str, Any]]:
+        """Held initiatives persisted across restarts (deep copies)."""
+        with self._lock:
+            raw = self._data.get("pending", {})
+            if not isinstance(raw, dict):
+                return []
+            return [json.loads(json.dumps(v)) for v in raw.values()
+                    if isinstance(v, dict)]
+
+    def save_pending(self, record: dict[str, Any]) -> None:
+        """Persist one held initiative. Best-effort, never raises."""
+        if not isinstance(record, dict) or not record.get("id"):
+            return
+        try:
+            clean = json.loads(json.dumps(record))
+        except (TypeError, ValueError):
+            _log.warning("held record for %s is not JSON-safe — not persisted",
+                         record.get("id"))
+            return
+        with self._lock:
+            pending = self._data.setdefault("pending", {})
+            if not isinstance(pending, dict):
+                pending = self._data["pending"] = {}
+            pending[str(record["id"])] = clean
+            self._save()
+
+    def drop_pending(self, proposal_id: str) -> None:
+        """Forget one persisted held initiative (it was decided)."""
+        with self._lock:
+            pending = self._data.get("pending", {})
+            if isinstance(pending, dict) and str(proposal_id) in pending:
+                del pending[str(proposal_id)]
+                self._save()
 
 
 # ── adaptive: outcome → knowledge → adjusted behaviour ───────────────────
@@ -472,6 +517,55 @@ class Initiative:
                 "proposal_id": self.proposal_id, "job_id": self.job_id}
 
 
+#: Sentinel for a value that cannot live in JSON (a closure, a live
+#: object): :func:`_json_safe` drops the leaf instead of stringifying it.
+_DROP = object()
+
+
+def _json_safe(value: Any) -> Any:
+    """Recursively keep only JSON-safe leaves; drop the rest.
+
+    Used to persist held initiatives: closures and live objects cannot
+    live in the store file, so they are dropped — the action is rebuilt
+    from the persisted ``payload`` on restore (see :func:`_rebuild_action`).
+    """
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        out: dict[str, Any] = {}
+        for key, item in value.items():
+            safe = _json_safe(item)
+            if safe is not _DROP:
+                out[str(key)] = safe
+        return out
+    if isinstance(value, (list, tuple)):
+        return [safe for safe in (_json_safe(v) for v in value)
+                if safe is not _DROP]
+    return _DROP
+
+
+def _held_record(init: Initiative, spec: dict[str, Any],
+                 ctx: dict[str, Any]) -> dict[str, Any]:
+    """The durable half of a held initiative (JSON-safe throughout)."""
+    return {"id": init.id, "label": init.label, "source": init.source,
+            "priority": init.priority, "created_at": init.created_at,
+            "spec": _json_safe(spec), "ctx": _json_safe(ctx)}
+
+
+def _rebuild_action(spec: dict[str, Any]) -> Any | None:
+    """Rebuild a held initiative's action from persisted data.
+
+    A spec that carries a JSON-safe ``payload`` (the proactive bridge
+    puts the suggestion payload there) gets an action that returns it;
+    anything else has no rebuildable action and stays orphaned — its
+    approval keeps failing honestly, its denial still clears it.
+    """
+    payload = spec.get("payload")
+    if isinstance(payload, dict):
+        return lambda c, p=dict(payload): dict(p)
+    return None
+
+
 class AutonomousEngine:
     """Self-initiation: sees what needs doing, does it, verifies, follows up.
 
@@ -489,7 +583,10 @@ class AutonomousEngine:
     ``deny_proposal`` discards it.  When approval is not required the
     initiative executes immediately, per the existing policy.  When
     approval is required but no sink is configured, the initiative
-    fails closed: it is never executed past a missing gate.
+    fails closed: it is never executed past a missing gate.  A held
+    initiative is ALSO persisted (its JSON-safe spec + context) into the
+    store's ``pending`` section, so a restart rehydrates it instead of
+    orphaning it — see :meth:`restore_pending`.
 
     Rotation: sources run in learned-weight order (see
     :class:`AdaptiveLearner`) — a source whose initiatives keep failing
@@ -502,10 +599,15 @@ class AutonomousEngine:
                  requires_approval: Callable[[dict[str, Any],
                                               dict[str, Any]], bool] | None = None,
                  park_after_s: float = 5.0,
+                 pending_store: Any = None,
                  ) -> None:
         self.learner = learner or AdaptiveLearner()
         self.proposal_sink = proposal_sink
         self.requires_approval = requires_approval
+        #: Durable half of a held initiative (a :class:`ModeStore`, or
+        #: None for a purely in-memory engine): holds persist the
+        #: JSON-safe record here so a restart can rehydrate them.
+        self.pending_store = pending_store
         #: Grace period before a slow action parks as a background job.
         #: Fast actions complete inline (unchanged behavior); slower ones
         #: keep running with heartbeats while the tick moves on. A latency
@@ -518,9 +620,11 @@ class AutonomousEngine:
         self._history: list[Initiative] = []
         self._ticks = 0
         #: proposal id → (initiative, spec, ctx, executor) for held work.
-        #: In-memory only: the action itself cannot live in the DB row,
-        #: so a restart orphans held rows — approving one then fails
-        #: honestly instead of running something unrecorded.
+        #: The live half lives here; the durable half lives in the
+        #: pending store (see :meth:`restore_pending`) — a restart
+        #: rehydrates what can be rebuilt from persisted data, and what
+        #: cannot be rebuilt stays orphaned honestly (approve fails,
+        #: deny clears) instead of running something unrecorded.
         self._pending: dict[str, tuple[Initiative, dict[str, Any],
                                         dict[str, Any], Any]] = {}
 
@@ -553,6 +657,62 @@ class AutonomousEngine:
         return [init for init, _s, _c, _e in self._pending.values()
                 if init.status == "proposed"]
 
+    def _drop_pending_record(self, proposal_id: str) -> None:
+        """Best-effort: forget a persisted held record (it was decided).
+
+        Persistence never breaks a decision — a store failure here is
+        a warning, and the record is simply re-offered after a restart.
+        """
+        store = self.pending_store
+        if store is None:
+            return
+        try:
+            store.drop_pending(str(proposal_id))
+        except Exception:  # noqa: BLE001 - persistence never breaks a decision
+            _log.warning("could not drop held record %s", proposal_id)
+
+    def restore_pending(self, records: list[dict[str, Any]] | None) -> None:
+        """Rehydrate held initiatives persisted by an earlier process.
+
+        Only records whose action rebuilds from persisted data come back
+        (the proactive bridge's ``payload``); anything else stays filed
+        in the proposals queue and must be denied to clear — approving
+        it keeps failing honestly.  Idempotent: ids already pending
+        are left alone.
+        """
+        for record in records or []:
+            if not isinstance(record, dict):
+                continue
+            pid = str(record.get("id", "") or "")
+            if not pid or pid in self._pending:
+                continue
+            spec = record.get("spec")
+            if not isinstance(spec, dict):
+                continue
+            action = _rebuild_action(spec)
+            if action is None:
+                continue
+            try:
+                priority = float(record.get("priority", 0.5))
+            except (TypeError, ValueError):
+                priority = 0.5
+            try:
+                created_at = float(record.get("created_at", 0.0) or 0.0)
+            except (TypeError, ValueError):
+                created_at = 0.0
+            ctx = record.get("ctx")
+            if not isinstance(ctx, dict):
+                ctx = {}
+            spec = dict(spec)
+            spec["action"] = action
+            init = Initiative(id=pid, label=str(record.get("label", pid)),
+                              source=str(record.get("source", "")),
+                              priority=priority, status="proposed",
+                              created_at=created_at, proposal_id=pid)
+            self._pending[pid] = (init, spec, ctx, None)
+            if init not in self._history:
+                self._history.append(init)
+
     def approve_proposal(self, proposal_id: str) -> Initiative:
         """Owner approved a held initiative — run its action now.
 
@@ -567,16 +727,51 @@ class AutonomousEngine:
         if init.status != "proposed":
             raise KeyError(
                 f"no pending initiative for proposal {proposal_id!r}")
-        return self._execute(init, spec, ctx, executor)
+        init = self._execute(init, spec, ctx, executor)
+        if init.status == "done":
+            # Decided and ran: the persisted record goes away.  A failed
+            # run keeps its record, so a restart can offer the retry.
+            self._drop_pending_record(proposal_id)
+        return init
 
     def deny_proposal(self, proposal_id: str) -> Initiative:
-        """Owner denied a held initiative — discard it, never run it."""
+        """Owner denied a held initiative — discard it, never run it.
+
+        Also clears a record orphaned by a restart: the persisted
+        record is dropped and a denied initiative is returned from it,
+        so the denial clears the proposal everywhere instead of
+        erroring.  Raises :class:`KeyError` only for an id the system
+        knows nothing about (neither pending nor persisted).
+        """
+        pid = str(proposal_id)
         try:
-            init, _spec, _ctx, _executor = self._pending.pop(
-                str(proposal_id))
+            init, _spec, _ctx, _executor = self._pending.pop(pid)
         except KeyError:
-            raise KeyError(
-                f"no pending initiative for proposal {proposal_id!r}") from None
+            init = None
+        record = None
+        store = self.pending_store
+        if store is not None:
+            try:
+                for rec in store.pending_records():
+                    if isinstance(rec, dict) and str(rec.get("id", "")) == pid:
+                        record = rec
+                        break
+            except Exception:  # noqa: BLE001 - a broken store never blocks a denial
+                record = None
+        self._drop_pending_record(pid)
+        if init is None:
+            if record is None:
+                raise KeyError(
+                    f"no pending initiative for proposal {proposal_id!r}"
+                    ) from None
+            try:
+                priority = float(record.get("priority", 0.5))
+            except (TypeError, ValueError):
+                priority = 0.5
+            init = Initiative(
+                id=pid, label=str(record.get("label", pid)),
+                source=str(record.get("source", "")), priority=priority,
+                status="denied", error="denied by owner", proposal_id=pid)
         init.status = "denied"
         init.error = "denied by owner"
         self.learner.record_outcome("autonomous", init.source, False)
@@ -676,6 +871,15 @@ class AutonomousEngine:
         init.proposal_id = str(proposal_id)
         init.status = "proposed"
         self._pending[init.proposal_id] = (init, spec, ctx, executor)
+        # Durable half: the hold survives a restart (the store record
+        # is what a fresh engine rehydrates from).  Persistence is
+        # best-effort — a store failure never breaks the hold itself.
+        if self.pending_store is not None:
+            try:
+                self.pending_store.save_pending(
+                    _held_record(init, spec, ctx))
+            except Exception:  # noqa: BLE001 - persistence never breaks a hold
+                _log.warning("could not persist held initiative %s", init.id)
         return init
 
     def _run_action(self, spec: dict[str, Any], ctx: dict[str, Any],
@@ -811,13 +1015,85 @@ def proactive_source(proactive: Any, user_id: str, *,
         for s in suggestions or []:
             payload = {"title": getattr(s, "title", str(s)),
                        "confidence": getattr(s, "confidence", 0.0)}
+            # The ``payload`` is the data twin of the ``action`` closure:
+            # a held initiative persists its JSON-safe spec, and a fresh
+            # engine rebuilds the action from the payload after a restart
+            # (see :func:`_rebuild_action`).  The closure stays as the
+            # live action — the payload never replaces it in-process.
             out.append({"label": f"proactive: {payload['title']}",
                         "proposal": payload["title"],
                         "requires_approval": True,
+                        "payload": dict(payload),
                         "action": (lambda p: (lambda c: p))(payload)})
         return out
 
     return _source
+
+
+def file_initiative_proposal(db: Any, initiative: Initiative,
+                             spec: dict[str, Any], ctx: dict[str, Any],
+                             *, on_error: Any = None) -> str:
+    """File a held initiative into the proposals queue (``proactive_log``).
+
+    ``kind="initiative"`` so ``/proposals`` lists it and approve/deny
+    route it to the modes engine instead of the message-send path —
+    approving an initiative RUNS its action; sending the proposal text
+    as a chat message would be wrong for an action.  Returns the
+    proposal id (= the initiative id, so routing is a direct lookup).
+    The one filing seam for every engine: the runtime, the CLI and the
+    scheduler fallback all file through here, so a held initiative
+    lands in the same queue whichever process held it.  ``on_error``
+    (if given) is called with a parse failure — the runtime passes its
+    failure ledger; without one the failure is a warning and the row
+    still files under ``local``.
+    """
+    chat_key = (ctx or {}).get("chat_key", "")
+    platform, chat_id = "local", ""
+    try:
+        # Same shape as ChatRef.parse ("platform:chat_id").
+        platform, _, chat_id = str(chat_key).partition(":")
+        if not platform or not chat_id:
+            raise ValueError(f"bad chat key: {chat_key!r}")
+    except Exception as exc:  # noqa: BLE001 - an unparsable key never blocks filing
+        if on_error is not None:
+            on_error(exc)
+        else:
+            _log.warning("initiative proposal chat key unparsable: %s", exc)
+        platform, chat_id = "local", ""
+    content = str(spec.get("proposal")
+                  or f"autonomous initiative: {initiative.label}")
+    reason = f"autonomous initiative from {initiative.source}"
+    db.execute(
+        "INSERT INTO proactive_log (id, kind, platform, chat_id, "
+        "content, status, reason, decided_at, acted_at) "
+        "VALUES (?, 'initiative', ?, ?, ?, 'pending', ?, ?, NULL)",
+        (initiative.id, platform, chat_id, content, reason, time.time()))
+    return initiative.id
+
+
+def with_production_sources(modes: AgentModes, *,
+                            proposal_sink: Any = None) -> AgentModes:
+    """Attach the production autonomous sources to an engine built
+    outside the runtime (the ``nm agent tick`` CLI, the scheduler
+    tick-tool fallback).
+
+    A bare ``AgentModes()`` has no sources and no sink, so a tick from
+    it proposes nothing and a held initiative fails closed — the CLI
+    and the fallback ticked a fresh sourceless engine.  This wires the
+    same shape the runtime boot builds: the proactive bridge over the
+    ``ProactiveEngine`` suggestion generators, plus a proposal sink
+    when one is given (a sink-less engine still ticks, but anything
+    needing approval fails closed).  Idempotent by source name.
+    """
+    if (proposal_sink is not None
+            and modes.autonomous.proposal_sink is None):
+        modes.autonomous.proposal_sink = proposal_sink
+    if "proactive" not in modes.autonomous.source_names():
+        from .proactive import ProactiveEngine
+
+        modes.autonomous.add_source(
+            "proactive", proactive_source(ProactiveEngine(), "owner"))
+    return modes
 
 
 # ── planning: plan first, verify each step, replan on failure ────────────
@@ -1187,7 +1463,14 @@ class AgentModes:
         # build; an explicitly passed engine already owns its own.
         self.autonomous = autonomous or AutonomousEngine(
             learner=self.learner, proposal_sink=proposal_sink,
-            requires_approval=requires_approval)
+            requires_approval=requires_approval,
+            pending_store=self.store)
+        # The durable half of a held initiative lives in the store:
+        # wire it into whatever engine we ended up with, then rehydrate
+        # holds an earlier process persisted (a restart, or a CLI tick).
+        if getattr(self.autonomous, "pending_store", None) is None:
+            self.autonomous.pending_store = self.store
+        self.autonomous.restore_pending(self.store.pending_records())
         self.planner = planner_runner or PlanningRunner()
 
     # ── selection ──
@@ -1344,6 +1627,14 @@ class AgentModes:
             return []
         base = dict(ctx or {})
         base.setdefault("chat_key", chat_key)
+        # Real wall-clock for the sources: the proactive bridge's
+        # time-based suggestions read hour / day / month from the tick
+        # context — without these they ran on a hardcoded noon default
+        # and the lunch suggestion fired on every scheduled tick.
+        now = time.localtime()
+        base.setdefault("hour", now.tm_hour)
+        base.setdefault("day_of_week", time.strftime("%A", now).lower())
+        base.setdefault("month", now.tm_mon)
         if "planning" in modes:
             def _executor(spec: dict[str, Any], c: dict[str, Any]) -> Any:
                 decompose = spec.get("decompose")
@@ -1358,11 +1649,17 @@ class AgentModes:
                     if action is None:
                         raise ValueError("initiative has no action")
                     execute_step = (lambda s, cc, _a=action: _a(cc))
-                return self.planner.run_sync(
+                # The planning path IS handle_task (the facade's
+                # documented planning entry point) — the executor runs
+                # in a job worker thread, so the async call is driven
+                # with asyncio.run.  This also picks up handle_task's
+                # adaptive strategy choice for the run.
+                return asyncio.run(self.handle_task(
                     str(spec.get("goal", spec.get("label", "initiative"))),
+                    str(c.get("chat_key", chat_key)),
                     decompose=decompose, execute_step=execute_step,
                     verify_step=spec.get("verify_step"),
-                    on_plan=spec.get("on_plan"))
+                    on_plan=spec.get("on_plan")))
             return self.autonomous.tick(base, executor=_executor)
         return self.autonomous.tick(base)
 

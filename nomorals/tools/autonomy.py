@@ -30,11 +30,11 @@ nervous system through plain language:
 * ``__agent_modes_tick__`` — scheduler-internal agent-modes tick: one
   autonomous cycle for every chat running the autonomous mode.
   Same closure pattern. Reads the runtime's persistent ``AgentModes``
-  from ``context.extras["agent_modes"]`` (a fresh engine would have
-  no sources and no pending initiatives); falls back to a default
-  engine when the runtime never booted one.  Initiatives that need
-  approval land in ``/proposals`` via the runtime's proposal sink —
-  the tool itself never sends anything.
+  from ``context.extras["agent_modes"]``; falls back to a default
+  engine wired the same way (proactive bridge + a proposal sink
+  filing into the workspace DB) when the runtime never booted one.
+  Initiatives that need approval land in ``/proposals`` via the
+  runtime's proposal sink — the tool itself never sends anything.
 * ``__immune_sampler__`` — scheduler-internal immune sampler: one
   live process sample into the persisted adaptive baseline
   (immune/wiring.py), consulting the adaptive cancer gate. Same
@@ -277,10 +277,17 @@ def register(registry: Any) -> None:
     def _agent_modes_tick_tool() -> dict[str, Any]:
         # The runtime's persistent engine (context.extras["agent_modes"])
         # — it owns the registered sources, the proposal sink, and the
-        # pending initiatives.  A fresh engine here would tick nothing.
-        # Fallback: a default engine still ticks chats whose mode set
-        # (in the settings-resolved store) includes autonomous.
-        from ..agents.modes import AgentModes
+        # pending initiatives.  Fallback: a default engine wired the
+        # same way the runtime boot wires its own (proactive bridge +
+        # a proposal sink filing into the workspace DB), so it still
+        # ticks chats whose mode set (in the settings-resolved store)
+        # includes autonomous — a bare engine would tick nothing.
+        from ..agents.modes import (
+            AgentModes,
+            file_initiative_proposal,
+            with_production_sources,
+        )
+        from ..autonomy.idle import workspace_db
 
         modes = None
         try:
@@ -289,7 +296,13 @@ def register(registry: Any) -> None:
             modes = None
         if modes is None:
             try:
-                modes = AgentModes()
+                ws = getattr(getattr(_context, "settings", None),
+                             "workspace_dir", None) or "."
+                db = workspace_db(ws)
+                modes = with_production_sources(
+                    AgentModes(),
+                    proposal_sink=lambda init, spec, ctx: (
+                        file_initiative_proposal(db, init, spec, ctx)))
             except Exception as exc:  # noqa: BLE001 - never crash the tick
                 return {"ok": False, "error": f"no agent modes: {exc}"}
         try:

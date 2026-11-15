@@ -10240,24 +10240,17 @@ class PartnerRuntime(
         RUNS its action; sending the proposal text as a chat message
         would be wrong for an action.  Returns the proposal id
         (= the initiative id, so routing is a direct lookup).
+        Delegates to :func:`nomorals.agents.modes.file_initiative_proposal`
+        — the one filing seam for the runtime, the CLI and the
+        scheduler fallback, so a held initiative lands in the same
+        queue whichever process held it.
         """
-        chat_key = (ctx or {}).get("chat_key", "")
-        platform, chat_id = "local", ""
-        try:
-            ref = ChatRef.parse(chat_key)
-            platform, chat_id = ref.platform, ref.chat_id
-        except Exception as e:
-            record_failure("runtime.PartnerRuntime._file_initiative_proposal", e)
-        content = str(spec.get("proposal")
-                      or f"autonomous initiative: {initiative.label}")
-        reason = f"autonomous initiative from {initiative.source}"
-        self.context.db.execute(
-            "INSERT INTO proactive_log (id, kind, platform, chat_id, "
-            "content, status, reason, decided_at, acted_at) "
-            "VALUES (?, 'initiative', ?, ?, ?, 'pending', ?, ?, NULL)",
-            (initiative.id, platform, chat_id, content, reason,
-             time.time()))
-        return initiative.id
+        from ..modes import file_initiative_proposal
+
+        return file_initiative_proposal(
+            self.context.db, initiative, spec, ctx,
+            on_error=lambda e: record_failure(
+                "runtime.PartnerRuntime._file_initiative_proposal", e))
 
     # ── proposal deny asks: the Deny tap's second step ────────
 

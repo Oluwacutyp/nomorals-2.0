@@ -45,11 +45,21 @@ def _cmd_agent(args: argparse.Namespace, context: Any) -> int:
     ``nm agent planning`` / ``nm agent adaptive+planning`` /
     ``nm agent +autonomous`` / ``nm agent -planning`` / ``nm agent status``
     / ``nm agent off`` / ``nm agent tick`` — per-chat defaults persist in
-    the agent-modes store, so chat and CLI see the same mode set.
+    the agent-modes store, so chat and CLI see the same mode set.  A tick
+    runs the production sources (the proactive bridge) with a proposal
+    sink filing into the same proposals queue the runtime uses — a bare
+    engine would tick nothing and hold nothing.
     """
-    from ...agents.modes import AgentModes
+    from ...agents.modes import (
+        AgentModes,
+        file_initiative_proposal,
+        with_production_sources,
+    )
 
-    agent = AgentModes()
+    agent = with_production_sources(
+        AgentModes(),
+        proposal_sink=lambda init, spec, ctx: file_initiative_proposal(
+            context.db, init, spec, ctx))
     chat_key = getattr(args, "chat", "") or "cli"
     tail = " ".join(getattr(args, "mode_args", []) or [])
     print(agent.apply_command(tail, chat_key))
