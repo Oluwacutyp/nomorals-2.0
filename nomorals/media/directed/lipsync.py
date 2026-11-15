@@ -253,11 +253,23 @@ def latentsync_status() -> dict:
     # VRAM from the shared detector (local path only) — the same
     # measurement _has_torch_cuda just made, not a second torch import
     # for the same number. The detector never raises, but the status
-    # check stays never-raises either way.
+    # check stays never-raises either way. A forwarded GPU that passed
+    # attestation reports its attested VRAM here too, so the 18 GB
+    # floor reads the proven number — but the driver renders locally,
+    # so ``cuda`` (and therefore ``available``) stays a local question:
+    # an attested remote GPU clears the floor without claiming this
+    # box can render on it.
     vram = 0.0
     if cuda:
         try:
             vram = detect_gpu().vram_gb
+        except Exception:  # noqa: BLE001 - probe, 0.0 is a valid answer
+            vram = 0.0
+    else:
+        try:
+            info = detect_gpu()
+            if info.path == "forwarded" and info.attested:
+                vram = info.vram_gb
         except Exception:  # noqa: BLE001 - probe, 0.0 is a valid answer
             vram = 0.0
     # The provision installs the 1.6 config (18GB floor), matching the

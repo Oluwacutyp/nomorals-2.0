@@ -135,25 +135,26 @@ def is_installed() -> bool:
 def probe_gpu() -> dict[str, Any]:
     """Measure this box's GPU. Never raises.
 
-    ``{"has_gpu", "name", "vram_gb", "source", "detail"}`` — vram_gb
-    is 0.0 when no NVIDIA GPU answers.
+    ``{"has_gpu", "name", "vram_gb", "source", "detail", "forward_url",
+    "attested"}`` — vram_gb is 0.0 when no NVIDIA GPU answers.
 
     Delegates to the shared detector (:mod:`nomorals.core.gpu`) — one
     detection point for the whole codebase. The local probing here
     (nvidia-smi, then torch) is exactly the shared detector's local
     path, run fresh every call (``refresh=True``), so the gate always
     measures the box as it is right now. A pinned ``NM_GPU`` /
-    ``NM_GPU_URL`` is honoured: a forwarded GPU reports
-    ``has_gpu`` True with unknown VRAM, so a VRAM floor gate still
-    refuses honestly (it cannot verify the floor over an endpoint
-    that was never probed).
+    ``NM_GPU_URL`` is honoured: a forwarded GPU that passes attestation
+    reports its attested VRAM here, so a VRAM floor gate can pass it;
+    a forwarded GPU that was never attested still reports ``has_gpu``
+    True with unknown VRAM, so the floor still refuses honestly.
     """
     from ..core.gpu import detect_gpu
 
     info = detect_gpu(refresh=True)
     return {"has_gpu": info.has_gpu, "name": info.name,
             "vram_gb": info.vram_gb, "source": info.source,
-            "detail": info.detail}
+            "detail": info.detail, "forward_url": info.forward_url,
+            "attested": info.attested}
 
 
 def gpu_gate(box: dict[str, Any] | None = None) -> tuple[bool, str]:
@@ -179,14 +180,18 @@ def gpu_gate(box: dict[str, Any] | None = None) -> tuple[bool, str]:
                 f"{TRELLIS_MIN_VRAM_GB:.0f} GB+ VRAM — no NVIDIA GPU "
                 f"detected on this box ({cpus} CPUs, {ram} GB RAM)")
     vram = float(gpu.get("vram_gb") or 0.0)
+    # A forwarded GPU is named as one — a passing floor means the
+    # *remote* GPU clears it, never a local one.
+    holder = (f"forwarded GPU at {gpu['forward_url']}"
+              if gpu.get("forward_url") else "this box")
     if vram < TRELLIS_MIN_VRAM_GB:
         return (False,
                 f"TRELLIS.2 needs an NVIDIA GPU with "
-                f"{TRELLIS_MIN_VRAM_GB:.0f} GB+ VRAM — this box has "
+                f"{TRELLIS_MIN_VRAM_GB:.0f} GB+ VRAM — {holder} has "
                 f"{gpu.get('name')} with {vram} GB")
     return (True,
             f"GPU {gpu.get('name')} with {vram} GB VRAM — meets the "
-            f"{TRELLIS_MIN_VRAM_GB:.0f} GB floor")
+            f"{TRELLIS_MIN_VRAM_GB:.0f} GB floor ({holder})")
 
 
 def install_detail() -> str:

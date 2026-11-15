@@ -216,14 +216,18 @@ def gpu_gate(box: dict[str, Any] | None = None) -> tuple[bool, str]:
                 f"{UNIRIG_MIN_VRAM_GB:.0f} GB+ VRAM — no NVIDIA GPU "
                 f"detected on this box ({cpus} CPUs, {ram} GB RAM)")
     vram = float(gpu.get("vram_gb") or 0.0)
+    # A forwarded GPU is named as one — a passing floor means the
+    # *remote* GPU clears it, never a local one.
+    holder = (f"forwarded GPU at {gpu['forward_url']}"
+              if gpu.get("forward_url") else "this box")
     if vram < UNIRIG_MIN_VRAM_GB:
         return (False,
                 f"UniRig needs a CUDA GPU with "
-                f"{UNIRIG_MIN_VRAM_GB:.0f} GB+ VRAM — this box has "
+                f"{UNIRIG_MIN_VRAM_GB:.0f} GB+ VRAM — {holder} has "
                 f"{gpu.get('name')} with {vram} GB")
     return (True,
             f"GPU {gpu.get('name')} with {vram} GB VRAM — meets the "
-            f"{UNIRIG_MIN_VRAM_GB:.0f} GB floor")
+            f"{UNIRIG_MIN_VRAM_GB:.0f} GB floor ({holder})")
 
 
 def install_detail() -> str:

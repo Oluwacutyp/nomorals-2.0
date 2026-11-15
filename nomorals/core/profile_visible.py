@@ -132,8 +132,14 @@ def profile_summary(profile: EnvironmentProfile | str | None = None,
     line = (f"{prof.kind} {workers} vcpu {free_mb / 1024:.1f}GB free "
             f"{shed_lvl} shed")
     if prof.gpu.has_gpu:
-        if prof.gpu.name:
+        if prof.gpu.name and prof.gpu.path == "local":
             line += f" gpu {prof.gpu.name} {prof.gpu.vram_gb:.0f}GB"
+        elif prof.gpu.attested:
+            # Attested forwarded: name + VRAM are proven, but the GPU
+            # is remote — the "fwd" marker keeps it from reading as
+            # a local device.
+            line += (f" gpu {prof.gpu.name} {prof.gpu.vram_gb:.0f}GB "
+                     f"fwd")
         else:
             line += f" gpu forwarded {prof.gpu.forward_url}"
     if prof.antivirus.has_engine:

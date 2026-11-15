@@ -586,16 +586,20 @@ def latentsync_gate(box: dict[str, Any]) -> tuple[bool, str]:
                        f"NVIDIA GPU detected on this box (0 GB VRAM, "
                        f"{cpus} CPUs, {ram} GB RAM)")
     vram = float(gpu.get("vram_gb") or 0.0)
+    # A forwarded GPU is named as one — a passing floor means the
+    # *remote* GPU clears it, never a local one.
+    holder = (f"forwarded GPU at {gpu['forward_url']}"
+              if gpu.get("forward_url") else "this box")
     if vram < LATENTSYNC_MIN_VRAM_GB:
         return (False, f"LatentSync needs an NVIDIA GPU with "
-                       f"{LATENTSYNC_MIN_VRAM_GB:.0f} GB+ VRAM — this "
-                       f"box has {gpu.get('name')} with {vram} GB")
+                       f"{LATENTSYNC_MIN_VRAM_GB:.0f} GB+ VRAM — "
+                       f"{holder} has {gpu.get('name')} with {vram} GB")
     major, minor = sys.version_info[:2]
     if (major, minor) < (3, 9) or (major, minor) >= (3, 13):
         return (False, f"LatentSync's torch 2.5.1 needs Python 3.9-3.12 "
                        f"— this box runs Python {major}.{minor}")
     return (True, f"GPU {gpu.get('name')} with {vram} GB VRAM — meets "
-                  f"the {LATENTSYNC_MIN_VRAM_GB:.0f} GB floor")
+                  f"the {LATENTSYNC_MIN_VRAM_GB:.0f} GB floor ({holder})")
 
 
 def wav2lip_gate(box: dict[str, Any]) -> tuple[bool, str]:

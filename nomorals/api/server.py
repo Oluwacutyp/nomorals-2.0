@@ -77,7 +77,8 @@ from typing import Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from ..llm.brain import brain_for
-from ..core.errors import CapabilityDenied, NoMoralsError, classify
+from ..core.errors import (
+    CapabilityDenied, NoMoralsError, RateLimited, classify)
 from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from ..core.policy import Capability, CapabilitySet
@@ -438,6 +439,10 @@ class APIServer:
         # (or ["*"]) enables origin echoing + the OPTIONS preflight.
         self.cors_origins = list(cors_origins) if cors_origins else None
         self._tls = threading.local()
+        # Last GPU-attestation allocation (monotonic): /gpu/attest is
+        # public like /live, so the throttle below — not bearer auth —
+        # bounds proof allocations to one per ATTEST_THROTTLE_S.
+        self._attest_last_at: float = 0.0
         self._routes: dict[tuple[str, str], Callable[..., Any]] = {}
         # (method, path) keys whose handler declares a ``raw_body`` keyword
         # and therefore receives the raw request bytes (see ``route``):
@@ -622,6 +627,53 @@ class APIServer:
             # Anything informative (providers, beacon state, last_error)
             # stays behind the bearer token on /health.
             return {"ok": True}
+
+        @self.route("GET", "/gpu/attest", public=True,
+                   description="Forwarded-GPU VRAM attestation: prove this "
+                               "host has a CUDA GPU by measuring it and "
+                               "allocating the challenged bytes on it "
+                               "(core.gpu protocol — a client believes the "
+                               "answer only when the receipt verifies)")
+        def gpu_attest(body: dict[str, Any],
+                       query: dict[str, str]) -> dict[str, Any]:
+            # Public like /live — the attesting client is the owner's
+            # own Devon on another box, and there is no shared secret
+            # between the two yet. The throttle below is the guard:
+            # one proof allocation per ATTEST_THROTTLE_S, so the
+            # endpoint cannot be hammered into repeated allocations.
+            # The API server binds loopback by default; do not expose
+            # it to the open internet without bearer auth in front
+            # of it. The answer carries no secrets, no DB access, and
+            # no state beyond a transient allocation freed before the
+            # response is sent.
+            from ..core import gpu as gpu_mod
+
+            challenge = (query.get("challenge") or "").strip()
+            if (not challenge or len(challenge) > 64
+                    or len(challenge) % 2
+                    or any(c not in "0123456789abcdefABCDEF"
+                           for c in challenge)):
+                raise NoMoralsError(
+                    "challenge is required (16-32 bytes, hex)")
+            try:
+                n_bytes = int(query.get("bytes")
+                              or str(gpu_mod.ATTEST_PROOF_BYTES))
+            except ValueError:
+                raise NoMoralsError("bytes must be an integer") from None
+            if (n_bytes < gpu_mod.ATTEST_MIN_BYTES
+                    or n_bytes > gpu_mod.ATTEST_MAX_BYTES):
+                raise NoMoralsError(
+                    "bytes must be between "
+                    f"{gpu_mod.ATTEST_MIN_BYTES} and "
+                    f"{gpu_mod.ATTEST_MAX_BYTES}")
+            now = time.monotonic()
+            if now - server._attest_last_at < gpu_mod.ATTEST_THROTTLE_S:
+                raise RateLimited(
+                    "attestation throttled: one proof allocation per "
+                    f"{int(gpu_mod.ATTEST_THROTTLE_S)}s",
+                    retry_after=gpu_mod.ATTEST_THROTTLE_S)
+            server._attest_last_at = now
+            return gpu_mod.probe_attestation(challenge, n_bytes)
 
         @self.route("POST", "/site/publish",
                     description="Publish Devon's web presence (her page + "
