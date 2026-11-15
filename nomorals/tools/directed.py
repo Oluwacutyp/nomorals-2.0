@@ -318,6 +318,49 @@ def register(registry: Any) -> None:
                 "note": res.note}
 
     @registry.register(
+        "lip_sync_provision",
+        description=(
+            "Install the lip-sync backends on this box (LatentSync, "
+            "Wav2Lip, SadTalker) — Devon installs them herself: clone + "
+            "deps + checkpoints, no setup from you. ('install the "
+            "lip-sync models', 'set up lip sync'). LatentSync needs a "
+            "GPU host (18GB+ VRAM); Wav2Lip runs on CPU; SadTalker needs "
+            "a GPU (4GB+ VRAM). Use 'status' to see what is installed now."
+        ),
+        capability=Capability.MEDIA,
+    )
+    def lip_sync_provision(rest: str = "") -> dict[str, Any]:
+        from ..media.directed.lipsync import (
+            BACKENDS,
+            latentsync_status,
+            provision_backends,
+            provision_report_text,
+            sadtaker_status,
+            wav2lip_status,
+        )
+        args = (rest or "").strip().lower().split()
+        if args and args[0] == "status":
+            lines = ["🎬 lip-sync backends — installed now:"]
+            for name, fn in (("latentsync", latentsync_status),
+                             ("wav2lip", wav2lip_status),
+                             ("sadtaker", sadtaker_status)):
+                info = fn()
+                state = ("installed" if info.get("available")
+                         else "not installed")
+                lines.append(f"• {name}: {state} — {info.get('reason', '')}")
+            lines.append("run lip_sync_provision [latentsync|wav2lip|"
+                         "sadtaker|all] to install.")
+            return {"ok": True, "report": "\n".join(lines)}
+        wanted = (list(BACKENDS) if not args or args[0] == "all"
+                  else [a for a in args if a in BACKENDS])
+        if not wanted:
+            return {"ok": False,
+                    "error": "which backend? lip_sync_provision "
+                             "[latentsync|wav2lip|sadtaker|all|status]"}
+        result = provision_backends(wanted)
+        return {"ok": result["ok"], "report": provision_report_text(result)}
+
+    @registry.register(
         "direct_action",
         description=(
             "Direct ANY action into a motion score without rendering "

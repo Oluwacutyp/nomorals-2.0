@@ -129,7 +129,12 @@ def test_lipsync_backends_report_unavailable():
     for fn in (wav2lip_status, latentsync_status, sadtaker_status):
         s = fn()
         assert s["available"] is False
-        assert "Install" in s["reason"] or "install" in s["reason"].lower()
+        # SUPERSEDED (directed-lipsync provision, 2026-11-15): the
+        # reason no longer hands the owner a manual install list — it
+        # points at the lip-sync provision, which installs the backend
+        # itself. A manual-step list is a failure, not a status.
+        assert "provision" in s["reason"]
+        assert "git clone" not in s["reason"]
 
 
 def test_envelope_speech_vs_silence(tmp_path):

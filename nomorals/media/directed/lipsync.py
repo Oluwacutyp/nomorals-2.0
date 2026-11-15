@@ -1,11 +1,13 @@
 """Lip sync — audio-driven lip movement on video/photo subjects.
 
 Backends (mined, see LIPSYNC_MINING.md):
-- Wav2Lip (zdh6090/Wav2Lip): video -> lip-synced video. ~2GB VRAM, 8GB GPU.
+- Wav2Lip (Rudrabha/Wav2Lip fork of zdh6090/Wav2Lip): video ->
+  lip-synced video. Runs on CPU (~25 fps) — no GPU needed.
   Research license (non-commercial) — noted in status.
-- LatentSync 1.5 (ByteDance, Apache 2.0): higher quality, 8GB VRAM.
-  v1.6 needs 18GB — wired as alt.
-- SadTalker: single photo + audio -> talking head with head motion.
+- LatentSync 1.6 (ByteDance, Apache 2.0): higher quality, 18GB VRAM.
+  The 1.5 8GB config is NOT provisioned — the provision installs 1.6.
+- SadTalker (OpenTalker, Apache 2.0): single photo + audio ->
+  talking head with head motion, 4GB VRAM.
 - envelope_warp (CPU): audio RMS envelope -> jaw-region warp. REAL
   audio-driven motion (mouth opens on energy, closes on silence),
   honestly labeled. Needs a face box (or pose-derived).
@@ -19,9 +21,11 @@ from .failures import record_failure
 
 import os
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 try:
     import numpy as np
@@ -54,6 +58,13 @@ def _require_pil() -> None:
 
 MODELS_DIR = Path.home() / ".devon-models"
 
+#: Canonical home for the provisioned SadTalker checkout (avatar
+#: canonical shape: ~/Repo). The directed organ resolves the avatar
+#: homes for LatentSync / Wav2Lip first (where the provision installs)
+#: and falls back to the legacy ~/.devon-models layout, so a manual
+#: install there keeps working.
+SADTALKER_DIR_NAME = "SadTalker"
+
 
 class ModelUnavailable(RuntimeError):
     """Neural lip-sync backend not installed. Carries the fix."""
@@ -80,31 +91,143 @@ def _has_torch_cuda() -> tuple[bool, bool]:
         return False, False
 
 
+# ── backend resolution ─────────────────────────────────────────────
+# The avatar organ provisions LatentSync + Wav2Lip to its canonical
+# homes (~/LatentSync, ~/Wav2Lip); the directed organ resolves those
+# FIRST and falls back to the legacy ~/.devon-models layout, so a
+# manual install there keeps working. SadTalker has no avatar home —
+# the directed provision installs it to ~/SadTalker.
+
+def _avatar_dirs() -> tuple[Path | None, Path | None]:
+    """(latentsync_dir, wav2lip_dir) from the avatar organ, or (None, None)."""
+    try:
+        from ...media_edit.avatar import latentsync_dir, wav2lip_dir
+        return latentsync_dir(), wav2lip_dir()
+    except Exception as exc:
+        record_failure("lipsync._avatar_dirs", exc)
+        return None, None
+
+
+def _wav2lip_repo() -> Path:
+    _, w2l = _avatar_dirs()
+    if w2l is not None and (w2l / "inference.py").is_file():
+        return w2l
+    return MODELS_DIR / "wav2lip" / "repo"
+
+
+def _wav2lip_ckpt() -> Path:
+    _, w2l = _avatar_dirs()
+    if w2l is not None:
+        canon = w2l / "checkpoints" / "wav2lip_gan.pth"
+        if canon.is_file():
+            return canon
+    return MODELS_DIR / "wav2lip" / "wav2lip.pth"
+
+
+def _wav2lip_s3fd() -> Path:
+    _, w2l = _avatar_dirs()
+    if w2l is not None:
+        canon = w2l / "face_detection" / "detection" / "sfd" / "s3fd.pth"
+        if canon.is_file():
+            return canon
+    return MODELS_DIR / "wav2lip" / "s3fd.pth"
+
+
+def _latentsync_repo() -> Path:
+    ls, _ = _avatar_dirs()
+    if ls is not None and (ls / "scripts" / "inference.py").is_file():
+        return ls
+    return MODELS_DIR / "latentsync" / "repo"
+
+
+def _latentsync_unet() -> Path:
+    ls, _ = _avatar_dirs()
+    if ls is not None:
+        canon = ls / "checkpoints" / "latentsync_unet.pt"
+        if canon.is_file():
+            return canon
+    return MODELS_DIR / "latentsync" / "latentsync_unet.pt"
+
+
+def _latentsync_tiny() -> Path:
+    ls, _ = _avatar_dirs()
+    if ls is not None:
+        canon = ls / "checkpoints" / "whisper" / "tiny.pt"
+        if canon.is_file():
+            return canon
+    return MODELS_DIR / "latentsync" / "whisper" / "tiny.pt"
+
+
+def _sadtaker_repo() -> Path:
+    canon = Path.home() / SADTALKER_DIR_NAME
+    if (canon / "inference.py").is_file():
+        return canon
+    return MODELS_DIR / "sadtaker" / "repo"
+
+
+def _wav2lip_python() -> str:
+    """Venv python for the avatar Wav2Lip repo, else sys.executable."""
+    try:
+        from ...media_edit.avatar import wav2lip_python
+        return wav2lip_python()
+    except Exception as exc:
+        record_failure("lipsync._wav2lip_python", exc)
+        return sys.executable
+
+
+def _latentsync_python() -> str:
+    """Venv python for the avatar LatentSync repo, else sys.executable."""
+    try:
+        from ...media_edit.avatar import latentsync_python
+        return latentsync_python()
+    except Exception as exc:
+        record_failure("lipsync._latentsync_python", exc)
+        return sys.executable
+
+
+def _venv_python(repo: Path) -> str | None:
+    """The repo's own .venv python, when one exists."""
+    if os.name == "nt":
+        candidate = repo / ".venv" / "Scripts" / "python.exe"
+    else:
+        candidate = repo / ".venv" / "bin" / "python"
+    return str(candidate) if candidate.is_file() else None
+
+
+def _sadtaker_python() -> str:
+    return _venv_python(_sadtaker_repo()) or sys.executable
+
+
 # ── backend status checks ────────────────────────────────────────────
 def wav2lip_status() -> dict:
     has_torch, cuda = _has_torch_cuda()
-    repo = MODELS_DIR / "wav2lip" / "repo"
-    weights = MODELS_DIR / "wav2lip" / "wav2lip.pth"
-    sfd = MODELS_DIR / "wav2lip" / "s3fd.pth"
-    ok = has_torch and cuda and repo.is_dir() and weights.exists()
+    repo = _wav2lip_repo()
+    weights = _wav2lip_ckpt()
+    sfd = _wav2lip_s3fd()
+    # Wav2Lip runs on CPU — CUDA is NOT required (the avatar provision
+    # installs it for CPU boxes). s3fd is required: without the face
+    # detector the driver cannot render, so an install missing it is
+    # honestly "not installed" and the provision fills the gap.
+    ok = has_torch and repo.is_dir() and weights.exists() and sfd.exists()
     return {
         "available": bool(ok), "torch": has_torch, "cuda": cuda,
         "license": "research/non-commercial (Wav2Lip upstream)",
         "reason": (
-            "Wav2Lip needs torch+CUDA, the repo, and weights "
-            "(wav2lip.pth ~350MB + s3fd.pth ~100MB). "
-            "Install: git clone https://github.com/zdh6090/Wav2Lip "
-            f"{repo} && download weights into {MODELS_DIR / 'wav2lip'}. "
-            "See LIPSYNC_MINING.md."
+            "Wav2Lip is not installed on this box — Devon installs it "
+            "herself with the lip-sync provision (clone + deps + "
+            "checkpoints, no setup needed from you). It runs on CPU, so "
+            "it fits boxes without a GPU."
         ),
     }
 
 
 def latentsync_status() -> dict:
     has_torch, cuda = _has_torch_cuda()
-    repo = MODELS_DIR / "latentsync" / "repo"
-    unet = MODELS_DIR / "latentsync" / "latentsync_unet.pt"
-    ok = has_torch and cuda and repo.is_dir() and unet.exists()
+    repo = _latentsync_repo()
+    unet = _latentsync_unet()
+    tiny = _latentsync_tiny()
+    ok = (has_torch and cuda and repo.is_dir() and unet.exists()
+          and tiny.exists())
     vram = 0
     if cuda:
         try:
@@ -112,30 +235,35 @@ def latentsync_status() -> dict:
             vram = torch.cuda.get_device_properties(0).total_memory / 1e9
         except Exception as e:
             record_failure("lipsync.latentsync_status", e)
+    # The provision installs the 1.6 config (18GB floor), matching the
+    # avatar gate — the 7.5GB gate was for the 1.5 config nothing
+    # provisions and the driver never drove.
     return {
-        "available": bool(ok and vram >= 7.5), "torch": has_torch,
+        "available": bool(ok and vram >= 18.0), "torch": has_torch,
         "cuda": cuda, "vram_gb": round(vram, 1),
         "license": "Apache 2.0 (commercial OK)",
         "reason": (
-            "LatentSync 1.5 needs torch+CUDA (8GB+ VRAM), the repo, and "
-            "checkpoints (latentsync_unet.pt + whisper tiny.pt). "
-            "Install: git clone https://github.com/bytedance/LatentSync "
-            f"{repo} && download checkpoints into "
-            f"{MODELS_DIR / 'latentsync'}. v1.6 needs 18GB VRAM."
+            "LatentSync 1.6 is not installed on this box — Devon "
+            "installs it herself with the lip-sync provision (clone + "
+            "deps + checkpoints, no setup needed from you). It needs "
+            "torch+CUDA (18GB+ VRAM)."
         ),
     }
 
 
 def sadtaker_status() -> dict:
     has_torch, cuda = _has_torch_cuda()
-    repo = MODELS_DIR / "sadtaker" / "repo"
-    ok = has_torch and cuda and repo.is_dir()
+    repo = _sadtaker_repo()
+    ok = (has_torch and cuda and repo.is_dir()
+          and (repo / "inference.py").is_file()
+          and bool(list((repo / "checkpoints").glob("SadTalker*.safetensors"))))
     return {
         "available": bool(ok), "torch": has_torch, "cuda": cuda,
         "reason": (
-            "SadTalker needs torch+CUDA and the repo + checkpoints. "
-            "Install: git clone https://github.com/OpenTalker/SadTalker "
-            f"{repo} && follow its checkpoint download script."
+            "SadTalker is not installed on this box — Devon installs it "
+            "herself with the lip-sync provision (clone + deps + "
+            "checkpoints, no setup needed from you). It needs torch+CUDA "
+            "(4GB+ VRAM)."
         ),
     }
 
@@ -149,10 +277,10 @@ def wav2lip_sync(video: str, audio: str, *, out_path: str | None = None,
     wd = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="w2l_"))
     wd.mkdir(parents=True, exist_ok=True)
     out = out_path or str(wd / "lipsync.mp4")
-    repo = MODELS_DIR / "wav2lip" / "repo"
-    ckpt = MODELS_DIR / "wav2lip" / "wav2lip.pth"
+    repo = _wav2lip_repo()
+    ckpt = _wav2lip_ckpt()
     proc = subprocess.run(
-        ["python", "inference.py",
+        [_wav2lip_python(), "inference.py",
          "--checkpoint_path", str(ckpt),
          "--face", video, "--audio", audio,
          "--outfile", out],
@@ -172,15 +300,44 @@ def latentsync_sync(video: str, audio: str, *, out_path: str | None = None,
     wd = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="ls_"))
     wd.mkdir(parents=True, exist_ok=True)
     out = out_path or str(wd / "lipsync.mp4")
-    repo = MODELS_DIR / "latentsync" / "repo"
+    repo = _latentsync_repo()
+    unet = _latentsync_unet()
+    # The repo's inference.sh takes NO arguments — it runs the demo
+    # files with defaults, so the old call could never lip-sync an
+    # arbitrary video. Drive the documented module CLI with explicit
+    # args, same invocation the avatar organ already proves.
+    from ...media_edit.avatar import (
+        DEFAULT_GUIDANCE,
+        DEFAULT_STEPS,
+        DEFAULT_UNET_CONFIG,
+        LATENTSYNC_INFERENCE_MODULE,
+    )
+    unet_cfg = ((os.environ.get("LATENTSYNC_UNET_CONFIG") or "").strip()
+                or DEFAULT_UNET_CONFIG)
+    ckpt = (os.environ.get("LATENTSYNC_CKPT") or "").strip()
+    if ckpt and not Path(ckpt).is_absolute():
+        ckpt_path = repo / ckpt
+    else:
+        ckpt_path = Path(ckpt) if ckpt else unet
+    steps = ((os.environ.get("LATENTSYNC_STEPS") or "").strip()
+             or str(DEFAULT_STEPS))
+    guidance = ((os.environ.get("LATENTSYNC_GUIDANCE") or "").strip()
+                or str(DEFAULT_GUIDANCE))
     proc = subprocess.run(
-        ["bash", "inference.sh", video, audio, out],
+        [_latentsync_python(), "-m", LATENTSYNC_INFERENCE_MODULE,
+         "--unet_config_path", unet_cfg,
+         "--inference_ckpt_path", str(ckpt_path),
+         "--video_path", video,
+         "--audio_path", audio,
+         "--video_out_path", out,
+         "--inference_steps", str(steps),
+         "--guidance_scale", str(guidance)],
         cwd=str(repo), capture_output=True, timeout=3600)
     if proc.returncode != 0 or not os.path.exists(out):
         raise RuntimeError("LatentSync failed: "
                            + proc.stderr.decode()[-2000:])
     return LipSyncResult(path=out, backend="latentsync",
-                         note="neural lip sync (LatentSync, diffusion)")
+                         note="neural lip sync (LatentSync 1.6, diffusion)")
 
 
 def sadtaker_animate(image: str, audio: str, *,
@@ -193,9 +350,9 @@ def sadtaker_animate(image: str, audio: str, *,
     wd = Path(workdir) if workdir else Path(tempfile.mkdtemp(prefix="st_"))
     wd.mkdir(parents=True, exist_ok=True)
     out = out_path or str(wd / "talking_head.mp4")
-    repo = MODELS_DIR / "sadtaker" / "repo"
+    repo = _sadtaker_repo()
     proc = subprocess.run(
-        ["python", "inference.py",
+        [_sadtaker_python(), "inference.py",
          "--source_image", image, "--driven_audio", audio,
          "--result_dir", str(wd)],
         cwd=str(repo), capture_output=True, timeout=3600)
@@ -647,7 +804,7 @@ def lip_sync(video: str, audio: str, *,
     """Best-available lip sync. Never fakes it.
 
     prefer: "auto" | "wav2lip" | "latentsync" | "warp".
-    Neural choices raise ModelUnavailable (with install instructions)
+    Neural choices raise ModelUnavailable (with the provision pointer)
     instead of silently degrading.
     ``text``/``phonemes`` drive viseme shapes in the CPU warp backend.
     """
@@ -711,3 +868,329 @@ def dub_video(video: str, translated_text: str, voice_name: str, *,
     synced.path = out
     synced.note += f" | dubbed with voice '{voice_name}'"
     return synced
+
+
+# ── self-provision: Devon installs the backends herself ─────────────
+# Same honest-reporting shape as /models (tools/models_provision) and
+# the avatar provision (media_edit/avatar.provision_backends):
+# per-backend report dicts, statuses installed / already-installed /
+# unavailable / failed, never raises, never a manual-step list.
+# LatentSync + Wav2Lip DELEGATE to the avatar provision (one
+# provisioner, not two); SadTalker is the directed organ's own backend
+# and gets its own provisioner here. Seams are module attributes so
+# tests can replace them. The only genuine walls are a GPU the box
+# does not have (LatentSync on a CPU-only box, SadTalker likewise)
+# and a login or payment — no backend here needs one; all repos and
+# checkpoints are public.
+
+SADTALKER_REPO_URL = "https://github.com/OpenTalker/SadTalker"
+SADTALKER_MIN_VRAM_GB = 4.0
+
+#: family, label, download MB, disk floor GB, RAM floor GB. The
+#: latentsync / wav2lip numbers mirror the avatar provision so the
+#: wrapper's disk accounting stays consistent with its delegate.
+_BACKEND_INFO: dict[str, dict[str, Any]] = {
+    "latentsync": {"family": "lip-sync",
+                   "label": "LatentSync 1.6 lip-sync (diffusion, GPU)",
+                   "size_mb": 9000, "disk_gb": 12.0, "ram_gb": 4.0},
+    "wav2lip": {"family": "lip-sync",
+                "label": "Wav2Lip lip-sync (lightweight, CPU)",
+                "size_mb": 2000, "disk_gb": 4.0, "ram_gb": 2.0},
+    "sadtaker": {"family": "lip-sync",
+                 "label": "SadTalker talking head (photo + audio, GPU)",
+                 "size_mb": 6000, "disk_gb": 8.0, "ram_gb": 4.0},
+}
+
+BACKENDS: tuple[str, ...] = ("latentsync", "wav2lip", "sadtaker")
+
+#: Modern deps for SadTalker's venv. Upstream documents torch 1.12.0
+#: (2022, Python 3.8-3.10) — no wheels exist for the owner's stack, so
+#: the provision installs the current set instead (same reasoning as
+#: the avatar's Wav2Lip). The first real render is the live proof it
+#: runs the 2023-era inference code.
+SADTALKER_PIP_PACKAGES: tuple[str, ...] = (
+    "torch", "torchvision", "torchaudio", "facexlib", "gfpgan",
+    "insightface", "onnxruntime", "moviepy", "opencv-python-headless",
+    "imageio[ffmpeg]", "yacs", "kornia", "safetensors", "pydub",
+    "librosa", "numpy", "scipy", "Pillow", "tqdm",
+)
+
+
+def _run(args, timeout=None, cwd=None):
+    return subprocess.run(args, capture_output=True, text=True,
+                          timeout=timeout,
+                          cwd=str(cwd) if cwd is not None else None)
+
+
+def _measure_box() -> dict[str, Any]:
+    from ...characters.provision import _measure_box as _mb
+    return _mb()
+
+
+def _probe_gpu() -> dict[str, Any]:
+    from ...media.trellis import probe_gpu
+    return probe_gpu()
+
+
+def _report(ok, status, detail, steps=None):
+    return {"ok": ok, "status": status, "detail": detail,
+            "steps": list(steps or [])}
+
+
+def _floor_refusal(name, box, disk_left):
+    info = _BACKEND_INFO[name]
+    return _report(
+        False, "unavailable",
+        f"{info['label']} needs {info['disk_gb']:.0f} GB disk and "
+        f"{info['ram_gb']:.0f} GB RAM — this box has "
+        f"{disk_left:.1f} GB free and {box.get('total_ram_gb', '?')} GB "
+        f"total RAM ({box.get('free_ram_gb', '?')} GB free). It cannot "
+        f"install here; it stays unavailable.")
+
+
+def _latentsync_installed() -> bool:
+    """File-level check (no torch import): repo + entry + checkpoints."""
+    repo = _latentsync_repo()
+    return ((repo / "scripts" / "inference.py").is_file()
+            and _latentsync_unet().is_file()
+            and _latentsync_tiny().is_file())
+
+
+def _wav2lip_installed() -> bool:
+    repo = _wav2lip_repo()
+    return ((repo / "inference.py").is_file()
+            and _wav2lip_ckpt().is_file()
+            and _wav2lip_s3fd().is_file())
+
+
+def _sadtaker_installed() -> bool:
+    repo = _sadtaker_repo()
+    return ((repo / "inference.py").is_file()
+            and bool(list((repo / "checkpoints").glob("SadTalker*.safetensors"))))
+
+
+def sadtaker_gate(box) -> tuple[bool, str]:
+    """True/False + plain reason, for a box measured by _measure_box."""
+    box = dict(box or {})
+    profile = str(box.get("profile") or "")
+    if profile == "termux":
+        return (False, "SadTalker cannot install on termux — talking head needs a GPU host")
+    platform = str(box.get("platform") or sys.platform)
+    cpus = box.get("cpus", "?")
+    ram = box.get("total_ram_gb", "?")
+    if not platform.startswith("linux"):
+        return (False, f"SadTalker is tested only on Linux — this box runs "
+                       f"{platform} ({cpus} CPUs, {ram} GB RAM); it cannot install here")
+    gpu = _probe_gpu()
+    if not gpu.get("has_gpu"):
+        return (False, f"SadTalker needs an NVIDIA GPU with "
+                       f"{SADTALKER_MIN_VRAM_GB:.0f} GB+ VRAM — no NVIDIA GPU "
+                       f"detected on this box (0 GB VRAM, {cpus} CPUs, "
+                       f"{ram} GB RAM)")
+    vram = float(gpu.get("vram_gb") or 0.0)
+    if vram < SADTALKER_MIN_VRAM_GB:
+        return (False, f"SadTalker needs an NVIDIA GPU with "
+                       f"{SADTALKER_MIN_VRAM_GB:.0f} GB+ VRAM — this box has "
+                       f"{gpu.get('name')} with {vram} GB")
+    major, minor = sys.version_info[:2]
+    if (major, minor) < (3, 9) or (major, minor) >= (3, 13):
+        return (False, f"SadTalker's torch needs Python 3.9-3.12 — "
+                       f"this box runs Python {major}.{minor}")
+    return (True, f"GPU {gpu.get('name')} with {vram} GB VRAM — meets "
+                  f"the {SADTALKER_MIN_VRAM_GB:.0f} GB floor")
+
+
+def _make_venv(repo, steps):
+    """repo/.venv via the venv module, with pip bootstrapped."""
+    venv_dir = repo / ".venv"
+    if not (venv_dir / "pyvenv.cfg").is_file():
+        proc = _run([sys.executable, "-m", "venv", str(venv_dir)],
+                    timeout=600)
+        steps.append(f"python -m venv: rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"venv stderr: {(proc.stderr or '')[-300:]}")
+            return None
+    python = (venv_dir / "Scripts" / "python.exe" if os.name == "nt"
+              else venv_dir / "bin" / "python")
+    if not python.is_file():
+        steps.append(f"venv python not found at {python}")
+        return None
+    proc = _run([str(python), "-m", "pip", "install", "-q",
+                 "--upgrade", "pip"], timeout=600)
+    steps.append(f"pip upgrade: rc={proc.returncode}")
+    if proc.returncode != 0:
+        steps.append(f"pip upgrade stderr: {(proc.stderr or '')[-300:]}")
+        return None
+    return str(python)
+
+
+def _provision_sadtaker(box: dict[str, Any]) -> dict[str, Any]:
+    """SadTalker: clone + venv + modern deps + download script + verify."""
+    steps: list[str] = []
+    import shutil
+
+    gate_ok, gate_reason = sadtaker_gate(box)
+    if not gate_ok:
+        return _report(False, "unavailable", gate_reason, steps)
+    if not shutil.which("git"):
+        return _report(False, "unavailable",
+                       "git is not on this box — SadTalker clones from "
+                       "github.com/OpenTalker/SadTalker", steps)
+    repo = Path.home() / SADTALKER_DIR_NAME
+    if (repo / "inference.py").is_file():
+        steps.append("repo already present, skipping clone")
+    else:
+        proc = _run(["git", "clone", "--depth", "1",
+                     SADTALKER_REPO_URL, str(repo)], timeout=900)
+        steps.append(f"git clone: rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"clone stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed", "SadTalker clone failed", steps)
+    venv_python = _make_venv(repo, steps)
+    if venv_python is None:
+        return _report(False, "failed", "SadTalker venv creation failed", steps)
+    proc = _run([venv_python, "-m", "pip", "install", "-q",
+                 *SADTALKER_PIP_PACKAGES], timeout=1800, cwd=str(repo))
+    steps.append(f"pip install deps: rc={proc.returncode}")
+    if proc.returncode != 0:
+        steps.append(f"pip stderr: {(proc.stderr or '')[-300:]}")
+        return _report(False, "failed", "SadTalker deps install failed", steps)
+    if _sadtaker_installed():
+        steps.append("checkpoints already present, skipping download")
+    else:
+        script = repo / "scripts" / "download_models.sh"
+        if not script.is_file():
+            script = repo / "download_models.sh"
+        if not script.is_file():
+            return _report(False, "failed",
+                           "SadTalker checkpoint script not found in the repo", steps)
+        proc = _run(["bash", str(script)], timeout=1800, cwd=str(repo))
+        steps.append(f"download checkpoints: rc={proc.returncode}")
+        if proc.returncode != 0:
+            steps.append(f"download stderr: {(proc.stderr or '')[-300:]}")
+            return _report(False, "failed", "SadTalker checkpoints did not download", steps)
+    if not _sadtaker_installed():
+        return _report(False, "failed",
+                       "checkpoints downloaded but the install cannot be verified", steps)
+    verify = _run([venv_python, "-c", "import torch, librosa, cv2"],
+                  timeout=300)
+    steps.append(f"import torch, librosa, cv2: rc={verify.returncode}")
+    if verify.returncode != 0:
+        return _report(False, "failed",
+                       "SadTalker deps installed but do not import — see the steps above", steps)
+    return _report(True, "installed",
+                   f"SadTalker installed in {repo} — talking head from a "
+                   f"photo (Apache 2.0)", steps)
+
+
+def provision_backends(backends=None, *, box=None) -> dict[str, Any]:
+    """Provision the named lip-sync backends (default: all three).
+
+    LatentSync + Wav2Lip delegate to the avatar provision (one
+    provisioner, not two); SadTalker is provisioned here. Returns
+    ``{"ok", "box", "backends"}`` in the /models report shape. Never
+    raises — a backend that blows up reports ``failed``. Never emits
+    a manual-step list.
+    """
+    wanted = list(BACKENDS if backends is None else backends)
+    box = dict(box) if box is not None else _measure_box()
+    try:
+        disk_left = float(box.get("free_disk_gb") or 0)
+    except (TypeError, ValueError):
+        disk_left = 0.0
+    try:
+        total_ram = float(box.get("total_ram_gb") or 0)
+    except (TypeError, ValueError):
+        total_ram = 0.0
+
+    reports: dict[str, dict[str, Any]] = {}
+    unknown = [b for b in wanted if b not in _BACKEND_INFO]
+    # Shared backends: the directed wrapper checks its OWN availability
+    # first (canonical OR legacy) and short-circuits already-installed
+    # — otherwise the avatar provision would re-install to the
+    # canonical path, or report "unavailable" on a floor-refused box
+    # where a legacy install exists.
+    to_delegate = []
+    for name in wanted:
+        if name in unknown:
+            continue
+        if name in ("latentsync", "wav2lip"):
+            installed = (_latentsync_installed() if name == "latentsync"
+                         else _wav2lip_installed())
+            if installed:
+                reports[name] = _report(True, "already-installed",
+                                        f"{name} already installed")
+            else:
+                to_delegate.append(name)
+    if to_delegate:
+        from ...media_edit.avatar import provision_backends as _avatar_provision
+        try:
+            shared_result = _avatar_provision(to_delegate, box=box)
+            for name in to_delegate:
+                rep = (shared_result.get("backends") or {}).get(name)
+                reports[name] = (rep if rep is not None else _report(
+                    False, "failed",
+                    f"avatar provision returned no report for {name}"))
+            for name in to_delegate:
+                if reports[name].get("ok"):
+                    disk_left = max(
+                        0.0, disk_left - _BACKEND_INFO[name]["size_mb"] / 1024.0)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            for name in to_delegate:
+                reports[name] = _report(False, "failed",
+                                        f"avatar provision crashed: {exc}")
+    for name in wanted:
+        if name in unknown or name in reports:
+            continue
+        # Only sadtaker reaches here.
+        if _sadtaker_installed():
+            reports[name] = _report(True, "already-installed",
+                                    "sadtaker already installed")
+            continue
+        gate_ok, gate_reason = sadtaker_gate(box)
+        if not gate_ok:
+            reports[name] = _report(False, "unavailable", gate_reason)
+            continue
+        info = _BACKEND_INFO[name]
+        if total_ram < info["ram_gb"] or disk_left < info["disk_gb"]:
+            reports[name] = _floor_refusal(name, box, disk_left)
+            continue
+        try:
+            reports[name] = _provision_sadtaker(box)
+        except Exception as exc:  # noqa: BLE001 - reported, not raised
+            reports[name] = _report(False, "failed",
+                                    f"provision crashed: {exc}")
+        if reports[name].get("ok"):
+            disk_left = max(0.0, disk_left - info["size_mb"] / 1024.0)
+    ok = bool(reports) and all(r["ok"] for r in reports.values()) and not unknown
+    result: dict[str, Any] = {"ok": ok, "box": box, "backends": reports}
+    if unknown:
+        result["error"] = "unknown backend(s): " + ", ".join(unknown)
+    return result
+
+
+def provision_report_text(result: dict[str, Any]) -> str:
+    """Plain-text per-backend report for the chat reply."""
+    box = result.get("box") or {}
+    lines = ["🎬 lip-sync backends — provision"]
+    if box:
+        lines.append(
+            f"box: {box.get('total_ram_gb', '?')} GB RAM "
+            f"({box.get('free_ram_gb', '?')} GB free), "
+            f"{box.get('free_disk_gb', '?')} GB disk free, "
+            f"profile {box.get('profile') or '?'}")
+    for name in BACKENDS:
+        rep = (result.get("backends") or {}).get(name)
+        if rep is None:
+            continue
+        lines.append(f"• {name}: {rep.get('status')} — {rep.get('detail')}")
+        for step in rep.get("steps") or []:
+            lines.append(f"    {step}")
+    if result.get("error"):
+        lines.append(str(result["error"]))
+    lines.append("")
+    lines.append("Wav2Lip weights are research-only (no commercial use) — "
+                 "prefer LatentSync for anything public.")
+    lines.append("LatentSync's VAE downloads on first render (~335 MB, public).")
+    lines.append("SadTalker is Apache 2.0 (commercial OK).")
+    return "\n".join(lines)
