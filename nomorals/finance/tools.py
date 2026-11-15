@@ -245,10 +245,13 @@ def register(registry: Any) -> None:
             "Subscription audit (MORE_TO_ADD gap 9): subscriptions "
             "detected from the real Ledger only — never invented — with "
             "renewal reminders, unused flags from recorded usage, and "
-            "draft cancel messages (text only; nothing here cancels "
-            "anything). Args: action (list|upcoming|used|cancel), days "
-            "(upcoming window, default 7), merchant, date (YYYY-MM-DD "
-            "last-used date for used, default today)."
+            "real cancellation (owner order 2026-11-15): cancel drives "
+            "the billing page through the web-driving seam and verifies "
+            "the page shows cancelled; the draft cancel text is only "
+            "the fallback when a real cancel cannot run. Args: action "
+            "(list|upcoming|used|cancel), days (upcoming window, "
+            "default 7), merchant, date (YYYY-MM-DD last-used date for "
+            "used, default today)."
         ),
         capability="finance",
         parameters={
@@ -267,7 +270,6 @@ def register(registry: Any) -> None:
         from .subscriptions import (
             UsageStore,
             audit,
-            draft_cancel_message,
             monthly_equivalent,
             render_audit,
             render_reminders,
@@ -296,15 +298,18 @@ def register(registry: Any) -> None:
                     "merchant": merchant,
                     "last_used": recorded.isoformat()}
         if action == "cancel":
+            from .commands import perform_cancel
+
             merchant = (merchant or "").strip()
-            subs, _ = audit(txns, usage_records=store.all())
-            match = next((s for s in subs
-                          if s.merchant.lower() == merchant.lower()), None)
-            if match is None:
+            if not merchant:
                 return {"ok": False,
-                        "error": f"no subscription found for {merchant}"}
-            return {"ok": True, "merchant": match.merchant,
-                    "text": draft_cancel_message(match)}
+                        "error": "merchant is required for cancel"}
+            text = perform_cancel(merchant, context)
+            status = "cancelled" if text.startswith("cancelled:") else (
+                "already_cancelled"
+                if text.startswith("already cancelled:") else "failed")
+            return {"ok": status != "failed", "merchant": merchant,
+                    "status": status, "text": text}
         if action == "upcoming":
             _, reminders = audit(txns, usage_records=store.all(),
                                  days_ahead=int(days or 7))

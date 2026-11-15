@@ -11,12 +11,20 @@ Rules this module lives by:
   transactions the caller supplies (e.g. ``Ledger`` records). No
   hardcoded merchant list, no assumed subscriptions, no fabricated
   renewals. No transactions in → no subscriptions out.
-* NEVER CANCELS. There is deliberately NO function in this module that
-  performs a cancellation — no ``cancel_subscription``, no
-  ``cancel()``, no API call, no side effect. The module produces
-  renewal/cancel REMINDERS and DRAFT cancel messages (text the owner
-  can send themselves). Cancelling is the owner's action, taken after
-  their explicit confirmation, outside this module.
+* CANCELS FOR REAL (owner order 2026-11-15, verbatim: "Asking it to
+  cancel should be able to cancel the subscription I don't care
+  how.... through Google play web or app store web or the websites").
+  The NEVER CANCELS rule this module shipped with is REVERSED by that
+  order. ``/subscriptions cancel`` now drives the real cancel flow on
+  the billing page (Google Play web, App Store web, or the merchant's
+  own site) through Devon's web-driving seam, and a cancel counts as
+  done ONLY when the page state read back afterwards shows it
+  cancelled. The draft cancel message survives as the FALLBACK: when
+  a real cancel cannot run (no saved login, bot wall, changed page,
+  unverified state), the command says so plainly and hands over the
+  draft text, clearly labelled as the fallback. Cancelling never
+  invents a route and never claims success from a clicked button
+  alone.
 * UNUSED = NO USAGE RECORDS. A subscription is flagged
   ``suspected_unused`` only when the caller supplies usage records and
   this merchant has none (or none recent). Absence of usage *evidence*
@@ -28,18 +36,26 @@ Currency is a parameter (Nigeria default ``₦`` — never a boundary).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import statistics
+import time
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Iterable, Literal, Mapping
 
 __all__ = [
     "Subscription",
     "RenewalReminder",
     "UsageStore",
+    "ChannelStore",
+    "CancelJournal",
+    "CancelOutcome",
+    "CancelRoute",
+    "CancelStep",
+    "BillingChannel",
     "detect_subscriptions",
     "renewal_reminders",
     "draft_cancel_message",
@@ -47,6 +63,11 @@ __all__ = [
     "audit",
     "render_audit",
     "render_reminders",
+    "resolve_channel",
+    "route_for",
+    "run_cancel_flow",
+    "verify_cancelled",
+    "render_cancel_outcome",
 ]
 
 DEFAULT_CURRENCY = "₦"
@@ -376,7 +397,9 @@ def render_audit(
             f"~{_money(sub.yearly_cost_minor, sub.currency)}/yr "
             f"({sub.occurrences} charges){flag}")
     lines.append("Mark one used with: /subscriptions used <merchant>. "
-                 "Draft a cancel note with: /subscriptions cancel <merchant>.")
+                 "Cancel one for real with: /subscriptions cancel <merchant>.")
+    lines.append("Set how a merchant bills with: /subscriptions channel "
+                 "<merchant> <google_play|app_store|website> [url]")
     return "\n".join(lines)
 
 
@@ -393,4 +416,524 @@ def render_reminders(reminders: list[RenewalReminder], *, days_ahead: int = 7) -
             f"{_money(reminder.cost_minor, reminder.currency)}{flag}")
         if reminder.suspected_unused:
             lines.append(f"  draft cancel: {reminder.draft_message}")
+    return "\n".join(lines)
+
+
+# ── Real cancellation (owner order 2026-11-15) ──────────────────────────
+
+BillingChannel = Literal["google_play", "app_store", "website", "unknown"]
+
+CHANNELS: tuple[str, ...] = ("google_play", "app_store", "website", "unknown")
+
+# Statement-descriptor evidence, read from the transaction text itself
+# (merchant / description / narration). Never guessed from a name.
+_APPLE_DESCRIPTORS = ("apple.com/bill", "apl*itunes", "itunes.com/bill")
+_GOOGLE_DESCRIPTORS = ("google play", "googleplay", "google *", "g.co/play")
+
+# A date is only an end date when it sits on a page that already showed
+# a cancellation marker — _extract_ends_on is never called on its own.
+_MONTHS = {
+    "jan": 1, "january": 1, "feb": 2, "february": 2, "mar": 3, "march": 3,
+    "apr": 4, "april": 4, "may": 5, "jun": 6, "june": 6, "jul": 7, "july": 7,
+    "aug": 8, "august": 8, "sep": 9, "sept": 9, "september": 9, "oct": 10,
+    "october": 10, "nov": 11, "november": 11, "dec": 12, "december": 12,
+}
+_ISO_DATE = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})\b")
+_LONG_DATE = re.compile(
+    r"\b(January|February|March|April|May|June|July|August|September|"
+    r"October|November|December|Jan|Feb|Mar|Apr|Jun|Jul|Aug|Sep|Sept|"
+    r"Oct|Nov|Dec)\s+(\d{1,2}),\s+(20\d{2})\b")
+
+
+def _txn_text(txn: Any) -> str:
+    """Searchable text of one transaction row (merchant/description/narration)."""
+    parts: list[str] = []
+    if isinstance(txn, Mapping):
+        for key in ("merchant", "description", "narration"):
+            value = txn.get(key)
+            if value:
+                parts.append(str(value))
+    else:
+        for attr in ("merchant", "description", "narration"):
+            value = getattr(txn, attr, None)
+            if value:
+                parts.append(str(value))
+    return " ".join(parts).lower()
+
+
+class ChannelStore:
+    """Durable billing-channel records per merchant (+ optional cancel URL).
+
+    Lives beside ``UsageStore`` under ``<home>/finance/``. Tolerant load:
+    a corrupt or partial file behaves as an empty store, never an
+    exception. Atomic save (temp file + rename), exactly like UsageStore.
+    """
+
+    def __init__(self, path: Path | None = None) -> None:
+        if path is None:
+            path = (Path.home() / ".nomorals" / "finance"
+                    / "subscription_channels.json")
+        self.path = Path(path)
+        self._data: dict[str, dict[str, str]] = self._load()
+
+    def _load(self) -> dict[str, dict[str, str]]:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        if not isinstance(raw, Mapping):
+            return {}
+        data: dict[str, dict[str, str]] = {}
+        for key, value in raw.items():
+            if not isinstance(value, Mapping):
+                continue
+            channel = value.get("channel")
+            if channel not in CHANNELS:
+                continue
+            row: dict[str, str] = {"channel": str(channel)}
+            url = value.get("cancel_url")
+            if url:
+                row["cancel_url"] = str(url)
+            data[str(key).strip().lower()] = row
+        return data
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self._data, indent=2, sort_keys=True),
+                       encoding="utf-8")
+        tmp.replace(self.path)
+
+    def set_channel(self, merchant: str, channel: str,
+                    cancel_url: str | None = None) -> None:
+        """Record how a merchant bills (owner-set). Raises ValueError on a
+        channel that is not one of ``CHANNELS``."""
+        if channel not in CHANNELS:
+            raise ValueError(
+                f"unknown billing channel {channel!r} "
+                f"(one of: {', '.join(CHANNELS)})")
+        row: dict[str, str] = {"channel": channel}
+        if cancel_url:
+            row["cancel_url"] = cancel_url.strip()
+        self._data[_norm_merchant(merchant)] = row
+        self._save()
+
+    def channel(self, merchant: str) -> str | None:
+        row = self._data.get(_norm_merchant(merchant))
+        return row["channel"] if row else None
+
+    def cancel_url(self, merchant: str) -> str | None:
+        row = self._data.get(_norm_merchant(merchant))
+        return row.get("cancel_url") if row else None
+
+
+def resolve_channel(merchant: str,
+                    transactions: Iterable[Any] | None = None,
+                    store: ChannelStore | None = None) -> str:
+    """How a merchant bills, from evidence only — never guessed.
+
+    (1) a stored channel (owner-set) wins; (2) a billing descriptor in
+    the supplied transaction rows (``APPLE.COM/BILL`` / ``APL*ITUNES``
+    → App Store; ``GOOGLE *<merchant>`` / ``GOOGLE PLAY`` → Google
+    Play); (3) ``"unknown"`` when nothing says so.
+    """
+    if store is not None:
+        stored = store.channel(merchant)
+        if stored is not None:
+            return stored
+    key = _norm_merchant(merchant)
+    for txn in transactions or []:
+        try:
+            name, _amount, _when, _currency = _txn_fields(txn)
+        except ValueError:
+            continue
+        if _norm_merchant(name) != key:
+            continue
+        text = _txn_text(txn)
+        if any(mark in text for mark in _APPLE_DESCRIPTORS):
+            return "app_store"
+        if any(mark in text for mark in _GOOGLE_DESCRIPTORS):
+            return "google_play"
+    return "unknown"
+
+
+@dataclass(frozen=True)
+class CancelStep:
+    """One click (or wait) inside a cancel flow.
+
+    ``target`` is visible text (or a CSS selector when it looks like
+    one) and supports ``{merchant}`` formatting. A required step that
+    fails ends the attempt as ``failed``; an optional step that fails
+    is skipped and the page state afterwards arbitrates.
+    """
+
+    action: Literal["click", "wait_text"]
+    target: str
+    required: bool = True
+
+
+@dataclass(frozen=True)
+class CancelRoute:
+    """Where and how one subscription is cancelled, per channel."""
+
+    channel: str
+    service: str          # vault service name for the sign-in (google/apple/…)
+    session_name: str     # browser session the drive runs in
+    url: str              # the cancel page to open
+    login_url: str        # where the sign-in happens when the session is cold
+    login_success_text: str  # text that must appear after a fresh sign-in
+    steps: tuple[CancelStep, ...]
+    cancelled_markers: tuple[str, ...]  # page text proving it is cancelled
+    already_markers: tuple[str, ...] = ()
+
+
+PLAY_SUBSCRIPTIONS = "https://play.google.com/store/account/subscriptions"
+APPLE_SUBSCRIPTIONS = ("https://account.apple.com/account/manage/section/"
+                       "subscriptions")
+
+KNOWN_ROUTES: dict[str, CancelRoute] = {
+    "google_play": CancelRoute(
+        channel="google_play",
+        service="google",
+        session_name="subcancel-google-play",
+        url=PLAY_SUBSCRIPTIONS,
+        login_url="https://accounts.google.com/",
+        login_success_text="Subscriptions",
+        steps=(
+            CancelStep("click", "{merchant}"),
+            CancelStep("click", "Cancel subscription"),
+            CancelStep("click", "Prefer not to answer", required=False),
+            CancelStep("click", "Continue", required=False),
+        ),
+        cancelled_markers=("canceled", "cancelled", "ends on"),
+    ),
+    "app_store": CancelRoute(
+        channel="app_store",
+        service="apple",
+        session_name="subcancel-apple",
+        url=APPLE_SUBSCRIPTIONS,
+        login_url="https://account.apple.com/sign-in",
+        login_success_text="Subscriptions",
+        steps=(
+            CancelStep("click", "{merchant}"),
+            CancelStep("click", "Cancel Subscription"),
+            CancelStep("click", "Confirm", required=False),
+        ),
+        cancelled_markers=("expires on", "already canceled",
+                           "already cancelled", "cancelled", "canceled",
+                           "subscription ends"),
+        already_markers=("already canceled", "already cancelled"),
+    ),
+    "netflix": CancelRoute(
+        channel="website",
+        service="netflix",
+        session_name="subcancel-netflix",
+        url="https://www.netflix.com/cancelplan",
+        login_url="https://www.netflix.com/login",
+        login_success_text="Cancel",
+        steps=(
+            CancelStep("click", "Cancel"),
+            CancelStep("click", "Finish Cancellation"),
+        ),
+        cancelled_markers=("will close on", "membership will end",
+                           "cancellation confirmed"),
+        already_markers=("already canceled", "already cancelled"),
+    ),
+    "spotify": CancelRoute(
+        channel="website",
+        service="spotify",
+        session_name="subcancel-spotify",
+        url="https://www.spotify.com/account",
+        login_url="https://accounts.spotify.com/login",
+        login_success_text="Manage your plan",
+        steps=(
+            CancelStep("click", "Cancel subscription"),
+            CancelStep("click", "Continue to cancel", required=False),
+            CancelStep("click", "Continue to cancel", required=False),
+            CancelStep("click", "Yes, cancel"),
+        ),
+        cancelled_markers=("switch to free", "switching to free",
+                           "premium ends", "your premium will end",
+                           "cancelled", "canceled"),
+    ),
+}
+
+# Merchants with a verified website cancel route, keyed by normalised name.
+KNOWN_MERCHANT_ROUTES: dict[str, str] = {
+    "netflix": "netflix",
+    "spotify": "spotify",
+}
+
+
+def _generic_website_route(sub: Subscription, url: str) -> CancelRoute:
+    """A merchant site with a stored cancel URL: try the cancel controls
+    a typical account page carries, in order. Every step is optional —
+    the page state afterwards is the only arbiter."""
+    slug = re.sub(r"[^a-z0-9]+", "-", _norm_merchant(sub.merchant)).strip("-")
+    return CancelRoute(
+        channel="website",
+        service=slug or "website",
+        session_name=f"subcancel-{slug or 'website'}",
+        url=url,
+        login_url=url,
+        login_success_text="Cancel",
+        steps=(
+            CancelStep("click", "Cancel subscription", required=False),
+            CancelStep("click", "Cancel", required=False),
+            CancelStep("click", "Cancel plan", required=False),
+            CancelStep("click", "Confirm", required=False),
+            CancelStep("click", "Yes, cancel", required=False),
+            CancelStep("click", "Finish Cancellation", required=False),
+        ),
+        cancelled_markers=("cancelled", "canceled", "will close",
+                           "ends on", "switch to free",
+                           "subscription ends", "membership will end"),
+        already_markers=("already canceled", "already cancelled"),
+    )
+
+
+def route_for(sub: Subscription, channel: str,
+              store: ChannelStore | None = None) -> CancelRoute | None:
+    """The cancel route for a subscription's channel, or None.
+
+    None means NO route was attempted and none is claimed: unknown
+    channel, or a website channel whose merchant has neither a known
+    route nor a stored cancel URL. The caller answers that case with a
+    no-route reply + the draft fallback, never a guess.
+    """
+    if channel == "google_play":
+        return KNOWN_ROUTES["google_play"]
+    if channel == "app_store":
+        return KNOWN_ROUTES["app_store"]
+    if channel == "website":
+        key = KNOWN_MERCHANT_ROUTES.get(_norm_merchant(sub.merchant))
+        if key is not None:
+            return KNOWN_ROUTES[key]
+        url = store.cancel_url(sub.merchant) if store is not None else None
+        if url:
+            return _generic_website_route(sub, url)
+    return None
+
+
+@dataclass
+class CancelOutcome:
+    """What one cancel attempt did, in plain language."""
+
+    merchant: str
+    channel: str
+    status: str  # cancelled | already_cancelled | failed | login_missing
+                 # | unverified | no_route
+    route_url: str
+    ends_on: date | None = None
+    detail: str = ""
+    attempted_at: datetime = field(default_factory=datetime.now)
+    draft: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "merchant": self.merchant,
+            "channel": self.channel,
+            "status": self.status,
+            "route_url": self.route_url,
+            "ends_on": self.ends_on.isoformat() if self.ends_on else None,
+            "detail": self.detail,
+            "attempted_at": self.attempted_at.isoformat(),
+            "draft": self.draft,
+        }
+
+    @classmethod
+    def from_dict(cls, row: Mapping[str, Any]) -> CancelOutcome:
+        ends_on = row.get("ends_on")
+        return cls(
+            merchant=str(row.get("merchant", "")),
+            channel=str(row.get("channel", "unknown")),
+            status=str(row.get("status", "failed")),
+            route_url=str(row.get("route_url", "")),
+            ends_on=date.fromisoformat(ends_on) if ends_on else None,
+            detail=str(row.get("detail", "")),
+            attempted_at=(datetime.fromisoformat(row["attempted_at"])
+                          if row.get("attempted_at") else datetime.now()),
+            draft=str(row.get("draft", "")),
+        )
+
+
+class CancelJournal:
+    """Durable record of cancel attempts (subscription, channel, route
+    attempted, result). Tolerant load, atomic save — mirrors
+    UsageStore/ChannelStore. Never stores credentials or page contents."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        if path is None:
+            path = (Path.home() / ".nomorals" / "finance"
+                    / "subscription_cancels.json")
+        self.path = Path(path)
+        self._rows: list[dict[str, Any]] = self._load()
+
+    def _load(self) -> list[dict[str, Any]]:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except Exception:
+            return []
+        if not isinstance(raw, list):
+            return []
+        return [row for row in raw
+                if isinstance(row, Mapping)
+                and row.get("merchant") and row.get("status")]
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
+        tmp.write_text(json.dumps(self._rows, indent=2, sort_keys=True),
+                       encoding="utf-8")
+        tmp.replace(self.path)
+
+    def record(self, outcome: CancelOutcome) -> None:
+        self._rows.append(outcome.to_dict())
+        self._save()
+
+    def all(self) -> list[dict[str, Any]]:
+        return list(self._rows)
+
+    def last_for(self, merchant: str) -> dict[str, Any] | None:
+        key = _norm_merchant(merchant)
+        for row in reversed(self._rows):
+            if _norm_merchant(str(row.get("merchant", ""))) == key:
+                return row
+        return None
+
+
+def _extract_ends_on(text: str) -> date | None:
+    """The end date on a page that already showed a cancellation marker
+    (``2026-12-01`` or ``Dec 1, 2026``). None when the page names none."""
+    match = _ISO_DATE.search(text)
+    if match:
+        try:
+            return date(int(match.group(1)), int(match.group(2)),
+                        int(match.group(3)))
+        except ValueError:
+            pass
+    match = _LONG_DATE.search(text)
+    if match:
+        month = _MONTHS.get(match.group(1).lower())
+        if month is not None:
+            try:
+                return date(int(match.group(3)), month,
+                            int(match.group(2)))
+            except ValueError:
+                pass
+    return None
+
+
+def verify_cancelled(page_text: str, route: CancelRoute) -> tuple[str, date | None]:
+    """Decide the outcome from the page text AFTER a flow ran.
+
+    Returns (status, ends_on): ``"already_cancelled"`` when the page
+    says it was already cancelled, ``"cancelled"`` when a cancellation
+    marker is present (with the end date when the page names one),
+    ``"unverified"`` otherwise. Verification is the ONLY arbiter of
+    success — no success claim ever comes from a clicked button alone.
+    """
+    text = (page_text or "").lower()
+    if any(mark in text for mark in route.already_markers):
+        return "already_cancelled", _extract_ends_on(page_text or "")
+    if any(mark in text for mark in route.cancelled_markers):
+        return "cancelled", _extract_ends_on(page_text or "")
+    return "unverified", None
+
+
+def run_cancel_flow(driver: Any, sub: Subscription, route: CancelRoute,
+                    *, settle_s: float = 2.0) -> CancelOutcome:
+    """Drive one cancel flow on a tab and verify the page afterwards.
+
+    ``driver`` is duck-typed — the exact interface a real rendered tab
+    and a plain tab both carry: ``navigate(url)`` (raises on failure),
+    ``click(target)`` (visible text or selector; raises when the target
+    is not on the page), ``page_text() -> str``, ``close()``. The
+    caller owns the driver (sign-in happens before this runs); this
+    function only closes it, best-effort, at the end.
+    """
+    draft = draft_cancel_message(sub)
+
+    def outcome(status: str, detail: str,
+                ends_on: date | None = None) -> CancelOutcome:
+        return CancelOutcome(
+            merchant=sub.merchant, channel=route.channel, status=status,
+            route_url=route.url, ends_on=ends_on, detail=detail,
+            draft=draft if status not in ("cancelled", "already_cancelled")
+            else "")
+
+    try:
+        driver.navigate(route.url)
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            driver.close()
+        return outcome("failed", f"could not open {route.url}: {exc}")
+    for step in route.steps:
+        target = step.target.format(merchant=sub.merchant)
+        try:
+            if step.action == "click":
+                driver.click(target)
+            else:
+                driver.page_text()  # wait_text: re-read below; no-op here
+        except Exception as exc:
+            if step.required:
+                with contextlib.suppress(Exception):
+                    driver.close()
+                return outcome(
+                    "failed",
+                    f"the page did not show {target!r} — the cancel flow "
+                    f"may have changed: {exc}")
+            continue
+    if settle_s > 0:
+        time.sleep(settle_s)
+    text = driver.page_text()
+    status, ends_on = verify_cancelled(text, route)
+    if status == "unverified" and settle_s > 0:
+        # A slow page may still be settling — one re-read, then decide.
+        time.sleep(settle_s)
+        text = driver.page_text()
+        status, ends_on = verify_cancelled(text, route)
+    with contextlib.suppress(Exception):
+        driver.close()
+    if status == "cancelled":
+        return outcome("cancelled",
+                       "verified on the page just now", ends_on)
+    if status == "already_cancelled":
+        return outcome("already_cancelled",
+                       "the page showed it was already cancelled", ends_on)
+    return outcome(
+        "unverified",
+        "the page after the flow did not show a cancellation — "
+        "still subscribed as far as I can tell")
+
+
+def _fmt_day(day: date) -> str:
+    return f"{day:%b} {day.day}, {day:%Y}"
+
+
+def render_cancel_outcome(outcome: CancelOutcome, sub: Subscription) -> str:
+    """The plain-words reply for one cancel attempt.
+
+    Success states carry no draft; every other state names what
+    happened, says the subscription is still standing, and hands over
+    the draft cancel text, clearly labelled as the fallback.
+    """
+    name = outcome.merchant or sub.merchant
+    if outcome.status == "cancelled":
+        tail = (f" Access runs until {_fmt_day(outcome.ends_on)}."
+                if outcome.ends_on else " No further charges.")
+        return (f"cancelled: {name} — {outcome.channel} route, verified "
+                f"on the page just now.{tail}")
+    if outcome.status == "already_cancelled":
+        return (f"already cancelled: {name} — the page showed it was "
+                f"already cancelled, so nothing was charged again.")
+    lines = [
+        f"couldn't cancel {name} for real: {outcome.detail}",
+        "You're still subscribed as far as I can tell.",
+    ]
+    if outcome.draft:
+        lines.append("")
+        lines.append("Draft cancel text — the fallback, send it yourself:")
+        lines.append("")
+        lines.append(outcome.draft)
     return "\n".join(lines)

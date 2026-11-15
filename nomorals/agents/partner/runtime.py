@@ -8438,8 +8438,11 @@ class PartnerRuntime(
             return control_insights(command.tail or arg, context=self.context)
         if kind == "subscriptions":
             # Subscription auditor (MORE_TO_ADD gap 9): detected from the
-            # real Ledger, unused flags from recorded usage, draft cancel
-            # text only — nothing here cancels anything.
+            # real Ledger, unused flags from recorded usage; cancel
+            # really cancels (owner order 2026-11-15) — it drives the
+            # billing page and verifies the page shows cancelled, with
+            # the draft text only as the fallback when a real cancel
+            # cannot run.
             from ...finance.commands import control_subscriptions
 
             return control_subscriptions(command.tail or arg,

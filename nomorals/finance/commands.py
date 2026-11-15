@@ -433,10 +433,183 @@ def control_recurring(tail: str, context: Any) -> str:
 # ── /subscriptions ───────────────────────────────────────────────────────
 
 _SUBSCRIPTIONS_USAGE = ("usage: /subscriptions [list | upcoming [days] | "
-                        "used <merchant> [YYYY-MM-DD] | cancel <merchant>]")
+                        "used <merchant> [YYYY-MM-DD] | cancel <merchant> | "
+                        "channel <merchant> <google_play|app_store|website> "
+                        "[url]]")
 
 # Detection window: a quarterly subscription needs two charges in view.
 _WINDOW_DAYS = 365
+
+
+# ── /subscriptions cancel — real cancellation ───────────────────────────
+
+class _TabDriver:
+    """Adapter: a browser tab (rendered or plain) behind the cancel
+    engine's duck-typed driver protocol (``navigate`` / ``click`` /
+    ``page_text`` / ``close``). Tab methods return ``{"ok": ...}``
+    dicts; a failed click/navigate raises, exactly like the fake
+    driver the tests script."""
+
+    def __init__(self, tab: Any) -> None:
+        self._tab = tab
+
+    def navigate(self, url: str) -> None:
+        result = self._tab.navigate(url)
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise RuntimeError(f"could not open {url}: {result}")
+
+    def click(self, target: str) -> None:
+        result = self._tab.click(target)
+        if isinstance(result, dict) and result.get("ok") is False:
+            raise LookupError(f"no {target!r} on the page: {result}")
+
+    def page_text(self) -> str:
+        text = self._tab.text()
+        if isinstance(text, dict):
+            return str(text.get("text") or "")
+        return str(text)
+
+    def close(self) -> None:
+        self._tab.close()
+
+
+def _real_cancel_driver(context: Any, route: Any) -> _TabDriver:
+    """Build a signed-in tab driver for a cancel route.
+
+    Sign-in runs through the saved login for the route's vault service
+    (``nm account store-login`` is the handoff that stores one; no
+    password is ever asked for in chat). When no login exists,
+    ``ensure_login`` raises NotFound and the cancel fails honestly,
+    naming the account. The cancel drive then runs in a fresh tab in
+    the same browser session, so the sign-in cookies carry over.
+    """
+    from ..accounts.browser_login import LoginConfig, ensure_login
+    from ..accounts.manager import AccountManager
+    from ..accounts.sessions import SessionManager
+    from ..accounts.vault import open_vault
+    from ..browser.service import BrowserService
+
+    settings = getattr(context, "settings", None)
+    try:
+        data_dir = settings.resolve("data/browser-service")
+    except Exception:
+        data_dir = None
+    service = BrowserService(data_dir=data_dir)
+    vault = open_vault(context.db, context=context,
+                       actor="subscriptions-cancel")
+    manager = AccountManager(vault)
+    sessions = SessionManager(vault)
+
+    def _open_tab() -> Any:
+        try:
+            return service.open_rendered_tab(route.session_name)
+        except Exception:
+            # Rendered tabs need Playwright+Chromium; fall back to the
+            # plain-HTTP tab (works for simple login forms).
+            handle = service.open_session(route.session_name)
+            return handle.open_tab()
+
+    ensure_login(manager, sessions, _open_tab, service=route.service,
+                 config=LoginConfig(login_url=route.login_url,
+                                    success_text=route.login_success_text))
+    try:
+        tab = service.open_rendered_tab(route.session_name, route.url)
+    except Exception:
+        handle = service.open_session(route.session_name)
+        tab = handle.open_tab(route.url)
+    return _TabDriver(tab)
+
+
+def _login_failure(exc: Exception, route: Any) -> tuple[str, str]:
+    """Classify a driver-construction failure into a cancel outcome."""
+    from ..accounts.vault import VaultLockedError
+    from ..core.errors import NotFound
+
+    if isinstance(exc, NotFound):
+        return ("login_missing",
+                f"{exc} — store one with: nm account store-login "
+                f"--service {route.service} --username <you>")
+    if isinstance(exc, VaultLockedError):
+        return ("failed",
+                "the vault is locked — open it first, then ask me to "
+                "cancel again")
+    return ("failed", f"could not start the cancel drive: {exc}")
+
+
+def perform_cancel(merchant: str, context: Any) -> str:
+    """Cancel one subscription for real, or say honestly why it cannot.
+
+    Detection runs on the real Ledger only. The channel resolves from
+    the owner's stored record first, then the transaction descriptors.
+    When a route exists, the cancel drives through Devon's web-driving
+    seam (a rendered tab in the route's browser session, signed in
+    through the saved login); the page state read back afterwards is
+    the only arbiter of success. Every outcome is journaled, and every
+    failure falls back to the draft cancel text, labelled as such.
+    """
+    from .subscriptions import (
+        CancelJournal,
+        CancelOutcome,
+        ChannelStore,
+        UsageStore,
+        audit,
+        draft_cancel_message,
+        render_cancel_outcome,
+        resolve_channel,
+        route_for,
+        run_cancel_flow,
+    )
+
+    settings = getattr(context, "settings", None)
+    ledger_path, _ = finance_paths(settings)
+    ledger = Ledger(ledger_path)
+    store = UsageStore(ledger_path.parent / "subscription_usage.json")
+    channels = ChannelStore(ledger_path.parent / "subscription_channels.json")
+    journal = CancelJournal(ledger_path.parent / "subscription_cancels.json")
+    txns = ledger.transactions(kind="spend",
+                               since=time.time() - _WINDOW_DAYS * 86400)
+    subs, _ = audit(txns, usage_records=store.all())
+    match = next((s for s in subs if s.merchant.lower() == merchant.lower()),
+                 None)
+    if match is None:
+        return (f"no subscription found for {merchant} — nothing to cancel. "
+                "Run /subscriptions to see what is detected.")
+    channel = resolve_channel(match.merchant, txns, channels)
+    route = route_for(match, channel, channels)
+    draft = draft_cancel_message(match)
+    if route is None:
+        outcome = CancelOutcome(
+            merchant=match.merchant, channel=channel, status="no_route",
+            route_url="",
+            detail=("no cancel route for this billing channel — I don't "
+                    "know where its cancel page is"),
+            draft=draft)
+        journal.record(outcome)
+        return (
+            f"couldn't cancel {match.merchant} for real: {outcome.detail}.\n"
+            "You're still subscribed as far as I can tell.\n"
+            "Tell me how it bills first:\n"
+            f"  /subscriptions channel {match.merchant} website "
+            "<cancel-page-url>\n"
+            "or google_play / app_store if it bills through a store.\n"
+            "\nDraft cancel text — the fallback, send it yourself:\n\n"
+            f"{draft}")
+    factory = getattr(context, "driver_factory", None)
+    try:
+        driver = (factory(route) if factory is not None
+                  else _real_cancel_driver(context, route))
+    except Exception as exc:
+        status, detail = _login_failure(exc, route)
+        outcome = CancelOutcome(
+            merchant=match.merchant, channel=channel, status=status,
+            route_url=route.url, detail=detail, draft=draft)
+        journal.record(outcome)
+        return render_cancel_outcome(outcome, match)
+    outcome = run_cancel_flow(
+        driver, match, route,
+        settle_s=0.0 if factory is not None else 2.0)
+    journal.record(outcome)
+    return render_cancel_outcome(outcome, match)
 
 
 def control_subscriptions(tail: str, context: Any) -> str:
@@ -444,14 +617,14 @@ def control_subscriptions(tail: str, context: Any) -> str:
 
     Detection runs on the real Ledger only — never invented. ``used``
     records a last-used date so the unused flag clears; ``cancel``
-    returns draft text only. Nothing here cancels, charges, or contacts
-    anyone — cancelling is the owner's action, taken after their own
-    confirmation, outside this module.
+    really cancels (owner order 2026-11-15): it drives the billing
+    page through the web-driving seam, verifies the page shows
+    cancelled, and falls back to draft text only when a real cancel
+    cannot run. ``channel`` records how a merchant bills.
     """
     from .subscriptions import (
         UsageStore,
         audit,
-        draft_cancel_message,
         render_audit,
         render_reminders,
     )
@@ -494,16 +667,49 @@ def control_subscriptions(tail: str, context: Any) -> str:
         merchant = (tail or "").strip()[len(parts[0]):].strip()
         if not merchant:
             return _SUBSCRIPTIONS_USAGE
-        subs, _ = audit(
-            ledger.transactions(kind="spend",
-                                since=time.time() - _WINDOW_DAYS * 86400),
-            usage_records=store.all())
-        match = next((s for s in subs if s.merchant.lower() == merchant.lower()),
-                     None)
-        if match is None:
-            return (f"no subscription found for {merchant} — nothing to draft. "
-                    "Run /subscriptions to see what is detected.")
-        return draft_cancel_message(match)
+        return perform_cancel(merchant, context)
+
+    if verb == "channel":
+        from .subscriptions import CHANNELS, ChannelStore
+
+        channels = ChannelStore(
+            ledger_path.parent / "subscription_channels.json")
+        rest = (tail or "").strip()[len(parts[0]):].strip()
+        if not rest:
+            return _SUBSCRIPTIONS_USAGE
+        tokens = rest.split()
+        channel_idx = next(
+            (i for i, token in enumerate(tokens)
+             if token.lower() in CHANNELS), None)
+        if channel_idx is None:
+            if len(tokens) >= 2:
+                # A trailing word that is not a channel is a mistyped
+                # channel, not a merchant name — say so.
+                return (_SUBSCRIPTIONS_USAGE + "\n"
+                        f"{tokens[-1]!r} is not a billing channel "
+                        "(google_play | app_store | website | unknown).")
+            merchant = rest
+            stored = channels.channel(merchant)
+            if stored is None:
+                return (f"no billing channel recorded for {merchant} — "
+                        "set one with:\n"
+                        f"  /subscriptions channel {merchant} "
+                        "<google_play|app_store|website> [url]")
+            url = channels.cancel_url(merchant)
+            tail_text = f" (cancel page: {url})" if url else ""
+            return f"{merchant} bills via {stored}.{tail_text}"
+        merchant = " ".join(tokens[:channel_idx]).strip()
+        channel = tokens[channel_idx].lower()
+        url = (tokens[channel_idx + 1]
+               if len(tokens) > channel_idx + 1 else None)
+        if not merchant:
+            return _SUBSCRIPTIONS_USAGE
+        try:
+            channels.set_channel(merchant, channel, url)
+        except ValueError as exc:
+            return str(exc) + "\n" + _SUBSCRIPTIONS_USAGE
+        tail_text = f" (cancel page: {url})" if url else ""
+        return f"recorded: {merchant} bills via {channel}.{tail_text}"
 
     if verb == "upcoming":
         days = 7
