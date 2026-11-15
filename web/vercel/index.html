@@ -1,0 +1,163 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Devon — Web</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true">D</span>
+    <span class="brand-name">Devon</span>
+    <span class="brand-sub">web</span>
+  </div>
+  <nav class="nav" aria-label="Views">
+    <a href="#/chat" data-view="chat" class="nav-link">Chat</a>
+    <a href="#/status" data-view="status" class="nav-link">Status</a>
+    <a href="#/pair" data-view="pair" class="nav-link">Pairing</a>
+  </nav>
+  <button id="settings-btn" class="btn btn-ghost" type="button">Settings</button>
+</header>
+
+<div id="conn-bar" class="conn-bar" role="status">
+  <span id="conn-dot" class="conn-dot unknown" aria-hidden="true"></span>
+  <span id="conn-text">Not connected — open Settings and enter Devon's API address and token.</span>
+  <button id="conn-test" class="btn btn-small" type="button">Test connection</button>
+</div>
+
+<main>
+  <!-- ── Chat ─────────────────────────────────────────────── -->
+  <section id="view-chat" class="view" aria-label="Chat with Devon">
+    <div class="panel">
+      <div class="panel-head">
+        <h1>Chat</h1>
+        <p class="panel-note">Talking to Devon's model router — her language brain.
+        Slash commands and games live in Telegram and WhatsApp, not here.</p>
+      </div>
+      <div id="chat-log" class="chat-log" aria-live="polite"></div>
+      <div id="chat-meta" class="chat-meta"></div>
+      <form id="chat-form" class="chat-form" autocomplete="off">
+        <label class="visually-hidden" for="chat-input">Message to Devon</label>
+        <input id="chat-input" type="text" placeholder="Say something to Devon…" autocomplete="off">
+        <button class="btn btn-primary" type="submit" id="chat-send">Send</button>
+      </form>
+      <div class="chat-controls">
+        <label>Temperature
+          <input id="chat-temp" type="number" min="0" max="2" step="0.1" value="0.7">
+        </label>
+        <label>Max tokens
+          <input id="chat-tokens" type="number" min="1" max="8192" step="1" value="1024">
+        </label>
+        <button id="chat-clear" class="btn btn-ghost" type="button">Clear conversation</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Status ───────────────────────────────────────────── -->
+  <section id="view-status" class="view" aria-label="Devon status" hidden>
+    <div class="panel">
+      <div class="panel-head">
+        <h1>Status</h1>
+        <p class="panel-note">What Devon is doing right now, from her own API.</p>
+        <button id="status-refresh" class="btn btn-small" type="button">Refresh</button>
+      </div>
+      <div id="status-cards" class="status-cards"></div>
+      <h2>Recent activity</h2>
+      <div id="events-list" class="events-list"></div>
+      <h2>What this connection can do</h2>
+      <p class="panel-note">Tools the saved token is allowed to call.</p>
+      <div id="tools-list" class="tools-list"></div>
+      <h2>Devon's public pages</h2>
+      <p class="panel-note">Served by her API on the same address — they open in a new tab.</p>
+      <div class="row">
+        <a id="link-devon" class="btn" href="#" target="_blank" rel="noopener">Open her page</a>
+        <a id="link-rules" class="btn" href="#" target="_blank" rel="noopener">Open group rules</a>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Pairing ──────────────────────────────────────────── -->
+  <section id="view-pair" class="view" aria-label="Pairing" hidden>
+    <div class="panel">
+      <div class="panel-head">
+        <h1>Pairing</h1>
+        <p class="panel-note">Her WhatsApp and Telegram accounts — pair new ones, answer
+        login codes, flip the personal toggles, start and stop bridges.
+        Pairing needs the owner token.</p>
+        <button id="pair-refresh" class="btn btn-small" type="button">Refresh</button>
+      </div>
+      <div id="pair-counts" class="pair-counts"></div>
+      <div id="pair-accounts" class="pair-accounts"></div>
+      <h2>Pair a new account</h2>
+      <form id="pair-new" class="pair-new" autocomplete="off">
+        <label>Platform
+          <select id="pair-platform">
+            <option value="whatsapp">WhatsApp</option>
+            <option value="telegram">Telegram</option>
+          </select>
+        </label>
+        <label>Number (international format, e.g. 2348012345678)
+          <input id="pair-number" type="tel" inputmode="tel" placeholder="2348012345678" required>
+        </label>
+        <label>Label
+          <input id="pair-label" type="text" placeholder="personal">
+        </label>
+        <button class="btn btn-primary" type="submit">Start pairing</button>
+      </form>
+      <p id="pair-new-note" class="pair-note"></p>
+    </div>
+  </section>
+</main>
+
+<!-- ── Settings ───────────────────────────────────────────── -->
+<div id="settings-modal" class="modal" hidden>
+  <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+    <h2 id="settings-title">Settings</h2>
+    <p class="panel-note">Devon herself stays on her own server. This page only talks to her
+    API. The address and token live in <em>your</em> browser only — they are never
+    sent anywhere else and never saved in the repo.</p>
+    <form id="settings-form" autocomplete="off">
+      <label>Devon API address
+        <input id="set-api-base" type="url" inputmode="url"
+               placeholder="https://your-server:8731" required>
+        <span class="field-hint">Her API on the server she runs on, with the port.
+        Example: <code>https://203.0.113.10:8731</code>. No trailing slash.</span>
+      </label>
+      <label>API token
+        <input id="set-token" type="password" autocomplete="current-password"
+               placeholder="Devon's API token (NM_API_TOKEN)" required>
+        <span class="field-hint">The owner token gives full control. Anyone holding it
+        runs Devon — keep it to yourself and do not share this browser profile.</span>
+      </label>
+      <fieldset>
+        <legend>How this page reaches her API</legend>
+        <label class="radio">
+          <input type="radio" name="set-mode" value="direct" checked>
+          <span><strong>Direct</strong> — the browser calls her API straight.
+          Needs her API to allow this site's address (CORS). See the README.</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="set-mode" value="proxy">
+          <span><strong>Vercel proxy</strong> — the browser calls this same site
+          (<code>/api/…</code>) and Vercel forwards it to her API. No CORS needed,
+          but you must add the proxy rule to <code>vercel.json</code> first (README).</span>
+        </label>
+      </fieldset>
+      <p id="settings-result" class="settings-result" role="status"></p>
+      <div class="row">
+        <button class="btn btn-primary" type="submit">Save settings</button>
+        <button id="settings-test" class="btn" type="button">Test connection</button>
+        <button id="settings-clear" class="btn btn-ghost" type="button">Forget saved settings</button>
+        <button id="settings-close" class="btn btn-ghost" type="button">Close</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+<script src="app.js"></script>
+</body>
+</html>
