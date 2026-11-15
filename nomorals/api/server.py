@@ -1621,6 +1621,28 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
+def _coerce_cors_origins(
+    value: list[str] | str | None,
+) -> list[str] | None:
+    """Normalise a CORS origins setting to the list APIServer expects.
+
+    The config field is a plain string (default "*"); APIServer takes a
+    list. ``None`` or a blank string means CORS off; ``"*"`` means allow
+    all; anything else is a comma-separated list of origins. A list
+    passes through unchanged.
+    """
+    if value is None:
+        return None
+    if isinstance(value, list):
+        return list(value)
+    text = str(value).strip()
+    if not text:
+        return None
+    if text == "*":
+        return ["*"]
+    return [part.strip() for part in text.split(",") if part.strip()]
+
+
 def serve(
     context: Any,
     *,
@@ -1631,6 +1653,7 @@ def serve(
     principals: dict[str, Principal | tuple[str, CapabilitySet]] | None = None,
     max_body_bytes: int | None = None,
     protocols: bool = True,
+    cors_origins: list[str] | str | None = None,
 ) -> int:
     """Start the API. Returns 0 on clean shutdown.
 
@@ -1638,12 +1661,24 @@ def serve(
     same port: ``POST /acp`` (Agent Client Protocol, incl. SSE streaming)
     and ``POST /mcp`` (Model Context Protocol). Pass ``protocols=False``
     for a bare HTTP API.
+
+    ``cors_origins`` (default None) is passed to APIServer; when None it
+    is read from ``context.settings.api.cors_origins``. None/blank means
+    CORS off; a list (or comma-separated string) enables origin echoing
+    plus the OPTIONS preflight for the listed origins.
     """
+    if cors_origins is None:
+        cors_origins = getattr(
+            getattr(getattr(context, "settings", None), "api", None),
+            "cors_origins",
+            None,
+        )
     api = APIServer(
         context,
         token=token or context.settings.api.token,
         principals=principals,
         max_body_bytes=max_body_bytes,
+        cors_origins=_coerce_cors_origins(cors_origins),
     )
     if protocols:
         # The protocol servers share this API's Principal/capability model —

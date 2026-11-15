@@ -1272,6 +1272,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_API_HOST": "api.host",
     "NM_API_PORT": "api.port",
     "NM_API_TOKEN": "api.token",
+    "NM_API_CORS_ORIGINS": "api.cors_origins",
     "NM_NEWS_TRANSLATION_ENABLED": "news.translation_enabled",
     "NM_NEWS_TRANSLATION_TARGET": "news.translation_target",
     "NM_TRANSLATE_OWNER_LANGUAGE": "translate.owner_language",

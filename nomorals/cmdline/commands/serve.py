@@ -16,4 +16,5 @@ def _cmd_serve(args: argparse.Namespace, context: Any) -> int:
         context,
         host=host,
         port=port,
+        cors_origins=context.settings.api.cors_origins,
     )
