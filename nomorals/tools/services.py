@@ -132,7 +132,7 @@ def register(registry: Any) -> None:
     def service_call(context: Any, connector: str = "",
                      action: str = "",
                      params: dict | None = None) -> dict[str, Any]:
-        from ..connectors.registry import get_connector
+        from ..connectors.registry import create_connector, get_connector
         from ..core.errors import ToolError
         if not connector or not action:
             raise ToolError("service_call needs connector and action")
@@ -161,30 +161,40 @@ def register(registry: Any) -> None:
                 "error": f"unknown action '{action}' for '{connector}'",
                 "valid_actions": sorted(valid),
             }
-        try:
-            inst = _get_connector_instance(connector, context)
-        except Exception as exc:  # noqa: BLE001
-            return {"ok": False, "error": f"connector init failed: {exc}"}
-        # Ensure connected; try to connect from vault credentials.
-        try:
-            st = inst.status()
-            connected = bool(getattr(st, "connected", False))
-        except Exception:  # noqa: BLE001
-            connected = False
-        if not connected:
+        # Public actions need no credential and no vault: build the
+        # connector without opening the vault (a locked vault must not
+        # block a keyless read) and skip the connect gate entirely.
+        # Every other action keeps the existing gate below.
+        if action in set(getattr(cls, "PUBLIC_ACTIONS", ()) or ()):
             try:
-                res = inst.connect()
-                if not bool(getattr(res, "ok", False)):
-                    return {
-                        "ok": False,
-                        "error": (
-                            f"'{connector}' not connected: "
-                            f"{getattr(res, 'message', 'auth missing')} — "
-                            "connect the service first"
-                        ),
-                    }
+                inst = create_connector(connector, None)
             except Exception as exc:  # noqa: BLE001
-                return {"ok": False, "error": f"connect failed: {exc}"}
+                return {"ok": False, "error": f"connector init failed: {exc}"}
+        else:
+            try:
+                inst = _get_connector_instance(connector, context)
+            except Exception as exc:  # noqa: BLE001
+                return {"ok": False, "error": f"connector init failed: {exc}"}
+            # Ensure connected; try to connect from vault credentials.
+            try:
+                st = inst.status()
+                connected = bool(getattr(st, "connected", False))
+            except Exception:  # noqa: BLE001
+                connected = False
+            if not connected:
+                try:
+                    res = inst.connect()
+                    if not bool(getattr(res, "ok", False)):
+                        return {
+                            "ok": False,
+                            "error": (
+                                f"'{connector}' not connected: "
+                                f"{getattr(res, 'message', 'auth missing')} — "
+                                "connect the service first"
+                            ),
+                        }
+                except Exception as exc:  # noqa: BLE001
+                    return {"ok": False, "error": f"connect failed: {exc}"}
         try:
             fn = getattr(inst, action)
             result = fn(**params) if params else fn()

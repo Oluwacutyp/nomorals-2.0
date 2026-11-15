@@ -3971,9 +3971,12 @@ def _parser() -> argparse.ArgumentParser:
     connectors = sub.add_parser("connectors", aliases=CLI_ALIASES["connectors"], help="Manage external service connectors")
     connectors.add_argument("action", nargs="?", default="list",
                            choices=["list", "status", "connect", "disconnect",
-                                    "provision", "checkpoint", "health"],
+                                    "provision", "checkpoint", "health",
+                                    "call"],
                            help="Action to perform")
     connectors.add_argument("--name", help="Connector name")
+    connectors.add_argument("--method",
+                            help="Action method (with 'call' action)")
     connectors.add_argument("--provider", help="Provider (mono, plaid, etc.)")
     connectors.add_argument("--kind", help="Provision kind (with 'provision' action)")
     connectors.add_argument("--params-json", default="{}",

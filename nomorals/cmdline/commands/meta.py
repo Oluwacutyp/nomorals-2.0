@@ -323,17 +323,20 @@ def _cmd_connectors(args: argparse.Namespace, context: Any) -> int:
         return 0
 
     if action not in ("status", "connect", "disconnect", "provision",
-                      "checkpoint", "health"):
+                      "checkpoint", "health", "call"):
         _emit(args, {"error": f"unknown action: {action}"},
-              f"Unknown action: {action} (list, status, connect, disconnect, provision, checkpoint, health)")
+              f"Unknown action: {action} (list, status, connect, disconnect, provision, checkpoint, health, call)")
         return 1
-    if not name and action != "checkpoint":
+    if not name and action not in ("checkpoint",):
         _emit(args, {"error": "name required"},
               f"Usage: nm connectors {action} --name <connector>")
         return 1
 
     if action == "checkpoint":
         return _cmd_connector_checkpoint(args, context)
+
+    if action == "call":
+        return _cmd_connector_call(args, context)
 
     try:
         vault = _connector_vault(context)
@@ -395,6 +398,77 @@ def _cmd_connectors(args: argparse.Namespace, context: Any) -> int:
     except ConnectorError as exc:
         _emit(args, {"error": str(exc)}, str(exc))
         return 1
+    return 0
+
+
+def _cmd_connector_call(args: argparse.Namespace, context: Any) -> int:
+    """``nm connectors call --name <id> --method <action> [--params-json]``.
+
+    Calls one PUBLIC connector action — an action the connector's
+    ``PUBLIC_ACTIONS`` declares needs no credential (public data,
+    keyless services). Runs without opening the vault, so a locked
+    vault can't block a keyless read. Anything else is refused here:
+    credentialed actions run through the brain (service_call) or
+    their own command, never through this unauthenticated path.
+    """
+    import json as _json
+
+    from ...connectors import create_connector, get_connector
+    from ...connectors.base import ConnectorError
+
+    name = getattr(args, "name", "") or ""
+    method = getattr(args, "method", "") or ""
+    if not name or not method:
+        _emit(args, {"error": "name and method required"},
+              "Usage: nm connectors call --name <connector> "
+              "--method <action> [--params-json '{...}']")
+        return 1
+    try:
+        cls = get_connector(name)
+    except ConnectorError as exc:
+        _emit(args, {"error": str(exc)}, str(exc))
+        return 1
+    if method.startswith("_") or method in (
+        "connect", "disconnect", "status", "test_connection",
+        "resume_checkpoint", "begin_link",
+    ):
+        _emit(args, {"error": f"{method!r} is not a callable action"},
+              f"{method!r} is not a callable action")
+        return 1
+    if not callable(getattr(cls, method, None)):
+        _emit(args, {"error": f"unknown action {method!r} for {name!r}"},
+              f"{name} has no action {method!r}")
+        return 1
+    if method not in set(getattr(cls, "PUBLIC_ACTIONS", ()) or ()):
+        _emit(
+            args,
+            {"error": f"{method!r} is not a public action"},
+            f"{method!r} needs a credential — nm connectors call only "
+            "runs public actions (no token, no vault)",
+        )
+        return 1
+    raw = getattr(args, "params_json", "") or "{}"
+    try:
+        params = _json.loads(raw)
+    except ValueError as exc:
+        _emit(args, {"error": f"bad --params-json: {exc}"},
+              f"bad --params-json: {exc}")
+        return 1
+    if not isinstance(params, dict):
+        _emit(args, {"error": "--params-json must be an object"},
+              "--params-json must be an object")
+        return 1
+    try:
+        connector = create_connector(name, None)
+        out = getattr(connector, method)(**params)
+    except TypeError as exc:
+        _emit(args, {"error": f"bad params for {method!r}: {exc}"},
+              f"bad params for {method!r}: {exc}")
+        return 1
+    except ConnectorError as exc:
+        _emit(args, {"error": str(exc)}, str(exc))
+        return 1
+    _emit(args, {"action": method, "result": out}, f"{method}: {out}")
     return 0
 
 

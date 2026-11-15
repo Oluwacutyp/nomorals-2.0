@@ -72,9 +72,14 @@ class GitHubConnector(Connector):
     description = (
         "Create repos, push code, manage releases/webhooks/deploy keys, "
         "and back up repositories. Authenticates with a fine-grained "
-        "personal access token."
+        "personal access token. Public repos are readable without a "
+        "token (get_public_repo, list_public_repos)."
     )
     auth_methods = (AuthMethod.PAT,)
+    #: Actions that work without any credential: public GitHub data is
+    #: free to anyone, so these never touch the vault. The tool spine
+    #: (service_call) and the CLI skip the connect gate for them.
+    PUBLIC_ACTIONS = ("get_public_repo", "list_public_repos")
     CATEGORY = "dev"
     PROVISIONABLE = (
         "repo",
@@ -206,18 +211,30 @@ class GitHubConnector(Connector):
                          username or "")
         )
 
-    def _public_api(self, method: str, path: str) -> Any:
+    def _public_api(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+    ) -> Any:
         """Unauthenticated API call (public endpoints, e.g. username check)."""
         url = f"{API_BASE}{path}"
         try:
             resp = self.http.get(url, headers={
                 "Accept": "application/vnd.github+json",
                 "X-GitHub-Api-Version": API_VERSION,
-            })
+            }, params=params)
         except Exception as exc:  # noqa: BLE001 - network layer is opaque
             raise GitHubError(f"github request failed: {exc}") from exc
         if resp.status == 404:
             raise GitHubError("not found", status_code=404)
+        if resp.status == 403 and "rate limit" in resp.text.lower():
+            raise GitHubError(
+                "github unauthenticated rate limit hit (60/hr) — wait for "
+                "the window, or connect a token for 5,000/hr",
+                status_code=403,
+            )
         if not resp.ok:
             raise GitHubError(
                 f"github {method} {path} failed ({resp.status})",
@@ -385,6 +402,62 @@ class GitHubConnector(Connector):
     def get_repo(self, full_name: str) -> dict[str, Any]:
         """One repository by ``owner/name``."""
         return self._api("GET", f"/repos/{full_name}")
+
+    # ── public reads (no token) ──────────────────────────────────
+
+    def get_public_repo(self, full_name: str) -> dict[str, Any]:
+        """One PUBLIC repository by ``owner/name`` — no token needed.
+
+        GitHub serves public repos to unauthenticated callers (60
+        requests/hour). No vault credential is read and no
+        Authorization header is sent. A private repo, or a name that
+        does not exist, reads as 404 to an unauthenticated caller —
+        the error says so rather than guessing which.
+        """
+        owner_repo = (full_name or "").strip()
+        parts = owner_repo.split("/")
+        if len(parts) != 2 or not all(p.strip() for p in parts):
+            raise GitHubError(
+                f"bad repo name {full_name!r} — want 'owner/name'"
+            )
+        try:
+            return self._public_api("GET", f"/repos/{owner_repo}")
+        except GitHubError as exc:
+            if exc.status_code == 404:
+                raise GitHubError(
+                    f"repo {owner_repo!r} not found as a public repo "
+                    "(it may be private, renamed, or not exist)",
+                    status_code=404,
+                ) from exc
+            raise
+
+    def list_public_repos(
+        self, username: str, *, limit: int = 30
+    ) -> list[dict[str, Any]]:
+        """A user's PUBLIC repositories (newest-updated first).
+
+        No token needed; one page, ``per_page`` clamped to 1..100.
+        """
+        user = (username or "").strip()
+        if not self._valid_username(user):
+            raise GitHubError(f"bad github username {username!r}")
+        try:
+            repos = self._public_api(
+                "GET", f"/users/{user}/repos",
+                params={
+                    "per_page": max(1, min(int(limit), 100)),
+                    "sort": "updated",
+                    "direction": "desc",
+                },
+            )
+        except GitHubError as exc:
+            if exc.status_code == 404:
+                raise GitHubError(
+                    f"github user {user!r} not found",
+                    status_code=404,
+                ) from exc
+            raise
+        return repos if isinstance(repos, list) else []
 
     # ── issues / pull requests / contents / search ─────────────
 

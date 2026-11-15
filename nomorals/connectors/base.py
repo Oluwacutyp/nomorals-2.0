@@ -385,6 +385,14 @@ class Connector(ABC):
     #: ("repo", "webhook", "deploy_key"). Empty means no provisioning.
     PROVISIONABLE: tuple[str, ...] = ()
 
+    #: Actions that work without any credential (public data, keyless
+    #: services). The tool spine (``service_call``) and the CLI skip
+    #: the connect gate for these; every other action still requires
+    #: a connected credential. Empty by default — a connector opts
+    #: in explicitly, naming only the actions it has verified need
+    #: no auth.
+    PUBLIC_ACTIONS: tuple[str, ...] = ()
+
     #: n8n/HA-style grouping for fleet views: "payments", "trading",
     #: "social", "messaging", "cloud", "media", "travel", "data",
     #: "network", "productivity", ... Empty = uncategorized.
