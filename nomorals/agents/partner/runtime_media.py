@@ -5829,6 +5829,14 @@ class RuntimeMediaMixin:
                                f"{result['width']}x{result['height']} · "
                                f"{result['segments']} segments · "
                                f"{result['beats_used']} beats{note}")
+                # The temporal QA verdict rides with the reply so the
+                # owner sees whether the cut actually landed — pass
+                # and fail both speak; an unmeasurable render stays
+                # silent, as before.
+                qa = review.get("qa") or {}
+                if qa.get("status") in ("pass", "fail"):
+                    render_line += (f"\n🎞️ temporal QA "
+                                    f"{qa['status']}: {qa.get('notes', '')}")
                 # The cut becomes a post draft: the owner is asked
                 # "post directly or send for review?" through the
                 # drafts organ (the #43 rule), not handed a bare

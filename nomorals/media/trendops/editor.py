@@ -28,11 +28,13 @@ to it". The unprompted proposal hook (a scheduler job calling
 ``propose()``) is the next step after this class lands, not part of
 this commit.
 
-Honest limits, stated where they bite: the full temporal WatchVideo
-organ does not exist yet (the director's shot QA is still-image QA
-over sampled frames), so the post-render review is probe assertions
-on the output file and the frame-QA leg reports ``qa_unavailable``
-with the reason — never a pass. There is no video Museum artifact
+Honest limits, stated where they bite: the post-render review
+watches the finished video over time with the director's WatchVideo
+organ (:mod:`nomorals.media.director.watchvideo`) — cuts on the
+beat grid, segment pacing, motion where an effect should be moving
+the picture. Footage that carries no measurable frame variation at
+all (a solid-colour clip) is reported as ``qa_unavailable`` with
+the reason, never a fake pass. There is no video Museum artifact
 organ in the repo, so the rendered MP4 + its JSON manifest in the
 workspace is the artifact; nothing is written to a Museum that does
 not exist.
@@ -252,7 +254,7 @@ class TrendOps:
             raise MediaEditError(
                 f"the render reported success but wrote no file "
                 f"(expected {output})")
-        review = self._review(output, fmt)
+        review = self._review(output, fmt, spec)
         self.library.bump_uses(fmt.slug)
         return {
             "ok": True, "output": output, "format": fmt.slug,
@@ -288,13 +290,20 @@ class TrendOps:
             "cut_rule is beats but no beat grid could be found — pass "
             "beats= explicitly or a music file with a clear beat")
 
-    def _review(self, output: str, fmt: TrendFormat) -> dict[str, Any]:
-        """Post-render review: probe assertions on the finished file.
+    def _review(self, output: str, fmt: TrendFormat,
+                spec: Any = None) -> dict[str, Any]:
+        """Post-render review: probe assertions on the finished file,
+        then the WatchVideo organ watches it over time.
 
-        The full temporal WatchVideo organ does not exist yet, so the
-        frame-QA leg reports ``qa_unavailable`` with the reason —
-        never a pass. A file that fails the probe assertions is a
-        failed render, reported as such.
+        The probe assertions are the render's own health (duration,
+        canvas, non-empty file) — a file that fails them is a failed
+        render, reported as such, and ``review["ok"]`` stays theirs
+        alone. The ``qa`` leg is the temporal verdict: cuts on the
+        beat grid, segment pacing, motion where an effect should be
+        moving the picture. It never blocks the render and never
+        fakes a pass — footage with no measurable frame variation,
+        or a watch that cannot run, reports ``qa_unavailable`` with
+        the reason.
         """
         info = video_probe(output)
         duration = float(info.get("duration") or 0.0)
@@ -315,10 +324,25 @@ class TrendOps:
             "problems": problems,
             "duration": duration, "width": width, "height": height,
             "bytes": Path(output).stat().st_size,
-            "qa": {"status": "qa_unavailable",
-                   "notes": ("no temporal WatchVideo organ yet — frame QA "
-                             "needs the director's full WatchVideo build")},
+            "qa": self._temporal_qa(output, spec),
         }
+
+    def _temporal_qa(self, output: str, spec: Any) -> dict[str, Any]:
+        """Watch the finished render over time against the spec's
+        cut grid + segment plan. Any failure to watch — unreadable
+        file, missing ffmpeg, sampling error — is ``qa_unavailable``
+        with the reason, never a crash and never a pass."""
+        try:
+            from ..director.watchvideo import watch_video
+
+            cut_points = list(getattr(spec, "cut_points", None) or [])
+            segments = [float(d) for _, d in
+                        (getattr(spec, "segments", None) or [])]
+            return watch_video(output, cut_points=cut_points,
+                               segments=segments or None)
+        except Exception as exc:  # noqa: BLE001 - QA reports, never crashes
+            return {"status": "qa_unavailable",
+                    "notes": f"WatchVideo could not run: {exc}"}
 
 
 def draft_for_render(report: dict[str, Any], *, footage: list[str],

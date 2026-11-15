@@ -11,8 +11,10 @@ regeneration per failed shot.
 Stages are separate, persisted calls (``Director.cover`` /
 ``plan`` / ``shoot`` / ``regen``) so the owner gates each one
 conversationally. This folds into videogen V3 (story→movie) as its
-front half; the temporal WatchVideo organ remains a later build —
-QA here is still-image judgment over sampled frames, and says so.
+front half; temporal QA lives in :mod:`nomorals.media.director.watchvideo`
+— the WatchVideo organ watches a finished render over time (cuts,
+pacing, motion) — while :mod:`nomorals.media.director.qa` stays
+still-image judgment over sampled frames, and says so.
 """
 
 from .errors import DirectorError
@@ -25,6 +27,7 @@ from .design import (
 )
 from .prompts import assemble_prompt
 from .qa import qa_shot
+from .watchvideo import watch_video
 from .production import Director, Production
 
 __all__ = [
@@ -34,6 +37,6 @@ __all__ = [
     "Shot", "break_down", "break_down_prose",
     "DesignSpec", "CameraSpec", "LightingSpec", "STYLE_PACKS",
     "design_shot", "get_style_pack", "refine_design",
-    "assemble_prompt", "qa_shot",
+    "assemble_prompt", "qa_shot", "watch_video",
     "Director", "Production",
 ]
