@@ -79,7 +79,11 @@ def test_181_accepts_raising_predicate_filters_out(caplog):
     assert seen == []
     # Consumer-level (current behavior): dispatch drops the event
     # for this subscription WITHOUT routing the failure into the
-    # handler-failure machinery — no error count, no DLQ, no log.
+    # handler-failure machinery — no error count, no DLQ, no
+    # WARNING+ log. The predicate failure IS recorded at DEBUG
+    # (events.py:183, the observability sketch from the tail-71
+    # survey, landed by 6e273bc9) — so the pin is no WARNING+
+    # record, not zero records.
     bus = ev.EventBus()
     delivered = []
     bus.subscribe("a.*", lambda e: delivered.append(e), sync=True,
@@ -88,7 +92,8 @@ def test_181_accepts_raising_predicate_filters_out(caplog):
     assert delivered == []
     stats = bus.stats()
     assert stats["handler_errors"] == 0 and stats["dlq_depth"] == 0
-    assert not caplog.records
+    assert not [r for r in caplog.records
+                if r.levelno >= logging.WARNING]
 
 
 # ── 261: EventBus.stop wake-up sentinel on a full queue ────────────────────

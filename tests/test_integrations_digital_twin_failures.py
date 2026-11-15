@@ -10,8 +10,10 @@ adds zero census sites.
 Module posture: the twin never breaks streams — ingest()
 never raises and records state-write failures itself via the
 outer _log.debug guard (not a census site). NOT-recording is
-pinned as caplog silence on the module logger
-(nomorals.integrations.digital_twin) for the silent sites.
+pinned as no WARNING+ record on the module logger
+(nomorals.integrations.digital_twin) for the silent sites —
+DEBUG observability logs are deliberate (e.g. the MQTT-import
+fallback at digital_twin.py:988).
 
 Verdict notes (full grounds in the tail-74 SURVEY.md):
 - 88: WAL pragma failure -> bare pass; "WAL is a nicety" is
@@ -28,7 +30,8 @@ Verdict notes (full grounds in the tail-74 SURVEY.md):
   the removed count returns honestly — VACUUM is "a nicety".
 - 818: mqtt_client import failure -> locally-derived entity
   id fallback (resolution ladder); ingestion continues.
-  Silent rung — observability sketch shelved in the SURVEY.
+  The fallback IS recorded at DEBUG (digital_twin.py:988);
+  the pin is no WARNING+ record, not zero records.
 """
 
 import logging
@@ -47,8 +50,13 @@ def _twin(tmp_path, name="twin.db"):
     return HomeTwin(db_path=str(tmp_path / name))
 
 
+# "Silent" = no WARNING-or-worse record on the module logger.
+# DEBUG observability logs are deliberate (e.g. the MQTT-import
+# fallback at digital_twin.py:988), so the pin is WARNING+, not
+# zero records.
 def _silent(caplog):
-    return [r for r in caplog.records if r.name == TWIN_LOG]
+    return [r for r in caplog.records
+            if r.name == TWIN_LOG and r.levelno >= logging.WARNING]
 
 
 def test_88_wal_pragma_failure_still_constructs_and_ingests(

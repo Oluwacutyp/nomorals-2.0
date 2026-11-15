@@ -8,7 +8,9 @@ inventory helpers' tolerance guards, the manifest's
 record-count sentinel, and the importer's dedupe-source guard.
 Each pin proves the failure value is the documented design
 value — and, where the contract is silent-by-design, that
-nothing is recorded on the failure path (snapshot method).
+nothing at WARNING or above is recorded on the failure path
+(snapshot method); DEBUG observability logs are deliberate
+(backup.py:67/:80/:94).
 
 Probed live first (nm-tail78-verify/probes.py).
 """
@@ -59,8 +61,10 @@ def test_64_resolver_failure_leaves_key_absent_and_silent(
     assert "repetition.db" not in files
     # the sibling resolvers still ran — one crash removes one key
     assert "knowledge_state.db" in files or "two_tier.db" in files
-    # silent by design: the inventory helpers record nothing
-    assert caplog.records == []
+    # no WARNING+ by design: the inventory helpers record the
+    # failure at DEBUG only (backup.py:67).
+    assert [r for r in caplog.records
+            if r.levelno >= logging.WARNING] == []
 
 
 # ── 76 (E103) main memories DB block: db.path crash → absent ────
@@ -72,7 +76,10 @@ def test_76_db_path_failure_leaves_memories_db_absent(caplog):
     with caplog.at_level(logging.DEBUG, logger="nomorals.memory.backup"):
         files = B._memory_files(SimpleNamespace(db=BadDB()))
     assert "memories.db" not in files
-    assert caplog.records == []
+    # no WARNING+ by design: the failure is recorded at DEBUG
+    # only (backup.py:80).
+    assert [r for r in caplog.records
+            if r.levelno >= logging.WARNING] == []
 
 
 # ── 90 (E103) entities block: entity_home crash → absent ────────
@@ -84,7 +91,10 @@ def test_90_entity_home_failure_leaves_entities_absent(
     with caplog.at_level(logging.DEBUG, logger="nomorals.memory.backup"):
         files = B._memory_files(SimpleNamespace(db=None))
     assert "entities/" not in files
-    assert caplog.records == []
+    # no WARNING+ by design: the failure is recorded at DEBUG
+    # only (backup.py:94).
+    assert [r for r in caplog.records
+            if r.levelno >= logging.WARNING] == []
 
 
 # ── 152 (E104) record_count: repo.count crash → sentinel -1 ─────

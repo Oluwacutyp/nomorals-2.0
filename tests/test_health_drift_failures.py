@@ -116,8 +116,11 @@ def test_584_consecutive_act_days_failure_reads_as_no_streak(
         caplog.clear()
         assert broken.consecutive_act_days() == 0
     assert broken._db.query.call_count >= 1  # the read was attempted
+    # The failure IS recorded at DEBUG (drift.py:585) by design —
+    # the pin is no WARNING+ record, not zero records.
     assert [r for r in caplog.records
-            if r.name == "nomorals.health.drift"] == []
+            if r.name == "nomorals.health.drift"
+            and r.levelno >= logging.WARNING] == []
     assert _snap() == before
 
 
