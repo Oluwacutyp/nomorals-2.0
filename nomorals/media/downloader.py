@@ -1094,10 +1094,14 @@ class MediaDownloader:
             from ..core.progress_events import CONNECTING
             count = getattr(self, "_chain_stage_count", 0)
             if count > 0:
-                # A route switch is a new attempt of this source: the
-                # previous route's percentage never pretends to
-                # describe the new transfer.
-                tracker.begin_attempt(note=f"route: {stage}")
+                # A route switch resets the transfer measurements —
+                # the previous route's percentage never pretends to
+                # describe the new transfer — but it is NOT an
+                # attempt: only a real retry counts against
+                # MAX_ATTEMPTS_PER_SOURCE (owner order 2026-11-15: a
+                # source must not read as 22 tries when it only
+                # switched routes a few times).
+                tracker.begin_route(note=f"route: {stage}")
             self._chain_stage_count = count + 1
             tracker.set_stage(CONNECTING, note=f"via {stage}")
         if stage == "direct":
@@ -1298,9 +1302,33 @@ class MediaDownloader:
         self._chain_stage_count = 0
         tracker = self._tracker()
         if tracker is not None:
-            from ..core.progress_events import RESOLVING
+            from ..core.progress_events import (
+                MAX_ATTEMPTS_PER_SOURCE,
+                RESOLVING,
+            )
             if tracker.source_index == 0:
                 tracker.begin_source("")
+            if tracker.attempt >= MAX_ATTEMPTS_PER_SOURCE:
+                # This source already used its tries on this
+                # operation (owner order 2026-11-15): refuse fast
+                # instead of running another full chain against it.
+                # The run moves on to the next source; the refusal
+                # is not a new failure of the source, so no outcome
+                # is recorded against it here.
+                report.failure = FailureKind.SITE_ERROR
+                report.likely_cause = (
+                    f"this source already used its "
+                    f"{MAX_ATTEMPTS_PER_SOURCE} attempts on this "
+                    "operation — moving on to the next source")
+                report.hint = ("the next source is tried instead; "
+                               "no more attempts are spent here")
+                report.stages.append(StageLog(
+                    stage="guard", url=url,
+                    error_class=FailureKind.SITE_ERROR.value,
+                    error=report.likely_cause))
+                tracker.note("source exhausted after "
+                             f"{MAX_ATTEMPTS_PER_SOURCE} attempts")
+                return self._finish(report, started)
             tracker.set_stage(RESOLVING, note="resolving the source")
 
         _log.info("download start url=%s profile=%s audio_only=%s",
@@ -1566,6 +1594,17 @@ class MediaDownloader:
                                 _err_text(exc, 200), attempt)
                 if kind is FailureKind.NETWORK_FAILURE \
                         and attempt < self.direct_retries:
+                    # A real retry — but never past the per-source
+                    # bound: the tracker may already carry tries
+                    # from an earlier download for this source on
+                    # the same operation.
+                    tracker = self._tracker()
+                    if tracker is not None:
+                        from ..core.progress_events import (
+                            MAX_ATTEMPTS_PER_SOURCE,
+                        )
+                        if tracker.attempt >= MAX_ATTEMPTS_PER_SOURCE:
+                            return False
                     backoff = 2.0 ** (attempt - 1)
                     _log.info("direct: network failure, retrying in %.0fs "
                               "(attempt %d/%d)", backoff, attempt + 1,

@@ -939,6 +939,13 @@ class PlaybackEngine:
                    "path": self._youtube_watch_url(video_id),
                    "title": title}
         try:
+            # The fallback IS a different source taking over: advance
+            # the measurement so its tries count against YouTube, not
+            # the source that just blocked the track — and so the
+            # per-source bound does not refuse it for the blocked
+            # source's spent tries.
+            from ..core.progress_events import emit_source
+            emit_source("youtube")
             path = self._youtube_audio(yt_item)
         except Exception as exc:  # noqa: BLE001
             from .cookies import BOT_COOKIE_SHORT_HELP, is_bot_detection_error

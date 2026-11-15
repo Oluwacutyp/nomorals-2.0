@@ -68,6 +68,14 @@ TERMINAL_DELIVERED = "delivered"
 TERMINAL_FAILED = "failed"
 TERMINAL_CANCELLED = "cancelled"
 
+#: A source gets its opening try plus up to two retries on one
+#: operation — then the run moves on to the next source (owner order
+#: 2026-11-15: one source must never be hammered while the others sit
+#: unused).  The counter lives on the tracker; the downloader enforces
+#: it.  A route switch inside one download is NOT an attempt (see
+#: ``ProgressTracker.begin_route``) — only real retries count.
+MAX_ATTEMPTS_PER_SOURCE = 3
+
 _STAGE_ICONS = {
     SEARCHING: "🔎",
     RESOLVING: "🧭",
@@ -196,6 +204,20 @@ class ProgressTracker:
         the attempt counter increments and measurements reset."""
         with self._lock:
             self.attempt += 1
+            if note:
+                self._note = str(note)
+            self._reset_transfer()
+            return self._record(force=True)
+
+    def begin_route(self, note: str = "") -> ProgressEvent:
+        """The current source switches route inside one download
+        (direct → kit → proxy …): the transfer measurements reset —
+        the previous route's percentage never pretends to describe
+        the new transfer — but the attempt counter does NOT move.
+        A route switch is not a retry of the source; only a real
+        retry (``begin_attempt``) counts against
+        ``MAX_ATTEMPTS_PER_SOURCE``."""
+        with self._lock:
             if note:
                 self._note = str(note)
             self._reset_transfer()

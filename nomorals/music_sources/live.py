@@ -169,11 +169,14 @@ class _LiveJourney:
             landed[id(cand)] = dl
             return str(dl.get("path") or ""), ""
 
+        # The orchestrator manages sources (one source per candidate):
+        # with manage_sources=False every candidate's tries piled
+        # onto source 1 and the run never visibly moved on (owner
+        # order 2026-11-15 — "source 1 · attempt 22").
         result = DownloadOrchestrator().run(
             fetchable, _retrieve, kind="song",
             label_of=lambda c: str(c.kind or "source"),
-            expected_duration_of=lambda c: float(c.duration or 0.0),
-            manage_sources=False)
+            expected_duration_of=lambda c: float(c.duration or 0.0))
         failures.extend(
             f"{a.label}: {a.reason}" for a in result.attempts if not a.ok)
         if result.ok and result.candidate is not None:

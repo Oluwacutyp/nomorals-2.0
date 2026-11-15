@@ -575,8 +575,13 @@ def test_downloader_chain_emits_the_stage_sequence(tmp_path):
     landed = [e for e in tr.events if e.stage == DOWNLOADING]
     assert landed and landed[-1].bytes_received == len(_BODY)
     assert landed[-1].bytes_expected == len(_BODY)
-    # Direct failed, kit succeeded: the route switch is a new attempt.
-    assert tr.attempt >= 2
+    # Direct failed, kit succeeded: the route switch resets the
+    # transfer measurements WITHOUT counting as an attempt (owner
+    # order 2026-11-15 — a route switch is not a retry of the
+    # source; only real retries count, pinned by
+    # test_direct_retries_count_but_never_pass_the_bound in
+    # test_source_retry_bound.py). The attempt stays 1.
+    assert tr.attempt == 1
     # Retrieval finished — but nothing here may claim delivery.
     assert tr.snapshot()["terminal"] is None
     assert Path(report.path).read_bytes() == _BODY
