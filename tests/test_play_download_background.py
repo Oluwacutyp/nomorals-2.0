@@ -44,7 +44,11 @@ class _FakeGateway:
         return SimpleNamespace(ok=True, platform=platform,
                                message_id=f"m{self._n}")
 
-    def send_file(self, platform, target, path, caption=""):
+    def send_file(self, platform, target, path, caption="", kind=None):
+        # Must track the real gateway's send_file signature (gateway.py):
+        # the delivery-shape pass added kind=, and a fake that drops it
+        # turns every successful send into "had the file but couldn't
+        # send it" via the caller's except.
         self.files.append((platform, target, path, caption))
         return SimpleNamespace(ok=True, platform=platform,
                                message_id="f1")
@@ -140,7 +144,18 @@ def test_handler_returns_immediately_while_download_blocks():
     assert rt.gateway.files == [
         ("telegram", "telegram:bg-1", "/tmp/song.mp3", "🎵 Song — A")]
     # The ack was edited to the final state — the delivered line.
-    assert rt.gateway.edits == [("m1", "🎵 Song — A")]
+    # Play & Downloads P1 (b8f4ef64): the measured progress stream
+    # renders its stages onto the ack (Verifying, Uploading) and the
+    # outcome edit owns the final state, promptly and exactly once —
+    # so the ack carries the stages plus the delivered line, not
+    # the delivered line alone.
+    assert rt.gateway.edits == [
+        ("m1", "🔍 Verifying — Song\nchecking the landed file\n"
+               "source 1 · attempt 1 — Song"),
+        ("m1", "⬆️ Uploading — Song\n"
+               "sending the file — no live count on this route\n"
+               "source 1 · attempt 1 — Song"),
+        ("m1", "🎵 Song — A")]
 
 
 # ── 2: completion: file + ack edit to the right chat, no follow-up ────
@@ -163,9 +178,17 @@ def test_completed_job_sends_file_and_edits_ack():
     assert rt.gateway.files == [
         ("telegram", "telegram:bg-2", "/tmp/song.mp3", "🎵 Song — A")]
     # No meta-narration: after the ack, NO further text is SENT —
-    # the completion is the ack's edit plus the file landing.
+    # the completion is the ack's edit plus the file landing.  The
+    # ack carries the P1 progress stages (Verifying, Uploading)
+    # before the final delivered line — see test 1.
     assert _sent_texts(rt) == ["⏳ Song"]
-    assert rt.gateway.edits == [("m1", "🎵 Song — A")]
+    assert rt.gateway.edits == [
+        ("m1", "🔍 Verifying — Song\nchecking the landed file\n"
+               "source 1 · attempt 1 — Song"),
+        ("m1", "⬆️ Uploading — Song\n"
+               "sending the file — no live count on this route\n"
+               "source 1 · attempt 1 — Song"),
+        ("m1", "🎵 Song — A")]
 
 
 # ── 3: honest failure — wording + queue hygiene preserved in the job ──
@@ -230,9 +253,14 @@ def test_fallthrough_still_tries_next_candidate_in_background():
         + [c for _p, _t, _path, c in rt.gateway.files]
     assert all("sources tried" not in t for t in surface), surface
     # Progress was reported between candidates (heartbeat visibility).
-    progress = job.snapshot()["last_progress"]
-    assert progress and "trying" in progress, \
-        f"no per-candidate progress note recorded: {progress!r}"
+    # The per-candidate "trying" note lands on the ack via
+    # _job_ack_progress; the job's last_progress is the tracker's
+    # latest render, so by completion it reads the delivered note
+    # (P1 mirrors the terminal render there) — the ack's edit
+    # history is the record that keeps the note.
+    edits = [t for _m, t in rt.gateway.edits]
+    assert any("trying" in t for t in edits), \
+        f"no per-candidate progress note recorded: {edits!r}"
 
 
 # ── 5: pick-list consumed only when the file actually went out ────────
@@ -399,8 +427,16 @@ def test_control_download_returns_ack_and_sends_when_done(tmp_path):
     assert len(rt.gateway.files) == 1
     assert rt.gateway.files[0][2] == str(target)
     # Final state replaces the ack: the item's own line — no size
-    # receipt, no "sent to this chat".
-    assert rt.gateway.edits == [("m1", "🎵 Clip")]
+    # receipt, no "sent to this chat".  The ack carries the P1
+    # progress stages (Verifying, Uploading) before the final line —
+    # see test 1.  No source line here: the /download path never
+    # begins a source, so the renders carry no source/attempt line.
+    assert rt.gateway.edits == [
+        ("m1", "🔍 Verifying — https://example.com/clip.mp3\n"
+               "checking the landed file"),
+        ("m1", "⬆️ Uploading — https://example.com/clip.mp3\n"
+               "sending the file — no live count on this route"),
+        ("m1", "🎵 Clip")]
     surface = _sent_texts(rt) + [t for _m, t in rt.gateway.edits]
     assert all("sent to this chat" not in t for t in surface)
 
