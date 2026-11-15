@@ -8636,7 +8636,13 @@ class PartnerRuntime(
             # Group parties (AA-05) — not owner-gated (shared surfaces,
             # group-scoped). Anyone in the group drives it; trivia wins
             # credit the one group economy through the token facade.
+            # The default chat ref rebuilt from the chat key defaults to
+            # DM kind, so the branch rebinds from the message (miniapp
+            # does the same) — without it every /party in a group met
+            # control_party's "Parties live in group chats" refusal.
             from ...community.parties import control_party
+            if message is not None:
+                chat = message.chat
             return control_party(
                 command.tail or arg,
                 context=self.context,

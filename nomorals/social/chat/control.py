@@ -250,6 +250,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "unpin", "purge", "report",
     "cleanup", "rmdeleted", "rminactive",
     "tag", "bansender", "unbansender", "reactwipe", "boosters",
+    "party",
     "game",
     *PUBLIC_GAME_COMMANDS,
 ])
