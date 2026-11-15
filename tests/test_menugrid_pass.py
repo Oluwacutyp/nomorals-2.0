@@ -148,6 +148,38 @@ class MenuGridTests(unittest.TestCase):
         # All commands still closes the grid.
         self.assertEqual(_flat(kb)[-1], "list")
 
+    # ── fontsfix: home button labels fit the grid ──────────
+    # (owner screenshot 2026-11-15: the section buttons carried
+    # the full "name — description" title and clipped mid-word
+    # on WhatsApp — "font library — her stocked typ". The grid
+    # stays 2-per-row; the labels shorten to the section name.)
+
+    def test_home_button_labels_fit_the_grid(self):
+        for platform in ("whatsapp", "telegram",
+                         "telegram-personal"):
+            render = menu_session_render(
+                platform=platform, public_only=False, home=True)
+            labels = [label for row in render.buttons
+                      for label, _cb in row]
+            self.assertTrue(labels, platform)
+            for label in labels:
+                # No " — description" tail rides a button.
+                self.assertNotIn(" — ", label, (platform, label))
+                # The screenshot's clip point is ~30 chars
+                # (emoji included); the longest short label is 22.
+                self.assertLessEqual(len(label), 24,
+                                     (platform, label))
+            # The clipped sections keep their short names.
+            self.assertIn("🔤 font library", labels, platform)
+            self.assertIn("📱 mock screens", labels, platform)
+            self.assertIn("🎨 makers & tools", labels, platform)
+            self.assertIn("🔒 chat & privacy", labels, platform)
+            # Callbacks are untouched by the relabel.
+            flat = _flat(render.buttons)
+            self.assertIn("list font", flat, platform)
+            self.assertIn("list mock", flat, platform)
+            self.assertIn("list makers", flat, platform)
+
 
 # ── surface rig: the gift proposal feed ─────────────────────────
 

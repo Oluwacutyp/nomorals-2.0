@@ -358,3 +358,75 @@ class TestFontsSurface:
             ["fonts", "stock", "--pack", "/tmp/pack", "--build"])
         assert args.fonts_action == "stock"
         assert args.build is True
+
+    # ── fontsfix: the /fonts reply renders per platform ─────
+    # (owner screenshot 2026-11-15: the WhatsApp reply arrived
+    # in the raw canonical dialect — literal ** and backticks —
+    # because the handler rendered card_text() and no downstream
+    # conversion reached it live.)
+
+    def _wa_message(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            chat=SimpleNamespace(platform="whatsapp"))
+
+    def _tg_message(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            chat=SimpleNamespace(platform="telegram"))
+
+    def test_whatsapp_overview_renders_whatsapp_native(
+            self, pack_dir, tmp_path, monkeypatch):
+        import re
+        fontpack.stock_pack(pack_dir, home=tmp_path / "home")
+        monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("NM_FONT_DIRS", "")
+        runtime = self._runtime()
+        overview = runtime._control_fonts(
+            "fonts", "", self._wa_message())
+        # WhatsApp-native bold, never the canonical markers.
+        assert "*Font library*" in overview
+        assert "**" not in overview
+        # Shelf counts are WhatsApp code, not raw backticks.
+        assert re.search(r"```\d+```", overview) is not None
+        assert re.search(r"(?<!`)`[^`\n]", overview) is None
+        # No internal id in user-facing text.
+        assert re.search(r"@[0-9a-f]{8}\b", overview) is None
+        # The content itself is unchanged.
+        assert "27 families" in overview
+        assert "core subset" in overview
+
+    def test_telegram_overview_renders_html(
+            self, pack_dir, tmp_path, monkeypatch):
+        import re
+        fontpack.stock_pack(pack_dir, home=tmp_path / "home")
+        monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("NM_FONT_DIRS", "")
+        runtime = self._runtime()
+        overview = runtime._control_fonts(
+            "fonts", "", self._tg_message())
+        assert "<b>Font library</b>" in overview
+        assert "**" not in overview
+        assert re.search(r"@[0-9a-f]{8}\b", overview) is None
+
+    def test_overview_carries_no_internal_id(
+            self, pack_dir, tmp_path, monkeypatch):
+        import re
+        fontpack.stock_pack(pack_dir, home=tmp_path / "home")
+        monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("NM_FONT_DIRS", "")
+        runtime = self._runtime()
+        overview = runtime._control_fonts("fonts", "", None)
+        assert re.search(r"@[0-9a-f]{8}\b", overview) is None
+        assert "27 families" in overview
+
+    def test_message_less_overview_stays_canonical(
+            self, pack_dir, tmp_path, monkeypatch):
+        fontpack.stock_pack(pack_dir, home=tmp_path / "home")
+        monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+        monkeypatch.setenv("NM_FONT_DIRS", "")
+        runtime = self._runtime()
+        overview = runtime._control_fonts("fonts", "", None)
+        # No platform handle: the canonical dialect is the
+        # fallback, exactly as before.
+        assert "**Font library**" in overview

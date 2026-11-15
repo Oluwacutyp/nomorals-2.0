@@ -35,12 +35,37 @@ class RuntimeFontsMixin:
 
         return FontLibrary.discover()
 
+    def _render_fonts_card(self, card,  # type: ignore[no-untyped-def]
+                           message=None) -> str:
+        """Render a /fonts card for the message's platform.
+
+        The handler has a live platform handle, so it renders
+        through the layer per platform (render_card) instead of
+        the canonical card_text() — the canonical dialect is for
+        surfaces without a platform handle, and it reaches the
+        user raw when a downstream conversion is skipped (owner
+        screenshot 2026-11-15: literal ** and backticks on
+        WhatsApp). No message, no platform: the canonical
+        dialect is the fallback, exactly as before.
+        """
+        platform = ""
+        chat = getattr(message, "chat", None)
+        if chat is not None:
+            platform = getattr(chat, "platform", "") or ""
+        if platform:
+            from ...social.chat.typography import render_card
+
+            return render_card(card, platform=platform).text
+        from ...social.chat.typography import card_text
+
+        return card_text(card)
+
     def _control_fonts(self, kind: str, tail: str,
                        message=None) -> str:  # type: ignore[no-untyped-def]
         """One /fonts command: present the stocked library."""
         if message is not None and not self._is_operator(message):
             return "that one's just for the owner."
-        from ...social.chat.typography import Card, card_text
+        from ...social.chat.typography import Card
 
         try:
             library = self._fonts_library()
@@ -64,10 +89,12 @@ class RuntimeFontsMixin:
                          "local": "owner-local"}.get(
                              tier["tier"], tier["tier"])
                 if tier["stocked"]:
+                    # The counts only: the source commit is an
+                    # internal id — it lives in the library stats,
+                    # never in user-facing text (owner rule
+                    # 2026-11-03: internal ids never print).
                     value = (f"{tier['families']} families · "
                              f"{tier['files']} files")
-                    if tier["source_commit"]:
-                        value += f" · @{tier['source_commit'][:8]}"
                 else:
                     value = "not stocked"
                 rows.append((label, value))
@@ -81,7 +108,7 @@ class RuntimeFontsMixin:
                      list(cats.items())[:8]],
                     title="shelves")
             card.note(_FONTS_USAGE)
-            return card_text(card)
+            return self._render_fonts_card(card, message)
 
         if verb == "categories":
             card = Card("chat", title="Font shelves", icon="🔤")
@@ -90,7 +117,7 @@ class RuntimeFontsMixin:
                  stats["categories"].items()],
                 title="families per shelf")
             card.note("/fonts category <name> opens one shelf")
-            return card_text(card)
+            return self._render_fonts_card(card, message)
 
         if verb == "search":
             if not rest:
@@ -109,7 +136,7 @@ class RuntimeFontsMixin:
                 if len(hits) > _LIST_CAP:
                     card.note(f"first {_LIST_CAP} shown — "
                               "narrow the search to see the rest")
-            return card_text(card)
+            return self._render_fonts_card(card, message)
 
         if verb == "category":
             if not rest:
@@ -128,7 +155,7 @@ class RuntimeFontsMixin:
                     title=f"{len(hits)} families")
                 if len(hits) > _LIST_CAP:
                     card.note(f"first {_LIST_CAP} shown")
-            return card_text(card)
+            return self._render_fonts_card(card, message)
 
         if verb == "info":
             if not rest:
@@ -139,7 +166,7 @@ class RuntimeFontsMixin:
                 card.line(f"{rest!r} is not in the stocked "
                           "library — /fonts search finds what "
                           "she holds.")
-                return card_text(card)
+                return self._render_fonts_card(card, message)
             rows = [("family", fam.name),
                     ("shelf", fam.category or "—"),
                     ("licence", fam.license or "—"),
@@ -168,7 +195,7 @@ class RuntimeFontsMixin:
                 card.note(f"resolves to {path}")
             except Exception as exc:  # noqa: BLE001 - named
                 card.note(str(exc))
-            return card_text(card)
+            return self._render_fonts_card(card, message)
 
         return _FONTS_USAGE
 

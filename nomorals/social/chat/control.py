@@ -1741,6 +1741,15 @@ def _menu_section_key(title: str) -> str:
     return words[0] if words else ""
 
 
+def _menu_button_label(title: str) -> str:
+    """The button label for a menu section: the section's name
+    only — the " — description" tail stays in the menu body,
+    where it belongs. A full title clips mid-word on the
+    half-width grid buttons (owner screenshot 2026-11-15:
+    "font library — her stocked typ")."""
+    return (title or "").split(" — ", 1)[0].strip()
+
+
 def _menu_session_sections(
         platform: str, public_only: bool,
 ) -> list[tuple[str, str, list[tuple[str, str]]]]:
@@ -1985,7 +1994,8 @@ def menu_session_render(topic: str = "", page: int = 1, *,
     sections = _menu_session_sections(platform, public_only)
     if not sections:
         return None
-    nav = [[(f"{emoji} {title}", f"list {_menu_section_key(title)}")]
+    nav = [[(f"{emoji} {_menu_button_label(title)}",
+              f"list {_menu_section_key(title)}")]
            for emoji, title, _items in sections]
     if home:
         card = _menu_home_card(sections, public_only=public_only)
