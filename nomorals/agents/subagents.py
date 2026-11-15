@@ -28,7 +28,8 @@ one small class each. This mirrors the existing precedent of
 * Each role carries a ``role_spec`` drawn from
   :data:`nomorals.agents.role_specs.BUILTIN_ROLES` (architect/critic/tester/
   coder/researcher) so the roster speaks the same contract language as the
-  swarm layer. :class:`SwarmAgent` itself is *not* subclassed: its contract
+  swarm layer. :class:`nomorals.agents.role_specs.RoleAgent` itself is
+  *not* subclassed: its contract
   is ``run(payload dict) -> SimpleNamespace(output, ok, error)`` bound to a
   tool registry and a full ``AgentContext`` — forcing the roster's
   ``run(dataclass) -> dataclass`` parallel-safe contract through it would be

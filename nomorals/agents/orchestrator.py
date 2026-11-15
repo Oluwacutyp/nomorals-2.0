@@ -34,7 +34,7 @@ from .debate import (
     Issue,
     WorkArtifact,
 )
-from .role_specs import RoleRegistry, SwarmAgent
+from .role_specs import RoleRegistry, RoleAgent
 from .runtime import ExecutionReport, HybridExecutor
 from .supervisor import Supervisor
 from ..core.tasks import Task, TaskGraph, TaskKind, TaskState
@@ -1365,7 +1365,7 @@ class MasterOrchestrator:
         Prompt 02: when a RoleRegistry is wired, every role resolves to a
         locked RoleSpec (unknown roles get the safe ``execution`` spec —
         never full tool access).  The ``coding`` role keeps the real
-        CodingRoleAgent; other roles get a generic SwarmAgent bound to
+        CodingRoleAgent; other roles get a generic RoleAgent bound to
         their allowlist.  With no registry wired, this is exactly the
         old behavior.
         """
@@ -1378,7 +1378,7 @@ class MasterOrchestrator:
                     if agent is not None:
                         return agent.run(task.payload).output
             spec = self.roles.resolve(task.role)
-            agent = SwarmAgent(self.context, spec, registry=tools)
+            agent = RoleAgent(self.context, spec, registry=tools)
             return agent.run(task.payload).output
         if self.context is not None:
             tools = getattr(self.context, "tools", None)

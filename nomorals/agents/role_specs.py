@@ -6,7 +6,7 @@ exact tool allowlist, a budget, an output contract, and a read-only flag.
 allowlist is enforced in code — a role agent can never escalate its own
 surface, whatever the model is told.
 
-:class:`SwarmAgent` is the generic role-bound agent: it runs an injected
+:class:`RoleAgent` is the generic role-bound agent: it runs an injected
 worker (tests, scripted behavior) or makes one model call against its
 system prompt (production), and every tool call it makes flows through
 the enforcing registry.
@@ -30,7 +30,7 @@ from ..tools.registry import _format_params
 from .base import Budget
 
 __all__ = [
-    "RoleSpec", "RoleRegistry", "SwarmAgent", "RoleEnforcingRegistry",
+    "RoleSpec", "RoleRegistry", "RoleAgent", "RoleEnforcingRegistry",
     "BUILTIN_ROLES", "SAFE_EXECUTION_SPEC", "ROLE_ALIASES",
     "default_registry", "MUTATING_CAPABILITIES", "is_mutating_tool",
     "check_spec_call", "record_tool_denial", "render_role_prompt",
@@ -624,7 +624,7 @@ class RoleEnforcingRegistry:
             return len(self.denials)
 
 
-class SwarmAgent:
+class RoleAgent:
     """A generic agent bound to one :class:`RoleSpec`.
 
     ``run(payload)`` executes ``worker(payload, agent)`` when one is

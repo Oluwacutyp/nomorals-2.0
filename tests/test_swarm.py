@@ -33,7 +33,7 @@ from nomorals.agents.fanout import (
 )
 from nomorals.agents.orchestrator import MasterOrchestrator, Plan, PlanStep
 from nomorals.agents.role_specs import (
-    RoleEnforcingRegistry, RoleRegistry, SwarmAgent, default_registry,
+    RoleAgent, RoleEnforcingRegistry, RoleRegistry, default_registry,
 )
 from nomorals.agents.runtime import HybridExecutor
 from nomorals.core.errors import ToolDenied
@@ -117,7 +117,7 @@ class ToolDeniedTests(unittest.TestCase):
 
     def _critic(self, db=None):
         ctx = _context(db=db)
-        return SwarmAgent(ctx, default_registry().resolve("critic"),
+        return RoleAgent(ctx, default_registry().resolve("critic"),
                           registry=ctx.tools), ctx
 
     def test_critic_write_denied_structured(self):
@@ -154,7 +154,7 @@ class ToolDeniedTests(unittest.TestCase):
 
     def test_tester_path_guard(self):
         ctx = _context()
-        agent = SwarmAgent(ctx, default_registry().resolve("tester"),
+        agent = RoleAgent(ctx, default_registry().resolve("tester"),
                            registry=ctx.tools)
         # outside test paths → denied even though fs_write is allowlisted
         bad = agent.call_tool("fs_write", path="src/main.py",
@@ -165,7 +165,7 @@ class ToolDeniedTests(unittest.TestCase):
 
     def test_writer_markdown_only(self):
         ctx = _context()
-        agent = SwarmAgent(ctx, default_registry().resolve("writer"),
+        agent = RoleAgent(ctx, default_registry().resolve("writer"),
                            registry=ctx.tools)
         bad = agent.call_tool("fs_write", path="src/main.py", content="x")
         self.assertFalse(bad.ok)
@@ -536,7 +536,7 @@ class SwarmCliTests(unittest.TestCase):
 class SpecBoundLegacyAgentTests(unittest.TestCase):
     """The pre-existing role agents enforce a bound RoleSpec.
 
-    One rule on every path: whether a call goes through SwarmAgent or
+    One rule on every path: whether a call goes through RoleAgent or
     straight through a legacy agent, the locked contract holds.
     """
 
@@ -602,9 +602,12 @@ class SpecBoundLegacyAgentTests(unittest.TestCase):
         self.assertEqual(rows[0][1], "role")
 
     def test_roles_package_reexports_spec_api(self):
-        from nomorals.agents import roles as roles_pkg
         import nomorals.agents.role_specs as rs
-        for name in ("RoleSpec", "RoleRegistry", "SwarmAgent",
+        from nomorals.agents import roles as roles_pkg
+        # RoleAgent is NOT re-exported: the roles package defines its own
+        # RoleAgent base class, so the name is taken there (see
+        # RoleAgentRenameTests.test_roles_package_role_agent_is_its_own_base_class).
+        for name in ("RoleSpec", "RoleRegistry",
                      "default_registry"):
             self.assertIs(getattr(roles_pkg, name), getattr(rs, name), name)
 
@@ -624,6 +627,56 @@ class SpecBoundLegacyAgentTests(unittest.TestCase):
                     self.assertTrue(
                         grant.grants(cap),
                         f"{name}: allowlisted {tool} (cap {cap}) not granted")
+
+
+class RoleAgentRenameTests(unittest.TestCase):
+    """The role-bound agent is RoleAgent, not SwarmAgent (E-7 follow-up).
+
+    role_specs.py's SwarmAgent was a single role-bound agent, not a swarm;
+    the name collided with the swarm orchestrator in swarm.py. The rename
+    pins: RoleAgent lives in role_specs, every importer resolves it, the
+    orchestrator keeps the SwarmAgent name, and the roles package keeps its
+    own RoleAgent base class (a different class, same name, different
+    module — the re-export is dropped, not shadowed).
+    """
+
+    def test_role_agent_importable_from_role_specs(self):
+        from nomorals.agents.role_specs import RoleAgent
+        self.assertEqual(RoleAgent.__module__, "nomorals.agents.role_specs")
+
+    def test_role_agent_is_the_single_role_bound_agent(self):
+        from nomorals.agents.role_specs import RoleAgent
+        ctx = _context()
+        agent = RoleAgent(ctx, default_registry().resolve("critic"),
+                          registry=ctx.tools,
+                          worker=lambda payload, ag: {"done": True})
+        self.assertEqual(agent.spec.name, "critic")
+        self.assertEqual(RoleAgent.LEGACY_DELEGATION["coder"], "coding")
+        result = agent.run({"goal": "x"})
+        self.assertTrue(result.ok)
+        # _check_contract annotates the worker output with the missing
+        # contract keys; the worker's own payload still lands intact.
+        self.assertTrue(result.output["done"])
+        self.assertIn("_contract_missing", result.output)
+
+    def test_fanout_and_orchestrator_resolve_role_agent(self):
+        from nomorals.agents import fanout, orchestrator
+        from nomorals.agents.role_specs import RoleAgent
+        self.assertIs(fanout.RoleAgent, RoleAgent)
+        self.assertIs(orchestrator.RoleAgent, RoleAgent)
+
+    def test_swarm_orchestrator_keeps_the_swarm_agent_name(self):
+        from nomorals.agents.swarm import SwarmAgent
+        self.assertTrue(callable(getattr(SwarmAgent, "save_state", None)))
+        self.assertTrue(callable(getattr(SwarmAgent, "resume", None)))
+        self.assertTrue(callable(getattr(SwarmAgent, "decompose", None)))
+
+    def test_roles_package_role_agent_is_its_own_base_class(self):
+        import nomorals.agents.role_specs as rs
+        from nomorals.agents import roles as roles_pkg
+        from nomorals.agents.base import Agent
+        self.assertIsNot(roles_pkg.RoleAgent, rs.RoleAgent)
+        self.assertTrue(issubclass(roles_pkg.RoleAgent, Agent))
 
 
 if __name__ == "__main__":

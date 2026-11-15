@@ -171,9 +171,9 @@ class RegistryRenameTests(unittest.TestCase):
         self.assertIn("coding", known_step_roles())
 
     def test_swarm_coder_delegation_lands_on_the_bridge(self):
-        from nomorals.agents.role_specs import SwarmAgent
+        from nomorals.agents.role_specs import RoleAgent
 
-        legacy = SwarmAgent.LEGACY_DELEGATION["coder"]
+        legacy = RoleAgent.LEGACY_DELEGATION["coder"]
         self.assertIs(roles.ROLES[legacy], MissionCodingAgent)
 
 

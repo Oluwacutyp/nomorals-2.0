@@ -30,7 +30,7 @@ from ..core.ids import new_id
 from ..core.logging_setup import get_logger
 from .base import Budget
 from .blackboard import Blackboard
-from .role_specs import RoleRegistry, SwarmAgent, default_registry
+from .role_specs import RoleAgent, RoleRegistry, default_registry
 
 __all__ = [
     "fan_out", "fan_in", "map_reduce",
@@ -150,7 +150,7 @@ def fan_out(
     angles: list[str],
     *,
     role: str = "researcher",
-    worker_fn: Callable[[str, SwarmAgent], Any] | None = None,
+    worker_fn: Callable[[str, RoleAgent], Any] | None = None,
     blackboard: Blackboard | None = None,
     registry: RoleRegistry | None = None,
     budget: Budget | None = None,
@@ -177,7 +177,7 @@ def fan_out(
 
     def _one(index: int, angle: str) -> None:
         spec = reg.resolve(role)
-        agent = SwarmAgent(
+        agent = RoleAgent(
             context, spec,
             budget=parent_budget.child_budget(fraction=fraction),
             worker=(lambda payload, ag, _a=angle: worker_fn(_a, ag))

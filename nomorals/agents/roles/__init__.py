@@ -24,12 +24,15 @@ from ...core.tasks import Task
 from ...core.policy import Capability
 from ...search.adaptive import adaptive_result_limit
 # Prompt 02: the role specs live in ..role_specs (this name is a package, so
-# the spec module could not be called roles.py); re-exported here so the
-# whole swarm API is importable from nomorals.agents.roles.
+# the spec module could not be called roles.py). Most of the spec API is
+# re-exported here so the whole swarm API is importable from
+# nomorals.agents.roles — EXCEPT the role-bound agent itself: role_specs
+# calls it RoleAgent, and this package already defines its own RoleAgent
+# base class below, so re-exporting it under that name would be shadowed by
+# the class definition. Import it from nomorals.agents.role_specs instead.
 from ..role_specs import (
     RoleRegistry,
     RoleSpec,
-    SwarmAgent,
     check_spec_call,
     default_registry,
     record_tool_denial,
