@@ -13,10 +13,14 @@ Auth schemes (set on the trigger's condition): ``plain`` compares the
 shared ``secret``; ``github`` verifies ``signature`` as
 ``sha256=<hmac_sha256(body)>``; ``stripe`` verifies ``signature`` as
 ``t=<ts>,v1=<hmac_sha256(ts + "." + body)>`` with a timestamp tolerance
-(default 300s, ``tolerance_s``).  The server route only sees the parsed
-body, so HMAC is computed over the canonical re-encoding of
-``payload`` — for raw-byte verification, call
-``TriggerEngine.fire_webhook(..., raw_body=<bytes>)`` directly.
+(default 300s, ``tolerance_s``).  For the HMAC schemes the HMAC is
+computed over the **raw request body bytes** exactly as received over
+HTTP — the bytes the sender signed.  A signature therefore cannot
+travel inside the body it signs (it would have to sign itself); send it
+outside the signed bytes, in the query string (``?signature=...``).
+Direct engine calls without raw bytes (``fire_webhook`` with no
+``raw_body``) fall back to the canonical re-encoding of ``payload`` —
+that is the in-process contract pass #51 pins, and it is unchanged.
 
 Response contract (pass #51 — external senders read the HTTP status,
 not our JSON, so a rejection answered 200 was a silent failure for
@@ -51,7 +55,8 @@ def register_trigger_routes(server: Any, context: Any) -> Any:
 
     @server.route("POST", WEBHOOK_PATH)
     def trigger_webhook(body: dict[str, Any],
-                        query: dict[str, str]) -> dict[str, Any]:
+                        query: dict[str, str],
+                        raw_body: bytes = b"") -> dict[str, Any]:
         from ..core.errors import CapabilityDenied, NoMoralsError
         from .engine import TriggerEngine
         from .models import (
@@ -73,6 +78,7 @@ def register_trigger_routes(server: Any, context: Any) -> Any:
                 timestamp=data.get("timestamp") or query.get("timestamp"),
                 event_id=str(data.get("event_id") or "")
                 or str(query.get("event_id") or ""),
+                raw_body=raw_body,
             )
         except WebhookAuthError as exc:
             # Non-2xx: the sender must see this delivery as FAILED.

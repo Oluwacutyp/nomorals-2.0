@@ -64,6 +64,7 @@ Cross-cutting HTTP behavior
 from __future__ import annotations
 
 import hmac
+import inspect
 import json
 import math
 import os
@@ -438,6 +439,11 @@ class APIServer:
         self.cors_origins = list(cors_origins) if cors_origins else None
         self._tls = threading.local()
         self._routes: dict[tuple[str, str], Callable[..., Any]] = {}
+        # (method, path) keys whose handler declares a ``raw_body`` keyword
+        # and therefore receives the raw request bytes (see ``route``):
+        # HMAC verification must run over the exact bytes the sender
+        # signed, never a re-encoding of the parsed JSON.
+        self._routes_raw_body: dict[tuple[str, str], bool] = {}
         # (method, path) -> human description, surfaced by GET /docs.
         self._route_docs: dict[tuple[str, str], str] = {}
         # (method, path) keys that skip bearer auth entirely — tokenless
@@ -507,9 +513,15 @@ class APIServer:
         body: dict[str, Any],
         query: dict[str, str],
         principal: Principal | None = None,
+        raw_body: bytes = b"",
     ) -> tuple[int, Any]:
         """Route a request. ``principal`` defaults to the bounded default
-        principal, so direct callers get the safe grant, never ``all()``."""
+        principal, so direct callers get the safe grant, never ``all()``.
+        ``raw_body`` is the exact request bytes as received (``b""`` for
+        direct callers that never saw the wire); routes whose handler
+        declares a ``raw_body`` keyword receive it, so HMAC verification
+        can run over the bytes the sender signed instead of a re-encoding
+        of the parsed JSON."""
         handler = self._routes.get((method.upper(), path))
         if handler is None:
             # A known path under a different method is 405, not 404 — the
@@ -526,6 +538,8 @@ class APIServer:
         self._tls.principal = principal if principal is not None else self.default_principal
         try:
             try:
+                if self._routes_raw_body.get((method.upper(), path)):
+                    return 200, handler(body, query, raw_body=raw_body)
                 return 200, handler(body, query)
             except CapabilityDenied as exc:
                 return 403, {"error": str(exc) or "capability denied",
@@ -550,6 +564,15 @@ class APIServer:
         def decorator(fn: Callable[..., Any]) -> Callable[..., Any]:
             key = (method.upper(), path)
             self._routes[key] = fn
+            # A handler that declares a ``raw_body`` keyword opts into
+            # receiving the raw request bytes at dispatch time (HMAC
+            # verification must run over the bytes the sender signed).
+            # Every other handler keeps the (body, query) call shape.
+            try:
+                params = inspect.signature(fn).parameters
+                self._routes_raw_body[key] = "raw_body" in params
+            except (TypeError, ValueError):
+                self._routes_raw_body[key] = False
             # An explicit description wins; otherwise fall back to the
             # handler's name so /docs never shows a blank line.
             self._route_docs[key] = description or fn.__name__
@@ -1533,11 +1556,17 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                               principal=principal)
                 return
             body: dict[str, Any] = {}
+            raw_body: bytes = b""
             if method != "GET":
                 data, error, status = self._read_body()
                 if error is not None:
                     self._send_error(status, error)
                     return
+                # Keep the exact bytes the sender sent: HMAC verification
+                # must run over them, never over a re-encoding of the
+                # parsed JSON (chunked framing is transport, not content —
+                # _read_body already returns the de-chunked content bytes).
+                raw_body = data or b""
                 if data:
                     try:
                         parsed_body = json.loads(data.decode("utf-8"))
@@ -1571,7 +1600,8 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                     body = parsed_body
             query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
             status, payload = server.dispatch(
-                method, parsed.path, body, query, principal=principal
+                method, parsed.path, body, query, principal=principal,
+                raw_body=raw_body,
             )
             if status >= 400:
                 payload, is_problem = self._wrap_dispatch_error(status, payload)

@@ -113,10 +113,11 @@ def verify_webhook_signature(secret: str, scheme: str, *,
     failure — missing signature, bad HMAC, or stale timestamp.  Uses
     :func:`hmac.compare_digest` (constant-time).
 
-    Note: the API server route passes the parsed JSON body re-encoded;
-    true raw-byte verification needs the raw request bytes — see
-    ``triggers.webhook``.  For Devon's own webhooks the sender and this
-    verifier must use the same canonical bytes.
+    Note: the API server route passes the raw request bytes it received
+    (``raw_body``), so the HMAC runs over the exact bytes the sender
+    signed.  Direct engine calls without ``raw_body`` fall back to the
+    canonical re-encoding of the payload — that is the in-process
+    contract pass #51 pins, and it is unchanged.
     """
     import time as _time
 
