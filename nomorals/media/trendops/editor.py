@@ -52,7 +52,7 @@ from ..edit_engine import render_report as render_spec_report
 from .formats import TrendFormat
 from .library import FormatLibrary
 
-__all__ = ["TrendOps"]
+__all__ = ["TrendOps", "draft_for_render"]
 
 _log = get_logger(__name__)
 
@@ -319,3 +319,64 @@ class TrendOps:
                    "notes": ("no temporal WatchVideo organ yet — frame QA "
                              "needs the director's full WatchVideo build")},
         }
+
+
+def draft_for_render(report: dict[str, Any], *, footage: list[str],
+                     music: str | None = None,
+                     caption: str | None = None) -> tuple[str, dict[str, Any]]:
+    """Build a post draft's (content, metadata) for a finished render.
+
+    Pure data shaping — no queue, no publish. The caller (the chat
+    layer) creates the draft through the drafts organ and proposes
+    it, so the owner is asked "post directly or send for review?"
+    through the existing drafts mechanism (the #43 rule), not
+    handed a bare file path.
+
+    ``report`` is the :meth:`TrendOps.apply_format` run report.
+    ``footage`` is the footage the cut was made from — the ready
+    re-cut command is built from the real args, not a placeholder.
+    The content is the post text: the owner's caption when one was
+    given (the meme caption is the natural post text), else a
+    description of the cut. The metadata carries the MP4 path, the
+    format, the render manifest (duration, canvas, beats, segments,
+    review) and the ready re-cut command — and the media entry the
+    drafts organ's publish path resolves (``{"path": ...}`` for a
+    file on disk, the shape
+    :func:`...social.drafts.execute_post` materializes before
+    posting).
+    """
+    import shlex
+
+    output = str(report.get("output") or "")
+    fmt_slug = str(report.get("format") or "")
+    fmt_name = str(report.get("format_name") or fmt_slug)
+    duration = float(report.get("duration") or 0.0)
+    width = int(report.get("width") or 0)
+    height = int(report.get("height") or 0)
+    beats_used = int(report.get("beats_used") or 0)
+    segments = int(report.get("segments") or 0)
+    cmd_parts = ["trendops", "apply", fmt_slug] + [str(p) for p in footage]
+    if music:
+        cmd_parts += ["--music", str(music)]
+    if caption:
+        cmd_parts += ["--caption", str(caption)]
+    apply_cmd = "/" + " ".join(shlex.quote(p) for p in cmd_parts)
+    content = (str(caption).strip() if caption else
+               f"🎬 {fmt_name} cut — {duration:.1f}s · {width}x{height} · "
+               f"{segments} segments · {beats_used} beats")
+    metadata: dict[str, Any] = {
+        "origin": "trendops",
+        "format": fmt_slug,
+        "format_name": fmt_name,
+        "output": output,
+        "apply": apply_cmd,
+        "duration": duration,
+        "width": width, "height": height,
+        "beats_used": beats_used,
+        "segments": segments,
+        "review": report.get("review") or {},
+        "media": [{"path": output,
+                   "name": Path(output).name or "trend-cut.mp4",
+                   "mime": "video/mp4"}],
+    }
+    return content, metadata

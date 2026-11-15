@@ -5739,7 +5739,7 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 - chat never raises
             return f"shorts failed: {exc}"
 
-    def _control_trendops(self, tail: str) -> str:
+    def _control_trendops(self, tail: str) -> Any:
         """Trend-driven video editing in chat.
 
         /trendops formats                                  — live trend formats
@@ -5823,12 +5823,42 @@ class RuntimeMediaMixin:
                 problems = review.get("problems") or []
                 note = (" (review flags: " + "; ".join(problems) + ")"
                         if problems else "")
-                return (f"🎬 cut to {result['format_name']} → "
-                        f"{result['output']}\n"
-                        f"{result['duration']:.1f}s · "
-                        f"{result['width']}x{result['height']} · "
-                        f"{result['segments']} segments · "
-                        f"{result['beats_used']} beats{note}")
+                render_line = (f"🎬 cut to {result['format_name']} → "
+                               f"{result['output']}\n"
+                               f"{result['duration']:.1f}s · "
+                               f"{result['width']}x{result['height']} · "
+                               f"{result['segments']} segments · "
+                               f"{result['beats_used']} beats{note}")
+                # The cut becomes a post draft: the owner is asked
+                # "post directly or send for review?" through the
+                # drafts organ (the #43 rule), not handed a bare
+                # path. A draft failure never loses the render —
+                # the file exists, so the plain reply is the
+                # fallback and the miss is named.
+                try:
+                    from ...media.trendops.editor import draft_for_render
+                    from ...social.drafts import propose_post
+
+                    content, metadata = draft_for_render(
+                        result, footage=footage, music=music or None,
+                        caption=caption or None)
+                    queue = self._draft_queue()
+                    try:
+                        draft = queue.create_draft(
+                            content, platforms=None, metadata=metadata)
+                        queue.propose(draft.id)
+                    finally:
+                        queue.close()
+                    text, buttons = propose_post(draft)
+                    from ...social.chat.tgbot_buttons import actionable, grid_layout
+
+                    return actionable(f"{render_line}\n\n{text}",
+                                      grid_layout([buttons]))
+                except Exception as exc:  # noqa: BLE001 - draft is delivery, not the render
+                    _log.warning("trendops: draft failed for %s: %s",
+                                 result.get("output"), exc)
+                    return (f"{render_line}\n"
+                            f"(couldn't queue the draft: {exc})")
             if action == "capture":
                 if not rest:
                     return ("usage: /trendops capture <url> "
