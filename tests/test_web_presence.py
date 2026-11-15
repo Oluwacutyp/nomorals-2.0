@@ -77,9 +77,13 @@ def test_bundle_writer_materialises_pages(tmp_path):
     written = site.write_bundle(out, surface,
                                 bot_username="devonbot")
     names = sorted(str(p.relative_to(out)) for p in written)
-    assert names[0] == "index.html"
+    assert "index.html" in names
     assert "rules/index.html" in names
-    assert len(names) == 4  # index + rules index + 2 group pages
+    # index + rules index + 2 rules pages + economy index + 2
+    # economy pages + standings index + 2 standings pages
+    assert len(names) == 10
+    assert "economy/index.html" in names
+    assert "standings/index.html" in names
     index_html = (out / "index.html").read_text(encoding="utf-8")
     assert "@devonbot" in index_html
 
@@ -355,8 +359,9 @@ def test_publish_both_sites_with_fake_transport(tmp_path):
         site_mod.wordpress_clients = original
     assert report["page"]["ok"] is True
     assert report["rules"]["ok"] is True
-    # rules site: index + one page per claimed group
-    assert len(report["rules"]["pages"]) == 3
+    # rules site: rules index + 2 rules pages + economy index +
+    # 2 economy pages + standings index + 2 standings pages
+    assert len(report["rules"]["pages"]) == 9
     auths = {c[2]["Authorization"] for c in calls if c[2]}
     assert "Basic " + base64.b64encode(b"u1:p1").decode() in auths
     assert "Basic " + base64.b64encode(b"u2:p2").decode() in auths

@@ -1,9 +1,11 @@
 """Devon's web presence (group build §12/§14 close-out): her own
-page, the per-group rules pages, and the two WordPress sites.
+page, the per-group rules pages, the per-group economy guides,
+and the per-group season standings — plus the two WordPress sites.
 
 The web is ANOTHER RUNG — it replaces nothing.  The same content
-lives in chat (/help, /rules); the pages exist so a member can
-open the full rules in a browser and so Devon has a front door.
+lives in chat (/help, /rules, /treasury, /top, /boards); the pages
+exist so a member can open the full guide or standings in a browser
+and so Devon has a front door.
 
 Three surfaces, one generator:
 
@@ -21,22 +23,38 @@ Three surfaces, one generator:
   resolver returns None and the server answers 404.  Rules are
   member-facing by design, so these paths are public like the
   API's liveness probe; they contain rules and titles only.
+- ``GET /economy`` + ``GET /economy/<slug>`` — one economy guide
+  per claimed group, rendered LIVE from the group economy state
+  (treasury, faucet rates, shop catalog — the same numbers
+  /treasury shows).  ``GET /standings`` + ``GET /standings/<slug>``
+  — one season standings page per claimed group, rendered from
+  the §14 leaderboard organ (the same rows /top and /boards
+  show) plus the season's top earners.  One slug per group,
+  shared by all its pages; the standings name display names and
+  usernames only — no numeric ids, no phone numbers, nothing
+  the group itself doesn't already show.
 - WordPress — when a site is configured (web settings:
   url + user + application password), the same bundles publish
   to it through the WP REST API (find-or-create by slug).  Two
-  sites: one carries her page, one carries the rules.  When a
-  site is NOT configured, publishing reports exactly that —
-  the local pages still generate and serve; nothing pretends
-  a publish happened.
+  sites: one carries her page, one carries the group pages
+  (rules, economy guides, standings).  When a site is NOT
+  configured, publishing reports exactly that — the local pages
+  still generate and serve; nothing pretends a publish happened.
+  The WordPress publish is find-or-create BY SLUG, so the
+  economy/standings pages carry a family suffix on that site
+  (``<slug>-economy``, ``<slug>-standings``) — the bare slug
+  would overwrite the group's rules page with the guide.
 
 The in-group rules card links here: the runtime appends the
 rules-page URL (a native URL button on Telegram's bot surface,
 a bare link where buttons don't exist) whenever a public base
-URL is configured.
+URL is configured.  /treasury and /top do the same for their
+pages.
 """
 from __future__ import annotations
 
 import base64
+import datetime
 import hashlib
 import html
 import json
@@ -52,6 +70,16 @@ PAGE_FOOTER = "Powered by peacethefirst"
 
 def _esc(value: Any) -> str:
     return html.escape(str(value if value is not None else ""))
+
+
+def _page_footer() -> str:
+    """The stamp every generated page carries: the §12
+    updated-at line (render-time UTC — the pages render live,
+    so the stamp is the moment they were read) + her signature."""
+    stamp = datetime.datetime.now(datetime.UTC).strftime(
+        "%Y-%m-%d %H:%M UTC")
+    return (f"<p><i>Updated {stamp} · "
+            f"{_esc(PAGE_FOOTER)}</i></p></body></html>")
 
 
 def slugify(text: str) -> str:
@@ -77,6 +105,14 @@ def group_slug(group_key: str, title: str = "") -> str:
 
 def rules_url(base_url: str, slug: str) -> str:
     return f"{str(base_url or '').rstrip('/')}/rules/{slug}"
+
+
+def economy_url(base_url: str, slug: str) -> str:
+    return f"{str(base_url or '').rstrip('/')}/economy/{slug}"
+
+
+def standings_url(base_url: str, slug: str) -> str:
+    return f"{str(base_url or '').rstrip('/')}/standings/{slug}"
 
 
 # ── the Devon page ──────────────────────────────────────────────────
@@ -141,7 +177,7 @@ def devon_page_html(*, bot_username: str = "",
         "<h2>Group rules pages</h2>"
         "<p>Every group Devon runs publishes its rules as a "
         "page: <a href='/rules'>/rules</a> lists them.</p>")
-    parts.append(f"<p><i>{_esc(PAGE_FOOTER)}</i></p></body></html>")
+    parts.append(_page_footer())
     return "".join(parts)
 
 
@@ -212,7 +248,7 @@ def rules_page_html(surface: Any, group_key: str, *,
         "<p>These are the live rules — the same settings the "
         "group's moderation enforces, rendered as they stand "
         "now.</p>")
-    parts.append(f"<p><i>{_esc(PAGE_FOOTER)}</i></p></body></html>")
+    parts.append(_page_footer())
     return "".join(parts)
 
 
@@ -235,7 +271,282 @@ def rules_index_html(surface: Any, *,
             f"<li><a href='/rules/{_esc(slug)}'>"
             f"{_esc(titles.get(key) or 'Group rules')}</a></li>"
             for slug, key in sorted(slugs.items())) + "</ul>")
-    parts.append(f"<p><i>{_esc(PAGE_FOOTER)}</i></p></body></html>")
+    parts.append(_page_footer())
+    return "".join(parts)
+
+
+def economy_slug_map(surface: Any, *,
+                     titles: dict[str, str] | None = None
+                     ) -> dict[str, str]:
+    """slug → group_key for the economy guides: the SAME slug
+    the group's rules page uses — one slug per group, shared by
+    all its pages (the local paths differ by family:
+    /rules/<slug>, /economy/<slug>, /standings/<slug>)."""
+    return rules_slug_map(surface, titles=titles)
+
+
+def standings_slug_map(surface: Any, *,
+                       titles: dict[str, str] | None = None
+                       ) -> dict[str, str]:
+    """slug → group_key for the standings pages: the same shared
+    slug as the rules and economy pages (see economy_slug_map)."""
+    return rules_slug_map(surface, titles=titles)
+
+
+# ── the economy guide ───────────────────────────────────────────────
+
+#: Human labels for the earn table — the table itself is data in
+#: the economy organ; these labels are the only presentation.
+_EARN_LABELS = {
+    "helpful_answer": "Helpful answer",
+    "event_host": "Hosting a group event",
+    "event_attend": "Showing up to an event",
+    "invite_joined": "Inviting someone who joins",
+    "streak_day": "One more day on a daily streak",
+    "trivia_win": "Winning party trivia",
+    "quest": "Finishing a quest",
+    "mining_claim": "Mining claim",
+}
+
+
+def economy_page_html(surface: Any, group_key: str, *,
+                      title: str = "") -> str:
+    """One group's economy guide as a real page — the same live
+    state /treasury and /tax read: treasury, faucet rates, the
+    shop catalog.  A read-only view: the page never writes the
+    ledger, it renders what the ledger holds right now."""
+    from ..community.group_economy import (
+        CURRENCY_DISCLAIMER,
+        DAILY_BASE,
+        DAILY_STREAK_CAP,
+        DAILY_STREAK_STEP,
+        EARN_CAPS,
+        EARN_TABLE,
+        MINING_BASE_RATE,
+        MINING_CLAIM_COOLDOWN_S,
+        MINING_DECAY,
+        QUESTS,
+        STATUS_SHOP,
+        current_season,
+    )
+
+    health = surface.economy_health(group_key)
+    policy = health.get("policy") or {}
+    reserved = surface.reserved_treasury(group_key)
+    name = title or "Group economy"
+    parts = [
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,"
+        "initial-scale=1'>"
+        f"<title>{_esc(name)} — economy guide</title></head><body>",
+        f"<h1>🪙 {_esc(name)}</h1>",
+        f"<p>Season {_esc(current_season())} · "
+        f"{_esc(CURRENCY_DISCLAIMER)}</p>",
+        "<h2>Treasury</h2><ul>",
+        f"<li>Treasury: {_esc(health['treasury'])} sparks</li>",
+    ]
+    if reserved:
+        parts.append(
+            f"<li>Reserved for open drops and escrow: "
+            f"{_esc(reserved)} sparks</li>")
+    parts.append(
+        f"<li>Circulating: {_esc(health['circulating'])} sparks</li>"
+        f"<li>Holders: {_esc(health['holders'])}</li>"
+        f"<li>Biggest holder: "
+        f"{_esc(int(health['top_share'] * 100))}%</li>"
+        f"<li>Active this week: {_esc(health['active_7d'])}</li>"
+        f"<li>Jackpot pot: {_esc(health.get('jackpot', 0))} "
+        f"sparks</li></ul>")
+    if policy.get("throttled"):
+        parts.append(
+            "<p>📉 <b>monetary policy: faucets throttled</b> — "
+            f"issuance ({_esc(policy['earned'])} sparks) is "
+            f"running hot against sinks "
+            f"({_esc(policy['sunk'])} sparks) this week, so "
+            "activity pays half until sinks catch up.</p>")
+    else:
+        parts.append(
+            "<p>📈 monetary policy: normal — "
+            f"{_esc(policy.get('earned', 0))} sparks issued vs "
+            f"{_esc(policy.get('sunk', 0))} sunk this week.</p>")
+    parts.append("<h2>How to earn</h2><ul>")
+    parts.append(
+        f"<li>Daily claim: {_esc(DAILY_BASE)} sparks, "
+        f"+{_esc(DAILY_STREAK_STEP)} per streak day (up to "
+        f"+{_esc(DAILY_STREAK_CAP)}) — once a day.</li>")
+    parts.append(
+        f"<li>Mining: first claim of the day pays "
+        f"{_esc(MINING_BASE_RATE)} sparks; each further claim "
+        f"that day pays less (×{_esc(MINING_DECAY)} each time, "
+        f"floor 1), {_esc(int(MINING_CLAIM_COOLDOWN_S))}s "
+        f"between claims.</li>")
+    for kind, amount in EARN_TABLE.items():
+        label = _EARN_LABELS.get(kind, kind)
+        if kind == "quest":
+            parts.append(
+                f"<li>{_esc(label)} — quests pay their own "
+                f"reward (below).</li>")
+        elif kind == "mining_claim":
+            parts.append(
+                f"<li>{_esc(label)} — pays the decaying claim "
+                f"rate (above).</li>")
+        else:
+            parts.append(
+                f"<li>{_esc(label)} — {_esc(amount)} sparks.</li>")
+    parts.append(
+        f"<li>Earn caps: {_esc(EARN_CAPS['daily'])} sparks/day · "
+        f"{_esc(EARN_CAPS['weekly'])} sparks/week.</li></ul>")
+    if QUESTS:
+        parts.append("<h2>Quests</h2><ul>" + "".join(
+            f"<li><b>{_esc(q.get('name') or qid)}</b> — "
+            f"{_esc(q.get('blurb') or '')} · "
+            f"{_esc(q.get('reward'))} sparks</li>"
+            for qid, q in sorted(QUESTS.items())) + "</ul>")
+    parts.append("<h2>Shop</h2><ul>" + "".join(
+        f"<li><b>{_esc(item.get('name') or item_id)}</b> — "
+        f"{_esc(item.get('cost'))} sparks · "
+        f"{_esc(item.get('blurb') or '')}</li>"
+        for item_id, item in sorted(STATUS_SHOP.items())) + "</ul>")
+    try:
+        shelf = surface.estate_catalog(group_key)
+    except Exception:  # noqa: BLE001 - a broken estate store
+        shelf = []             # hides the shelf, never the guide
+    if shelf:
+        rows = []
+        for row in shelf:
+            tiers = row.get("tiers") or {}
+            priced = ", ".join(
+                f"{_esc(tier)}: {_esc(price)} sparks"
+                for tier, price in sorted(tiers.items()))
+            rows.append(
+                f"<li><b>{_esc(row.get('name') or row.get('district') or '')}</b>"
+                + (f" — {priced}" if priced else "") + "</li>")
+        parts.append("<h2>Property shelf</h2><ul>"
+                     + "".join(rows) + "</ul>")
+    parts.append(
+        "<p>This is the live economy — the same treasury, rates "
+        "and catalog the group's commands read, rendered as they "
+        "stand now.</p>")
+    parts.append(_page_footer())
+    return "".join(parts)
+
+
+def economy_index_html(surface: Any, *,
+                       titles: dict[str, str] | None = None) -> str:
+    slugs = economy_slug_map(surface, titles=titles)
+    titles = titles or {}
+    parts = [
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,"
+        "initial-scale=1'>"
+        "<title>Devon — group economies</title></head><body>",
+        "<h1>🪙 Group economies</h1>",
+    ]
+    if not slugs:
+        parts.append(
+            "<p>No group has published an economy guide yet.</p>")
+    else:
+        parts.append("<ul>" + "".join(
+            f"<li><a href='/economy/{_esc(slug)}'>"
+            f"{_esc(titles.get(key) or 'Group economy')}</a></li>"
+            for slug, key in sorted(slugs.items())) + "</ul>")
+    parts.append(_page_footer())
+    return "".join(parts)
+
+
+# ── the standings page ──────────────────────────────────────────────
+
+#: The §14 boards, in page order, with their headings.
+_STANDINGS_BOARDS = (
+    ("sparks", "Richest"),
+    ("gems", "Gems"),
+    ("messages", "Chattiest"),
+    ("contributions", "Contributions"),
+    ("gangs", "Gangs"),
+)
+
+
+def standings_page_html(surface: Any, group_key: str, *,
+                        title: str = "") -> str:
+    """One group's season standings as a real page — the §14
+    boards (the same rows /top and /boards show in chat) plus
+    the season's top earners.  Empty boards are omitted; a
+    group with no sparks yet says so plainly instead of
+    showing a fake row."""
+    from ..community.group_economy import current_season
+
+    season = current_season()
+    name = title or "Group standings"
+    parts = [
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,"
+        "initial-scale=1'>"
+        f"<title>{_esc(name)} — standings</title></head><body>",
+        f"<h1>🏆 {_esc(name)}</h1>",
+        f"<p>Season {_esc(season)}</p>",
+    ]
+    try:
+        champs = surface.economy.season_top(group_key, season,
+                                            limit=3)
+    except Exception:  # noqa: BLE001 - a broken ledger hides
+        champs = []             # the section, never the page
+    if champs:
+        medals = ["🥇", "🥈", "🥉"]
+        rows = "".join(
+            f"<li>{medals[i] if i < 3 else f'{i + 1}.'} "
+            f"{_esc(surface._member_label(group_key, uid))} — "
+            f"{_esc(amount)} sparks earned</li>"
+            for i, (uid, amount) in enumerate(champs))
+        parts.append(
+            f"<h2>Season {_esc(season)} — top earners</h2>"
+            f"<ol>{rows}</ol>")
+    medals = ["🥇", "🥈", "🥉"]
+    for metric, heading in _STANDINGS_BOARDS:
+        rows = surface._board_group_rows(group_key, metric, 10)
+        if not rows:
+            if metric == "sparks":
+                parts.append(
+                    "<p>no sparks held yet — /work and /mine "
+                    "start it.</p>")
+            continue
+        items = "".join(
+            f"<li>{medals[i] if i < 3 else f'{i + 1}.'} "
+            f"{_esc(row.get('label') or '')} — "
+            f"{_esc(row.get('value'))}"
+            + (f" <i>{_esc(row.get('sub'))}</i>"
+               if row.get("sub") else "")
+            + (f" <i>{_esc(row.get('note'))}</i>"
+               if row.get("note") else "")
+            + "</li>"
+            for i, row in enumerate(rows))
+        parts.append(f"<h2>{_esc(heading)}</h2><ol>{items}</ol>")
+    parts.append(
+        "<p>These are the live standings — the same boards the "
+        "group's commands show, rendered as they stand now.</p>")
+    parts.append(_page_footer())
+    return "".join(parts)
+
+
+def standings_index_html(surface: Any, *,
+                         titles: dict[str, str] | None = None) -> str:
+    slugs = standings_slug_map(surface, titles=titles)
+    titles = titles or {}
+    parts = [
+        "<!doctype html><html lang='en'><head><meta charset='utf-8'>"
+        "<meta name='viewport' content='width=device-width,"
+        "initial-scale=1'>"
+        "<title>Devon — group standings</title></head><body>",
+        "<h1>🏆 Group standings</h1>",
+    ]
+    if not slugs:
+        parts.append(
+            "<p>No group has published standings yet.</p>")
+    else:
+        parts.append("<ul>" + "".join(
+            f"<li><a href='/standings/{_esc(slug)}'>"
+            f"{_esc(titles.get(key) or 'Group standings')}</a></li>"
+            for slug, key in sorted(slugs.items())) + "</ul>")
+    parts.append(_page_footer())
     return "".join(parts)
 
 
@@ -247,10 +558,14 @@ def write_bundle(out_dir: str | Path, surface: Any, *,
                  ) -> list[Path]:
     """Materialise the whole presence as static files (for any
     static host, or as the WordPress publish payload source):
-    index.html (her page), rules/index.html, rules/<slug>.html.
+    index.html (her page), rules/index.html, rules/<slug>.html,
+    economy/index.html, economy/<slug>.html,
+    standings/index.html, standings/<slug>.html.
     Returns the files written."""
     out = Path(out_dir)
     (out / "rules").mkdir(parents=True, exist_ok=True)
+    (out / "economy").mkdir(parents=True, exist_ok=True)
+    (out / "standings").mkdir(parents=True, exist_ok=True)
     written: list[Path] = []
     index = out / "index.html"
     index.write_text(devon_page_html(bot_username=bot_username),
@@ -266,6 +581,30 @@ def write_bundle(out_dir: str | Path, surface: Any, *,
         page.write_text(
             rules_page_html(surface, key,
                             title=titles.get(key, "")),
+            encoding="utf-8")
+        written.append(page)
+    eindex = out / "economy" / "index.html"
+    eindex.write_text(economy_index_html(surface, titles=titles),
+                      encoding="utf-8")
+    written.append(eindex)
+    for slug, key in economy_slug_map(
+            surface, titles=titles).items():
+        page = out / "economy" / f"{slug}.html"
+        page.write_text(
+            economy_page_html(surface, key,
+                              title=titles.get(key, "")),
+            encoding="utf-8")
+        written.append(page)
+    sindex = out / "standings" / "index.html"
+    sindex.write_text(standings_index_html(surface, titles=titles),
+                      encoding="utf-8")
+    written.append(sindex)
+    for slug, key in standings_slug_map(
+            surface, titles=titles).items():
+        page = out / "standings" / f"{slug}.html"
+        page.write_text(
+            standings_page_html(surface, key,
+                                title=titles.get(key, "")),
             encoding="utf-8")
         written.append(page)
     return written
@@ -363,7 +702,8 @@ class WordPressClient:
 
 def wordpress_clients(web: Any) -> dict[str, WordPressClient]:
     """The two sites from web settings: ``page`` (her page) and
-    ``rules`` (the group-rules site)."""
+    ``rules`` (the community group-pages site — rules, economy
+    guides, standings)."""
     return {
         "page": WordPressClient(
             getattr(web, "wp_page_url", ""),
@@ -420,6 +760,41 @@ def publish_to_wordpress(web: Any, surface: Any, *,
                             title=titles.get(key, "")))
                     pages.append({"slug": slug,
                                   "link": got.get("link", "")})
+                # The economy guides and standings ride the same
+                # community site.  The publish is find-or-create
+                # BY SLUG, so each family carries its suffix —
+                # the bare slug would overwrite the group's rules
+                # page with the guide.
+                got = client.publish_page(
+                    "Group economies", "economy",
+                    economy_index_html(surface, titles=titles))
+                pages.append({"slug": "economy",
+                              "link": got.get("link", "")})
+                for slug, key in economy_slug_map(
+                        surface, titles=titles).items():
+                    got = client.publish_page(
+                        (titles.get(key) or "Group economy")
+                        + " — economy guide", f"{slug}-economy",
+                        economy_page_html(
+                            surface, key,
+                            title=titles.get(key, "")))
+                    pages.append({"slug": f"{slug}-economy",
+                                  "link": got.get("link", "")})
+                got = client.publish_page(
+                    "Group standings", "standings",
+                    standings_index_html(surface, titles=titles))
+                pages.append({"slug": "standings",
+                              "link": got.get("link", "")})
+                for slug, key in standings_slug_map(
+                        surface, titles=titles).items():
+                    got = client.publish_page(
+                        (titles.get(key) or "Group standings")
+                        + " — standings", f"{slug}-standings",
+                        standings_page_html(
+                            surface, key,
+                            title=titles.get(key, "")))
+                    pages.append({"slug": f"{slug}-standings",
+                                  "link": got.get("link", "")})
             report[name] = {"ok": True, "configured": True,
                             "pages": pages}
         except Exception as exc:  # noqa: BLE001 - the site's own
@@ -462,7 +837,8 @@ def _titles_for_context(context: Any,
 
 def render_site_path(context: Any, path: str) -> str | None:
     """Resolve one public site path to its HTML, or None (the
-    server answers 404).  Paths: /devon, /rules, /rules/<slug>."""
+    server answers 404).  Paths: /devon, /rules, /rules/<slug>,
+    /economy, /economy/<slug>, /standings, /standings/<slug>."""
     settings = getattr(context, "settings", None)
     web = getattr(settings, "web", None)
     if path == "/devon":
@@ -482,4 +858,30 @@ def render_site_path(context: Any, path: str) -> str | None:
             return None
         return rules_page_html(surface, key,
                                title=titles.get(key, ""))
+    if path == "/economy":
+        titles = _titles_for_context(
+            context, claimed_group_keys(surface))
+        return economy_index_html(surface, titles=titles)
+    if path.startswith("/economy/"):
+        slug = path[len("/economy/"):].strip("/")
+        titles = _titles_for_context(
+            context, claimed_group_keys(surface))
+        key = economy_slug_map(surface, titles=titles).get(slug)
+        if key is None:
+            return None
+        return economy_page_html(surface, key,
+                                 title=titles.get(key, ""))
+    if path == "/standings":
+        titles = _titles_for_context(
+            context, claimed_group_keys(surface))
+        return standings_index_html(surface, titles=titles)
+    if path.startswith("/standings/"):
+        slug = path[len("/standings/"):].strip("/")
+        titles = _titles_for_context(
+            context, claimed_group_keys(surface))
+        key = standings_slug_map(surface, titles=titles).get(slug)
+        if key is None:
+            return None
+        return standings_page_html(surface, key,
+                                   title=titles.get(key, ""))
     return None

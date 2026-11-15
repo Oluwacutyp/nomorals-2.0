@@ -2902,8 +2902,9 @@ class RuntimeGroupMixin:
             return None
         return message.chat.key
 
-    def _rules_page_url(self, key: str) -> str:
-        """The group's public rules-page URL, or "" when no
+    def _site_page_url(self, key: str, page: str) -> str:
+        """The group's public page URL for one page family
+        (``rules`` | ``economy`` | ``standings``), or "" when no
         public base URL is configured or the room isn't claimed
         (an unclaimed room publishes no page to link to)."""
         settings = getattr(getattr(self, "context", None),
@@ -2912,7 +2913,12 @@ class RuntimeGroupMixin:
         base = str(getattr(web, "base_url", "") or "").strip()
         if not base:
             return ""
-        from ...social.site import group_slug, rules_url
+        from ...social.site import (
+            economy_url,
+            group_slug,
+            rules_url,
+            standings_url,
+        )
 
         surface = self._group_surface()
         if key not in {k for k in list(surface.store.data)
@@ -2928,7 +2934,14 @@ class RuntimeGroupMixin:
                     title = str(row.get("title") or "")
         except Exception:  # noqa: BLE001 - the title only
             title = ""                    # pretties the slug
-        return rules_url(base, group_slug(key, title))
+        url_for = {"rules": rules_url, "economy": economy_url,
+                   "standings": standings_url}[page]
+        return url_for(base, group_slug(key, title))
+
+    def _rules_page_url(self, key: str) -> str:
+        """The group's public rules-page URL — see
+        _site_page_url."""
+        return self._site_page_url(key, "rules")
 
     def _control_rules(self, message):  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
@@ -13549,6 +13562,18 @@ class RuntimeGroupMixin:
                 for open_pid, proposal
                 in list(proposals.items())[:6]]
         card.note("triple 7️⃣ on /slots takes the jackpot pot")
+        url = self._site_page_url(key, "economy")
+        platform = str(getattr(message.chat, "platform", "") or "")
+        if url and platform == "telegram-bot":
+            # The bot surface carries buttons: the guide rides
+            # as a native URL button.  Everywhere else the bare
+            # link goes in the text (the rules card's pattern).
+            return self._card(
+                message, card,
+                [[("🪙 Economy guide", url)]]
+                + (treasury_buttons or []))
+        if url:
+            card.line(f"🪙 full economy guide: {url}")
         return self._card(message, card, treasury_buttons)
 
     def _control_drop(self, tail, message) -> str:  # type: ignore[no-untyped-def]
@@ -15951,6 +15976,16 @@ class RuntimeGroupMixin:
                           f"property)")
             stats.append((f"{mark} {who}", value, True))
         card.stats(stats)
+        url = self._site_page_url(key, "standings")
+        platform = str(getattr(message.chat, "platform", "") or "")
+        if url and platform == "telegram-bot":
+            # The bot surface carries buttons: the standings ride
+            # as a native URL button.  Everywhere else the bare
+            # link goes in the text (the rules card's pattern).
+            return self._card(
+                message, card, [[("🏆 Standings page", url)]])
+        if url:
+            card.line(f"🏆 full standings page: {url}")
         return self._card(message, card)
 
     def _control_tax(self, message) -> str:  # type: ignore[no-untyped-def]

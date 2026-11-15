@@ -1321,6 +1321,14 @@ class APIServer:
         self._route_docs[("GET", "/rules")] = (
             "Index of the claimed groups' public rules pages (/rules/<slug>)"
         )
+        self._route_docs[("GET", "/economy")] = (
+            "Index of the claimed groups' public economy guides "
+            "(/economy/<slug>)"
+        )
+        self._route_docs[("GET", "/standings")] = (
+            "Index of the claimed groups' public season standings "
+            "(/standings/<slug>)"
+        )
 
 
 def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
@@ -1508,16 +1516,19 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                 self._send_error(400, "malformed path")
                 return
             if method == "GET" and (
-                    parsed.path in ("/devon", "/rules")
-                    or parsed.path.startswith("/rules/")):
+                    parsed.path in ("/devon", "/rules", "/economy",
+                                   "/standings")
+                    or parsed.path.startswith(
+                        ("/rules/", "/economy/", "/standings/"))):
                 # Devon's public web presence (social/site.py):
-                # her page + the claimed groups' rules pages.
+                # her page + the claimed groups' rules, economy
+                # and standings pages.
                 # Public like the liveness probe — the content
-                # is member-facing by design (rules and titles,
-                # no ids in slugs, nothing else), so these paths
-                # skip bearer auth entirely and never enter the
-                # JSON dispatch (HTML cannot ride it — the /pair
-                # precedent).
+                # is member-facing by design (rules, treasury
+                # state, standings and titles, no ids in slugs,
+                # nothing else), so these paths skip bearer auth
+                # entirely and never enter the JSON dispatch
+                # (HTML cannot ride it — the /pair precedent).
                 from ..social.site import render_site_path
 
                 try:
