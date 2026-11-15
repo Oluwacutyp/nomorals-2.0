@@ -1157,7 +1157,16 @@ class RuntimeSystemMixin:
             name = f"{art.type}-{art.id}"
         name = re.sub(r"[^A-Za-z0-9._-]+", "_", name).strip("._") or art.id
         if "." not in name:
-            name += mimetypes.guess_extension(art.mime or "") or ".bin"
+            # No invented `.bin` for an unknown mime: the name stays
+            # extensionless here and the send branch gives the
+            # materialized file its real extension from the bytes.
+            # (mimetypes maps application/octet-stream to `.bin`
+            # itself, which is how nameless octet-stream artifacts
+            # used to arrive as binaries — so a `.bin` guess is
+            # dropped just like no guess at all.)
+            ext = mimetypes.guess_extension(art.mime or "") or ""
+            if ext != ".bin":
+                name += ext
         db = getattr(self.context, "db", None)
         db_path = getattr(db, "path", None)
         base = Path(db_path).parent if db_path else Path("data")
@@ -1430,6 +1439,20 @@ class RuntimeSystemMixin:
                     "the stored original is unchanged.")
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(data)
+            if not fmt_raw:
+                # The export name carries its real format: an
+                # artifact with no mime (or octet-stream) lands
+                # extensionless above, and the bytes name it now —
+                # sniff-only, never a guessed label. A converted
+                # send already carries its format's extension.
+                from pathlib import Path
+
+                from ...media.platforms import ensure_media_extension
+
+                fixed = ensure_media_extension(
+                    str(path), allow_kind_fallback=False)
+                if fixed != str(path):
+                    path = Path(fixed)
             chat = self._ref_from_key(chat_key)
             transfer = self._begin_artifact_transfer(
                 art, kind="send", chat=chat)

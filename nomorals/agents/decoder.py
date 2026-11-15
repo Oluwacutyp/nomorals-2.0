@@ -38,7 +38,8 @@ import time
 from typing import Any
 
 from ..llm.brain import brain_for
-from ..core.decoder import (DECODERS, StagedOutput, analyze, analyze_path,
+from ..core.decoder import (DECODERS, MAGIC_EXTENSIONS, StagedOutput,
+                            analyze, analyze_path,
                             decompression_run, identify_hash,
                             known_hash_lookup, quarantine_budget_bytes)
 from ..core.errors import ToolError
@@ -49,15 +50,10 @@ __all__ = ["DecoderAgent", "register"]
 
 _log = logging.getLogger(__name__)
 
-_MAGIC_EXT = {
-    "png": ".png", "jpeg": ".jpg", "gif": ".gif", "pdf": ".pdf",
-    "gzip": ".gz", "zip": ".zip", "elf": ".elf", "mp3": ".mp3",
-    "mp3-id3": ".mp3", "riff/wav": ".wav", "ogg": ".ogg", "flac": ".flac",
-    "webp": ".webp", "bmp": ".bmp", "ole2/doc": ".doc", "sqlite": ".sqlite",
-    "bzip2": ".bz2", "xz": ".xz", "7zip": ".7z", "zlib": ".zlib",
-    "zstd": ".zst", "pe/dos-executable": ".bin", "script-shebang": ".sh",
-    "webm/mkv": ".webm",
-}
+#: Magic label → extension, from the core sniffer's one source of
+#: truth (``nomorals.core.decoder.MAGIC_EXTENSIONS``) — a format the
+#: sniffer can see never quarantines as ``.bin``.
+_MAGIC_EXT = MAGIC_EXTENSIONS
 
 
 def _artifact_store_for(context: Any) -> Any | None:

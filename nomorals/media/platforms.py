@@ -71,6 +71,8 @@ __all__ = [
     "probe_info",
     "tiktok_format_facts",
     "verify_download",
+    "sniff_media_ext",
+    "ensure_media_extension",
     "TIKTOK_CLEAN_FORMAT_SPEC",
 ]
 
@@ -627,3 +629,77 @@ def file_size(path: str) -> int:
     except Exception as exc:  # noqa: BLE001
         record_failure("platforms.file_size", exc)
         return 0
+
+
+def sniff_media_ext(path: str | Path) -> str:
+    """The extension a file's ACTUAL bytes are, from magic.
+
+    Reads a small head sample and asks the core sniffer
+    (:func:`nomorals.core.decoder.identify_magic`) — the same
+    sniffer the decoder agent uses, so the two never disagree about
+    a format.  "" when the bytes match nothing known (an unknown
+    binary is unknown, not a guessed format).  Never raises.
+    """
+    try:
+        with open(str(path or ""), "rb") as fh:
+            head = fh.read(512)
+    except Exception as exc:  # noqa: BLE001 — unreadable = unknown
+        record_failure("platforms.sniff_media_ext.read", exc)
+        return ""
+    try:
+        from ..core.decoder import extension_for_magic, identify_magic
+
+        return extension_for_magic(identify_magic(head))
+    except Exception as exc:  # noqa: BLE001 — sniff failure: unknown
+        record_failure("platforms.sniff_media_ext", exc)
+        return ""
+
+
+def ensure_media_extension(path: str | Path, *,
+                           audio_only: bool = False,
+                           allow_kind_fallback: bool = True) -> str:
+    """Give a landed file its real extension.  Returns the path to send.
+
+    A file whose name already carries a real extension is returned
+    untouched — only ``.bin`` and extensionless names are repaired,
+    because only those are a claim the bytes contradict (or no claim
+    at all).  Evidence order: magic sniff of the bytes, then — only
+    when the caller KNOWS the file is media (a download) — the kind
+    fallback (video → ``.mp4``, audio → ``.mp3``).  With
+    ``allow_kind_fallback=False`` (a send seam handed a file from
+    outside the downloader) an unidentifiable file is returned
+    unchanged: a lying label is worse than an honest ``.bin``.
+    The rename is in place (same directory); a colliding target
+    gains a numeric suffix.  Never raises.
+    """
+    p = Path(str(path or ""))
+    try:
+        if not p.is_file():
+            return str(path)
+        suffix = p.suffix.lower()
+        if suffix not in ("", ".bin"):
+            return str(path)
+        ext = sniff_media_ext(p)
+        if not ext and allow_kind_fallback:
+            ext = ".mp3" if audio_only else ".mp4"
+        if not ext or ext == suffix:
+            return str(path)
+        target = p.with_suffix(ext)
+        if target == p:
+            return str(path)
+        if target.exists():
+            stem = p.stem
+            for n in range(2, 100):
+                cand = p.with_name(f"{stem}-{n}{ext}")
+                if not cand.exists():
+                    target = cand
+                    break
+            else:
+                return str(path)
+        p.rename(target)
+        _log.info("media file renamed to its real format: %s → %s",
+                  p.name, target.name)
+        return str(target)
+    except Exception as exc:  # noqa: BLE001 — repair never breaks a send
+        record_failure("platforms.ensure_media_extension", exc)
+        return str(path)

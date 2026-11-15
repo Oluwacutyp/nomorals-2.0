@@ -1182,11 +1182,31 @@ class MediaDownloader:
 
     def _succeed(self, report: DownloadReport,
                  started: float,
-                 format_facts: dict[str, str] | None = None) -> DownloadReport:
+                 format_facts: dict[str, str] | None = None,
+                 audio_only: bool = False) -> DownloadReport:
         """Record a landed download in the kit's integrity ledger,
         teach the registry the rule that worked (Pass #87), then
         finish.  Bookkeeping is best-effort — a ledger failure never
-        turns a real download into a reported failure."""
+        turns a real download into a reported failure.
+
+        The landed file is given its real extension FIRST — before
+        the ledger hashes it, before the artifact registration, and
+        before the archive unpack — so every record of the download
+        names the file the user will actually receive, never a
+        ``.bin`` placeholder."""
+        if report.ok and report.path:
+            try:
+                from .platforms import ensure_media_extension
+
+                fixed = ensure_media_extension(
+                    report.path, audio_only=audio_only)
+                if fixed != report.path:
+                    _log.info("download landed as %s, renamed to its "
+                              "real format: %s", report.path, fixed)
+                    report.path = fixed
+            except Exception as e:  # noqa: BLE001 — repair never
+                # turns a real download into a failure
+                record_failure("download._succeed.rename", e)
         tracker = self._tracker()
         if tracker is not None:
             from ..core.progress_events import VERIFYING
@@ -1498,7 +1518,8 @@ class MediaDownloader:
                             target_dir, audio_only, format_spec,
                             timeout, budget, page_url):
                         return self._succeed(report, started,
-                                             format_facts)
+                                             format_facts,
+                                             audio_only=audio_only)
                     self._note_rule_failure(learned_desc)
                     rule_failure_recorded = True
                     skip_stages.add(learned_rule.stage)
@@ -1515,7 +1536,8 @@ class MediaDownloader:
                         stage_name, report, work_url, target_dir,
                         audio_only, format_spec, timeout, budget,
                         page_url):
-                    return self._succeed(report, started, format_facts)
+                    return self._succeed(report, started, format_facts,
+                                         audio_only=audio_only)
         except Exception as exc:  # noqa: BLE001 — the chain never raises
             _log.warning("downloader crashed mid-chain on %s: %s",
                          url, exc)
@@ -3115,13 +3137,24 @@ def _sha256_of(path: Path) -> str:
 
 
 def _safe_name(url: str, audio_only: bool) -> str:
-    """Filesystem-safe filename for a browser-stage download."""
+    """Filesystem-safe filename for a browser-stage download.
+
+    The URL's own extension is kept when it has one.  When it has
+    none, the name stays EXTENSIONLESS — the landing normalizer
+    (:meth:`MediaDownloader._succeed`) gives the landed file its
+    real extension from the bytes, and it owns the audio/video kind
+    fallback, so ``audio_only`` no longer decides a suffix here.
+    No invented suffix is ever appended: the old ``.bin`` fallback
+    for video named every extensionless CDN download (TikTok
+    included) a binary, and that name rode all the way to the
+    user's phone.  A trailing ``.bin`` from :func:`url_filename`'s
+    own default is stripped for the same reason."""
     from ..core.http import url_filename
     name = url_filename(url)
     name = re.sub(r"[^A-Za-z0-9._ -]+", "_", name).strip(" .")[:120]
-    if not name or "." not in name:
-        name = (name or "media") + (".mp3" if audio_only else ".bin")
-    return name or "media.bin"
+    if name.lower().endswith(".bin"):
+        name = name[:-4].rstrip(".")
+    return name or "media"
 
 
 # ── rendered capture: network-log evidence (B3) ─────────────────────

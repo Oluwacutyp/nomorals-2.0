@@ -82,6 +82,8 @@ __all__ = [
     "identify_hash",
     "known_hash_lookup",
     "identify_magic",
+    "MAGIC_EXTENSIONS",
+    "extension_for_magic",
     "min_free_disk_bytes",
     "owner_ceiling_bytes",
     "quarantine_budget_bytes",
@@ -231,17 +233,64 @@ _MAGIC = (
     (b"7z\xbc\xaf\x27\x1c", "7zip"),
     (b"\x78\x9c", "zlib"),
     (b"\x28\xb5\x2f\xfd", "zstd"),
+    (b"\x1a\x45\xdf\xa3", "webm/mkv"),
     (b"MZ", "pe/dos-executable"),
     (b"#!/", "script-shebang"),
 )
+
+#: Magic label → file extension. The one source of truth for what a
+#: sniffed format IS on disk: the decoder agent's quarantine names,
+#: the media send path and the download chain all read it here, so a
+#: format the sniffer can see never lands as ``.bin`` anywhere.
+#: "pe/dos-executable" keeps ``.bin`` deliberately — an unidentified
+#: executable has no better honest name.
+MAGIC_EXTENSIONS: dict[str, str] = {
+    "png": ".png", "jpeg": ".jpg", "gif": ".gif", "pdf": ".pdf",
+    "gzip": ".gz", "zip": ".zip", "elf": ".elf", "mp3": ".mp3",
+    "mp3-id3": ".mp3", "riff/wav": ".wav", "riff/avi": ".avi",
+    "ogg": ".ogg", "flac": ".flac", "webp": ".webp", "bmp": ".bmp",
+    "ole2/doc": ".doc", "sqlite": ".sqlite", "bzip2": ".bz2",
+    "xz": ".xz", "7zip": ".7z", "zlib": ".zlib", "zstd": ".zst",
+    "pe/dos-executable": ".bin", "script-shebang": ".sh",
+    "webm/mkv": ".webm", "mp4": ".mp4", "m4a": ".m4a", "mov": ".mov",
+    "mpegts": ".ts",
+}
+
+
+def extension_for_magic(magic: str) -> str:
+    """The file extension for an :func:`identify_magic` label.
+
+    "" when the label names no known format — the caller must not
+    invent an extension from nothing."""
+    return MAGIC_EXTENSIONS.get(magic or "", "")
 
 
 def identify_magic(data: bytes) -> str:
     if not data:
         return ""
+    # RIFF is a container: WAV and AVI share the header; the form
+    # type at offset 8 tells them apart.
+    if data.startswith(b"RIFF") and len(data) >= 12 \
+            and data[8:12] == b"AVI ":
+        return "riff/avi"
     for sig, label in _MAGIC:
         if data.startswith(sig):
             return label
+    # ISO-BMFF containers (MP4 / MOV / M4A): the signature is not at
+    # offset 0 — a 4-byte box size, then "ftyp", then the brand.
+    # (This is why MP4 was invisible to the sniffer: nothing at
+    # offset 0 matches it.) The brand decides the family: M4A/M4B
+    # are audio, "qt  " is QuickTime, everything else ftyp is MP4.
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        brand = data[8:12]
+        if brand in (b"M4A ", b"M4B "):
+            return "m4a"
+        if brand == b"qt  ":
+            return "mov"
+        return "mp4"
+    # MPEG transport stream: 0x47 sync bytes 188 apart.
+    if len(data) >= 189 and data[0] == 0x47 and data[188] == 0x47:
+        return "mpegts"
     if len(data) >= 4:
         if struct.unpack(">I", data[:4])[0] in (
             0x00000020, 0x00000002, 0x00000003, 0x00000004, 0x00000006,

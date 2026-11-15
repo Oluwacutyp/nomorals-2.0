@@ -1495,7 +1495,18 @@ class RuntimeMediaMixin:
             return f"downloaded: {path}", False
         note = ""
         try:
+            from ...media.platforms import ensure_media_extension
             from ...social.chat.platform_limits import for_platform
+            # A file that reaches this seam named `.bin` (or with no
+            # extension at all) is repaired from its own bytes
+            # before it goes out — sniff-only, no guessing: the
+            # downloader already applied the kind fallback upstream,
+            # so an unidentifiable file here stays as it is rather
+            # than wearing a wrong label. The repair also fixes the
+            # delivery kind below: a video named `.bin` would ride
+            # as a document instead of a playable video.
+            path = ensure_media_extension(path,
+                                          allow_kind_fallback=False)
             cap_mb = for_platform(chat.platform).max_file_mb
             if cap_mb and size_bytes > cap_mb * 1024 * 1024:
                 note = (f"\n(it's {size_bytes // (1024 * 1024)}MB — over "
