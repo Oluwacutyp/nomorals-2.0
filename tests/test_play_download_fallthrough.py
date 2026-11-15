@@ -53,7 +53,11 @@ class _FakeGateway:
         return SimpleNamespace(ok=True, platform=platform,
                                message_id=f"m{self._n}")
 
-    def send_file(self, platform, target, path, caption=""):
+    # Must track the real gateway's send_file signature (gateway.py):
+    # the delivery-shape pass added kind=, and a fake that drops it
+    # turns every successful send into "had the file but couldn't
+    # send it" via the caller's except.
+    def send_file(self, platform, target, path, caption="", kind=None):
         self.files.append((platform, target, path, caption))
         return SimpleNamespace(ok=True, platform=platform,
                                message_id="f1")
