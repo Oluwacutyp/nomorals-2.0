@@ -15,11 +15,13 @@ Pins:
   caps scalar and dict lists with an explicit ``… (+N more)`` tail,
   and the default (0) keeps F2's whole-list behaviour;
 * end-to-end through the real Scheduler: a tool job publishes a Doc
-  (failures publish an error Doc naming the failure) while the stored
-  ``last_result`` keeps its legacy string form byte-for-byte — the
-  Pass #71/#75 contract (``startswith("finance_alert:")``,
-  ``"fired: 0" in last_result``, the ``"job failed"`` prefix) is
-  untouched; command jobs keep the legacy string publish.
+  (failures publish an error Doc naming the failure) — except a
+  no-op run, which journals only under the owner's 2026-11-05
+  scheduled-silence law — while the stored ``last_result`` keeps
+  its legacy string form byte-for-byte — the Pass #71/#75 contract
+  (``startswith("finance_alert:")``, ``"fired: 0" in last_result``,
+  the ``"job failed"`` prefix) is untouched; command jobs keep the
+  legacy string publish.
 """
 
 from __future__ import annotations
@@ -269,7 +271,18 @@ def _last_result(ctx, job_id):
     return row["last_result"] or ""
 
 
-def test_scheduler_publishes_doc_and_stores_legacy_string(tmp_path):
+def test_scheduler_silent_finance_run_journals_only_and_stores_legacy_string(tmp_path):
+    # The owner's 2026-11-05 Law 3 (scheduled silence, ae8b3ddb)
+    # consciously supersedes the F3-era pin
+    # ``test_scheduler_publishes_doc_and_stores_legacy_string``: the
+    # all-zero finance_alert check (checked: 0, fired: 0 — the
+    # screenshot case) no longer posts its report Doc; the run
+    # journals only.  The Doc itself is unchanged (see
+    # ``test_finance_alert_screenshot_becomes_a_report``) and the
+    # silence is pinned end to end in
+    # ``test_noop_scheduled_run_sends_nothing``.  What F3 actually
+    # protected is unchanged and still pinned here: the STORED
+    # last_result string stays byte-identical.
     tools = _Tools(_ok(dict(SCREENSHOT)))
     sched = _sched(tmp_path, tools)
     job = sched.add("finance alerts", "every 900s", "tool",
@@ -278,17 +291,10 @@ def test_scheduler_publishes_doc_and_stores_legacy_string(tmp_path):
                     routine=False)
     out = sched.run_now(job["id"])
     assert out["ok"] is True, out
-    # published: exactly one schedule alert, a Doc, the report content
+    assert out["silent"] is True, out
+    # silent: nothing publishes — the run journals, nothing posts
     calls = [c for c in sched.notifier.calls if c["kind"] == "schedule"]
-    assert len(calls) == 1, calls
-    call = calls[0]
-    assert call["title"] == "✅ scheduled: finance alerts"
-    doc = call["kw"].get("doc")
-    assert isinstance(doc, Doc), call
-    assert doc.summary == "No alerts checked — none fired."
-    assert call["kw"].get("output_kind") == "scheduled"
-    assert call["kw"].get("output_meta") == {"job": "finance alerts",
-                                              "ok": True}
+    assert calls == [], calls
     # stored: the legacy string form, byte-for-byte the old contract
     last = _last_result(sched.context, job["id"])
     assert last.startswith("finance_alert:"), last
