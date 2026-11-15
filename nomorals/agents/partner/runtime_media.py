@@ -5619,6 +5619,87 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 - chat never raises
             return f"imggen failed: {exc}"
 
+    def _control_poster(self, tail: str) -> str:
+        """A finished poster in one call: generated art + exact text.
+
+        /poster <art prompt> :: <title> [:: <line> ...]
+                [--ar 9:16] [--seed N] [--steps N]
+        The first text is the title (center, large); the rest join
+        into one footer block at the bottom. Any line may carry a
+        position prefix (top:TEXT, bottom:TEXT, ...). Flags may sit
+        anywhere in the tail.
+        """
+        ref = (tail or "").strip()
+        usage = ("poster — generated art + exact typography in one call:\n"
+                 "/poster <art prompt> :: <title> [:: <line> ...] "
+                 "[--ar 9:16] [--seed N] [--steps N]\n"
+                 "example: /poster a Lagos owambe at night :: OWAMBE "
+                 ":: Saturday 8 PM")
+        if not ref or "::" not in ref:
+            return usage
+        try:
+            import shlex
+
+            from ...media.upgrade.typography import POSITIONS
+
+            # Flags may sit in any segment; pull them out of each
+            # segment before the "::" split becomes prompt + texts.
+            cleaned: list[str] = []
+            call_kwargs: dict = {}
+            for part in [p.strip() for p in ref.split("::")]:
+                try:
+                    toks = shlex.split(part)
+                except ValueError:
+                    toks = part.split()
+                kept: list[str] = []
+                i = 0
+                while i < len(toks):
+                    t = toks[i]
+                    if t == "--seed" and i + 1 < len(toks):
+                        call_kwargs["seed"] = int(toks[i + 1])
+                        i += 2
+                    elif t == "--ar" and i + 1 < len(toks):
+                        call_kwargs["aspect"] = toks[i + 1]
+                        i += 2
+                    elif t == "--steps" and i + 1 < len(toks):
+                        call_kwargs["steps"] = int(toks[i + 1])
+                        i += 2
+                    else:
+                        kept.append(t)
+                        i += 1
+                cleaned.append(" ".join(kept).strip())
+            prompt = cleaned[0]
+            texts = [s for s in cleaned[1:] if s]
+            if not prompt or not texts:
+                return usage
+            layers: list[dict] = []
+            footer: list[str] = []
+            for j, seg in enumerate(texts):
+                pos = None
+                text = seg
+                if ":" in seg:
+                    maybe, rest = seg.split(":", 1)
+                    if maybe.strip().lower() in POSITIONS and rest.strip():
+                        pos, text = maybe.strip().lower(), rest.strip()
+                if j == 0:
+                    layers.append({"text": text,
+                                   "position": pos or "center",
+                                   "size": 96})
+                elif pos is not None:
+                    layers.append({"text": text, "position": pos,
+                                   "size": 48})
+                else:
+                    footer.append(text)
+            if footer:
+                layers.append({"text": "\n".join(footer),
+                               "position": "bottom", "size": 48})
+            from ...media.poster import make_poster
+
+            result = make_poster(prompt, layers, **call_kwargs)
+            return f"🖼️ poster: {prompt}\nsaved: {result['path']}"
+        except Exception as exc:  # noqa: BLE001 - chat never raises
+            return f"poster failed: {exc}"
+
     def _control_shorts(self, tail: str) -> str:
         """Devon's short-form content empire in chat.
 

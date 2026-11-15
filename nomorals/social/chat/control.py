@@ -866,6 +866,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
                              #   /mission new <research|build|fix> <args>
     "image": (1, None),      # /image <path-or-url> — lookup; <prompt> — generate
     "imggen": (0, None),     # /imggen <prompt> — Devon's own diffusion studio
+    "poster": (0, None),     # /poster <art prompt> :: <title> [:: <line> ...] — generated art + exact typography
     "shorts": (0, None),     # /shorts make|status|resume|niches|calendar|ledger|estimate
     "trendops": (0, None),   # /trendops formats|apply|capture|propose|remove
     "lens": (1, 3),          # /lens <path-or-url> — reverse image search
@@ -4155,6 +4156,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/imggen <prompt> [--seed N] [--ar 16:9] | /imggen upscale <path> | /imggen checkpoints | /imggen dashboard <run>",
               "example": "/imggen a danfo bus at sunset --ar 16:9",
               "related": "/image"},
+    "poster": {"what": "A finished poster in one call: generated art as the background with EXACT typography composited on top (the text is real PIL type, never model-generated lettering).",
+              "usage": "/poster <art prompt> :: <title> [:: <line> ...] [--ar 9:16] [--seed N] [--steps N]",
+              "example": "/poster a Lagos owambe at night :: OWAMBE :: Saturday 8 PM",
+              "related": "/imggen /image"},
     "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
@@ -4561,7 +4566,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
     ("media system", ["music", "distribute", "play", "video", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "sham", "musicnote",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
@@ -4826,7 +4831,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "trendops", "caption", "imggen", "sham", "musicnote",
+      "shorts", "trendops", "caption", "imggen", "poster", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5261,6 +5266,7 @@ LIST_ONELINERS: dict[str, str] = {
     "stt": "transcribe an audio file",
     "look": "screen-reader analysis of a screenshot (sees pixels)",
     "imggen": "Devon's own image studio: native diffusion, upscale, training",
+    "poster": "finished poster in one call: generated art + exact typography — /poster <art prompt> :: <title> [:: <line>]",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

@@ -167,6 +167,38 @@ def register(registry: Any) -> None:
         return {"paths": all_paths, "count": len(all_paths)}
 
     @registry.register(
+        "poster_generate",
+        description=("Make a finished poster in one call: generated art as "
+                     "the background with EXACT typography composited on "
+                     "top (Septorch-grade — the text is real PIL type, "
+                     "never model-generated lettering). prompt = the art "
+                     "prompt; texts = the text layers, each a string (a "
+                     "footer line) or an object with text + position "
+                     "(top|center|bottom|top-left|top-right|bottom-left|"
+                     "bottom-right) + size + color + stroke + box. "
+                     "aspect defaults to 9:16 (portrait poster). "
+                     "Returns the saved poster path."),
+        capability=Capability.FS_WRITE,
+    )
+    def poster_generate(prompt: str, texts, *, aspect: str = "9:16",
+                        seed: int = 0, steps: int = 0,
+                        style: str = "") -> dict[str, Any]:
+        """One-call poster: generated art + exact typography."""
+        from ..media.poster import make_poster
+        if not (prompt or "").strip():
+            raise ValueError("prompt is required")
+        if not texts:
+            raise ValueError("at least one text layer is required")
+        full_prompt = _apply_style_preset(prompt, style) if style else prompt
+        out = _out_dir(context, "images")
+        kwargs: dict[str, Any] = {"save_to": str(out)}
+        if seed:
+            kwargs["seed"] = seed
+        if steps:
+            kwargs["steps"] = steps
+        return make_poster(full_prompt, texts, aspect=aspect, **kwargs)
+
+    @registry.register(
         "video_generate",
         description=("Generate a short video clip from a text prompt "
                      "('a drone shot over Lagos at sunset'). "

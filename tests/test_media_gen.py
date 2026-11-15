@@ -15,7 +15,7 @@ def registry():
 def test_all_six_registered(registry):
     for name in ("image_generate", "image_variation", "image_inpaint",
                  "image_outpaint", "image_batch", "video_generate",
-                 "video_animate"):
+                 "video_animate", "poster_generate"):
         assert name in registry._tools, f"{name} not registered"
 
 
@@ -34,16 +34,16 @@ def test_unknown_style_falls_back_to_raw():
 def test_image_generate_rejects_empty_prompt(registry):
     tool = registry._tools["image_generate"]
     with pytest.raises(Exception):
-        tool.func("", save_to="/tmp")
+        tool.fn("", save_to="/tmp")
 
 
 def test_video_generate_rejects_empty_prompt(registry):
     tool = registry._tools["video_generate"]
     with pytest.raises(Exception):
-        tool.func("")
+        tool.fn("")
 
 
 def test_image_batch_rejects_empty_list(registry):
     tool = registry._tools["image_batch"]
     with pytest.raises(Exception):
-        tool.func([])
+        tool.fn([])
