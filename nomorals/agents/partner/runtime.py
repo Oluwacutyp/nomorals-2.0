@@ -8613,7 +8613,14 @@ class PartnerRuntime(
         if kind == "cgroup":
             # Community groups + events + meetups (#84) — not owner-gated
             # (shared surfaces). Anyone drives it.
+            # The default chat ref rebuilt from the chat key defaults to
+            # DM kind, so the branch rebinds from the message (miniapp
+            # does the same) — without it /cgroup schedule and /cgroup
+            # posts in a group met the "Scheduled posts belong to a
+            # group chat" refusal.
             from ...community.groups import control_cgroup
+            if message is not None:
+                chat = message.chat
             return control_cgroup(
                 command.tail or arg,
                 context=self.context,
@@ -8654,7 +8661,13 @@ class PartnerRuntime(
             # Rotating savings circles (AA-22) — not owner-gated
             # (shared surfaces, group-scoped). Anyone in the group
             # drives it.
+            # The default chat ref rebuilt from the chat key defaults to
+            # DM kind, so the branch rebinds from the message (miniapp
+            # does the same) — without it every /ajo in a group met
+            # control_ajo's "Ajo circles live in group chats" refusal.
             from ...community.ajo import control_ajo
+            if message is not None:
+                chat = message.chat
             return control_ajo(
                 command.tail or arg,
                 context=self.context,
