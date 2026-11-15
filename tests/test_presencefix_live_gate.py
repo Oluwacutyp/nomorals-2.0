@@ -351,8 +351,10 @@ def test_pair_list_warns_when_a_toggle_is_set_but_not_live(tmp_path):
     rig, sup, registry, rec = _pair_rig(tmp_path)
     try:
         out = rig._control_pair("")
-        assert "status_viewing" in out
-        assert "not live" in out  # set-on-but-dead must SAY so
+        # The summary carries toggle buttons, so it arrives as an
+        # ActionableMessage — the verdicts live in its text.
+        assert "status_viewing" in out.text
+        assert "not live" in out.text  # set-on-but-dead must SAY so
     finally:
         rig.gateway.stop()
 
@@ -365,6 +367,21 @@ def test_pair_toggle_reply_names_the_live_state(tmp_path):
             f"toggle {rec.id} status_viewing on")
         assert "status_viewing on" in out
         assert "not live" in out
+    finally:
+        rig.gateway.stop()
+
+
+def test_pair_toggle_short_code_flips_the_real_toggle(tmp_path):
+    # The /pair toggle buttons carry the two-letter code, not the
+    # full toggle name (the full payload does not fit Telegram's
+    # 47-byte callback budget) — the handler must expand the code
+    # and flip the same real toggle the full name would.
+    rig, sup, registry, rec = _pair_rig(tmp_path)
+    try:
+        registry.set_toggles(rec.id, status_viewing=True)
+        out = rig._control_pair(f"toggle {rec.id} sv off")
+        assert "status_viewing off" in out
+        assert registry.get(rec.id).toggle("status_viewing") is False
     finally:
         rig.gateway.stop()
 
@@ -384,8 +401,10 @@ def test_pair_list_shows_live_when_the_surface_is_up(bridge,
         assert wait_for(
             lambda: len(bridge.cmds("presence")) > 0)
         out = rig._control_pair("")
-        assert "not live" not in out
-        assert "live" in out
+        # The summary carries toggle buttons, so it arrives as an
+        # ActionableMessage — the verdicts live in its text.
+        assert "not live" not in out.text
+        assert "live" in out.text
     finally:
         rig.gateway.stop()
 

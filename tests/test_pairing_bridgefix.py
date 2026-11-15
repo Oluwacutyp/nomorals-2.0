@@ -202,8 +202,10 @@ def test_summary_row_carries_death_reason(tmp_path):
     rec = sup.pair_whatsapp("2348012345678")
     assert wait_for(lambda: registry.get(rec.id).status == "down")
     reply = bare_runtime(sup)._control_pair("", chat_key="owner")
-    assert "bridge exited" in reply
-    assert "Cannot find package" in reply
+    # The summary carries toggle buttons, so it arrives as an
+    # ActionableMessage — the death reason lives in its text.
+    assert "bridge exited" in reply.text
+    assert "Cannot find package" in reply.text
 
 
 # ── pairing refusals speak ─────────────────────────────────────────

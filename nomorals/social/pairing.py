@@ -529,6 +529,28 @@ PERSONAL_TOGGLES = ("status_saving", "view_once", "antidelete",
                     "status_react", "anticall", "antitag",
                     "antiedit")
 
+#: Two-letter codes for the nine toggles, used where the full name
+#: cannot ride: the /pair toggle buttons carry the toggle in their
+#: callback data, and the full "pair toggle <id> <name> <on|off>"
+#: payload is 51 bytes for a real account — over Telegram's 47-byte
+#: callback budget — so the button silently vanished (and the /pair
+#: summary itself died on the over-long payload wherever the
+#: per-button skip did not run). The code keeps every payload under
+#: the budget for any E.164 number (worst case 43 bytes). The toggle
+#: handler expands a code back to the full name; the typed command
+#: still takes the full name, and an unknown code fails loudly at
+#: set_toggle. The user never sees the code: the button label
+#: still shows the full toggle name.
+TOGGLE_SHORT_CODES = {
+    "status_saving": "ss", "view_once": "vo", "antidelete": "ad",
+    "always_online": "ao", "status_viewing": "sv",
+    "status_react": "sr", "anticall": "ac", "antitag": "at",
+    "antiedit": "ae",
+}
+
+#: Reverse of TOGGLE_SHORT_CODES: two-letter code -> full toggle name.
+TOGGLE_SHORT_NAMES = {v: k for k, v in TOGGLE_SHORT_CODES.items()}
+
 
 def default_toggles() -> dict[str, bool]:
     return {name: False for name in PERSONAL_TOGGLES}

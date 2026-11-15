@@ -2097,6 +2097,35 @@ def _whatsapp_greeting() -> str:
         return "✨ *Devon — command menu*"
 
 
+#: Max description chars per command row in the WhatsApp menu.
+#: The one-liners run long (median 60, p90 202, worst 1,294 chars),
+#: and the full menu is ONE WhatsApp message under the real 65,536-char
+#: protocol cap — at full length it measured 67,149, over by 1,613.
+#: Truncating each description at the render layer bounds every
+#: command's menu cost, so the menu can only grow ~100 chars per new
+#: command instead of re-opening the cap failure at every ship; the
+#: three cap tests are the tripwire. The full text still lives in
+#: /help <command>, and the Telegram menu (paged by design) keeps
+#: its full descriptions — the trim is WhatsApp-only, where the
+#: single-message cap is real.
+WHATSAPP_MENU_DESC_WIDTH = 80
+
+
+def _whatsapp_menu_desc(desc: str) -> str:
+    """One menu description, cut word-aware at
+    WHATSAPP_MENU_DESC_WIDTH with an ellipsis. Short descs pass
+    through untouched; the command token itself is never cut (it
+    rides before the " — ", outside this helper)."""
+    text = (desc or "").strip()
+    if len(text) <= WHATSAPP_MENU_DESC_WIDTH:
+        return text
+    head = text[:WHATSAPP_MENU_DESC_WIDTH]
+    cut = head.rsplit(" ", 1)[0].strip()
+    if len(cut) < WHATSAPP_MENU_DESC_WIDTH // 2:
+        cut = head.strip()
+    return cut + "…"
+
+
 def whatsapp_menu(page: str = "") -> str:
     """WhatsApp-native command menu — the XMD frame over the real
     catalog (owner order 2026-11-05: "one Whatsapp bot menu like
@@ -2127,8 +2156,10 @@ def whatsapp_menu(page: str = "") -> str:
     set actually shown, not the global registry.
 
     * ``page=""`` — the full menu, ONE message: the whole render
-      sits far under WhatsApp's 65,536-char protocol cap
-      (platform_limits), so no chunking applies on this surface.
+      sits under WhatsApp's 65,536-char protocol cap
+      (platform_limits) because descriptions are truncated at the
+      render layer (:data:`WHATSAPP_MENU_DESC_WIDTH`), so no
+      chunking applies on this surface.
     * ``page="3"`` / ``page="voice"`` — just that section, same
       frame.
 
@@ -2145,7 +2176,8 @@ def whatsapp_menu(page: str = "") -> str:
             head = f"{emoji} {small_caps(title)}".strip()
             box = [xmd_frame_top(head)]
             for command, desc in items:
-                row = f"{command} — {desc}" if desc else command
+                row = (f"{command} — {_whatsapp_menu_desc(desc)}"
+                       if desc else command)
                 box.append(xmd_frame_line(row, "✫✧│"))
             box.append(xmd_frame_bottom())
             return box
@@ -4956,6 +4988,8 @@ _GROUP_EMOJI = {
     "fun one-shots — jokes · facts · pictures · space": "✨",
     "makers & tools — cards · qr · links · bible": "🎨",
     "chat & privacy — your chats · your accounts": "🔒",
+    "mock screens — authored chat screens": "📱",
+    "font library — her stocked typefaces": "🔤",
 }
 
 #: quick aliases → the group they filter to

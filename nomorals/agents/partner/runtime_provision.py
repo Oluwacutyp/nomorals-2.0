@@ -2014,11 +2014,26 @@ class RuntimeProvisionMixin:
             buttons: list = []
             for row_id, rec in toggle_rows:
                 from ...social.pairing import PERSONAL_TOGGLES as _TG
+                from ...social.pairing import TOGGLE_SHORT_CODES as _TS
 
                 singles: list = []
                 for name in _TG:
                     on = bool(rec.toggle(name))
-                    data = (f"pair toggle {row_id} {name} "
+                    # The toggle rides as its two-letter code: the
+                    # full payload ("pair toggle <id> <name>
+                    # <on|off>") is 51 bytes for a real account,
+                    # over Telegram's 47-byte callback budget, so
+                    # the button silently vanished on Telegram —
+                    # and the /pair summary died outright wherever
+                    # the per-button skip below did not run (a
+                    # non-Telegram chat_key still reaches
+                    # actionable(), which enforces the budget on
+                    # every button). The code keeps every payload
+                    # under the budget for any E.164 number (worst
+                    # case 43 bytes); the toggle handler expands
+                    # it back, and the typed command still takes
+                    # the full name. The label still shows it.
+                    data = (f"pair toggle {row_id} {_TS[name]} "
                             f"{'off' if on else 'on'}")
                     if _tg_surface:
                         from ...social.chat.tgbot_buttons import check_callback_data
@@ -2298,6 +2313,15 @@ class RuntimeProvisionMixin:
                         "status_react, anticall, antitag, "
                         "antiedit")
             name = parts[2].lower()
+            from ...social.pairing import TOGGLE_SHORT_NAMES as _TSN
+
+            # Button payloads carry the two-letter toggle code
+            # (the full name does not fit Telegram's 47-byte
+            # callback budget — see the /pair summary builder);
+            # the typed command still takes the full name. An
+            # unknown code is left as-is and fails loudly at
+            # set_toggle below, never read as success.
+            name = _TSN.get(name, name)
             on = parts[3].lower() in ("on", "true", "yes", "1")
             try:
                 svc = self._pairing_personal()

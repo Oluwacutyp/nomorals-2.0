@@ -201,8 +201,10 @@ def test_pair_status_names_the_disabled_platform(tmp_path):
                         port=BASE_PORT)
     registry.upsert(rec)
     reply = rt._control_pair("")
-    assert "disabled in config" in reply
-    assert "whatsapp_enabled=false" in reply
+    # The summary carries toggle buttons, so it arrives as an
+    # ActionableMessage — the note lives in its text.
+    assert "disabled in config" in reply.text
+    assert "whatsapp_enabled=false" in reply.text
 
 
 def test_sync_surfaces_disabled_config_on_the_record(tmp_path):
@@ -257,7 +259,9 @@ def test_pair_status_quiet_about_platform_when_enabled(tmp_path):
                         port=BASE_PORT)
     registry.upsert(rec)
     reply = rt._control_pair("")
-    assert "disabled in config" not in reply
+    # The summary carries toggle buttons, so it arrives as an
+    # ActionableMessage — the note lives in its text.
+    assert "disabled in config" not in reply.text
 
 
 # ── 2. the self-chat owner surface (adapter level) ──────────────────

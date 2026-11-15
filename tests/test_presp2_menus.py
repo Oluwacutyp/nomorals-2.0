@@ -214,11 +214,14 @@ class PairHomeCardTests(unittest.TestCase):
         flat = {data: label for row in out.buttons
                 for label, data in row}
         # view_once is ON, so its button turns it OFF — and the
-        # label carries the live state.
+        # label carries the live state. The toggle rides as its
+        # two-letter code in the callback data (the full name does
+        # not fit Telegram's 47-byte callback budget for a real
+        # account); the label still shows the full name.
         self.assertEqual(flat["pair toggle telegram:123456 "
-                              "view_once off"], "view_once ✓")
+                              "vo off"], "view_once ✓")
         self.assertEqual(flat["pair toggle telegram:123456 "
-                              "always_online on"], "always_online ✗")
+                              "ao on"], "always_online ✗")
 
 
 # ── /boards index + /pack listing are Cards ──────────────────────
