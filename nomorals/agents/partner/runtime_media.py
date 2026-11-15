@@ -5776,11 +5776,16 @@ class RuntimeMediaMixin:
                 rows = ops.list_formats()
                 if not rows:
                     return "no live trend formats — capture one: /trendops capture <url>"
-                return "\n".join(
-                    f"• {r['slug']} ({r['niche'] or 'no niche'}) — "
-                    f"{r['days_left']:.0f}d left, used {r['uses']}x — "
-                    f"{r['description'][:60]}"
-                    for r in rows)
+                lines = []
+                for r in rows:
+                    left = (f"{r['days_left']:.0f}d left"
+                            if r["days_left"] is not None
+                            else "never expires")
+                    lines.append(
+                        f"• {r['slug']} ({r['niche'] or 'no niche'}) — "
+                        f"{left}, used {r['uses']}x — "
+                        f"{r['description'][:60]}")
+                return "\n".join(lines)
             if action == "apply":
                 if len(rest) < 2:
                     return ("usage: /trendops apply <format> <footage> "
