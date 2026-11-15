@@ -534,8 +534,28 @@ class StripeConnector(Connector):
             resume_state={"op": "confirm_payment_intent",
                           "intent_id": intent_id},
         )
-        return self._api(
+        result = self._api(
             "POST", f"/v1/payment_intents/{intent_id}/confirm")
+        try:
+            from ..cognition.representation import log_representation_action
+            log_representation_action(
+                "purchase",
+                f"Stripe charge {amount:,.2f} {currency} ({intent_id})",
+                outcome="success",
+                metadata={
+                    "action_class": "purchase",
+                    "op": "confirm_payment_intent",
+                    "intent_id": intent_id,
+                    "amount": amount,
+                    "currency": currency,
+                    "customer": intent.get("customer", ""),
+                    "status": result.get("status", "")
+                    if isinstance(result, dict) else "",
+                },
+            )
+        except Exception:  # noqa: BLE001 — ledger never breaks the action
+            pass
+        return result
 
     def finalize_invoice(
         self,
@@ -562,7 +582,32 @@ class StripeConnector(Connector):
             ]),
             resume_state={"op": "finalize_invoice", "invoice_id": invoice_id},
         )
-        return self._api("POST", f"/v1/invoices/{invoice_id}/finalize")
+        result = self._api("POST", f"/v1/invoices/{invoice_id}/finalize")
+        try:
+            from ..cognition.representation import log_representation_action
+            inv = result if isinstance(result, dict) else {}
+            due = inv.get("amount_due")
+            amount_due = due / 100 if isinstance(due, (int, float)) else None
+            currency = str(inv.get("currency", "")).upper()
+            detail = (f" ({amount_due:,.2f} {currency})"
+                      if amount_due is not None else "")
+            log_representation_action(
+                "purchase",
+                f"Stripe invoice finalized: {invoice_id}{detail}",
+                outcome="success",
+                metadata={
+                    "action_class": "purchase",
+                    "op": "finalize_invoice",
+                    "invoice_id": invoice_id,
+                    "amount_due": amount_due,
+                    "currency": currency,
+                    "customer": inv.get("customer", ""),
+                    "status": inv.get("status", ""),
+                },
+            )
+        except Exception:  # noqa: BLE001 — ledger never breaks the action
+            pass
+        return result
 
     def create_transfer(
         self,
@@ -597,11 +642,32 @@ class StripeConnector(Connector):
             resume_state={"op": "create_transfer", "amount": amount,
                           "currency": currency, "destination": destination},
         )
-        return self._api(
+        result = self._api(
             "POST", "/v1/transfers",
             params={"amount": amount, "currency": currency,
                     "destination": destination},
         )
+        try:
+            from ..cognition.representation import log_representation_action
+            transfer_id = (result.get("id", "")
+                           if isinstance(result, dict) else "")
+            log_representation_action(
+                "purchase",
+                f"Stripe transfer {amount / 100:,.2f} "
+                f"{currency.upper()} → {destination} ({transfer_id})",
+                outcome="success",
+                metadata={
+                    "action_class": "transfer",
+                    "op": "create_transfer",
+                    "transfer_id": transfer_id,
+                    "amount": amount / 100,
+                    "currency": currency.upper(),
+                    "destination": destination,
+                },
+            )
+        except Exception:  # noqa: BLE001 — ledger never breaks the action
+            pass
+        return result
 
     def create_payout(
         self,
@@ -631,11 +697,32 @@ class StripeConnector(Connector):
             resume_state={"op": "create_payout", "amount": amount,
                           "currency": currency, "destination": destination},
         )
-        return self._api(
+        result = self._api(
             "POST", "/v1/payouts",
             params={"amount": amount, "currency": currency,
                     "destination": destination or None},
         )
+        try:
+            from ..cognition.representation import log_representation_action
+            payout_id = (result.get("id", "")
+                         if isinstance(result, dict) else "")
+            log_representation_action(
+                "purchase",
+                f"Stripe payout {amount / 100:,.2f} {currency.upper()} "
+                f"({payout_id})",
+                outcome="success",
+                metadata={
+                    "action_class": "transfer",
+                    "op": "create_payout",
+                    "payout_id": payout_id,
+                    "amount": amount / 100,
+                    "currency": currency.upper(),
+                    "destination": destination or "default",
+                },
+            )
+        except Exception:  # noqa: BLE001 — ledger never breaks the action
+            pass
+        return result
 
     # ── checkpoint resume ────────────────────────────────────────────
 

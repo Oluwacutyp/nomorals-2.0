@@ -1,10 +1,12 @@
-"""Representation ledger coverage: Gmail sends + Duffel book/cancel.
+"""Representation ledger coverage: Gmail sends + Duffel book/cancel +
+Stripe money moves.
 
 The ledger's one-line hook already covers gig applications, Twilio SMS
-and social publishes. These tests pin the next three live sites: a Gmail
-send, a Duffel flight booking, and a Duffel cancellation. Each must log
-exactly once, with the extended action class in metadata, and a ledger
-crash must never break the action it observes.
+and social publishes. These tests pin the next live sites: a Gmail
+send, a Duffel flight booking, a Duffel cancellation, and the four
+gated Stripe money moves (charge, invoice finalize, transfer, payout).
+Each must log exactly once, with the extended action class in metadata,
+and a ledger crash must never break the action it observes.
 
 All offline — scripted HTTP, tmp mandate store, patched hook.
 """
@@ -23,6 +25,7 @@ from nomorals.accounts.vault import CredentialVault
 from nomorals.connectors.base import ConnectorError
 from nomorals.connectors.duffel import DuffelConnector
 from nomorals.connectors.gmail import GmailConnector
+from nomorals.connectors.stripe import StripeConnector
 from nomorals.finance.mandate import (
     SCOPE_TRAVEL,
     MandateStore,
@@ -359,3 +362,188 @@ def test_duffel_cancel_ledger_crash_never_breaks_cancel() -> None:
     with mock.patch.object(rep, "log_representation_action", _raise):
         result = c.cancel_order("ord_1", confirmed=True)
     assert result["id"] == "oec_1"
+
+
+# ── Stripe money moves ─────────────────────────────────────────────────
+
+
+def _stripe_connected() -> tuple[StripeConnector, FakeHttp]:
+    http = FakeHttp()
+    conn = StripeConnector(_vault(), http=http)
+    http.route("GET", "/v1/account",
+               FakeResponse(200, {"id": "acct_1", "email": "o@x.com",
+                                  "country": "US"}))
+    result = conn.connect(secret_key="sk_test_abc")
+    assert result.ok
+    return conn, http
+
+
+def _calls() -> tuple[list[tuple[tuple[Any, ...], dict[str, Any]]], Any]:
+    calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+    patch = mock.patch.object(
+        rep, "log_representation_action",
+        lambda *a, **k: calls.append((a, k)))
+    return calls, patch
+
+
+def test_stripe_transfer_logs_once() -> None:
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/transfers", FakeResponse(200, {"id": "tr_1"}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.create_transfer(10000, "usd", "acct_dest",
+                                   confirmed=True)
+    assert out["id"] == "tr_1"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] == "purchase"
+    assert "100.00" in args[1] and "acct_dest" in args[1]
+    assert "tr_1" in args[1]
+    assert kwargs["outcome"] == "success"
+    assert kwargs["metadata"]["action_class"] == "transfer"
+    assert kwargs["metadata"]["op"] == "create_transfer"
+    assert kwargs["metadata"]["transfer_id"] == "tr_1"
+    assert kwargs["metadata"]["amount"] == 100.0
+    assert kwargs["metadata"]["currency"] == "USD"
+    assert kwargs["metadata"]["destination"] == "acct_dest"
+
+
+def test_stripe_transfer_logs_real_record(tmp_path) -> None:
+    """End to end through the real hook: the row lands in the ledger DB."""
+    from nomorals.cognition.ledger_ext import ExtendedRepresentationLedger
+    from nomorals.cognition.representation import RepresentationLedger
+
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/transfers", FakeResponse(200, {"id": "tr_1"}))
+    db_path = tmp_path / "representation.db"
+    ledger = ExtendedRepresentationLedger(RepresentationLedger(db_path))
+    with mock.patch.object(rep, "_ledger_for", lambda settings=None: ledger):
+        out = conn.create_transfer(10000, "usd", "acct_dest",
+                                   confirmed=True)
+    assert out["id"] == "tr_1"
+    rows = ledger.recent(action_type="purchase", limit=5)
+    assert len(rows) == 1
+    assert rows[0].outcome == "success"
+    assert rows[0].metadata.get("action_class") == "transfer"
+    assert rows[0].metadata.get("transfer_id") == "tr_1"
+
+
+def test_stripe_transfer_ledger_crash_never_breaks_transfer() -> None:
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/transfers", FakeResponse(200, {"id": "tr_1"}))
+    with mock.patch.object(rep, "log_representation_action", _raise):
+        out = conn.create_transfer(10000, "usd", "acct_dest",
+                                   confirmed=True)
+    assert out["id"] == "tr_1"
+
+
+def test_stripe_transfer_unconfirmed_logs_nothing() -> None:
+    conn, _http = _stripe_connected()
+    calls, patch = _calls()
+    with patch, pytest.raises(ConnectorError):
+        # No confirmation: the money gate refuses before any API call.
+        conn.create_transfer(10000, "usd", "acct_dest")
+    assert calls == []
+
+
+def test_stripe_transfer_failed_logs_nothing() -> None:
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/transfers", FakeResponse(200, {"error": {
+        "type": "invalid_request_error", "code": "bad",
+        "message": "boom"}}))
+    calls, patch = _calls()
+    with patch, pytest.raises(ConnectorError):
+        conn.create_transfer(10000, "usd", "acct_dest", confirmed=True)
+    assert calls == []
+
+
+def test_stripe_payout_logs_once() -> None:
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/payouts", FakeResponse(200, {"id": "po_1"}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.create_payout(5000, "usd", destination="ba_1",
+                                 confirmed=True)
+    assert out["id"] == "po_1"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] == "purchase"
+    assert "50.00" in args[1] and "po_1" in args[1]
+    assert kwargs["outcome"] == "success"
+    assert kwargs["metadata"]["action_class"] == "transfer"
+    assert kwargs["metadata"]["op"] == "create_payout"
+    assert kwargs["metadata"]["payout_id"] == "po_1"
+    assert kwargs["metadata"]["amount"] == 50.0
+    assert kwargs["metadata"]["currency"] == "USD"
+    assert kwargs["metadata"]["destination"] == "ba_1"
+
+
+def test_stripe_confirm_intent_logs_once() -> None:
+    conn, http = _stripe_connected()
+    http.route("GET", "/v1/payment_intents/pi_1", FakeResponse(200, {
+        "id": "pi_1", "amount": 2500, "currency": "usd",
+        "customer": "cus_1", "description": "gig"}))
+    http.route("POST", "/v1/payment_intents/pi_1/confirm", FakeResponse(200, {
+        "id": "pi_1", "status": "succeeded", "amount": 2500,
+        "currency": "usd", "customer": "cus_1"}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.confirm_payment_intent("pi_1", confirmed=True)
+    assert out["status"] == "succeeded"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] == "purchase"
+    assert "25.00" in args[1] and "pi_1" in args[1]
+    assert kwargs["outcome"] == "success"
+    assert kwargs["metadata"]["action_class"] == "purchase"
+    assert kwargs["metadata"]["op"] == "confirm_payment_intent"
+    assert kwargs["metadata"]["intent_id"] == "pi_1"
+    assert kwargs["metadata"]["amount"] == 25.0
+    assert kwargs["metadata"]["currency"] == "USD"
+    assert kwargs["metadata"]["customer"] == "cus_1"
+    assert kwargs["metadata"]["status"] == "succeeded"
+
+
+def test_stripe_finalize_invoice_logs_once() -> None:
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/invoices/in_1/finalize", FakeResponse(200, {
+        "id": "in_1", "amount_due": 2500, "currency": "usd",
+        "customer": "cus_1", "status": "paid"}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.finalize_invoice("in_1", confirmed=True)
+    assert out["status"] == "paid"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] == "purchase"
+    assert "in_1" in args[1] and "25.00" in args[1]
+    assert kwargs["outcome"] == "success"
+    assert kwargs["metadata"]["action_class"] == "purchase"
+    assert kwargs["metadata"]["op"] == "finalize_invoice"
+    assert kwargs["metadata"]["invoice_id"] == "in_1"
+    assert kwargs["metadata"]["amount_due"] == 25.0
+    assert kwargs["metadata"]["currency"] == "USD"
+    assert kwargs["metadata"]["customer"] == "cus_1"
+    assert kwargs["metadata"]["status"] == "paid"
+
+
+def test_stripe_resume_logs_once() -> None:
+    """The live path: owner resolves the checkpoint, the move runs once
+    and logs exactly once (the resume itself adds no second record)."""
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/payouts", FakeResponse(200, {"id": "po_9"}))
+    cp = mock.Mock()
+    cp.resume_state = {"stage": "create_payout", "op": "create_payout",
+                       "amount": 700, "currency": "usd", "destination": ""}
+    calls, patch = _calls()
+    with patch:
+        out = conn.resume_checkpoint(cp, db=object())
+    assert out["id"] == "po_9"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0] == "purchase"
+    assert kwargs["metadata"]["action_class"] == "transfer"
+    assert kwargs["metadata"]["op"] == "create_payout"
+    assert kwargs["metadata"]["payout_id"] == "po_9"
+    assert kwargs["metadata"]["amount"] == 7.0
+    assert kwargs["metadata"]["destination"] == "default"
