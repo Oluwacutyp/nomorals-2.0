@@ -5667,9 +5667,13 @@ class PartnerRuntime(
         and observes the answer in the room. Role by platform
         because a group text is often a MEMBER's, and the
         sender-based _is_owner_surface cannot stagger a member's
-        turn when the owner registry is unseeded. False when the
-        registry could not take it — the caller then answers at
-        once (a failed deferral never silences a turn)."""
+        turn when the owner registry is unseeded. True when the
+        deferral exists — registered now, or already pending from
+        an identical turn (safe to stand down: the sweeper will
+        fail over and answer once). False ONLY when the record is
+        unkeyable (no chat_key or no message_id) and was never
+        registered — the caller then answers at once (a failed
+        deferral never silences a turn)."""
         try:
             from ...social.chat.group_surface import BOT_PLATFORMS
             from .peer_deferral import (
@@ -5694,12 +5698,24 @@ class PartnerRuntime(
                     if platform in BOT_PLATFORMS
                     else GROUP_PEER_ANSWER_WINDOW_S),
             }
+            # Keyability is decided BEFORE register(): the registry
+            # refuses an unkeyable record (no chat_key or no
+            # message_id) and returns False — but a duplicate
+            # (already pending) ALSO returns False, and those are
+            # opposites. A duplicate IS registered (by the earlier
+            # identical turn), so standing down is safe: the
+            # sweeper will fail over and answer once. An unkeyable
+            # record was NEVER registered, so standing down would
+            # vanish it. Return True for a duplicate, False only
+            # for unkeyable. (Mirrors _defer_peer_command.)
+            if not record["chat_key"] or not record["message_id"]:
+                return False
             registered = self._peer_deferral().register(record)
             if registered:
                 self._peer_deferral().supersede(
                     record["chat_key"], record["message_id"])
                 self._start_peer_deferral_sweeper()
-            return bool(registered)
+            return True
         except Exception as exc:  # noqa: BLE001 - deferral never eats a turn
             record_failure(
                 "runtime.PartnerRuntime._defer_peer_text", exc)

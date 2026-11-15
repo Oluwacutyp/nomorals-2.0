@@ -415,6 +415,58 @@ def test_group_plain_text_failover_answers_once(
     assert "what should I post?" in _texts(ad_b["telegram"])[0]
 
 
+def test_group_plain_text_duplicate_stands_down_and_answers_once(
+        split_homes_broken_store):
+    """_defer_peer_text conflation (mirrors the command fix):
+    register() returns False for a duplicate (already pending)
+    as well as for an unkeyable record — and the caller fell
+    through on False, so a re-delivered group text answered at
+    once AND the sweep failed over the first registration. Two
+    replies for one turn. A duplicate IS registered (by the
+    earlier identical turn), so standing down is safe: the
+    sweeper fails over and answers once.
+
+    Failing-first: before the fix the second turn answers at
+    once (1 reply before the sweep), and the sweep adds a
+    second."""
+    (_rt_a, _ad_a, _ctx_a), (rt_b, ad_b, _ctx_b), _info = \
+        split_homes_broken_store
+    rt_b._process_inner(_group_msg("telegram", "post this", "850",
+                                   sender_id=MEMBER_ID))
+    assert _texts(ad_b["telegram"]) == []
+    assert rt_b._peer_deferral().pending_count() == 1
+    # The same echo re-delivered: same chat, same message id.
+    rt_b._process_inner(_group_msg("telegram", "post this", "850",
+                                   sender_id=MEMBER_ID))
+    assert _texts(ad_b["telegram"]) == [], _texts(ad_b["telegram"])
+    assert rt_b._peer_deferral().pending_count() == 1
+    rt_b._sweep_peer_deferrals(now=time.time() + 60)
+    deadline = time.time() + 10.0
+    while (len(_texts(ad_b["telegram"])) == 0
+           and time.time() < deadline):
+        time.sleep(0.05)
+    assert len(_texts(ad_b["telegram"])) == 1, \
+        _texts(ad_b["telegram"])
+    assert "what should I post?" in _texts(ad_b["telegram"])[0]
+
+
+def test_group_plain_text_unkeyable_is_answered_at_once(
+        split_homes_broken_store):
+    """The other side of the distinction: an unkeyable group text
+    (no message id) was NEVER registered, so standing down would
+    vanish it — the caller answers at once. This pins the
+    unkeyable behaviour so the duplicate fix cannot regress it:
+    a failed deferral never silences a turn."""
+    (_rt_a, _ad_a, _ctx_a), (rt_b, ad_b, _ctx_b), _info = \
+        split_homes_broken_store
+    rt_b._process_inner(_group_msg("telegram", "post this", "",
+                                   sender_id=MEMBER_ID))
+    assert len(_texts(ad_b["telegram"])) == 1, \
+        _texts(ad_b["telegram"])
+    assert "what should I post?" in _texts(ad_b["telegram"])[0]
+    assert rt_b._peer_deferral().pending_count() == 0
+
+
 # ── split homes, divergent Path.home(), no override ──────────────────
 
 def test_split_homes_divergent_no_runaway(split_homes_divergent):
