@@ -7672,6 +7672,8 @@ class PartnerRuntime(
             return self._control_console(command.tail, message)
         if kind == "groups":
             return self._control_groups(command.tail, message)
+        if kind == "community":
+            return self._control_community(command.tail, message)
         if kind == "gbackup":
             return self._control_gbackup(command.tail, message)
         if kind == "lookup":

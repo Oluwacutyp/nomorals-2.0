@@ -6617,6 +6617,27 @@ class TelegramBotAdapter(ChatAdapter):
                 "title": str(_topic.get("name") or ""),
                 "icon_color": _topic.get("icon_color"),
                 "implicit": bool(_topic.get("is_name_implicit"))}
+        # Communities (§16): a chat or the bot being added to /
+        # removed from a Community, or a chat joined from one
+        # (Bot API 10.2/10.3).  The added/joined payloads carry
+        # the Community ({id, name}); removed holds NO information
+        # — the organ clears only what the group currently carries.
+        from .group_community import parse_community as _parse_community
+
+        _added = msg.get("community_chat_added")
+        if isinstance(_added, dict) and _added:
+            _community = _parse_community(_added.get("community"))
+            if _community is not None:
+                meta["service"] = "community_chat_added"
+                meta["community"] = _community
+        _joined = msg.get("community_chat_joined")
+        if isinstance(_joined, dict) and _joined:
+            _community = _parse_community(_joined.get("community"))
+            if _community is not None:
+                meta["service"] = "community_chat_joined"
+                meta["community"] = _community
+        if msg.get("community_chat_removed") is not None:
+            meta["service"] = "community_chat_removed"
         if msg.get("message_thread_id"):
             # Topic traffic: the thread id rides meta so the
             # rename duty can find its topic (the bot surface
@@ -8102,6 +8123,28 @@ class TelegramBotAdapter(ChatAdapter):
             return {"ok": True, "result": result}
         except Exception as exc:  # noqa: BLE001 - honest error, never a crash
             return {"ok": False, "error": str(exc)[:200]}
+
+    def get_chat_community(self, chat: ChatRef) -> dict[str, Any]:
+        """The Telegram Community a chat belongs to (DESIGN §16).
+
+        Bot API ``getChat`` → ``ChatFullInfo.community`` (Bot API
+        10.2): ``{"id", "name"}`` or None when the chat belongs to
+        no community.  ``{"ok": False, "error": ...}`` when the call
+        fails — the bot must be a member to query a non-public chat.
+        The userbot surface has no equivalent: MTProto ``channelFull``
+        carries no community field, so detection rides this Bot API
+        verb only.
+        """
+        from .group_community import parse_community
+
+        out = self._admin("getChat", chat)
+        if not out.get("ok"):
+            return out
+        result = out.get("result") or {}
+        if not isinstance(result, dict):
+            return {"ok": False, "error": "unexpected getChat shape"}
+        return {"ok": True,
+                "community": parse_community(result.get("community"))}
 
     def admin_rights(self, chat: ChatRef) -> dict[str, Any]:
         """Our OWN admin rights in a group/channel. Honest capability check."""

@@ -1096,6 +1096,31 @@ class RuntimeGroupMixin:
                     title=str(topic.get("title") or ""),
                     implicit=bool(topic.get("implicit")))
             return True
+        if service in ("community_chat_added",
+                       "community_chat_joined",
+                       "community_chat_removed"):
+            # Communities (§16): the platform telling us this
+            # chat (or the bot) joined or left a Community, or
+            # was joined FROM one.  Observed, never answered,
+            # never narrated — reading the room, not system
+            # output, so the §33 gate does not apply.  The
+            # added/removed events write the group's community
+            # tag (the §14 boards' first writer); the joined
+            # event only attributes the arrival.
+            from ...social.chat import group_community as _gc
+
+            community = meta.get("community") or {}
+            if service == "community_chat_added":
+                _gc.note_community_added(surface, key, community)
+            elif service == "community_chat_removed":
+                _gc.note_community_removed(surface, key)
+            else:
+                _gc.note_community_joined(
+                    surface, key, community,
+                    user_id=str(message.sender_id or ""),
+                    username=str(getattr(message, "sender_username",
+                                         "") or ""))
+            return True
         if service == "join":
             adapter = self._group_adapter(message.chat.platform)
             acc_cfg = (surface.store.settings(key)
@@ -6556,6 +6581,10 @@ class RuntimeGroupMixin:
         lines.append(
             "media locks "
             f"{_gd.describe_media_locks((surface.store.settings(key).get('defense') or {}).get('media_locks') or {})}")
+        from ...social.chat import group_community as _gc
+
+        if _gc.community_of(surface, key) is not None:
+            lines.append(_gc.describe_community(surface, key))
         waiting = self._groups_waiting(surface, key)
         lines.append(f"waiting: {waiting}" if waiting
                      else "nothing waiting")
@@ -6747,6 +6776,256 @@ class RuntimeGroupMixin:
             return None, ("you don't admin that group — backups "
                           "open for its admins.")
         return key, None
+
+    def _community_usage(self) -> str:  # type: ignore[no-untyped-def]
+        return ("/community — the §16 community board: Telegram "
+                "Communities (several supergroups, channels and bots "
+                "linked around one audience) and WhatsApp communities, "
+                "one board over both.\n"
+                "/community — list every community carrying a group "
+                "you admin\n"
+                "/community show <id|name> — the groups in one "
+                "community\n"
+                "/community link <g1|key> <id> [name] — tag a group "
+                "to a community (manual; platform syncs never "
+                "overwrite it)\n"
+                "/community unlink <g1|key> — clear a group's tag\n"
+                "/community sync [g1|key] — re-read the platform "
+                "community (bare sync = every claimed group, "
+                "operator only)")
+
+    def _community_visible_keys(self, surface, message,
+                                sender):  # type: ignore[no-untyped-def]
+        """Keys this sender may see: the operator sees all; anyone
+        else sees only groups/channels they actually admin — the
+        /groups proof, unchanged."""
+        return [k for k in sorted(surface.store.data.keys())
+                if self._operator_or_false(message)
+                or self._console_is_admin(k, sender)]
+
+    def _community_resolve(self, surface, message, sender, session,
+                           token):  # type: ignore[no-untyped-def]
+        """Resolve a /community group handle to a store key: the
+        console session-map token first (g1… / c1… from /groups or
+        /console), then the cold gN/cN ordinal, then the exact key,
+        then one unique substring match over the groups/channels
+        this sender admins.  Communities include channels, so no
+        channel refusal — unlike /gbackup.  Returns (key, None) or
+        (None, error)."""
+        import re as _re
+
+        groups = session.get("groups") or {}
+        channels = session.get("channels") or {}
+        key = groups.get(token) or channels.get(token)
+        admin_keys = self._community_visible_keys(surface, message,
+                                                  sender)
+        if key is None:
+            match = _re.fullmatch(r"g(\d+)", token.lower())
+            match_c = _re.fullmatch(r"c(\d+)", token.lower())
+            if match:
+                group_keys = [k for k in admin_keys
+                             if not surface.is_channel(k)]
+                index = int(match.group(1)) - 1
+                if 0 <= index < len(group_keys):
+                    key = group_keys[index]
+            elif match_c:
+                channel_keys = [k for k in admin_keys
+                                if surface.is_channel(k)]
+                index = int(match_c.group(1)) - 1
+                if 0 <= index < len(channel_keys):
+                    key = channel_keys[index]
+            if key is None and token in admin_keys:
+                key = token
+            elif key is None:
+                matches = [k for k in admin_keys
+                           if token.lower() in k.lower()]
+                if len(matches) == 1:
+                    key = matches[0]
+                elif len(matches) > 1:
+                    return None, (
+                        f"more than one group matches “{token}” — "
+                        "run /community and use its handle (g1, g2…).")
+        if key is None:
+            return None, ("that group handle expired — run /community "
+                          "and pick again.")
+        if not (self._operator_or_false(message)
+                or self._console_is_admin(key, sender)):
+            return None, ("you don't admin that group — communities "
+                          "open for its admins.")
+        return key, None
+
+    def _community_list(self, surface, message,
+                        sender):  # type: ignore[no-untyped-def]
+        """Bare /community: every community carrying a group this
+        sender admins — name, platforms, member count."""
+        from ...social.chat import group_community as _gc
+
+        visible = set(self._community_visible_keys(surface, message,
+                                                   sender))
+        index = _gc.communities_index(surface)
+        rows: list[str] = []
+        for cid in sorted(index):
+            row = index[cid]
+            groups = [k for k in row["groups"] if k in visible]
+            if not groups:
+                continue
+            name = row["name"] or cid
+            platforms = ", ".join(row["platforms"])
+            rows.append(f"{name} ({cid}) — {platforms} · "
+                        f"{len(groups)} group(s)")
+        if not rows:
+            return ("no community carries a group you admin yet — "
+                    "link one with /community link <g1> <id>, or "
+                    "sync a group whose platform already put it in "
+                    "a community (/community sync <g1>).")
+        return "communities:\n" + "\n".join(rows)
+
+    def _community_show(self, surface, message, sender,
+                        query):  # type: ignore[no-untyped-def]
+        """One community's member groups, with claim state."""
+        from ...social.chat import group_community as _gc
+
+        visible = set(self._community_visible_keys(surface, message,
+                                                   sender))
+        index = _gc.communities_index(surface)
+        query = str(query or "").strip()
+        found = None
+        if query in index:
+            found = (query, index[query])
+        else:
+            matches = [(cid, row) for cid, row in index.items()
+                       if str(row.get("name") or "").lower()
+                       == query.lower()]
+            if len(matches) == 1:
+                found = matches[0]
+            elif len(matches) > 1:
+                return (f"more than one community is named "
+                        f"“{query}” — use its id instead.")
+        if found is None:
+            return (f"no community “{query}” carries a group I "
+                    "serve — /community lists the ones that do.")
+        cid, row = found
+        groups = [k for k in row["groups"] if k in visible]
+        if not groups:
+            return (f"community {row['name'] or cid} carries no "
+                    "group you admin.")
+        lines = [f"community {row['name'] or cid} ({cid}):"]
+        for key in groups:
+            claim = surface.claim_state(key)
+            tag = _gc.community_of(surface, key) or {}
+            lines.append(
+                f"· {key} — "
+                f"{'claimed' if claim['claimed'] else 'unclaimed'}"
+                f" · tag: {tag.get('source') or '?'}")
+        return "\n".join(lines)
+
+    def _control_community(self, tail, message):  # type: ignore[no-untyped-def]
+        """The §16 community board (/community): Telegram Communities
+        and WhatsApp communities over one surface — list, show, link,
+        unlink, sync.  DM-first like /groups; in-group it only ever
+        reports that room's own community line.  Link/unlink/sync need
+        the operator or that group's admin (the /console proof)."""
+        from ...social.chat import group_community as _gc
+        from ...social.chat.base import ChatKind
+
+        if message is None or getattr(message, "chat", None) is None:
+            return ("the community board lives in my DM — open a chat "
+                    "with me there and send /community.")
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        if message.chat.kind != ChatKind.DM:
+            words = str(tail or "").split()
+            if words:
+                return ("community management lives in my DM — open a "
+                        "chat with me there and send /community.")
+            key = message.chat.key
+            return (f"{key}: "
+                    f"{_gc.describe_community(surface, key)}.")
+        skey = f"{message.chat.platform}:{sender}"
+        session = self._console_session_map().get(skey) or {}
+        if time.time() - float(session.get("at") or 0) \
+                > self._CONSOLE_TTL_S:
+            session = {}
+        words = str(tail or "").split()
+        if not words or words[0].lower() in ("list", "ls"):
+            return self._community_list(surface, message, sender)
+        verb = words[0].lower()
+        if verb in ("help", "?"):
+            return self._community_usage()
+        if verb == "show":
+            if len(words) < 2:
+                return self._community_usage()
+            return self._community_show(surface, message, sender,
+                                        " ".join(words[1:]))
+        if verb == "link":
+            if len(words) < 3:
+                return self._community_usage()
+            key, error = self._community_resolve(
+                surface, message, sender, session, words[1])
+            if error:
+                return error
+            cid = words[2]
+            name = " ".join(words[3:]) if len(words) > 3 else ""
+            out = _gc.set_community_tag(surface, key, cid, name)
+            if not out.get("ok"):
+                return f"couldn't link {key}: {out.get('reason')}"
+            label = out["community"]["name"] or cid
+            return f"linked {key} to community {label}."
+        if verb == "unlink":
+            if len(words) < 2:
+                return self._community_usage()
+            key, error = self._community_resolve(
+                surface, message, sender, session, words[1])
+            if error:
+                return error
+            out = _gc.clear_community_tag(surface, key)
+            if not out.get("changed"):
+                return (f"{key} carries no community — nothing to "
+                        "unlink.")
+            removed = out.get("removed") or {}
+            label = removed.get("name") or removed.get("id") or "?"
+            return f"unlinked {key} from community {label}."
+        if verb == "sync":
+            if len(words) < 2:
+                if not self._operator_or_false(message):
+                    return ("syncing every group is an operator call "
+                            "— sync one group you admin instead "
+                            "(/community sync <g1>).")
+                gateway = getattr(self, "gateway", None)
+                adapters = getattr(gateway, "adapters", {}) or {}
+                claimed = [k for k in sorted(
+                    surface.store.data.keys())
+                    if surface.claim_state(k)["claimed"]]
+                reports = _gc.sync_all_communities(surface, adapters,
+                                                    claimed)
+                changed = [r for r in reports if r.get("changed")]
+                failed = [r for r in reports if not r.get("ok")]
+                return (f"synced {len(reports)} claimed group(s): "
+                        f"{len(changed)} changed"
+                        + (f", {len(failed)} failed"
+                           if failed else "")
+                        + (f" — {'; '.join(r['key'] + ': ' + r['error'] for r in failed)}"
+                           if failed else ""))
+            key, error = self._community_resolve(
+                surface, message, sender, session, words[1])
+            if error:
+                return error
+            platform = str(key).split(":", 1)[0]
+            adapter = self._group_adapter(platform)
+            out = _gc.sync_group_community(surface, key, adapter)
+            if not out.get("ok"):
+                return (f"couldn't sync {key}: "
+                        f"{out.get('error') or 'unknown error'}")
+            found = out.get("community")
+            if found is None:
+                if out.get("changed"):
+                    return (f"{key} is in no community — its old tag "
+                            "was cleared.")
+                return f"{key} is in no community."
+            label = found.get("name") or found.get("id") or "?"
+            verb_word = "now" if out.get("changed") else "still"
+            return f"{key} is {verb_word} in community {label}."
+        return self._community_usage()
 
     def _gbackup_board(self, surface, message, sender,
                        skey):  # type: ignore[no-untyped-def]
@@ -7078,6 +7357,9 @@ class RuntimeGroupMixin:
         _roster_line = (
             f"roster diff: "
             f"{_rd.describe_roster_diff(_rd.roster_diff_settings(surface, key))}")
+        from ...social.chat import group_community as _gc
+
+        _community_line = _gc.describe_community(surface, key)
         card = Card("settings", title=f"Console — {key}",
                     icon="🛠️")
         card.block_lines([
@@ -7124,6 +7406,7 @@ class RuntimeGroupMixin:
             f" (Telegram groups)",
             _identity_line,
             _roster_line,
+            _community_line,
         ])
         from ...social.chat.expression import buttons_from_spec
 

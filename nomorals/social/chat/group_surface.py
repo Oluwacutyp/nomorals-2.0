@@ -341,6 +341,16 @@ def _default_settings() -> dict[str, Any]:
                                         # community boards read
                                         # the tag; untagged
                                         # groups join none)
+        "community_name": "",           # the community's name as
+                                        # the platform reported it
+                                        # (§16; "" when untagged)
+        "community_source": "",         # how the tag got here:
+                                        # "" | "platform" (a
+                                        # getChat / linkedParent
+                                        # probe) | "manual" (an
+                                        # admin's /community link
+                                        # — platform syncs never
+                                        # overwrite it)
         "rhythm": copy.deepcopy(RHYTHM_DEFAULTS),
                                         # the room's clock (P3):
                                         # silent hours + UTC
