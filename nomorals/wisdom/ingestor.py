@@ -77,6 +77,7 @@ from ..documents.errors import DocumentError
 from ..documents.model import full_text
 from ..documents.parsers import parse_bytes
 from ..media.source_registry import WISDOM_SOURCE_DOMAINS
+from ..tools.browser import parse_html
 from ..tools.web import RobotsCache
 from .corpus import CanonCorpus, ManifestEntry
 from .errors import CorpusError, IngestError
@@ -151,6 +152,28 @@ WISDOM_KIND = "wisdom-archive"
 #: status surface renders the class from it, and the health loop
 #: probes the two template-carrying seeds through their real search
 #: endpoints.
+
+
+def _node_to_html(node: Any) -> str:
+    """Serialize one parsed DOM node back to HTML.
+
+    Text is re-escaped (the parser decodes charrefs on the way in);
+    elements round-trip with open + close tags. Void elements tolerate
+    a closing tag — the parser never pushes them, so their end tag is
+    a no-op on re-parse. Only used to feed a cleaned DOM back to the
+    document engine, so fidelity is to the parsed tree, not to the
+    source bytes.
+    """
+    if node.is_text:
+        return html.escape(node.text, quote=False)
+    # Valueless attributes (e.g. <input disabled>) parse to None —
+    # emit them bare, as boolean attributes.
+    attrs = "".join(
+        f" {k}" if v is None
+        else f' {k}="{html.escape(v, quote=True)}"'
+        for k, v in node.attrs.items())
+    inner = "".join(_node_to_html(c) for c in node.children)
+    return f"<{node.tag}{attrs}>{inner}</{node.tag}>"
 
 
 class ArchiveIngestor:
@@ -377,6 +400,39 @@ class ArchiveIngestor:
     _PG_START = "*** START OF"
     _PG_END = "*** END OF"
 
+    # Site chrome that is never the text itself. HTML pages carry nav
+    # menus, headers, footers and asides that the document engine
+    # faithfully extracts as text — and the corpus then serves as
+    # passages (the gospels.net wart: ask("Philip said") returned the
+    # site menu first). Stripped from the DOM before parsing, so the
+    # stored text is the text's own words. Mirrors the documents
+    # parser's own <head> drop, but at the ingestor: the shared
+    # parser serves other organs that may legitimately want chrome.
+    _BOILERPLATE_TAGS = frozenset({"nav", "header", "footer", "aside"})
+
+    #: Whole class tokens (lowercased) marking a non-landmark element
+    #: as navigation chrome — Squarespace/WordPress-style divs.
+    _NAV_CLASS_TOKENS = frozenset({
+        "nav", "navbar", "navigation", "nav-bar", "nav-menu",
+        "main-nav", "mobile-nav", "desktop-nav",
+        "menu", "menubar", "sidebar", "masthead",
+        "topbar", "bottombar", "breadcrumbs",
+        "site-nav", "site-header", "site-footer",
+        "header-nav", "footer-nav",
+    })
+
+    #: id substrings (lowercased) marking an element as navigation
+    #: chrome — ids are single tokens, so substring matching catches
+    #: "mainNavigation", "topNav", "mobileMenuLink".
+    _NAV_ID_PARTS = ("nav", "menu", "sidebar", "masthead", "breadcrumb")
+
+    #: Content sniff for an HTML document — the same shape the
+    #: document engine sniffs (documents/parsers.py): a doctype or an
+    #: <html> tag at the start. Extension-less fetches
+    #: (gospels.net/philip) arrive with no filename hint, so the
+    #: strip decision is made on content.
+    _HTML_START_RE = re.compile(r"(?is)^\s*(<!doctype\s+html|<html[\s>])")
+
     @classmethod
     def strip_gutenberg_boilerplate(cls, text: str) -> str:
         """Remove Project Gutenberg header/footer boilerplate.
@@ -400,6 +456,47 @@ class ArchiveIngestor:
                 break
         return "".join(lines[start:end]).strip() + "\n"
 
+    @classmethod
+    def _is_boilerplate(cls, node: Any) -> bool:
+        """True when a DOM element is site chrome, never text content."""
+        if node.is_text:
+            return False
+        if node.tag in cls._BOILERPLATE_TAGS:
+            return True
+        classes = (node.attrs.get("class") or "").lower().split()
+        if any(tok in cls._NAV_CLASS_TOKENS for tok in classes):
+            return True
+        ident = (node.attrs.get("id") or "").lower()
+        return bool(ident) and any(
+            part in ident for part in cls._NAV_ID_PARTS)
+
+    @classmethod
+    def strip_site_boilerplate(cls, data: bytes) -> bytes:
+        """Remove nav/header/footer/aside chrome from HTML bytes.
+
+        Parses the DOM, drops boilerplate subtrees, serializes the
+        cleaned DOM back to HTML. Returns the input unchanged (the
+        same object) when it is not an HTML document or contains no
+        boilerplate — non-HTML ingests and clean pages parse
+        byte-identically to before.
+        """
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data
+        if not cls._HTML_START_RE.match(text):
+            return data
+        root = parse_html(text)
+        doomed = [n for n in root.walk() if cls._is_boilerplate(n)]
+        if not doomed:
+            return data
+        for node in doomed:
+            parent = node.parent
+            if parent is not None and node in parent.children:
+                parent.children.remove(node)
+        cleaned = "".join(_node_to_html(c) for c in root.children)
+        return cleaned.encode("utf-8")
+
     def parse(self, data: bytes, filename: str) -> str:
         """Parse raw bytes into full text via the document engine.
 
@@ -410,6 +507,18 @@ class ArchiveIngestor:
             raise IngestError(filename, "refusing to parse empty bytes")
         if not (filename or "").strip():
             raise IngestError("<unknown>", "parse needs a filename")
+        # HTML pages carry site chrome (nav menus, headers, footers)
+        # that the document engine faithfully extracts as text — strip
+        # it before parsing so the stored text is the text's own
+        # words. Non-HTML input and clean pages pass through unchanged.
+        cleaned = self.strip_site_boilerplate(data)
+        if cleaned is not data:
+            # The stripped bytes no longer carry the doctype the
+            # format sniffer looks for; force the HTML parser while
+            # keeping the original name for error messages.
+            if not filename.lower().endswith((".html", ".htm")):
+                filename = f"{filename}.html"
+            data = cleaned
         try:
             document = parse_bytes(data, filename=filename)
         except DocumentError as exc:
