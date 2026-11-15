@@ -390,6 +390,13 @@ def personal_buttons_for(text: str, last_command: str = "") -> Keyboard | None:
         if rest == "bin":
             return keyboard_for_screen("bin")
         if rest.startswith("bin "):
+            # The usage text (input too short — "Paste a BIN") is
+            # still the bin TOOL screen, not a result: a result
+            # keyboard here would point Back at the screen already
+            # shown (R1 self-loop). Only a real result earns
+            # bin_result — same marker as buttons_for_text below.
+            if "Paste a BIN" in (text or ""):
+                return keyboard_for_screen("bin")
             return keyboard_for_screen("bin_result")
         return None
 

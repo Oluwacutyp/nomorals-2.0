@@ -203,6 +203,15 @@ class ScreenTests(unittest.TestCase):
                          keyboard_for_screen("bin"))
         self.assertEqual(personal_buttons_for("x", "/toolhub bin 457173"),
                          keyboard_for_screen("bin_result"))
+        # F4: an invalid BIN answers with the usage text ("Paste a
+        # BIN") — still the bin TOOL screen, not a result. A result
+        # keyboard here would point Back at the screen already shown.
+        self.assertEqual(personal_buttons_for(bin_usage_text(),
+                                              "/toolhub bin 123"),
+                         keyboard_for_screen("bin"))
+        self.assertEqual(personal_buttons_for(
+            "💳 BIN lookup — 457173\n\nscheme: visa",
+            "/toolhub bin 457173"), keyboard_for_screen("bin_result"))
         self.assertEqual(personal_buttons_for("x", "/toolhub help"),
                          keyboard_for_screen("help"))
         self.assertIsNone(personal_buttons_for("x", "/toolhub frobnicate"))
