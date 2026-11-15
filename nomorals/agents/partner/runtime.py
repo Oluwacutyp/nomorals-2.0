@@ -3700,6 +3700,21 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "group backup tick job not registered: %s", exc)
+                # Roster diffing (§9.1): one durable "group
+                # roster diff tick" job (every 1h) diffing every
+                # claimed group whose cadence is due against the
+                # live member list — the builder is the
+                # per-group roster-diff organ; the tick itself
+                # posts nothing and journals to each group's
+                # audit log.  Idempotent; best-effort.
+                try:
+                    from ...social.chat.group_roster_diff import ensure_group_roster_diff_job
+
+                    ensure_group_roster_diff_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "group roster diff tick job not registered: %s",
+                        exc)
                 # Community orchestration (AA-18): one durable
                 # "community orchestration tick" job (every 1m)
                 # heartbeating this device into the fleet session

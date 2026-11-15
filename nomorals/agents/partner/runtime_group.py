@@ -3732,6 +3732,25 @@ class RuntimeGroupMixin:
                 "Telegram groups only; admins, bots and my own "
                 "accounts are never removed",
             ], title="Member cleanup")
+            # Scheduled roster diffing (§9.1): the change-
+            # detection backbone — the live member list is
+            # polled on a schedule and diffed against the last
+            # snapshot, so changes made while she was offline
+            # are caught too.  State read from the same block
+            # the grammar writes.
+            from ...social.chat import group_roster_diff as _rd
+
+            _rd_cfg = _rd.roster_diff_settings(surface, key)
+            card.block_lines([
+                f"roster diff: {_rd.describe_roster_diff(_rd_cfg)}",
+                "joins, leaves, name changes and role changes "
+                "land in /glog — the diff posts nothing, ever · "
+                "the live list comes from the userbot; on the "
+                "Bot API alone a small group is probed member "
+                "by member, a large one is skipped honestly · "
+                "photos are not diffed (the live list carries "
+                "no photo hash)",
+            ], title="Roster diff")
             # The §16 P5 layer's switches — Telegram rooms
             # only: the block doesn't render on WhatsApp, whose
             # surface carries none of these systems.
@@ -3874,6 +3893,11 @@ class RuntimeGroupMixin:
                 "`/gsettings cleanup days N` — member cleanup "
                 "(deleted + inactive members), not the "
                 "service-message cleanup above",
+                "`/gsettings roster off|daily|weekly [hour N]` · "
+                "`… roster now` · `… roster status` — scheduled "
+                "roster diffing (§9.1): the roster is checked "
+                "against the live member list on a schedule, "
+                "changes land in /glog, nothing is posted",
             ], title="Change it")
             card.note("tap a button to flip a switch, or type a "
                       "command")
@@ -3975,6 +3999,16 @@ class RuntimeGroupMixin:
                 return out
             return ("usage: /gsettings cleanup on|off · "
                     "cleanup auto on|off · cleanup days N")
+        if head == "roster":
+            # Scheduled roster diffing (§9.1): cadence, a manual
+            # run, the status — the same helper the console's
+            # roster section applies.
+            out = self._apply_roster_grammar(
+                surface, key, text.split()[1:], message=message)
+            if out is not None:
+                return out
+            return ("usage: /gsettings roster off|daily|weekly "
+                    "[hour N] · roster now · roster status")
         if head in ("p5", "topics", "scopes", "ephemeral"):
             # The §16 P5 layer's switches: the topic
             # auto-rename duty, per-member command scopes, and
@@ -6103,8 +6137,8 @@ class RuntimeGroupMixin:
     _CONSOLE_SECTIONS = ("defense", "acceptance", "economy",
                          "estate", "presentation", "welcome",
                          "expression", "reputation", "conflict",
-                         "rhythm", "boards", "cleanup", "police",
-                         "p5")
+                         "rhythm", "boards", "cleanup", "roster",
+                         "police", "p5")
     _CONSOLE_CHANNEL_SECTIONS = ("queue", "post", "posts",
                                  "series", "analytics",
                                  "settings")
@@ -6391,6 +6425,11 @@ class RuntimeGroupMixin:
         delay = surface.slowmode_delay(key)
         lines.append("slow mode "
                      f"{'off' if not delay else _duration_text(delay)}")
+        from ...social.chat import group_roster_diff as _rd
+
+        lines.append(
+            "roster diff "
+            f"{_rd.describe_roster_diff(_rd.roster_diff_settings(surface, key))}")
         waiting = self._groups_waiting(surface, key)
         lines.append(f"waiting: {waiting}" if waiting
                      else "nothing waiting")
@@ -6908,6 +6947,11 @@ class RuntimeGroupMixin:
                f"{_latest_change.get('old') or '—'} → "
                f"{_latest_change.get('new') or '—'})"
                if _latest_change else ""))
+        from ...social.chat import group_roster_diff as _rd
+
+        _roster_line = (
+            f"roster diff: "
+            f"{_rd.describe_roster_diff(_rd.roster_diff_settings(surface, key))}")
         card = Card("settings", title=f"Console — {key}",
                     icon="🛠️")
         card.block_lines([
@@ -6953,6 +6997,7 @@ class RuntimeGroupMixin:
             f"{int((s.get('cleanup') or {}).get('inactive_days') or 90)}d"
             f" (Telegram groups)",
             _identity_line,
+            _roster_line,
         ])
         from ...social.chat.expression import buttons_from_spec
 
@@ -6979,7 +7024,9 @@ class RuntimeGroupMixin:
               f"console {token} cleanup"),
              ("p5", "P5 layer",
               f"console {token} p5")],
-            [("back", "All groups", "console")],
+            [("roster", "Roster diff",
+              f"console {token} roster"),
+             ("back", "All groups", "console")],
         ], settings=s)
         card.note("tap a section, or type its grammar — every "
                   "change lands in the group's /glog with your "
@@ -7490,6 +7537,37 @@ class RuntimeGroupMixin:
                 "/cleanup (scan) · /rmdeleted · /rminactive "
                 "[days]",
             ], title="Grammar")
+        elif section == "roster":
+            from ...social.chat import group_roster_diff as _rd
+
+            _rd_cfg = _rd.roster_diff_settings(surface, key)
+            card.block_lines([
+                f"schedule: "
+                f"{_rd.describe_roster_diff(_rd_cfg)} — the "
+                f"live member list is polled on this cadence "
+                f"and diffed against the last snapshot, so "
+                f"changes made while she was offline are "
+                f"caught too",
+                "what the diff records: joins, leaves, username "
+                "and display-name changes, deleted accounts, "
+                "role changes — every one lands in /glog, and "
+                "the diff posts nothing, ever",
+                "scope, honestly: the live list comes from the "
+                "userbot; on the Bot API alone a small group "
+                "is probed member by member, a large one is "
+                "skipped instead of guessed.  Photos are not "
+                "diffed — the live list carries no photo hash. "
+                "Leaves are never asserted from a truncated "
+                "list.",
+            ])
+            card.block_lines([
+                "`off` · `daily` · `weekly` · `hour N` · "
+                "`now` · `status`",
+                "the diff itself runs on the schedule: "
+                "`/gsettings roster daily` turns it on, "
+                "`now` runs one diff right now, `status` "
+                "shows the last run",
+            ], title="Grammar")
         elif section == "p5":
             # The §16 layer's switches, read from the same
             # block the grammar writes.  Telegram rooms only —
@@ -7986,6 +8064,11 @@ class RuntimeGroupMixin:
             # gsettings grammar.
             return self._apply_cleanup_grammar(
                 surface, key, list(words))
+        if section == "roster":
+            # Same rule: the console's roster words are the
+            # gsettings grammar.
+            return self._apply_roster_grammar(
+                surface, key, list(words), message=message)
         if section == "p5":
             # Same rule (§16): the console's p5 words are the
             # gsettings grammar.
@@ -10270,6 +10353,114 @@ class RuntimeGroupMixin:
                                  inactive_days=days)
             return (f"inactivity window: {days} days — the "
                     f"sweep judges members against it.")
+        return None
+
+    def _apply_roster_grammar(self, surface, key, words,
+                              message=None):  # type: ignore[no-untyped-def]
+        """The scheduled-roster-diff grammar, shared by
+        /gsettings (words after the `roster` head) and the
+        console's roster section.  Forms: `off|daily|weekly
+        [hour N]` · `now` (run one diff right now) · `status`.
+        The schedule words only write settings; `now` fetches
+        the live list and diffs it, so it needs a claimed group
+        and a member-list route."""
+        from ...social.chat import group_roster_diff as _rd
+
+        w = [str(x) for x in words or []]
+        low = [x.lower() for x in w]
+        if not w:
+            return None
+        if low[0] in ("off", "daily", "weekly"):
+            cadence = low[0]
+            hour: int | None = None
+            i = 1
+            while i < len(w):
+                if low[i] == "hour" and i + 1 < len(w):
+                    try:
+                        hour = int(w[i + 1])
+                    except ValueError:
+                        return (f"hour is a number 0–23 — not "
+                                f"{w[i + 1]!r}.")
+                    i += 2
+                else:
+                    return (f"I didn't follow {w[i]!r} — "
+                            "/gsettings roster off|daily|weekly "
+                            "[hour N].")
+            try:
+                out = _rd.set_roster_diff_schedule(
+                    surface, key, cadence=cadence, hour=hour,
+                    by=str(getattr(message, "sender_id", "")
+                           or ""))
+            except _rd.GroupRosterDiffRefused as exc:
+                return str(exc)
+            cfg = out["settings"]
+            line = (f"roster diff for {key}: {cfg['cadence']}"
+                    + (f" at {cfg['hour']:02d}:00"
+                       if cfg["cadence"] != "off" else "")
+                    + f". {out['next']}.")
+            return line
+        if low == ["status"]:
+            cfg = _rd.roster_diff_settings(surface, key)
+            return (f"roster diff for {key}: "
+                    f"{_rd.describe_roster_diff(cfg)}. "
+                    f"{_rd.next_run_desc(cfg, time.time())}.")
+        if low == ["now"]:
+            if not surface.claim_state(key)["claimed"]:
+                return ("this room isn't switched on for my "
+                        "group systems yet — the roster diff runs "
+                        "where I'm claimed (my bot operating "
+                        "here, or the owner's designation: "
+                        "/gsettings system output on).")
+            platform = str(key).split(":", 1)[0]
+            candidates: list = []
+            seen_ids: set = set()
+            for plat in (platform, "telegram", "telegram-bot",
+                         "telegram-personal"):
+                adapter = self._group_adapter(plat)
+                if adapter is not None \
+                        and id(adapter) not in seen_ids:
+                    seen_ids.add(id(adapter))
+                    candidates.append((plat, adapter))
+            fetched = _rd.fetch_live_roster(candidates, key,
+                                            surface=surface)
+            if not isinstance(fetched, dict) \
+                    or not fetched.get("ok"):
+                return ("the roster diff couldn't run: "
+                        + str((fetched or {}).get("error")
+                              or "no member-list route") + ".")
+            result = _rd.diff_group_roster(
+                surface, key, fetched.get("rows") or [],
+                admin_ids=fetched.get("admin_ids"),
+                truncated=bool(fetched.get("truncated")),
+                source=str(fetched.get("source") or ""))
+            parts = []
+            if result["joined"]:
+                parts.append(
+                    f"+{len(result['joined'])} joined")
+            if result["left"]:
+                parts.append(f"−{len(result['left'])} left")
+            if result["changed"]:
+                parts.append(
+                    f"~{len(result['changed'])} changed")
+            if result["deleted"]:
+                parts.append(
+                    f"{len(result['deleted'])} deleted")
+            if result["roles"]:
+                parts.append(
+                    f"{len(result['roles'])} role changes")
+            line = (f"roster diff for {key}: "
+                    + (", ".join(parts) if parts
+                       else "no changes")
+                    + f" · {result['total_live']} members live"
+                    + (f" ({fetched.get('source')})"
+                       if fetched.get("source") else ""))
+            if result.get("seeded"):
+                line += (" · first run — snapshot seeded, "
+                         "joins are reported from the next run")
+            if result.get("truncated"):
+                line += (" · list truncated — leaves were not "
+                         "asserted this run")
+            return line
         return None
 
     def _cleanup_gate(self, message):  # type: ignore[no-untyped-def]

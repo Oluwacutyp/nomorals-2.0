@@ -76,6 +76,7 @@ from .failures import record_failure
 from .group_acceptance import ACCEPTANCE_DEFAULTS
 from .group_backup import BACKUP_DEFAULTS
 from .group_cleanup import CLEANUP_DEFAULTS
+from .group_roster_diff import ROSTER_DIFF_DEFAULTS
 from .group_p5 import P5_DEFAULTS
 from .group_reputation import (
     CATEGORIES as REPUTATION_CATEGORIES,
@@ -248,6 +249,19 @@ def _default_settings() -> dict[str, Any]:
                                         # backups kept — cadence
                                         # defaults OFF, an admin
                                         # turns it on
+        "roster_diff": copy.deepcopy(ROSTER_DIFF_DEFAULTS),
+                                        # per-group roster diff
+                                        # (§9.1): scheduled
+                                        # cadence (off/daily/
+                                        # weekly), wall-clock
+                                        # hour — cadence defaults
+                                        # DAILY: the diff is the
+                                        # design's change-
+                                        # detection backbone, and
+                                        # a backbone off
+                                        # everywhere by default
+                                        # is not one; an admin
+                                        # turns it off per group
         "system_claim": {"designated": False,
                          "bot_admin": None},
                                         # the §33 claim: may
@@ -1049,9 +1063,13 @@ class GroupSurface:
             group_key, name=name, username=username,
             group_name=group_name)
 
-    def record_leave(self, group_key: str, user_id: str, *,
-                     group_name: str = "",
-                     ts: float | None = None) -> str:
+    def note_leave(self, group_key: str, user_id: str, *,
+                   ts: float | None = None) -> None:
+        """Record a leave SILENTLY: left stamp, rhythm count,
+        audit row — no goodbye render.  The scheduled roster
+        diff's leave path (a diff never sends a goodbye for a
+        member it noticed is gone); ``record_leave`` below is
+        the event path that may render one."""
         now = ts if ts is not None else time.time()
         entry = self.store.group(group_key)
         member = entry["members"].get(user_id)
@@ -1060,6 +1078,14 @@ class GroupSurface:
         self._rhythm_count(group_key, "leaves", now)
         self._audit(group_key, "leave", user_id=user_id)
         self.store.save()
+
+    def record_leave(self, group_key: str, user_id: str, *,
+                     group_name: str = "",
+                     ts: float | None = None) -> str:
+        now = ts if ts is not None else time.time()
+        entry = self.store.group(group_key)
+        member = entry["members"].get(user_id)
+        self.note_leave(group_key, user_id, ts=now)
         settings = self.store.settings(group_key)
         if not settings.get("goodbye_enabled") or member is None:
             return ""

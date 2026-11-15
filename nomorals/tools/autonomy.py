@@ -63,6 +63,11 @@ nervous system through plain language:
   (§9.8): back up every group whose backup cadence is due.
   Same closure pattern. Routine job (silent at the scheduler);
   each run journals to its group's audit log.
+* ``__group_roster_diff_tick__`` — scheduler-internal roster-diff
+  tick (§9.1): diff every claimed group whose roster cadence is
+  due against its live member list. Same closure pattern; the
+  tool resolves the live gateway and hands the organ the
+  adapters.
 """
 
 from __future__ import annotations
@@ -475,6 +480,34 @@ def register(registry: Any) -> None:
         except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
             return {"ok": False,
                     "error": f"group backup tick failed: {exc}"}
+
+    @registry.register(
+        "__group_roster_diff_tick__",
+        description="Run one group roster-diff tick (§9.1): diff "
+        "every claimed group whose roster cadence is due against "
+        "its live member list (userbot; Bot API probe fallback). "
+        "Scheduler-internal; runs every ~1h. Routine and silent — "
+        "each run journals to its group's audit log and never "
+        "posts anywhere.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _group_roster_diff_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import resolve_gateway
+        from ..social.chat.group_roster_diff import (
+            run_roster_diff_tick_once,
+        )
+
+        try:
+            gateway = resolve_gateway(_context)
+            adapters = list(
+                (getattr(gateway, "adapters", None) or {}).items()
+            ) if gateway is not None else []
+            return run_roster_diff_tick_once(
+                context=_context, adapters=adapters)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"group roster diff tick failed: {exc}"}
 
     @registry.register(
         "__orchestration__",
