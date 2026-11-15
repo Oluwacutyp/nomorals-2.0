@@ -698,9 +698,10 @@ def deferred_effect_reason(name: str) -> str | None:
         return reason
     return (f"the 3D rung is chosen ({renderer.name!r} serves "
             f"Scene3D documents through edit_engine.scene3d's "
-            f"registry) — but 'camera3d' is not a 2D chain effect "
-            f"and has no builder here; 3D composes as a Scene3D "
-            f"document or a MotionProject camera3d group")
+            f"registry, plan §1.5e) — but 'camera3d' is not a 2D "
+            f"chain effect and has no builder here; 3D composes "
+            f"as a Scene3D document or a MotionProject camera3d "
+            f"group")
 
 
 def _effect_filter(name: str, params: dict[str, Any],

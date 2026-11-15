@@ -109,10 +109,10 @@ class TestProducerInventory:
 
     def test_census_counts(self):
         summary = census.summarize()
-        # the census reproduced from code on current main: 135
-        # publish-shaped call sites = 65 producers + 70 excluded.
+        # the census reproduced from code on current main: 138
+        # publish-shaped call sites = 65 producers + 73 excluded.
         assert summary["producers"] == 65
-        assert summary["excluded"] == 70
+        assert summary["excluded"] == 73
         assert summary["by_posture"] == {
             "hinted": 30, "unhinted": 28, "forwarding": 7}
         # the bypass is the unhinted + hints-dependent-forwarding set

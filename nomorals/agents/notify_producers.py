@@ -449,6 +449,8 @@ EXCLUDED_SITES: tuple[ExcludedSite, ...] = (
     ExcludedSite("nomorals/integrations/mqtt_client.py", "MQTTBridge.set_state", 0, "publish", "mqtt"),
     ExcludedSite("nomorals/integrations/mqtt_client.py", "MQTTBridge.request_state", 0, "publish", "mqtt"),
     ExcludedSite("nomorals/integrations/mqtt_client.py", "MQTTBridge._serve_once._on_connect", 0, "publish", "mqtt"),
+    ExcludedSite("nomorals/llm/guardrails.py", "Guardrails._journal", 0, "publish", "event-bus"),
+    ExcludedSite("nomorals/llm/prompt_compiler.py", "_journal", 0, "publish", "event-bus"),
     ExcludedSite("nomorals/mesh/node.py", "_emit", 0, "publish", "event-bus"),
     ExcludedSite("nomorals/mesh/tasks.py", "_emit", 0, "publish", "event-bus"),
     ExcludedSite("nomorals/missions/runner.py", "MissionRunner._emit_bus", 0, "publish", "event-bus"),
@@ -469,6 +471,7 @@ EXCLUDED_SITES: tuple[ExcludedSite, ...] = (
     ExcludedSite("nomorals/sync/engine.py", "_emit", 0, "publish", "event-bus"),
     ExcludedSite("nomorals/tools/registry.py", "ToolRegistry._emit_tool_call", 0, "publish", "event-bus"),
     ExcludedSite("nomorals/triggers/engine.py", "_emit", 0, "publish", "event-bus"),
+    ExcludedSite("nomorals/voice/livekit_call.py", "LiveKitCallSession._journal", 0, "publish", "event-bus"),
     ExcludedSite("nomorals/wisdom/practice.py", "_emit", 0, "publish", "event-bus"),
 )
 

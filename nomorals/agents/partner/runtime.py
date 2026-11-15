@@ -396,53 +396,6 @@ _control_deliveries: contextvars.ContextVar[int] = (
     contextvars.ContextVar("nm_control_deliveries", default=0))
 
 
-def _control_output_kind(command: Any) -> tuple[str | None,
-                                                dict[str, Any] | None]:
-    """The adaptive-buttons output kind a control reply carries,
-    derived from the PARSED command that produced it — producer
-    data, never a guess from the reply text (buttons completion
-    repair, 2026-11-11: the Telegram send path derived keyboards
-    without output_kind, so the kind keyboards — a search result's
-    deepen/save/re-run row, a game's rematch row, the memory
-    system's recall/memories row — were unreachable on ordinary
-    command replies).
-
-    Only kinds whose keyboards are real operations on THIS output
-    map: ``search`` (payload = the query the caller actually ran),
-    ``game`` (payload = the game actually being played — the
-    ``/game`` verb's argument, or the direct game command's own
-    kind), ``memory`` (the recall/memories commands). Everything
-    else returns (None, None) and keeps the existing derivation:
-    inventing a kind for an unrelated reply would paste the same
-    strip onto everything, which is filler, not buttons.
-    """
-    if command is None:
-        return None, None
-    kind = str(getattr(command, "kind", "") or "").strip().lower()
-    arg = str(getattr(command, "arg", "") or "").strip()
-    tail = str(getattr(command, "tail", "") or "").strip()
-    if kind in ("search", "searchdeep"):
-        # The handlers read the query from the tail (the arg slot
-        # holds at most the first token for free-text kinds).
-        query = tail or arg
-        return ("search", {"query": query}) if query else (None, None)
-    if kind == "game":
-        verb = tail or arg
-        game = verb.split(None, 1)[0] if verb else ""
-        return ("game", {"game": game}) if game else (None, None)
-    if kind in ("recall", "memories"):
-        return "memory", None
-    try:
-        from ...social.chat.control import GAME_COMMANDS
-    except Exception:  # noqa: BLE001 - a missing table maps nothing
-        GAME_COMMANDS = ()
-    if kind in GAME_COMMANDS:
-        # A direct game command (/trivia, /digits, …): the kind
-        # itself names the game this output belongs to.
-        return "game", {"game": kind}
-    return None, None
-
-
 class PartnerRuntime(
     RuntimeLiveMixin,
     RuntimeMetaMixin,
@@ -469,6 +422,53 @@ class PartnerRuntime(
     RuntimeChatOpsMixin,
 ):
     """Runs the partner across all configured platforms, at the same time."""
+
+    @staticmethod
+    def _control_output_kind(command: Any) -> tuple[str | None,
+                                                    dict[str, Any] | None]:
+        """The adaptive-buttons output kind a control reply carries,
+        derived from the PARSED command that produced it — producer
+        data, never a guess from the reply text (buttons completion
+        repair, 2026-11-11: the Telegram send path derived keyboards
+        without output_kind, so the kind keyboards — a search result's
+        deepen/save/re-run row, a game's rematch row, the memory
+        system's recall/memories row — were unreachable on ordinary
+        command replies).
+
+        Only kinds whose keyboards are real operations on THIS output
+        map: ``search`` (payload = the query the caller actually ran),
+        ``game`` (payload = the game actually being played — the
+        ``/game`` verb's argument, or the direct game command's own
+        kind), ``memory`` (the recall/memories commands). Everything
+        else returns (None, None) and keeps the existing derivation:
+        inventing a kind for an unrelated reply would paste the same
+        strip onto everything, which is filler, not buttons.
+        """
+        if command is None:
+            return None, None
+        kind = str(getattr(command, "kind", "") or "").strip().lower()
+        arg = str(getattr(command, "arg", "") or "").strip()
+        tail = str(getattr(command, "tail", "") or "").strip()
+        if kind in ("search", "searchdeep"):
+            # The handlers read the query from the tail (the arg slot
+            # holds at most the first token for free-text kinds).
+            query = tail or arg
+            return ("search", {"query": query}) if query else (None, None)
+        if kind == "game":
+            verb = tail or arg
+            game = verb.split(None, 1)[0] if verb else ""
+            return ("game", {"game": game}) if game else (None, None)
+        if kind in ("recall", "memories"):
+            return "memory", None
+        try:
+            from ...social.chat.control import GAME_COMMANDS
+        except Exception:  # noqa: BLE001 - a missing table maps nothing
+            GAME_COMMANDS = ()
+        if kind in GAME_COMMANDS:
+            # A direct game command (/trivia, /digits, …): the kind
+            # itself names the game this output belongs to.
+            return "game", {"game": kind}
+        return None, None
 
     def __init__(
         self,
@@ -2070,7 +2070,7 @@ class PartnerRuntime(
                              f"or /game quit and start it fresh")
                 if reply:
                     try:
-                        _okind, _ometa = _control_output_kind(command)
+                        _okind, _ometa = self._control_output_kind(command)
                         result = self._send_control_reply(
                             message, reply, output_kind=_okind,
                             output_meta=_ometa)
@@ -2141,7 +2141,7 @@ class PartnerRuntime(
                             # client still holds — once per chat.
                             if bare_menu:
                                 self._clear_menu_grid_once(message)
-                            _okind, _ometa = _control_output_kind(command)
+                            _okind, _ometa = self._control_output_kind(command)
                             self._send_control_reply(
                                 message, reply, output_kind=_okind,
                                 output_meta=_ometa)
@@ -2217,7 +2217,7 @@ class PartnerRuntime(
                         reply = "that broke something on my end — try again."
                     if reply:
                         try:
-                            _okind, _ometa = _control_output_kind(command)
+                            _okind, _ometa = self._control_output_kind(command)
                             self._send_control_reply(
                                 message, reply, output_kind=_okind,
                                 output_meta=_ometa)
@@ -5970,7 +5970,7 @@ class PartnerRuntime(
                 # client still holds, once per chat.
                 if message.text.strip() in ("/start", "/menu"):
                     self._clear_menu_grid_once(message)
-                _okind, _ometa = _control_output_kind(_cmd)
+                _okind, _ometa = self._control_output_kind(_cmd)
                 self._send_control_reply(
                     message, reply, output_kind=_okind,
                     output_meta=_ometa)

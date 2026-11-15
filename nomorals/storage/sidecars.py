@@ -962,7 +962,8 @@ _register(_S(
     name="sidecar-readers", verdict="reader", kind="none",
     modules=("search/sources.py", "tools/vision.py",
              "agents/healing_ticket.py", "agents/repair_pipeline.py",
-             "goals/providers.py", "maps/mbtiles.py"),
+             "goals/providers.py", "maps/mbtiles.py",
+             "tools/models_provision.py"),
     reason=(
         "read-only consumers of other stores' files, owning no "
         "state of their own: federated search reads the books "
@@ -976,7 +977,11 @@ _register(_S(
         "store cannot be imported; its DDL mirror is pinned by "
         "the goals P6 suite), and the mbtiles reader streams "
         "builder-emitted pack artifacts — an interchange file, "
-        "converted into packs, never a store. Their reads follow "
+        "converted into packs, never a store, and the models "
+        "provision status read counts briefing-engagement rows "
+        "from the central database file read-only (mode=ro — the "
+        "file must already exist, never created by a status "
+        "read). Their reads follow "
         "the target store's disposition (books-library / "
         "workspace-inbox / incidents)."),
 ))
