@@ -39,6 +39,9 @@ class PlayManySourcesTests(unittest.TestCase):
 
     def test_unknown_title_tries_all_sources(self):
         # Every source in the chain is attempted on total failure.
+        # The mocked list must cover EVERY source in the resolve chain
+        # (MUSIC_SEARCH_SOURCES): an unmocked source runs live, and
+        # JioSaavn did (matching "999" in the query and returning hits).
         ctx = SimpleNamespace(settings=SimpleNamespace(workspace_dir="/nonexistent"))
         with mock.patch.object(resolver_mod, "probe",
                                side_effect=RuntimeError("no yt-dlp")), \
@@ -50,6 +53,9 @@ class PlayManySourcesTests(unittest.TestCase):
              mock.patch("nomorals.media.sources.MdundoSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.BandcampSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.ArchiveOrgSource.search", return_value=[]), \
+             mock.patch("nomorals.media.sources.JamendoSource.search", return_value=[]), \
+             mock.patch("nomorals.media.sources.FMASource.search", return_value=[]), \
+             mock.patch("nomorals.media.sources.JioSaavnSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.MusicBrainzSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.OpenverseSource.search", return_value=[]), \
              mock.patch("nomorals.media.sources.WikimediaSource.search", return_value=[]), \
@@ -95,6 +101,14 @@ class PlayManySourcesTests(unittest.TestCase):
              mock.patch("nomorals.media.sources.BandcampSource.search",
                         return_value=[]), \
              mock.patch("nomorals.media.sources.ArchiveOrgSource.search",
+                        return_value=[]), \
+             mock.patch("nomorals.media.sources.JamendoSource.search",
+                        return_value=[]), \
+             mock.patch("nomorals.media.sources.FMASource.search",
+                        return_value=[]), \
+             mock.patch("nomorals.media.sources.JioSaavnSource.search",
+                        return_value=[]), \
+             mock.patch("nomorals.media.sources.MdundoSource.search",
                         return_value=[]), \
              mock.patch("nomorals.media.sources.MusicBrainzSource.search",
                         return_value=[]), \

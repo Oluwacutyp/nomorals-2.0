@@ -54,11 +54,18 @@ def _cand(source, title, url, artist="A", direct_url=""):
 
 
 def _chain_ctx(monkeypatch):
-    """All chain sources empty except the ones a test fills in."""
+    """All chain sources empty except the ones a test fills in.
+
+    The mocked list must cover EVERY source in the resolve chain
+    (MUSIC_SEARCH_SOURCES): an unmocked source runs live, and Mdundo
+    did (returning real hits that won the chain before Boomplay).
+    """
     from nomorals.media import sources as _src
     from nomorals.media import playback as _pb
     for name in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
-                 "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
+                 "MdundoSource", "BandcampSource", "ArchiveOrgSource",
+                 "JamendoSource", "FMASource", "JioSaavnSource",
+                 "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
                  "DeezerSource", "BoomplaySource"):
         monkeypatch.setattr(getattr(_src, name), "search",
@@ -362,6 +369,9 @@ def test_search_candidates_excludes_nondownloadable():
     yt = ResolvedAudio(ok=True, path_or_url="https://youtube.com/watch?v=xyz12345678",
                        title="YT Song", kind="youtube",
                        source_name="YouTube search (yt-dlp)")
+    # The mock list must cover EVERY source in search_candidates_detailed's
+    # sweep, in sweep order: an unmocked source runs live, and Mdundo did
+    # (returning real hits that filled the candidates before YouTube).
     with mock.patch.object(r, "_musicbrainz_search_many",
                            return_value=[mb]), \
             mock.patch.object(r, "_youtube_search_many",
@@ -369,11 +379,15 @@ def test_search_candidates_excludes_nondownloadable():
             mock.patch.object(r, "_netnaija_search_many", return_value=[]), \
             mock.patch.object(r, "_notjustok_search_many", return_value=[]), \
             mock.patch.object(r, "_tooxclusive_search_many", return_value=[]), \
+            mock.patch.object(r, "_mdundo_search_many", return_value=[]), \
             mock.patch.object(r, "_soundcloud_search_many", return_value=[]), \
             mock.patch.object(r, "_bandcamp_search_many", return_value=[]), \
             mock.patch.object(r, "_youtube_music_search_many",
                                return_value=[]), \
             mock.patch.object(r, "_archiveorg_search_many", return_value=[]), \
+            mock.patch.object(r, "_jamendo_search_many", return_value=[]), \
+            mock.patch.object(r, "_fma_search_many", return_value=[]), \
+            mock.patch.object(r, "_jiosaavn_search_many", return_value=[]), \
             mock.patch.object(r, "_openverse_search_many", return_value=[]), \
             mock.patch.object(r, "_wikimedia_search_many", return_value=[]), \
             mock.patch.object(r, "_itunes_search_many", return_value=[]), \

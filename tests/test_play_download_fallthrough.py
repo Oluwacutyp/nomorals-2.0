@@ -337,6 +337,8 @@ def test_skip_duplicate_youtube_after_fallback_attempt(caplog):
 
 def test_search_candidates_detailed_reports_all_sources():
     r = SourceResolver(SimpleNamespace(), soundcloud=None, spotify=None)
+    # The mock list must cover EVERY source in the sweep: an unmocked
+    # source runs live (Mdundo did, in the tests below this one).
     with mock.patch.object(
             r, "_netnaija_search_many",
             return_value=[ResolvedAudio(ok=True, path_or_url="https://n/x",
@@ -354,6 +356,7 @@ def test_search_candidates_detailed_reports_all_sources():
             mock.patch.object(r, "_jamendo_search_many", return_value=[]), \
             mock.patch.object(r, "_fma_search_many", return_value=[]), \
             mock.patch.object(r, "_mdundo_search_many", return_value=[]), \
+            mock.patch.object(r, "_jiosaavn_search_many", return_value=[]), \
             mock.patch.object(r, "_musicbrainz_search_many", return_value=[]), \
             mock.patch.object(r, "_openverse_search_many", return_value=[]), \
             mock.patch.object(r, "_wikimedia_search_many", return_value=[]), \
@@ -378,6 +381,8 @@ def test_search_candidates_detailed_reports_all_sources():
 
 def test_search_candidates_still_returns_candidates_only():
     r = SourceResolver(SimpleNamespace(), soundcloud=None, spotify=None)
+    # The mock list must cover EVERY source in the sweep: an unmocked
+    # source runs live (Mdundo did, in the tests below this one).
     with mock.patch.object(
             r, "_netnaija_search_many",
             return_value=[ResolvedAudio(ok=True, path_or_url="https://n/x",
@@ -392,6 +397,9 @@ def test_search_candidates_still_returns_candidates_only():
             mock.patch.object(r, "_tooxclusive_search_many", return_value=[]), \
             mock.patch.object(r, "_archiveorg_search_many", return_value=[]), \
             mock.patch.object(r, "_mdundo_search_many", return_value=[]), \
+            mock.patch.object(r, "_jamendo_search_many", return_value=[]), \
+            mock.patch.object(r, "_fma_search_many", return_value=[]), \
+            mock.patch.object(r, "_jiosaavn_search_many", return_value=[]), \
             mock.patch.object(r, "_musicbrainz_search_many", return_value=[]), \
             mock.patch.object(r, "_openverse_search_many", return_value=[]), \
             mock.patch.object(r, "_wikimedia_search_many", return_value=[]), \

@@ -714,8 +714,11 @@ def test_candidate_sweep_isolates_a_dying_source():
     from nomorals.media.resolver import ResolvedAudio, SourceResolver
 
     resolver = SourceResolver(None)
-    names = ("netnaija", "notjustok", "tooxclusive", "soundcloud",
+    # Every method in the sweep, in sweep order: an unmocked source
+    # runs live, and Mdundo did (filling the candidates before YouTube).
+    names = ("netnaija", "notjustok", "tooxclusive", "mdundo", "soundcloud",
              "bandcamp", "youtube", "youtube_music", "archiveorg",
+             "jamendo", "fma", "jiosaavn",
              "musicbrainz", "openverse", "wikimedia", "itunes", "deezer")
     for name in names:
         setattr(resolver, f"_{name}_search_many",
