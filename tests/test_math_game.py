@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 import unittest
 from types import SimpleNamespace
 from typing import Any
@@ -31,7 +32,8 @@ from nomorals.social.chat.control import (
 
 
 def _msg(text: str, *, chat_key: str = "telegram:999",
-         owner: bool = False, kind: str = ChatKind.DM) -> ChatMessage:
+         owner: bool = False, kind: str = ChatKind.DM,
+         message_id: str = "") -> ChatMessage:
     platform, _, chat_id = chat_key.partition(":")
     return ChatMessage(
         chat=ChatRef(platform=platform or "telegram",
@@ -40,6 +42,7 @@ def _msg(text: str, *, chat_key: str = "telegram:999",
         sender="owner" if owner else "stranger",
         sender_id="5478650254" if owner else "999",
         meta={"is_owner": True} if owner else {},
+        message_id=message_id,
     )
 
 
@@ -395,7 +398,14 @@ class RuntimeMathTest(unittest.TestCase):
         assert isinstance(gateway, _RecordingGateway)
         with mock.patch.object(
                 self.runtime, "_route_game_move", return_value=None):
-            self.runtime._process(_msg("/math", kind=ChatKind.GROUP))
+            self.runtime._process(_msg("/math", kind=ChatKind.GROUP,
+                                       message_id="4242"))
+        # A group game command with no live room defers (groupdup
+        # rule 1.5: a sibling may own the room) — the message needs
+        # a platform id or the deferral cannot register and the
+        # command vanishes with no failover. The sweeper fails over
+        # when no sibling answers, and the math problem lands then.
+        self.runtime._sweep_peer_deferrals(now=time.time() + 30)
         self.assertTrue(any("🧮" in text for _, text in gateway.sent))
 
     def test_process_outsider_dm_math_falls_through_to_conversation(self) -> None:
