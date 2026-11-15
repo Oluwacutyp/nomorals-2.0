@@ -148,7 +148,10 @@ def _boot_runtime(world: _World):
     rt = PartnerRuntime.__new__(PartnerRuntime)
     settings = SimpleNamespace(home_path=world.home, db_path=world.db,
                                blob_dir=None)
-    rt.context = SimpleNamespace(settings=settings)
+    # The boot seam also reads context.db (document_leg resolves the
+    # snapshot document-store leg from the live db handle): a bare
+    # handle means no document leg, the plain-SQLite case.
+    rt.context = SimpleNamespace(settings=settings, db=SimpleNamespace())
     rt.gateway = object()
     rt.dry_run = False
     return rt

@@ -29,7 +29,13 @@ def _bot_adapter():
     # screen-stack nav-edit marker (Bot Hub ship — send() pops it on
     # every send), the origin-command freshness pair send() reads when
     # deriving inline buttons, and owner_only (default: the gated bot).
+    # The weave-refusal ledger send() consults for the button weave
+    # (empty at __init__).
     adapter.owner_only = False
+    adapter._weave_refused = {}
+    # The custom-emoji weave provider send() consults (None at
+    # __init__ — no provider wired).
+    adapter.custom_emoji_weave_source = None
     adapter._last_command = {}
     adapter._last_inbound_was_command = {}
     adapter._nav_edit = {}

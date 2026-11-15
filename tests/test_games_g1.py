@@ -113,8 +113,12 @@ class DirectCommandStartsGameTests(unittest.TestCase):
                       f"{text} not routed to the any-chat game path")
         verb = _dispatch_verb(parsed)
         engine = self.engine
+        # The group-system gate _control_game consults: this rig has
+        # no group store, so no chat is a known group-system surface
+        # and nothing is blocked — production's own verdict for it.
         stub = SimpleNamespace(context=SimpleNamespace(),
-                               _game_engine=lambda: engine)
+                               _game_engine=lambda: engine,
+                               _group_system_blocked=lambda key: False)
         return PartnerRuntime._control_game(
             stub, verb, chat_key=chat_key, player=ADA, kind="group")
 

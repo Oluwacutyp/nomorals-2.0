@@ -147,6 +147,12 @@ class MroTest(unittest.TestCase):
 
 class _StubGateway:
     adapters: dict = {}
+    # The delivery-mode surface status() reads, at the real
+    # gateway's values for durability off: no outbox, so sends
+    # go direct.
+    delivery_mode = "direct"
+    durable_outbox = False
+    outbox = None
 
     def status(self) -> dict:
         return {}

@@ -72,7 +72,11 @@ class TestStreamParser(unittest.TestCase):
 
 class TestServeOverrides(unittest.TestCase):
     def _settings_ctx(self):
-        api = SimpleNamespace(host="127.0.0.1", port=8787)
+        # The api settings the serve command reads, at their real
+        # defaults — cors_origins included (real settings always
+        # carry it since the CORS wiring).
+        api = SimpleNamespace(host="127.0.0.1", port=8787,
+                              cors_origins="*")
         return SimpleNamespace(settings=SimpleNamespace(api=api), db=None, extras={})
 
     def test_port_and_host_override_reach_api_serve(self):

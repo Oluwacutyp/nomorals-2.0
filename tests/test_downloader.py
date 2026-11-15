@@ -614,6 +614,9 @@ class FetchBytesTests(unittest.TestCase):
         session.respect_robots = False
         session.timeout = 10
         session.request_count = 0
+        # The robots gate reads the session origin: the real
+        # __init__ default is "autonomous".
+        session.origin = "autonomous"
 
         body = b"ID3" + b"\x00" * 100
         resp = MagicMock()

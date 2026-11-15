@@ -103,6 +103,7 @@ class AliasMapTests(unittest.TestCase):
                       # alias parse on pristine base the same way, so
                       # the map is completed here with read-only
                       # subactions.
+                      "trendops": ["list"],
                       "proxy": ["sources"], "maps": ["packs"],
                       "outcomes": ["status"], "apk": ["status"],
                       "re": ["status"], "desk": ["status"],

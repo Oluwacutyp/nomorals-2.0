@@ -16,6 +16,7 @@ Pins:
 """
 from __future__ import annotations
 
+import threading
 from types import SimpleNamespace
 
 from nomorals.social.chat.base import ChatKind, ChatRef
@@ -101,10 +102,20 @@ def _wa_adapter(monkeypatch):
     from nomorals.social.chat.whatsapp import WhatsAppAdapter
 
     adapter = WhatsAppAdapter.__new__(WhatsAppAdapter)
-    adapter.connected = __import__("threading").Event()
+    adapter.connected = threading.Event()
     adapter.connected.set()
     adapter.stats = {"sent": 0, "send_errors": 0}
     adapter.name = "whatsapp"
+    # The __init__ state the live send path consults, at its real
+    # defaults: the unconfirmed-send guard (empty ledger + lock),
+    # the per-account button-form preference ("" = native
+    # quick_reply), and the sent-id ledger the send notes its
+    # bridge-assigned id into (empty ledger + lock).
+    adapter._unconfirmed = {}
+    adapter._unconfirmed_lock = threading.Lock()
+    adapter._buttons_form_pref = ""
+    adapter._sent_ids = {}
+    adapter._sent_ids_lock = threading.Lock()
     captured = {}
     monkeypatch.setattr(
         adapter, "_send_cmd",
