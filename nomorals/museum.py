@@ -24,7 +24,8 @@ from typing import Any, Callable
 from .museum_failures import record_failure
 
 __all__ = ["Museum", "museum_card", "apkforge_exhibitor",
-           "library_exhibitor", "characters_exhibitor"]
+           "library_exhibitor", "characters_exhibitor",
+           "trendops_exhibitor"]
 
 
 def museum_card(*, id: str, title: str, kind: str, shelf: str,
@@ -204,6 +205,70 @@ def characters_exhibitor(char_store: Any, learn_store: Any,
 
 # ── the museum ────────────────────────────────────────────────────────
 
+def trendops_exhibitor(root: Path) -> list[dict[str, Any]]:
+    """TrendOps renders: one card per MP4 in the renders dir, facts
+    from the sibling JSON manifest (written by apply_format) when
+    present. A render with no manifest still exhibits — a minimal
+    card from the filename, no format guessed from it; a corrupt
+    manifest is a named failure, never a dead shelf. The card's hash
+    is the manifest's (small, like the library hashing book.json),
+    never the MP4's — the file is the payload, its size carries its
+    weight. Findable by format (``format:<slug>``), by QA verdict
+    (``qa:<status>``) and by draft (``draft:<id>``) through tags."""
+    renders = Path(root) / "renders"
+    try:
+        clips = sorted(renders.glob("*.mp4"))
+    except OSError as exc:
+        record_failure("museum.trendops_exhibitor.listdir", exc)
+        return []
+    cards: list[dict[str, Any]] = []
+    for clip in clips:
+        stem = clip.stem
+        manifest_path = clip.with_suffix(".json")
+        manifest: dict[str, Any] = {}
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            pass  # renders predating manifests still exhibit
+        except (OSError, ValueError) as exc:
+            record_failure("museum.trendops_exhibitor.manifest", exc)
+        slug = str(manifest.get("format") or "")
+        name = str(manifest.get("format_name") or slug or stem)
+        duration = float(manifest.get("duration") or 0.0)
+        review = manifest.get("review") or {}
+        qa = review.get("qa") or {}
+        qa_status = str(qa.get("status") or "")
+        draft_id = str(manifest.get("draft_id") or "")
+        digest = ""
+        try:
+            digest = hashlib.sha256(
+                manifest_path.read_bytes()).hexdigest()[:16]
+        except OSError:
+            digest = ""
+        try:
+            size = clip.stat().st_size
+        except OSError:
+            size = 0
+        tags = ["trendops"]
+        if slug:
+            tags.append(f"format:{slug}")
+        if qa_status:
+            tags.append(f"qa:{qa_status}")
+        if draft_id:
+            tags.append(f"draft:{draft_id}")
+        cards.append(museum_card(
+            id=f"trendops-render:{stem}",
+            title=(f"{name} cut — {duration:.1f}s" if duration > 0
+                   else f"{name} cut"),
+            kind="trendops-render", shelf="trendops-renders",
+            path=str(clip), hash=digest, size=size,
+            provenance={"type": "render", "ref": slug,
+                        "tool": "trendops", "qa": qa_status,
+                        "draft_id": draft_id},
+            tags=tags))
+    return cards
+
+
 class Museum:
     """One census, many systems. Roots are explicit (no guessed paths):
     pass what you have; missing systems simply exhibit nothing."""
@@ -211,12 +276,15 @@ class Museum:
     def __init__(self, *, apk_root: Path | str | None = None,
                  library: Any = None, char_store: Any = None,
                  learn_store: Any = None,
-                 learn_dir: Path | str | None = None) -> None:
+                 learn_dir: Path | str | None = None,
+                 trendops_root: Path | str | None = None) -> None:
         self.apk_root = Path(apk_root) if apk_root else None
         self.library = library
         self.char_store = char_store
         self.learn_store = learn_store
         self.learn_dir = learn_dir
+        self.trendops_root = (Path(trendops_root)
+                              if trendops_root else None)
         self._exhibitors: dict[str, Callable[[], list[dict[str, Any]]]] = {}
         if self.apk_root is not None:
             self.register_exhibitor(
@@ -230,6 +298,10 @@ class Museum:
                 lambda: characters_exhibitor(self.char_store,
                                              self.learn_store,
                                              self.learn_dir))
+        if self.trendops_root is not None:
+            self.register_exhibitor(
+                "trendops",
+                lambda: trendops_exhibitor(self.trendops_root))
 
     def register_exhibitor(self, name: str,
                            fn: Callable[[], list[dict[str, Any]]]) -> None:

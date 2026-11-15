@@ -34,14 +34,16 @@ organ (:mod:`nomorals.media.director.watchvideo`) — cuts on the
 beat grid, segment pacing, motion where an effect should be moving
 the picture. Footage that carries no measurable frame variation at
 all (a solid-colour clip) is reported as ``qa_unavailable`` with
-the reason, never a fake pass. There is no video Museum artifact
-organ in the repo, so the rendered MP4 + its JSON manifest in the
-workspace is the artifact; nothing is written to a Museum that does
-not exist.
+the reason, never a fake pass. The finished render lands in the
+Museum as an artifact: :meth:`TrendOps.apply_format` writes a JSON
+manifest next to the MP4, and the Museum's trendops exhibitor reads
+the renders dir at census time — format, WatchVideo verdict and
+draft id on the card.
 """
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -54,7 +56,8 @@ from ..edit_engine import render_report as render_spec_report
 from .formats import TrendFormat
 from .library import FormatLibrary
 
-__all__ = ["TrendOps", "draft_for_render"]
+__all__ = ["TrendOps", "draft_for_render", "write_render_manifest",
+           "stamp_render_draft"]
 
 _log = get_logger(__name__)
 
@@ -255,8 +258,7 @@ class TrendOps:
                 f"the render reported success but wrote no file "
                 f"(expected {output})")
         review = self._review(output, fmt, spec)
-        self.library.bump_uses(fmt.slug)
-        return {
+        report = {
             "ok": True, "output": output, "format": fmt.slug,
             "format_name": fmt.name, "duration": review.get("duration"),
             "width": review.get("width"), "height": review.get("height"),
@@ -264,6 +266,9 @@ class TrendOps:
             "segments": len(spec.segments or []),
             "review": review,
         }
+        write_render_manifest(report)
+        self.library.bump_uses(fmt.slug)
+        return report
 
     def _resolve_beats(self, fmt: TrendFormat,
                        beats: list[float] | None, music: str | None,
@@ -343,6 +348,68 @@ class TrendOps:
         except Exception as exc:  # noqa: BLE001 - QA reports, never crashes
             return {"status": "qa_unavailable",
                     "notes": f"WatchVideo could not run: {exc}"}
+
+
+def write_render_manifest(report: dict[str, Any]) -> str | None:
+    """Persist a finished render's report as a JSON manifest next to
+    the MP4 (same stem, ``.json``) — the record the Museum's
+    trendops exhibitor reads at census time. The manifest is the
+    report's facts (format, duration, canvas, beats, segments,
+    review with the WatchVideo verdict) plus a ``draft_id`` slot,
+    None until the chat path stamps the draft that carries the cut.
+    Never raises: a manifest failure is logged and the render still
+    stands — the MP4 is the artifact, the manifest is its card."""
+    output = str(report.get("output") or "")
+    if not output:
+        return None
+    manifest = {
+        "output": output,
+        "format": str(report.get("format") or ""),
+        "format_name": str(report.get("format_name") or ""),
+        "duration": float(report.get("duration") or 0.0),
+        "width": int(report.get("width") or 0),
+        "height": int(report.get("height") or 0),
+        "beats_used": int(report.get("beats_used") or 0),
+        "segments": int(report.get("segments") or 0),
+        "review": report.get("review") or {},
+        "draft_id": None,
+        "created_at": time.time(),
+    }
+    path = Path(output).with_suffix(".json")
+    try:
+        path.write_text(json.dumps(manifest, indent=2, sort_keys=True),
+                        encoding="utf-8")
+    except OSError as exc:
+        _log.warning("trendops: could not write render manifest %s: %s",
+                     path, exc)
+        return None
+    return str(path)
+
+
+def stamp_render_draft(output: str, draft_id: str) -> bool:
+    """Stamp the draft id onto a render's manifest — the chat path,
+    after the draft is proposed, so the cut's Museum card names the
+    draft that carries it. Never raises and never creates a manifest
+    from nothing: a missing manifest means the render predates
+    manifests, and the draft still stands."""
+    path = Path(str(output or "")).with_suffix(".json")
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError) as exc:
+        _log.warning("trendops: could not read render manifest %s: %s",
+                     path, exc)
+        return False
+    manifest["draft_id"] = str(draft_id)
+    try:
+        path.write_text(json.dumps(manifest, indent=2, sort_keys=True),
+                        encoding="utf-8")
+    except OSError as exc:
+        _log.warning("trendops: could not stamp draft %s on %s: %s",
+                     draft_id, path, exc)
+        return False
+    return True
 
 
 def draft_for_render(report: dict[str, Any], *, footage: list[str],

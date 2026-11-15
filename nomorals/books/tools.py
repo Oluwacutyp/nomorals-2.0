@@ -1937,10 +1937,10 @@ def register(registry: Any) -> None:
         description=(
             "The Museum: one browsable census over every system — "
             "ApkForge builds, library books/digests/sources, characters' "
-            "learned state — as cards (id/title/kind/shelf/path/hash/ "
-            "size/provenance/tags/sendable). Non-file exhibits are "
-            "exhibit-only, never sendable. A failing shelf reports a "
-            "named error and never kills the other shelves."
+            "learned state, TrendOps renders — as cards (id/title/kind/"
+            "shelf/path/hash/size/provenance/tags/sendable). Non-file "
+            "exhibits are exhibit-only, never sendable. A failing shelf "
+            "reports a named error and never kills the other shelves."
         ),
         capability=Capability.FS_READ,
         parameters={
@@ -1951,11 +1951,13 @@ def register(registry: Any) -> None:
         from ..agents.apkforge.project import apkforge_dir
         from ..characters.learn import LearnStore
         from ..characters.store import CharacterStore
+        from ..media.trendops.editor import DEFAULT_ROOT as _trendops_root
         from ..museum import Museum
 
         root = apk_root.strip() or str(apkforge_dir(context))
         museum = Museum(apk_root=root, library=_library(),
                         char_store=CharacterStore(),
-                        learn_store=LearnStore())
+                        learn_store=LearnStore(),
+                        trendops_root=_trendops_root)
         res = museum.census()
         return {**res, "card_text": museum.render(res)}

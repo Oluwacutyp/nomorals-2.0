@@ -5844,7 +5844,7 @@ class RuntimeMediaMixin:
                 # the file exists, so the plain reply is the
                 # fallback and the miss is named.
                 try:
-                    from ...media.trendops.editor import draft_for_render
+                    from ...media.trendops.editor import draft_for_render, stamp_render_draft
                     from ...social.drafts import propose_post
 
                     content, metadata = draft_for_render(
@@ -5857,6 +5857,10 @@ class RuntimeMediaMixin:
                         queue.propose(draft.id)
                     finally:
                         queue.close()
+                    # The cut's Museum card now names the draft that
+                    # carries it — a stamp failure never loses the
+                    # draft (stamp_render_draft never raises).
+                    stamp_render_draft(result["output"], draft.id)
                     text, buttons = propose_post(draft)
                     from ...social.chat.tgbot_buttons import actionable, grid_layout
 
