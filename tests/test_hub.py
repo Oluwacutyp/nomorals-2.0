@@ -603,6 +603,60 @@ class ProxyFlowWrapTests(unittest.TestCase):
         self.assertIn("no working proxies", reply)
 
 
+class BinResultWrapTests(unittest.TestCase):
+    """F2: the authored BIN result screen must carry the map's
+    bin_result keyboard (Back to BIN, one level up) on surfaces
+    without derivation (WhatsApp/userbot) — the same screen the Bot
+    API derivation gives. The BIN tool (usage) screen keeps the bin
+    keyboard; the derivation surfaces keep the plain-string path."""
+
+    def setUp(self):
+        import tempfile
+
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+
+    def _fake_bin(self):
+        return {
+            "ok": True, "bin": "457173", "scheme": "visa", "type": "debit",
+            "brand": "Visa Classic/Dankort", "prepaid": False,
+            "country": {"name": "Denmark", "alpha2": "DK", "emoji": "🇩🇰",
+                        "currency": "DKK"},
+            "bank": {"name": "Vestjysk Bank A/S", "city": "", "url": "",
+                     "phone": ""}}
+
+    def _authored(self, reply):
+        self.assertIsInstance(reply, ActionableMessage)
+        return reply.buttons
+
+    def _result(self, chat_key):
+        orig = hub_mod.lookup_bin
+        hub_mod.lookup_bin = lambda digits: self._fake_bin()
+        try:
+            rt = _runtime(self._tmp.name, _FakeGateway())
+            return rt._control_toolhub("bin 457173", chat_key)
+        finally:
+            hub_mod.lookup_bin = orig
+
+    def test_result_carries_bin_result_buttons(self):
+        reply = self._result("whatsapp:1")
+        self.assertIn("457173", reply.text)
+        self.assertEqual(self._authored(reply),
+                         keyboard_for_screen("bin_result"))
+
+    def test_usage_keeps_bin_buttons(self):
+        rt = _runtime(self._tmp.name, _FakeGateway())
+        reply = rt._control_toolhub("bin", "whatsapp:1")
+        self.assertIn("Paste a BIN", reply.text)
+        self.assertEqual(self._authored(reply),
+                         keyboard_for_screen("bin"))
+
+    def test_derivation_surfaces_keep_plain_text(self):
+        reply = self._result("tg:1")
+        self.assertIsInstance(reply, str)
+        self.assertIn("457173", reply)
+
+
 # ── adapter navigation edit ──────────────────────────────────────────────
 
 class _FakeResp:

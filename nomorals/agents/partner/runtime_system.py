@@ -710,11 +710,15 @@ class RuntimeSystemMixin:
         if verb == "bin":
             if not rest:
                 return self._hub_wrap(chat_key, bin_usage_text(), "bin")
-            # The result screen carries the bin screen's keyboard
-            # too (Back / Hub) — an unwrapped result stranded the
-            # WhatsApp + userbot surfaces with no way back.
+            # The result screen carries its own keyboard (Back to
+            # BIN, one level up — the BIN screen itself carries
+            # Back to Hub, so the path back is never cut). The
+            # map's bin_result screen exists for exactly this, and
+            # the Bot API derivation already gives it; the authored
+            # wrap used to pass "bin" here and skip a level.
             return self._hub_wrap(
-                chat_key, format_bin_result(lookup_bin(rest)), "bin")
+                chat_key, format_bin_result(lookup_bin(rest)),
+                "bin_result")
         if verb == "proxy":
             # Stack: /toolhub proxy IS the tool screen (intro + Refresh +
             # Back); only "run" executes the flow.
