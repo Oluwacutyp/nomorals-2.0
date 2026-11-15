@@ -1,10 +1,11 @@
 """Chat command handlers: /spend, /budget, /spending, /mandate, /balances,
-/alert, /goal, /insights, /recurring, /trade, /import."""
+/alert, /goal, /insights, /recurring, /subscriptions, /trade, /import."""
 
 from __future__ import annotations
 
 import re
 import time
+from datetime import date
 from typing import Any
 
 from .budgets import (BudgetStore, budget_status, finance_paths, month_key,
@@ -427,6 +428,103 @@ def control_recurring(tail: str, context: Any) -> str:
         return "usage: /recurring [list|upcoming|sync]"
     txns = ledger.transactions(since=time.time() - 120 * 86400)
     return render_recurring(detect_recurring(txns))
+
+
+# ── /subscriptions ───────────────────────────────────────────────────────
+
+_SUBSCRIPTIONS_USAGE = ("usage: /subscriptions [list | upcoming [days] | "
+                        "used <merchant> [YYYY-MM-DD] | cancel <merchant>]")
+
+# Detection window: a quarterly subscription needs two charges in view.
+_WINDOW_DAYS = 365
+
+
+def control_subscriptions(tail: str, context: Any) -> str:
+    """ /subscriptions — the subscription auditor (MORE_TO_ADD gap 9).
+
+    Detection runs on the real Ledger only — never invented. ``used``
+    records a last-used date so the unused flag clears; ``cancel``
+    returns draft text only. Nothing here cancels, charges, or contacts
+    anyone — cancelling is the owner's action, taken after their own
+    confirmation, outside this module.
+    """
+    from .subscriptions import (
+        UsageStore,
+        audit,
+        draft_cancel_message,
+        render_audit,
+        render_reminders,
+    )
+
+    settings = getattr(context, "settings", None)
+    ledger_path, _ = finance_paths(settings)
+    ledger = Ledger(ledger_path)
+    store = UsageStore(ledger_path.parent / "subscription_usage.json")
+    parts = (tail or "").strip().split()
+    verb = parts[0].lower() if parts else "list"
+
+    if verb == "used":
+        rest = (tail or "").strip()[len(parts[0]):].strip()
+        if not rest:
+            return _SUBSCRIPTIONS_USAGE
+        tokens = rest.split()
+        when: date | None = None
+        merchant = rest
+        if len(tokens) >= 2 and re.fullmatch(r"\d{4}-\d{2}-\d{2}", tokens[-1]):
+            try:
+                when = date.fromisoformat(tokens[-1])
+            except ValueError:
+                return _SUBSCRIPTIONS_USAGE
+            merchant = " ".join(tokens[:-1]).strip()
+        if not merchant:
+            return _SUBSCRIPTIONS_USAGE
+        recorded = store.record(merchant, when)
+        subs, _ = audit(
+            ledger.transactions(kind="spend",
+                                since=time.time() - _WINDOW_DAYS * 86400),
+            usage_records=store.all())
+        matched = any(s.merchant.lower() == merchant.lower() for s in subs)
+        note = ("It is a detected subscription — the unused flag clears."
+                if matched else
+                "No subscription detected for that name right now — the "
+                "record stands for when its charges show up.")
+        return f"recorded: {merchant} last used {recorded}. {note}"
+
+    if verb == "cancel":
+        merchant = (tail or "").strip()[len(parts[0]):].strip()
+        if not merchant:
+            return _SUBSCRIPTIONS_USAGE
+        subs, _ = audit(
+            ledger.transactions(kind="spend",
+                                since=time.time() - _WINDOW_DAYS * 86400),
+            usage_records=store.all())
+        match = next((s for s in subs if s.merchant.lower() == merchant.lower()),
+                     None)
+        if match is None:
+            return (f"no subscription found for {merchant} — nothing to draft. "
+                    "Run /subscriptions to see what is detected.")
+        return draft_cancel_message(match)
+
+    if verb == "upcoming":
+        days = 7
+        if len(parts) > 1:
+            try:
+                days = max(0, min(365, int(parts[1])))
+            except ValueError:
+                return _SUBSCRIPTIONS_USAGE
+        _, reminders = audit(
+            ledger.transactions(kind="spend",
+                                since=time.time() - _WINDOW_DAYS * 86400),
+            usage_records=store.all(), days_ahead=days)
+        return render_reminders(reminders, days_ahead=days)
+
+    if verb != "list":
+        return _SUBSCRIPTIONS_USAGE
+    subs, _ = audit(
+        ledger.transactions(kind="spend",
+                            since=time.time() - _WINDOW_DAYS * 86400),
+        usage_records=store.all())
+    return render_audit(subs, window_days=_WINDOW_DAYS)
 
 
 # ── /trade ───────────────────────────────────────────────────────────────

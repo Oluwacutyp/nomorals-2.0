@@ -8436,6 +8436,14 @@ class PartnerRuntime(
             from ...finance.commands import control_insights
 
             return control_insights(command.tail or arg, context=self.context)
+        if kind == "subscriptions":
+            # Subscription auditor (MORE_TO_ADD gap 9): detected from the
+            # real Ledger, unused flags from recorded usage, draft cancel
+            # text only — nothing here cancels anything.
+            from ...finance.commands import control_subscriptions
+
+            return control_subscriptions(command.tail or arg,
+                                         context=self.context)
         if kind == "predict":
             # Prediction pit: unlocked by beating challenges (see
             # nomorals/games/unlocks.py). Gated above in _progression_gate.

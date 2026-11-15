@@ -28,19 +28,25 @@ Currency is a parameter (Nigeria default ``₦`` — never a boundary).
 
 from __future__ import annotations
 
+import json
 import re
 import statistics
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from pathlib import Path
 from typing import Any, Iterable, Mapping
 
 __all__ = [
     "Subscription",
     "RenewalReminder",
+    "UsageStore",
     "detect_subscriptions",
     "renewal_reminders",
     "draft_cancel_message",
     "monthly_equivalent",
+    "audit",
+    "render_audit",
+    "render_reminders",
 ]
 
 DEFAULT_CURRENCY = "₦"
@@ -94,7 +100,8 @@ def _txn_fields(txn: Any) -> tuple[str, int, date, str]:
     """Duck-typed read of a supplied transaction.
 
     Accepts dicts (``merchant``/``description``, ``amount_minor``/``amount``,
-    ``date``) or ``Ledger.Transaction``-shaped objects. Raises
+    ``date``) or ``Ledger.Transaction``-shaped objects (``merchant``,
+    ``amount_minor``/``amount``/``amount_kobo``, ``date``/``ts``). Raises
     ``ValueError`` on a malformed row instead of guessing.
     """
     if isinstance(txn, Mapping):
@@ -107,7 +114,13 @@ def _txn_fields(txn: Any) -> tuple[str, int, date, str]:
         amount = getattr(txn, "amount_minor", None)
         if amount is None:
             amount = getattr(txn, "amount", None)
+        if amount is None:
+            amount = getattr(txn, "amount_kobo", None)
         when = getattr(txn, "date", None) or getattr(txn, "txn_date", None)
+        if when is None:
+            ts = getattr(txn, "ts", None)
+            if ts is not None:
+                when = datetime.fromtimestamp(float(ts)).date()
         currency = getattr(txn, "currency", DEFAULT_CURRENCY)
     if not merchant or amount is None or when is None:
         raise ValueError(f"transaction missing merchant/amount/date: {txn!r}")
@@ -253,3 +266,131 @@ def renewal_reminders(
                 )
             )
     return sorted(out, key=lambda r: r.renewal_date)
+
+
+class UsageStore:
+    """Durable last-used dates per merchant — the unused flag's evidence.
+
+    JSON: {normalised merchant: ISO date}. Tolerant load — a missing or
+    corrupt file reads as empty, bad rows are skipped, never fatal.
+    Atomic tmp+replace save after every mutation, mirroring
+    ``MerchantMemory``. A merchant with no record here is exactly what
+    the auditor reports: "no usage records supplied", never a verdict.
+    """
+
+    def __init__(self, path: str | Path | None = None) -> None:
+        if path is None:
+            path = Path.home() / ".nomorals" / "finance" / "subscription_usage.json"
+        self.path = Path(path)
+        self._data = self._load()
+
+    def _load(self) -> dict[str, date]:
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(raw, dict):
+            return {}
+        out: dict[str, date] = {}
+        for key, value in raw.items():
+            try:
+                out[_norm_merchant(str(key))] = date.fromisoformat(str(value)[:10])
+            except ValueError:
+                continue
+        return out
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({k: v.isoformat() for k, v in sorted(self._data.items())},
+                       indent=1, sort_keys=True),
+            encoding="utf-8",
+        )
+        tmp.replace(self.path)
+
+    def record(self, merchant: str, when: date | None = None) -> date:
+        """Record a last-used date (today when omitted)."""
+        when = when or date.today()
+        self._data[_norm_merchant(merchant)] = when
+        self._save()
+        return when
+
+    def last_used(self, merchant: str) -> date | None:
+        return self._data.get(_norm_merchant(merchant))
+
+    def all(self) -> dict[str, date]:
+        return dict(self._data)
+
+
+def audit(
+    transactions: Iterable[Any],
+    *,
+    usage_records: Mapping[str, date | None] | None = None,
+    as_of: date | None = None,
+    days_ahead: int = 7,
+) -> tuple[list[Subscription], list[RenewalReminder]]:
+    """One shared path for the chat command and the tool: detect + remind.
+
+    Detection runs on the supplied transactions only — never invented.
+    Reminders are text only; nothing here cancels, charges, or contacts
+    anyone.
+    """
+    as_of = as_of or date.today()
+    subs = detect_subscriptions(transactions, usage_records=usage_records,
+                                as_of=as_of)
+    reminders = renewal_reminders(subs, as_of=as_of, days_ahead=days_ahead)
+    return subs, reminders
+
+
+def _money(minor: int, currency: str) -> str:
+    return f"{currency}{minor / 100:,.2f}"
+
+
+def render_audit(
+    subscriptions: list[Subscription],
+    *,
+    as_of: date | None = None,
+    window_days: int = 365,
+) -> str:
+    """The audit as text: cost, cadence, next renewal, unused flags."""
+    as_of = as_of or date.today()
+    if not subscriptions:
+        return (f"no recurring subscriptions found in the last {window_days} days — "
+                "nothing charged at least twice on a steady cadence. "
+                "Log spends with /spend and they show up here once a charge repeats.")
+    currency = subscriptions[0].currency
+    monthly = sum(monthly_equivalent(s) for s in subscriptions)
+    yearly = sum(s.yearly_cost_minor for s in subscriptions)
+    lines = [f"{len(subscriptions)} subscription(s) — "
+             f"~{_money(monthly, currency)} monthly, ~{_money(yearly, currency)} yearly:"]
+    for sub in subscriptions:
+        nxt = sub.estimated_next_renewal
+        when = (f"next renewal {nxt} ({(nxt - as_of).days}d)"
+                if nxt is not None else "next renewal unknown")
+        flag = (f" — suspected unused: {sub.unused_reason}"
+                if sub.suspected_unused else "")
+        lines.append(
+            f"• {sub.merchant} — {_money(sub.cost_minor, sub.currency)} "
+            f"every ~{sub.period_days:.0f}d, {when}, "
+            f"~{_money(sub.yearly_cost_minor, sub.currency)}/yr "
+            f"({sub.occurrences} charges){flag}")
+    lines.append("Mark one used with: /subscriptions used <merchant>. "
+                 "Draft a cancel note with: /subscriptions cancel <merchant>.")
+    return "\n".join(lines)
+
+
+def render_reminders(reminders: list[RenewalReminder], *, days_ahead: int = 7) -> str:
+    """Renewal reminders as text — reminders only, never actions."""
+    if not reminders:
+        return f"nothing renewing in the next {days_ahead} day(s)."
+    lines = [f"{len(reminders)} renewal(s) in the next {days_ahead} day(s):"]
+    for reminder in reminders:
+        flag = " — suspected unused" if reminder.suspected_unused else ""
+        lines.append(
+            f"• {reminder.merchant} — renews {reminder.renewal_date} "
+            f"({reminder.days_until}d), "
+            f"{_money(reminder.cost_minor, reminder.currency)}{flag}")
+        if reminder.suspected_unused:
+            lines.append(f"  draft cancel: {reminder.draft_message}")
+    return "\n".join(lines)

@@ -901,6 +901,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "glossary": (0, None),    # /glossary [list [glossary] [scope]] | set <glossary> <scope> <term> = <translation> | del <glossary> [scope] <term> — the translation glossary board: every named glossary in the shipped store with its per-scope counts (owner/domain/global, empty scopes named), the entries themselves, and add/replace/remove through the store's own write path; an edit changes the glossary's fingerprint, so translations cached under the old fingerprint stop matching (owner-only)
     "read": (0, None),        # /read [list] | open <n> | go <token> <verb> | get <token> <html|pdf|epub|txt> — routed long outputs in the reader, editions + raw downloads (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
+    "subscriptions": (0, None),  # /subscriptions [list|upcoming [days]|used <merchant> [YYYY-MM-DD]|cancel <merchant>] — subscription auditor (gap 9): detected from the real Ledger, unused flags from recorded usage, draft cancel text only
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
     # wave 72 systems: media, execution, archives, builders
@@ -1089,6 +1090,7 @@ _HELP_TEXT = "\n".join(
         "  /focus start [label] | pause | resume | stop [note] | status | today | week",
         "  /assets add <name> [| kind | interval_km | interval_days | odometer_km] | service <id> <description> [| cost | odometer_km | vendor] | due | costs | show <id> | list",
         "  /legacy show | create <owner> | <executor> | beneficiary <name> | asset <label> | instruction <text> | witness <name> | seal <text> | reveal | reset yes",
+        "  /subscriptions [list | upcoming [days] | used <merchant> [YYYY-MM-DD] | cancel <merchant>]   detected subscriptions, renewals, unused flags, draft cancel notes",
         "  /backup status | verify                backup health (read-only; runs need the vault, stay scheduled)",
         "  — expansion —",
         "  /game [list|<name>|quit]                41 games (DM + group): /game list",
@@ -4553,7 +4555,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible",
                            "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
-                          "balances", "goal", "goals", "careers", "ideas", "insights", "alert"]),
+                          "balances", "goal", "goals", "careers", "ideas", "insights", "subscriptions", "alert"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -4822,7 +4824,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "agent", "chatmode", "style", "stylepin", "doctor", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
-      "goals", "careers", "ideas", "insights", "alert", "cost", "heal", "tour", "pulse"]),
+      "goals", "careers", "ideas", "insights", "subscriptions", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
@@ -5395,6 +5397,7 @@ LIST_ONELINERS: dict[str, str] = {
     "balances": "unified money view across rails: /balances [rail…]",
     "goal": "money goals: /goal add|list|done|snooze|remove",
     "insights": "native money analytics: /insights [days]",
+    "subscriptions": "subscription auditor: /subscriptions [list | upcoming [days] | used <merchant> [YYYY-MM-DD] | cancel <merchant>]",
     "caption": "burn AI subtitles into a video: /caption [style] (attach or path)",
     "checkpoint": "snapshot the coding workdir: /checkpoint [label]",
     "checkpoints": "list saved coding checkpoints: /checkpoints",

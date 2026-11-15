@@ -240,6 +240,106 @@ def register(registry: Any) -> None:
                     for r in recurring]}
 
     @registry.register(
+        "finance_subscriptions",
+        description=(
+            "Subscription audit (MORE_TO_ADD gap 9): subscriptions "
+            "detected from the real Ledger only — never invented — with "
+            "renewal reminders, unused flags from recorded usage, and "
+            "draft cancel messages (text only; nothing here cancels "
+            "anything). Args: action (list|upcoming|used|cancel), days "
+            "(upcoming window, default 7), merchant, date (YYYY-MM-DD "
+            "last-used date for used, default today)."
+        ),
+        capability="finance",
+        parameters={
+            "action": "str — list|upcoming|used|cancel (default list)",
+            "days": "int — upcoming window in days (default 7)",
+            "merchant": "str — merchant for used|cancel",
+            "date": "str — YYYY-MM-DD last-used date for used (default today)",
+        },
+    )
+    def finance_subscriptions(context: Any, action: str = "list",
+                              days: int = 7, merchant: str = "",
+                              date: str = "") -> dict[str, Any]:
+        import time as _t
+        from datetime import date as _date
+
+        from .subscriptions import (
+            UsageStore,
+            audit,
+            draft_cancel_message,
+            monthly_equivalent,
+            render_audit,
+            render_reminders,
+        )
+        ledger, _ = _ledger_budgets(context)
+        store = UsageStore(ledger.path.parent / "subscription_usage.json")
+        window_days = 365
+        txns = ledger.transactions(kind="spend",
+                                   since=_t.time() - window_days * 86400)
+        action = (action or "list").lower()
+        if action == "used":
+            merchant = (merchant or "").strip()
+            if not merchant:
+                return {"ok": False,
+                        "error": "merchant is required for used"}
+            when = None
+            if (date or "").strip():
+                try:
+                    when = _date.fromisoformat(date.strip())
+                except ValueError:
+                    return {"ok": False,
+                            "error": "date must be YYYY-MM-DD"}
+            recorded = store.record(merchant, when)
+            return {"ok": True,
+                    "text": f"recorded: {merchant} last used {recorded}.",
+                    "merchant": merchant,
+                    "last_used": recorded.isoformat()}
+        if action == "cancel":
+            merchant = (merchant or "").strip()
+            subs, _ = audit(txns, usage_records=store.all())
+            match = next((s for s in subs
+                          if s.merchant.lower() == merchant.lower()), None)
+            if match is None:
+                return {"ok": False,
+                        "error": f"no subscription found for {merchant}"}
+            return {"ok": True, "merchant": match.merchant,
+                    "text": draft_cancel_message(match)}
+        if action == "upcoming":
+            _, reminders = audit(txns, usage_records=store.all(),
+                                 days_ahead=int(days or 7))
+            return {"ok": True, "count": len(reminders),
+                    "text": render_reminders(reminders,
+                                             days_ahead=int(days or 7)),
+                    "reminders": [
+                        {"merchant": r.merchant,
+                         "renewal_date": r.renewal_date.isoformat(),
+                         "days_until": r.days_until,
+                         "cost_minor": r.cost_minor,
+                         "currency": r.currency,
+                         "suspected_unused": r.suspected_unused,
+                         "draft_message": r.draft_message}
+                        for r in reminders]}
+        subs, _ = audit(txns, usage_records=store.all())
+        return {"ok": True, "count": len(subs),
+                "text": render_audit(subs, window_days=window_days),
+                "total_monthly_kobo": sum(monthly_equivalent(s) for s in subs),
+                "total_yearly_kobo": sum(s.yearly_cost_minor for s in subs),
+                "charges": [
+                    {"merchant": s.merchant,
+                     "cost_minor": s.cost_minor,
+                     "currency": s.currency,
+                     "period_days": s.period_days,
+                     "occurrences": s.occurrences,
+                     "estimated_next_renewal":
+                         (s.estimated_next_renewal.isoformat()
+                          if s.estimated_next_renewal else None),
+                     "suspected_unused": s.suspected_unused,
+                     "unused_reason": s.unused_reason,
+                     "yearly_cost_minor": s.yearly_cost_minor}
+                    for s in subs]}
+
+    @registry.register(
         "finance_send",
         description=(
             "Send money as a chat primitive ('send 5k to Mama'). Args: to "
