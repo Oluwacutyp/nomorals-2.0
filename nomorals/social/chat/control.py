@@ -867,6 +867,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "image": (1, None),      # /image <path-or-url> — lookup; <prompt> — generate
     "imggen": (0, None),     # /imggen <prompt> — Devon's own diffusion studio
     "shorts": (0, None),     # /shorts make|status|resume|niches|calendar|ledger|estimate
+    "trendops": (0, None),   # /trendops formats|apply|capture|propose|remove
     "lens": (1, 3),          # /lens <path-or-url> — reverse image search
     # devon: the autonomous dev & investigation agent
     "devon": (0, None),      # /devon [free text] — plan tools, run, digest, reply
@@ -4158,6 +4159,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
               "related": "/imggen /say"},
+    "trendops": {"what": "Trend-driven video editing: catch a trending clip and cut footage to its format — velocity ramps, beat-synced cuts, meme caption.",
+              "usage": "/trendops formats | /trendops apply <format> <footage> [--music <audio>] [--caption \"text\"] | /trendops capture <url> | /trendops propose",
+              "example": "/trendops apply roadster clips/game.mp4 --caption \"Me and bro in 2030\"",
+              "related": "/shorts /download"},
     "lens": {"what": "reverse image search.",
              "usage": "/lens <path-or-url>", "example": "/lens /sdcard/pic.jpg",
              "related": "/image"},
@@ -4556,7 +4561,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
     ("media system", ["music", "distribute", "play", "video", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "caption", "imggen", "sham", "musicnote",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
@@ -4821,7 +4826,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "caption", "imggen", "sham", "musicnote",
+      "shorts", "trendops", "caption", "imggen", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5279,6 +5284,7 @@ LIST_ONELINERS: dict[str, str] = {
     "api": "external API connectors (weather, fx, github, …)",
     "connectors": "manage the service connectors: list, status, connect",
     "shorts": "short-form content empire: make, queue, post vertical videos",
+    "trendops": "trend-driven video editing: cut footage to a trending format",
     "notion": "Notion databases, rows, and page creation",
     "gcal": "Google Calendar agenda and event creation",
     "trello": "Trello boards, lists, cards — create cards",

@@ -679,3 +679,61 @@ def register(registry: Any) -> None:
             "direct_http": True,
             "site_extraction": available("yt_dlp") or bool(which("yt-dlp")),
         }
+
+    @registry.register(
+        "trendops",
+        description=(
+            "Trend-driven video editing: list live trend formats, cut "
+            "footage to a format (velocity ramps, beat-synced cuts, meme "
+            "caption), capture a trending clip into a new format, propose "
+            "peaking formats. action=formats|apply|capture|propose|"
+            "remove|prune."
+        ),
+        capability=Capability.NET_DOWNLOAD,
+    )
+    def trendops(*, action: str = "formats", format_name: str = "",
+                 footage: str = "", music: str = "", caption: str = "",
+                 beats: str = "", source: str = "", name: str = "",
+                 niche: str = "", limit: int = 5) -> dict[str, Any]:
+        """TrendOps through the tool spine (chat: /trendops)."""
+        from ..media.trendops import TrendOps
+
+        ops = TrendOps(context=context)
+        act = (action or "formats").strip().lower()
+        if act == "formats":
+            return {"formats": ops.list_formats()}
+        if act == "propose":
+            return {"proposals": ops.propose(limit=limit)}
+        if act == "remove":
+            if not format_name.strip():
+                raise ToolError("remove needs format_name=<slug>")
+            return {"removed": ops.remove_format(format_name)}
+        if act == "prune":
+            return {"pruned": ops.library.prune()}
+        if act == "capture":
+            if not source.strip():
+                raise ToolError("capture needs source=<trending clip URL>")
+            return ops.capture_trend(source, name=name or None, niche=niche)
+        if act == "apply":
+            if not format_name.strip():
+                raise ToolError("apply needs format_name=<slug>")
+            if not footage.strip():
+                raise ToolError("apply needs footage=<video file>")
+            grid: list[float] | None = None
+            if beats.strip():
+                try:
+                    grid = [float(b) for b in beats.split(",") if b.strip()]
+                except ValueError:
+                    raise ToolError(
+                        "beats takes a comma list of seconds, "
+                        "e.g. beats='0.5,1.0,1.5'") from None
+            paths = [p.strip() for p in footage.split(",") if p.strip()]
+            try:
+                return ops.apply_format(
+                    paths[0] if len(paths) == 1 else paths, format_name,
+                    music=music or None, caption=caption or None,
+                    beats=grid)
+            except Exception as exc:  # noqa: BLE001 - tool surface: name it
+                raise ToolError(f"trendops apply failed: {exc}") from exc
+        return {"error": f"unknown action {act!r} — "
+                         "formats|apply|capture|propose|remove|prune"}

@@ -9484,6 +9484,8 @@ class PartnerRuntime(
             return self._control_imggen(command.tail or arg)
         if kind == "shorts":
             return self._control_shorts(command.tail or arg)
+        if kind == "trendops":
+            return self._control_trendops(command.tail or arg)
         if kind == "lens":
             return self._control_lens(command.tail or arg)
 

@@ -5739,6 +5739,136 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 - chat never raises
             return f"shorts failed: {exc}"
 
+    def _control_trendops(self, tail: str) -> str:
+        """Trend-driven video editing in chat.
+
+        /trendops formats                                  — live trend formats
+        /trendops apply <format> <footage> [--music <audio>] [--caption "text"]
+                                                           — cut footage to a format
+        /trendops capture <url> [--name <slug>] [--niche X] — catch a trending clip
+        /trendops propose                                  — peaking formats, ranked
+        /trendops remove <slug>                            — drop a format
+        """
+        import shlex
+
+        ref = (tail or "").strip()
+        if not ref:
+            return ("🎬 /trendops — trend-driven video editing:\n"
+                    "/trendops formats — live trend formats\n"
+                    "/trendops apply <format> <footage> [--music <audio>] "
+                    "[--caption \"text\"]\n"
+                    "/trendops capture <url> [--name <slug>] [--niche X]\n"
+                    "/trendops propose — peaking formats, ranked\n"
+                    "/trendops remove <slug>")
+        try:
+            toks = shlex.split(ref)
+        except ValueError:
+            toks = ref.split()
+        if not toks:
+            return ("usage: /trendops formats|apply|capture|propose|remove ...")
+        action = toks[0].lower()
+        rest = toks[1:]
+        try:
+            from ...media.trendops import TrendOps
+
+            ops = TrendOps(context=self.context)
+            if action == "formats":
+                rows = ops.list_formats()
+                if not rows:
+                    return "no live trend formats — capture one: /trendops capture <url>"
+                return "\n".join(
+                    f"• {r['slug']} ({r['niche'] or 'no niche'}) — "
+                    f"{r['days_left']:.0f}d left, used {r['uses']}x — "
+                    f"{r['description'][:60]}"
+                    for r in rows)
+            if action == "apply":
+                if len(rest) < 2:
+                    return ("usage: /trendops apply <format> <footage> "
+                            "[--music <audio>] [--caption \"text\"]")
+                fmt_name = rest[0]
+                music = ""
+                caption = ""
+                beats: list[float] = []
+                footage: list[str] = []
+                args = rest[1:]
+                i = 0
+                while i < len(args):
+                    a = args[i]
+                    if a == "--music" and i + 1 < len(args):
+                        music = args[i + 1]
+                        i += 2
+                    elif a == "--caption" and i + 1 < len(args):
+                        caption = args[i + 1]
+                        i += 2
+                    elif a == "--beats" and i + 1 < len(args):
+                        try:
+                            beats = [float(b) for b in
+                                     args[i + 1].split(",") if b.strip()]
+                        except ValueError:
+                            return ("--beats takes a comma list of seconds, "
+                                    "e.g. --beats 0.5,1.0,1.5")
+                        i += 2
+                    elif a.startswith("--"):
+                        i += 1
+                    else:
+                        footage.append(a)
+                        i += 1
+                if not footage:
+                    return "usage: /trendops apply <format> <footage> [...]"
+                result = ops.apply_format(
+                    footage[0] if len(footage) == 1 else footage,
+                    fmt_name, music=music or None,
+                    caption=caption or None, beats=beats or None)
+                review = result.get("review", {})
+                problems = review.get("problems") or []
+                note = (" (review flags: " + "; ".join(problems) + ")"
+                        if problems else "")
+                return (f"🎬 cut to {result['format_name']} → "
+                        f"{result['output']}\n"
+                        f"{result['duration']:.1f}s · "
+                        f"{result['width']}x{result['height']} · "
+                        f"{result['segments']} segments · "
+                        f"{result['beats_used']} beats{note}")
+            if action == "capture":
+                if not rest:
+                    return ("usage: /trendops capture <url> "
+                            "[--name <slug>] [--niche X]")
+                url = rest[0]
+                name = ""
+                niche = ""
+                i = 1
+                while i < len(rest):
+                    if rest[i] == "--name" and i + 1 < len(rest):
+                        name = rest[i + 1]
+                        i += 2
+                    elif rest[i] == "--niche" and i + 1 < len(rest):
+                        niche = rest[i + 1]
+                        i += 2
+                    else:
+                        i += 1
+                got = ops.capture_trend(url, name=name or None, niche=niche)
+                measured = got.get("measured", {})
+                return (f"🎬 caught the trend → format {got['slug']}\n"
+                        f"{measured.get('duration', 0):.1f}s · "
+                        f"{measured.get('beat_count', 0)} beats measured · "
+                        f"expires in {got['expires_in_days']:.0f}d\n"
+                        f"cut it: /trendops apply {got['slug']} <footage>")
+            if action == "propose":
+                rows = ops.propose()
+                if not rows:
+                    return "no live trend formats — capture one: /trendops capture <url>"
+                return "\n".join(
+                    f"• {r['why']}\n  {r['apply']}" for r in rows)
+            if action == "remove":
+                if not rest:
+                    return "usage: /trendops remove <slug>"
+                if ops.remove_format(rest[0]):
+                    return f"removed trend format {rest[0]}"
+                return f"no trend format {rest[0]!r}"
+            return f"unknown /trendops action {action!r}"
+        except Exception as exc:  # noqa: BLE001 - chat never raises
+            return f"trendops failed: {exc}"
+
     def _shorts_hero(self, toks: list) -> str:
         """``/shorts hero "<prompt>" [--seconds N] [--seed N] [--model M]
         [--lora NAME[:W]]…`` — one neural hero clip via videogen.
