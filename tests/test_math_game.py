@@ -401,12 +401,29 @@ class RuntimeMathTest(unittest.TestCase):
             self.runtime._process(_msg("/math", kind=ChatKind.GROUP,
                                        message_id="4242"))
         # A group game command with no live room defers (groupdup
-        # rule 1.5: a sibling may own the room) — the message needs
-        # a platform id or the deferral cannot register and the
-        # command vanishes with no failover. The sweeper fails over
-        # when no sibling answers, and the math problem lands then.
+        # rule 1.5: a sibling may own the room). The sweeper fails
+        # over when no sibling answers, and the math problem lands
+        # then. (An unkeyable message — no platform id — does not
+        # defer at all: see the unkeyable test below, which is
+        # handled at once instead of vanishing.)
         self.runtime._sweep_peer_deferrals(now=time.time() + 30)
         self.assertTrue(any("🧮" in text for _, text in gateway.sent))
+
+    def test_process_unkeyable_outsider_group_math_is_handled_at_once(self) -> None:
+        gateway = self.runtime.gateway
+        assert isinstance(gateway, _RecordingGateway)
+        with mock.patch.object(
+                self.runtime, "_route_game_move", return_value=None):
+            # No message_id: the deferral cannot register
+            # (unkeyable), so the command must NOT vanish — a
+            # "defer" verdict is NOT a stand-down when the
+            # deferral was never registered. It is handled at once.
+            self.runtime._process(_msg("/math", kind=ChatKind.GROUP))
+        # The math problem lands immediately, with no sweeper needed.
+        self.assertTrue(any("🧮" in text for _, text in gateway.sent))
+        # And nothing is pending: no deferral was registered.
+        self.assertFalse(
+            self.runtime._peer_deferral().has_pending("telegram:999"))
 
     def test_process_outsider_dm_math_falls_through_to_conversation(self) -> None:
         gateway = self.runtime.gateway

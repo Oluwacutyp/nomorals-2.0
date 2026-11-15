@@ -1924,13 +1924,25 @@ class PartnerRuntime(
                 _arb = self._command_arbitration(message, command)
                 if _arb == "defer":
                     self._bump("controls")
-                    self._defer_peer_command(message, command)
-                    _log.info(
-                        "command /%s in %s defers on %s — waiting "
-                        "to see whether the bot answers",
-                        command.kind, message.chat.key,
-                        message.chat.platform)
-                    return
+                    if self._defer_peer_command(message, command):
+                        _log.info(
+                            "command /%s in %s defers on %s — waiting "
+                            "to see whether the bot answers",
+                            command.kind, message.chat.key,
+                            message.chat.platform)
+                        return
+                    # Unkeyable: the deferral could not be
+                    # registered, so the command cannot be delayed
+                    # safely. A "defer" verdict is NOT a stand-down
+                    # when the deferral was never registered — handle
+                    # it here instead of vanishing. Treat the verdict
+                    # as "handle" so the stand-down below does not
+                    # swallow it.
+                    _log.warning(
+                        "command /%s in %s is unkeyable — deferral "
+                        "refused, handling at once instead of "
+                        "vanishing", command.kind, message.chat.key)
+                    _arb = "handle"
                 if _arb != "handle":
                     self._bump("controls")
                     _log.info(
@@ -2294,13 +2306,23 @@ class PartnerRuntime(
                 _arb = self._command_arbitration(message, _parsed)
                 if _arb == "defer":
                     self._bump("controls")
-                    self._defer_peer_command(message, _parsed)
-                    _log.info(
-                        "command /%s in %s defers on %s — waiting to "
-                        "see whether the bot answers",
-                        _parsed.kind, message.chat.key,
-                        message.chat.platform)
-                    return
+                    if self._defer_peer_command(message, _parsed):
+                        _log.info(
+                            "command /%s in %s defers on %s — waiting to "
+                            "see whether the bot answers",
+                            _parsed.kind, message.chat.key,
+                            message.chat.platform)
+                        return
+                    # Unkeyable: the deferral could not be
+                    # registered, so the command cannot be delayed
+                    # safely. A "defer" verdict is NOT a stand-down
+                    # when the deferral was never registered — fall
+                    # through to _run_control_command below instead
+                    # of vanishing.
+                    _log.warning(
+                        "command /%s in %s is unkeyable — deferral "
+                        "refused, handling at once instead of "
+                        "vanishing", _parsed.kind, message.chat.key)
                 if _arb == "down":
                     self._bump("controls")
                     _log.info(
@@ -5684,9 +5706,14 @@ class PartnerRuntime(
             return False
 
     def _defer_peer_command(self, message, command) -> bool:  # type: ignore[no-untyped-def]
-        """Register this echo command as deferred. False when the
-        registry could not take it (unkeyable) — the caller then
-        treats the turn as stood down, never as handled."""
+        """Register this echo command as deferred. True when the
+        deferral exists — registered now, or already pending from
+        an identical echo (safe to stand down: the sweeper will
+        fail over). False ONLY when the record is unkeyable (no
+        chat_key or no message_id) and was never registered — the
+        caller must NOT stand down; it handles the command at
+        once instead of vanishing (a "defer" verdict is NOT a
+        stand-down when the deferral was never registered)."""
         try:
             from .command_claims import command_claim_key
 
@@ -5734,6 +5761,17 @@ class PartnerRuntime(
                 record["window_s"] = (
                     GROUP_PEER_ANSWER_WINDOW_S if owner_side
                     else GROUP_PEER_ANSWER_WINDOW_FAST_S)
+            # Keyability is decided BEFORE register(): the registry
+            # refuses an unkeyable record (no chat_key or no
+            # message_id) and returns False — but a duplicate
+            # (already pending) ALSO returns False, and those are
+            # opposites. A duplicate IS registered (by the earlier
+            # identical command), so standing down is safe: the
+            # sweeper will fail over. An unkeyable record was NEVER
+            # registered, so standing down would vanish it. Return
+            # True for a duplicate, False only for unkeyable.
+            if not record["chat_key"] or not record["message_id"]:
+                return False
             registered = self._peer_deferral().register(record)
             if registered:
                 # A newer command supersedes older pendings in
@@ -5741,7 +5779,7 @@ class PartnerRuntime(
                 self._peer_deferral().supersede(
                     record["chat_key"], record["message_id"])
                 self._start_peer_deferral_sweeper()
-            return bool(registered)
+            return True
         except Exception as exc:  # noqa: BLE001 - deferral never eats a turn
             record_failure(
                 "runtime.PartnerRuntime._defer_peer_command", exc)
