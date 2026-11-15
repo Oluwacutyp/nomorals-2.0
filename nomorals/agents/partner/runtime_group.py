@@ -3115,7 +3115,9 @@ class RuntimeGroupMixin:
                 f"{mod['repeat_threshold']} · links: "
                 f"{', '.join(mod.get('link_allowlist') or []) or 'open'}"
                 f" · filters: {len(mod.get('word_filters') or [])} "
-                f"({mod.get('filter_action') or 'delete'})",
+                f"({mod.get('filter_action') or 'delete'})"
+                f" · slow mode "
+                f"{'off' if not int(mod.get('slowmode_delay_s') or 0) else _duration_text(int(mod.get('slowmode_delay_s') or 0))}",
                 f"economy: {'on' if s['economy_enabled'] else 'off'}"
                 f" · transfer tax {s.get('transfer_tax_pct', 2)}%"
                 f" · fine {s.get('fine_amount', 0)}"
@@ -3443,7 +3445,8 @@ class RuntimeGroupMixin:
                 "`/gsettings rules add TEXT` · "
                 "`/gsettings rules clear`",
                 "`/gsettings flood N` · "
-                "`/gsettings links DOMAINS|off`",
+                "`/gsettings links DOMAINS|off` · "
+                "`/gsettings slowmode 30s|off`",
                 "`/gsettings economy on|off` · "
                 "`/gsettings tax PCT` · "
                 "`/gsettings warns N` · "
@@ -3773,6 +3776,33 @@ class RuntimeGroupMixin:
             mod["flood_max"] = max(2, int(rest))
             surface.update_settings(key, moderation=mod)
             return f"flood limit {mod['flood_max']} per window."
+        if head == "slowmode":
+            if key.partition(":")[0].strip().lower() \
+                    in ("whatsapp", "wa"):
+                return ("that can't be set here: WhatsApp groups "
+                        "don't have slow mode — it's a Telegram "
+                        "setting. Nothing changed.")
+            if rest.lower() in ("off", "0", "none", "disable", ""):
+                seconds = 0
+            else:
+                parsed, _why = _parse_duration(rest)
+                if parsed is None:
+                    return ("usage: /gsettings slowmode "
+                            "30s|5m|1h|off")
+                snapped = _slowmode_snap(parsed)
+                if snapped is None:
+                    return ("too short — Telegram's smallest "
+                            "slow-mode step is 5s.")
+                seconds = snapped
+            ok, reply = self._slowmode_set(
+                surface, key, message.chat, message.chat.platform,
+                seconds,
+                str(message.sender_id or message.sender or ""))
+            if not ok:
+                return reply
+            return ("slow mode off" if not seconds else
+                    "slow mode on — one message every "
+                    f"{_duration_text(seconds)}.")
         if head == "filter" and rest.lower() == "add" and rest2:
             current = surface.store.settings(key)
             mod = dict(current["moderation"])
@@ -6010,6 +6040,9 @@ class RuntimeGroupMixin:
             if health["policy"].get("throttled"):
                 econ += " · faucets halved"
             lines.append(econ)
+        delay = surface.slowmode_delay(key)
+        lines.append("slow mode "
+                     f"{'off' if not delay else _duration_text(delay)}")
         waiting = self._groups_waiting(surface, key)
         lines.append(f"waiting: {waiting}" if waiting
                      else "nothing waiting")
@@ -6238,6 +6271,15 @@ class RuntimeGroupMixin:
                 mute_truth = (" · stored mute settings can't "
                               "fire here (no per-person mute "
                               "on WhatsApp)")
+            slow_s = int((s.get("moderation") or {})
+                         .get("slowmode_delay_s") or 0)
+            slow_txt = (
+                "slow mode n/a on WhatsApp "
+                "(no slow mode on WhatsApp)"
+                if key.partition(":")[0].strip().lower()
+                in ("whatsapp", "wa") else
+                f"slow mode "
+                f"{'off' if not slow_s else _duration_text(slow_s)}")
             card.block_lines([
                 f"autonomy "
                 f"{'ON' if d.get('autonomy', True) else 'OFF'}"
@@ -6260,7 +6302,7 @@ class RuntimeGroupMixin:
                 f" · standing mute "
                 f"{_duration_text(int(s.get('mute_default_s') or 0)) if s.get('mute_default_s') else 'ask'}"
                 f" · mute fine {s.get('fine_amount', 0)}"
-                f"{mute_truth}",
+                f"{mute_truth} · {slow_txt}",
                 f"ladder: {esc.describe()}",
             ])
             buttons = [
@@ -6276,6 +6318,26 @@ class RuntimeGroupMixin:
                          bool((d.get('antitag') or {})
                               .get('enabled', True)))],
             ]
+            if key.partition(":")[0].strip().lower() \
+                    not in ("whatsapp", "wa"):
+                # Slow-mode presets ride the same console grammar
+                # the command takes (below: head == "slowmode") —
+                # on WhatsApp no button is offered, the state line
+                # already says the platform has no slow mode.
+                buttons.append([
+                    (button_label("slowmode", "Slow: off",
+                                  settings=s),
+                     f"console {token} defense slowmode off"),
+                    (button_label("slowmode", "Slow: 30s",
+                                  settings=s),
+                     f"console {token} defense slowmode 30s"),
+                    (button_label("slowmode", "Slow: 5m",
+                                  settings=s),
+                     f"console {token} defense slowmode 5m"),
+                    (button_label("slowmode", "Slow: 1h",
+                                  settings=s),
+                     f"console {token} defense slowmode 1h"),
+                ])
             # The ladder's step menu (§30): on WhatsApp the
             # mute/restrict steps are not offered — the
             # platform cannot fire them (see
@@ -6314,6 +6376,8 @@ class RuntimeGroupMixin:
                 "`filter add|remove WORD` · `filter clear` · "
                 + filter_action_offer,
                 "`warns N` · " + mute_default_offer + " · `fine N`",
+                "`slowmode 30s|off` — Telegram only (the userbot "
+                "sets it; the Bot API can't)",
                 "`escalation limit N` · `escalation final "
                 "kick|ban` · `escalation window DAYS`",
                 escalation_steps_offer,
@@ -6782,6 +6846,42 @@ class RuntimeGroupMixin:
                 mod["flood_max"] = max(2, int(rest))
                 surface.update_settings(key, moderation=mod)
                 return f"flood limit {mod['flood_max']} per window."
+            if head == "slowmode":
+                from ...social.chat.base import ChatKind, ChatRef
+
+                if key.partition(":")[0].strip().lower() \
+                        in ("whatsapp", "wa"):
+                    return ("that can't be set here: WhatsApp "
+                            "groups don't have slow mode — it's a "
+                            "Telegram setting. Nothing changed.")
+                if rest in ("off", "0", "none", "disable", ""):
+                    seconds = 0
+                else:
+                    parsed, _why = _parse_duration(rest)
+                    if parsed is None:
+                        return None
+                    snapped = _slowmode_snap(parsed)
+                    if snapped is None:
+                        return ("too short — Telegram's smallest "
+                                "slow-mode step is 5s.")
+                    seconds = snapped
+                plat = key.partition(":")[0].strip()
+                if self._group_adapter(plat) is None:
+                    # The console's DM may ride a surface whose
+                    # platform has no adapter here — the userbot
+                    # is the one that sets slow mode.
+                    plat = "telegram"
+                chat_id = key.split(":", 1)[1] if ":" in key else ""
+                chat = ChatRef(platform=plat, chat_id=chat_id,
+                               kind=ChatKind.GROUP)
+                ok, reply = self._slowmode_set(
+                    surface, key, chat, plat, seconds,
+                    str(sender or ""))
+                if not ok:
+                    return reply
+                return ("slow mode off" if not seconds else
+                        "slow mode on — one message every "
+                        f"{_duration_text(seconds)}.")
             if head == "links":
                 current = surface.store.settings(key)
                 mod = dict(current["moderation"])
@@ -10868,6 +10968,146 @@ class RuntimeGroupMixin:
                              user_id, call):
             return "the unmute didn't go through — the platform refused it (it's in /glog)."
         return f"🔊 {label} can speak again."
+
+    # ---- slow mode (DESIGN §4/§16) --------------------------------
+    # The Bot API cannot set slow mode — only the MTProto userbot
+    # can (channels.toggleSlowMode).  WhatsApp has no slow mode at
+    # all.  The setting is stored only after Telegram accepts it,
+    # so the store never claims an enforcement that didn't happen.
+
+    def _slowmode_set(self, surface, key, chat, platform, seconds,
+                      actor):  # type: ignore[no-untyped-def]
+        """Enforce one slow-mode change through the platform,
+        then store it.  Returns (ok, reply): ok False carries
+        the honest failure text; the audit row carries seconds +
+        previous either way, so /glog shows what was asked even
+        when Telegram refused."""
+        previous = surface.slowmode_delay(key)
+        details = {"seconds": int(seconds), "previous": previous}
+        adapter = self._group_adapter(platform)
+        if adapter is None:
+            surface._audit(key, "admin_action_failed",
+                           action="slowmode", user_id=0, by=actor,
+                           reason="no adapter for this platform",
+                           **details)
+            surface.store.save()
+            return False, ("slow mode didn't change — there's no "
+                           "adapter for this platform (it's in "
+                           "/glog).")
+        fn = getattr(adapter, "admin_set_slow_mode", None)
+        if fn is None:
+            surface._audit(key, "admin_action_failed",
+                           action="slowmode", user_id=0, by=actor,
+                           reason="platform path cannot set slow "
+                           "mode", **details)
+            surface.store.save()
+            return False, ("slow mode didn't change — this "
+                           "platform path can't set it (it's in "
+                           "/glog).")
+        try:
+            result = fn(chat, int(seconds))
+            if isinstance(result, dict) \
+                    and result.get("ok") is False:
+                raise RuntimeError(str(result.get("error")
+                                       or "platform refused"))
+        except Exception as exc:  # noqa: BLE001 - audited, not raised
+            reason = f"{type(exc).__name__}: {exc}"
+            surface._audit(key, "admin_action_failed",
+                           action="slowmode", user_id=0, by=actor,
+                           reason=reason, **details)
+            surface.store.save()
+            if "Bot API cannot set slow mode" in str(exc):
+                return False, ("slow mode didn't change — the "
+                               "Bot API can't set it, only the "
+                               "userbot can. Run /slowmode in the "
+                               "group itself (it's in /glog).")
+            return False, ("slow mode didn't change — the "
+                           "platform refused it (it's in /glog).")
+        surface.set_slowmode_delay(key, int(seconds))
+        surface._audit(key, "admin_action", action="slowmode",
+                       user_id=0, by=actor, **details)
+        surface.store.save()
+        return True, ""
+
+    def _slowmode_detected(self, message):  # type: ignore[no-untyped-def]
+        """The delay Telegram itself reports for this group, or
+        None when the platform can't say (fail-open: the status
+        line then shows the stored value only)."""
+        adapter = self._group_adapter(message.chat.platform)
+        if adapter is None:
+            return None
+        fn = getattr(adapter, "chat_slow_mode_delay", None)
+        if fn is None:
+            return None
+        try:
+            out = fn(message.chat)
+        except Exception:  # noqa: BLE001 - detection is best-effort
+            return None
+        if not isinstance(out, dict) or not out.get("ok"):
+            return None
+        try:
+            return max(0, int(out.get("seconds") or 0))
+        except (TypeError, ValueError):
+            return None
+
+    def _control_slowmode(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """§4 slow mode: /slowmode 30s | 5m | 1h | off — one
+        message per member per delay, enforced on Telegram
+        through MTProto (the Bot API cannot set it); bare
+        /slowmode reports the stored delay and the delay
+        Telegram itself shows."""
+        key, err = self._mod_gate(message)
+        if err:
+            return err
+        platform = str(message.chat.platform or "")
+        if platform.partition(":")[0].strip().lower() \
+                in ("whatsapp", "wa"):
+            return ("WhatsApp groups don't have slow mode — "
+                    "that's a Telegram setting. Nothing changed.")
+        if not platform.startswith("telegram"):
+            return "slow mode is only wired for Telegram groups."
+        surface = self._group_surface()
+        actor = str(message.sender_id or message.sender or "")
+        raw = str(tail or "").strip()
+        if not raw:
+            stored = surface.slowmode_delay(key)
+            line = ("slow mode is off" if not stored else
+                    "slow mode is on — one message every "
+                    f"{_duration_text(stored)}")
+            detected = self._slowmode_detected(message)
+            if detected is not None and detected != stored:
+                line += (f" — Telegram itself shows "
+                         f"{'off' if not detected else _duration_text(detected)}")
+            return line + ". /slowmode 30s | 5m | 1h | off"
+        low = raw.lower()
+        if low in ("off", "0", "disable", "none"):
+            seconds = 0
+            requested = 0
+        else:
+            requested, _rest = _parse_duration(raw)
+            if requested is None:
+                return ("usage: /slowmode 30s | 5m | 15m | 1h | "
+                        "off — Telegram allows 5s, 10s, 30s, 1m, "
+                        "5m, 15m, 1h.")
+            snapped = _slowmode_snap(requested)
+            if snapped is None:
+                return ("too short — Telegram's smallest "
+                        "slow-mode step is 5s. /slowmode 5s | "
+                        "10s | 30s | 1m | 5m | 15m | 1h | off.")
+            seconds = snapped
+        ok, reply = self._slowmode_set(
+            surface, key, message.chat, message.chat.platform,
+            seconds, actor)
+        if not ok:
+            return reply
+        if not seconds:
+            return "slow mode off — the group is back to full speed."
+        text = (f"🐢 slow mode on — one message every "
+                f"{_duration_text(seconds)}")
+        if seconds != requested:
+            text += (f" (the closest Telegram allows under "
+                     f"{_duration_text(requested)})")
+        return text
 
     def _control_ban(self, tail, message) -> str:  # type: ignore[no-untyped-def]
         key, err = self._mod_gate(message)
@@ -15538,6 +15778,23 @@ def _duration_text(seconds: int) -> str:
     if seconds >= 60:
         return f"{seconds // 60}m"
     return f"{seconds}s"
+
+
+def _slowmode_snap(seconds: int) -> int | None:
+    """Snap a requested slow-mode delay down to the nearest delay
+    Telegram accepts (0, 5, 10, 30, 60, 300, 900, 3600 — the
+    SLOWMODE_ALLOWED_S set).  0 stays 0; 1–4s has no step at or
+    under it, so None — the caller shows the allowed list
+    instead of silently meaning 'off'."""
+    from ...social.chat.telegram import SLOWMODE_ALLOWED_S
+
+    seconds = int(seconds)
+    if seconds <= 0:
+        return 0
+    allowed = [s for s in SLOWMODE_ALLOWED_S if 0 < s <= seconds]
+    if not allowed:
+        return None
+    return max(allowed)
 
 
 def _fmt_ts(ts) -> str:

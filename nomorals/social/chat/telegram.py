@@ -62,7 +62,13 @@ def _is_entity_parse_error(exc: BaseException) -> bool:
             or "parse entities" in s
             or "entity offset" in s)
 
-__all__ = ["TelegramAdapter", "TelegramBotAdapter"]
+__all__ = ["TelegramAdapter", "TelegramBotAdapter",
+           "SLOWMODE_ALLOWED_S"]
+
+#: The slow-mode delays Telegram accepts (TDLib doc for the same
+#: setting; MTProto answers anything else with SECONDS_INVALID):
+#: 0 disables, the rest are the client-offered steps.
+SLOWMODE_ALLOWED_S = (0, 5, 10, 30, 60, 300, 900, 3600)
 
 _log = get_logger(__name__)
 
@@ -4273,6 +4279,58 @@ class TelegramAdapter(ChatAdapter):
             self._join_request_coro(chat, user_id, approve),
             "join_request")
 
+    # ── slow mode (DESIGN §4/§16) ─────────────────────────────
+    # The Bot API has no slow-mode setter (slow_mode_delay is a
+    # read-only Chat field) — this MTProto verb is the only way
+    # Devon sets it: channels.toggleSlowMode.  The read rides
+    # GetFullChannelRequest → full_chat.slowmode_seconds.
+
+    async def _slow_mode_coro(self, chat: ChatRef,
+                              seconds: int) -> None:
+        from telethon.tl import functions
+
+        entity = await self._resolve(chat)
+        await self._client(
+            functions.channels.ToggleSlowModeRequest(
+                channel=entity, seconds=int(seconds)))
+
+    def admin_set_slow_mode(self, chat: ChatRef,
+                            seconds: int) -> dict[str, Any]:
+        """Set the group's slow-mode delay: every member waits
+        this long between messages.  0 disables.  Telegram
+        accepts only 0, 5, 10, 30, 60, 300, 900, 3600 —
+        anything else is refused here, never sent."""
+        if int(seconds) not in SLOWMODE_ALLOWED_S:
+            return {"ok": False,
+                    "error": (f"slow mode delay {int(seconds)}s is not "
+                              "one Telegram accepts — allowed: 0, 5, 10, "
+                              "30, 60, 300, 900, 3600")}
+        return self._admin(
+            self._slow_mode_coro(chat, int(seconds)), "slow mode")
+
+    async def _slow_mode_delay_coro(self, chat: ChatRef) -> int:
+        from telethon.tl import functions
+
+        entity = await self._resolve(chat)
+        full = await self._client(
+            functions.channels.GetFullChannelRequest(
+                channel=entity))
+        full_chat = getattr(full, "full_chat", None)
+        value = getattr(full_chat, "slowmode_seconds", None)
+        return int(value) if value is not None else 0
+
+    def chat_slow_mode_delay(self, chat: ChatRef) -> dict[str, Any]:
+        """The delay Telegram itself reports for this group
+        (GetFullChannelRequest → slowmode_seconds; absent = off).
+        Detection only — setting rides admin_set_slow_mode."""
+        try:
+            seconds = self._run_on_loop(
+                self._slow_mode_delay_coro(chat), timeout=30.0)
+            return {"ok": True, "seconds": int(seconds)}
+        except Exception as exc:  # noqa: BLE001 - honest error
+            return {"ok": False,
+                    "error": f"slow mode read failed: {exc}"}
+
     # ── §16 P5 verbs (userbot surface) ─────────────────────────
     # MTProto carries two of the P5 acts itself (sender-chat
     # ban, topic rename); the rest are Bot-API-only affordances
@@ -7989,6 +8047,32 @@ class TelegramBotAdapter(ChatAdapter):
         bot's can_delete_messages right."""
         return self._admin("deleteAllMessageReactions", chat,
                            user_id=int(user_id))
+
+    def admin_set_slow_mode(self, chat: ChatRef,
+                            seconds: int) -> dict[str, Any]:
+        """Slow mode cannot be set through the Bot API — it
+        only reads the delay (getChat's slow_mode_delay).  The
+        userbot sets it (TelegramAdapter.admin_set_slow_mode)."""
+        return {"ok": False,
+                "error": "the Bot API cannot set slow mode — "
+                "it only reads the delay; the userbot sets it"}
+
+    def chat_slow_mode_delay(self, chat: ChatRef) -> dict[str, Any]:
+        """The delay Telegram reports for this group, read off
+        getChat's slow_mode_delay (absent = off).  Detection
+        only — setting rides the userbot."""
+        out = self._admin("getChat", chat)
+        if not out.get("ok"):
+            return {"ok": False,
+                    "error": str(out.get("error") or "")}
+        result = out.get("result") or {}
+        try:
+            return {"ok": True,
+                    "seconds": int(result.get("slow_mode_delay")
+                                   or 0)}
+        except (TypeError, ValueError):
+            return {"ok": False,
+                    "error": "slow_mode_delay unreadable"}
 
     def admin_answer_join_query(self, query_id: str, result: str
                                 ) -> dict[str, Any]:

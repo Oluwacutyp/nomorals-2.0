@@ -184,6 +184,11 @@ def _default_settings() -> dict[str, Any]:
             "link_allowlist": [],
             "word_filters": [],
             "filter_action": "delete",
+            "slowmode_delay_s": 0,  # DESIGN §4: seconds between
+                                     # messages per member (0 =
+                                     # off); Telegram accepts only
+                                     # 0, 5, 10, 30, 60, 300, 900,
+                                     # 3600 — enforced via MTProto
         },
         "economy_enabled": True,        # consumed by P2
         "transfer_tax_pct": 2,          # /pay fee to the treasury
@@ -860,6 +865,31 @@ class GroupSurface:
         self.store.save()
         self.refresh_moderator(group_key)
         return settings
+
+    # ---- slow mode (DESIGN §4/§16) --------------------------------
+    def slowmode_delay(self, group_key: str) -> int:
+        """The group's stored slow-mode delay in seconds (0 =
+        off).  The store is the source of truth for what Devon
+        last set; Telegram itself may differ (see the status
+        command, which reads the live value too)."""
+        try:
+            raw = (self.store.settings(group_key)
+                   .get("moderation") or {}).get("slowmode_delay_s")
+            return max(0, int(raw or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def set_slowmode_delay(self, group_key: str,
+                           seconds: int) -> int:
+        """Persist the slow-mode delay (the store write only —
+        enforcement through Telegram is the caller's job, so a
+        stored value never claims an enforcement that didn't
+        happen).  Returns the stored value."""
+        current = self.store.settings(group_key)
+        mod = dict(current.get("moderation") or {})
+        mod["slowmode_delay_s"] = max(0, int(seconds))
+        self.update_settings(group_key, moderation=mod)
+        return int(mod["slowmode_delay_s"])
 
     # ---- audit ---------------------------------------------------
     def _audit(self, group_key: str, kind: str, **details: Any

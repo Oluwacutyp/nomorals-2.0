@@ -7445,6 +7445,12 @@ class PartnerRuntime(
                 return ("that's a Telegram tool — WhatsApp "
                         "has no member tags, channel posts, "
                         "reaction wipes or boosts to run it on.")
+            if kind == "slowmode":
+                # Slow mode is a Telegram group setting —
+                # WhatsApp groups don't have it at all.
+                return ("WhatsApp groups don't have slow mode — "
+                        "that's a Telegram setting. Nothing "
+                        "changed.")
             return ("WhatsApp has no per-person mute — a "
                     "member here can only be removed, or left "
                     "as they are.")
@@ -7831,6 +7837,9 @@ class PartnerRuntime(
 
         if kind == "purge":
             return self._control_purge(command.tail, message)
+
+        if kind == "slowmode":
+            return self._control_slowmode(command.tail, message)
 
         if kind == "report":
             return self._control_report(command.tail, message)

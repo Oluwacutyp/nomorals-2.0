@@ -84,7 +84,8 @@ PLATFORMS = ("telegram", "discord", "whatsapp", "local")
 #: global catalog is untouched.
 WHATSAPP_UNSUPPORTED_KINDS: frozenset[str] = frozenset(
     {"mute", "unmute", "cleanup", "rmdeleted", "rminactive",
-     "tag", "bansender", "unbansender", "reactwipe", "boosters"})
+     "tag", "bansender", "unbansender", "reactwipe", "boosters",
+     "slowmode"})
 
 #: The Telegram-only member-cleanup kinds — on WhatsApp they get
 #: their own dispatch truth line (see the constant above).
@@ -247,7 +248,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "listproperty", "auctions", "mortgage", "insure",
     "drop", "claim",
     "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
-    "unpin", "purge", "report",
+    "unpin", "purge", "slowmode", "report",
     "cleanup", "rmdeleted", "rminactive",
     "tag", "bansender", "unbansender", "reactwipe", "boosters",
     "party", "ajo", "cgroup", "room", "challenge", "match",
@@ -813,6 +814,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "pin": (0, 0),            # /pin — admin: pin the message you reply to
     "unpin": (0, 0),          # /unpin — admin: unpin the current pin
     "purge": (0, 0),          # /purge — admin: delete the message you reply to
+    "slowmode": (0, None),    # /slowmode [30s|5m|1h|off] — admin: set the group's slow-mode delay (Telegram only; MTProto) (DESIGN §4)
     "report": (0, None),      # /report [@member] [reason] — member: flag something for the admins (held log)
     "cleanup": (0, 1),        # /cleanup [page] — admin: Telegram group cleanup SCAN (dry run, removes nothing): deleted accounts + members inactive past the window
     "rmdeleted": (0, 0),      # /rmdeleted — admin: remove the deleted accounts the scan finds (kick, not ban; journaled per member)
@@ -3947,6 +3949,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/purge as a reply",
             "example": "/purge",
             "related": "/glog"},
+    "slowmode": {"what": "set the group's slow mode (admins, Telegram only): every member waits this long between messages. Telegram allows 5s, 10s, 30s, 1m, 5m, 15m, 1h; anything between snaps down to the closest step. Bare /slowmode reports the stored delay and the delay Telegram itself shows. WhatsApp groups don't have slow mode.",
+            "usage": "/slowmode 30s | 5m | 1h | off",
+            "example": "/slowmode 30s",
+            "related": "/gsettings /console /groups"},
     "report": {"what": "report a member or message to the group admins. The report goes into the held group log with the author's name attached when you reply to their message; admins read it with /glog.",
             "usage": "/report as a reply, or /report @member [reason]",
             "example": "/report @ada spamming",
@@ -4655,7 +4661,8 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                             "contributions", "boards", "webshot",
                             "webrec",
                             "mute", "unmute", "ban", "unban", "kick",
-                            "warn", "pin", "unpin", "purge", "report",
+                            "warn", "pin", "unpin", "purge", "slowmode",
+                            "report",
                             "cleanup", "rmdeleted", "rminactive",
                             "tag", "bansender", "unbansender",
                             "reactwipe", "boosters", "party", "ajo"]),
@@ -4978,7 +4985,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "poll", "vote", "milestones", "contributions", "boards",
       "webshot", "webrec",
       "mute", "unmute", "ban", "unban", "kick", "warn", "pin",
-      "unpin", "purge", "report",
+      "unpin", "purge", "slowmode", "report",
       "cleanup", "rmdeleted", "rminactive",
       "tag", "bansender", "unbansender", "reactwipe", "boosters",
       "party", "ajo"]),
