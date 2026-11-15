@@ -88,7 +88,7 @@ model - switch the active model live (up to 5 fallbacks); no argument shows the 
 providers - probe every registered provider and report live/dead with the reason — the diagnostic for a silent brain.
 say - three forms: send a message to a chat as her, from your hands — speak text as a voice note in a named voice — or rich voice with direction/accent/ambience.
 power - power mode: no human-like pacing, maximum capability — needs the key you set in config, or the owner seal (identity + passphrase).
-proposals - list everything waiting for your approval: proactive actions + research upgrade proposals.
+proposals - list everything waiting for your approval — and inspect any one of them in full before you decide: proactive actions + research upgrade proposals.
 approve - approve one pending proposal so she executes it (upgrade tickets are approved + test-gated applied).
 deny - deny one pending proposal (upgrade tickets need a reason).
 start - hot-start a chat platform without restarting the system.
