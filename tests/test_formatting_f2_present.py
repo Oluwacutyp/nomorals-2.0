@@ -36,6 +36,7 @@ from nomorals.social.chat.gateway import ChatGateway
 from nomorals.social.chat.present import (
     Doc, Field, KV, Section, actions_rows, body_text, chunks, from_dict,
     humanize_key, render, render_text)
+from nomorals.social.chat.typography import STAMP_HTML
 from nomorals.social.format_conformance import check_message, max_text_for
 
 
@@ -396,7 +397,8 @@ class NotifierDocTests(unittest.TestCase):
         self.assertTrue(out["delivered"], out)
         _p, _c, text, kw = gw.sent[0]
         self.assertEqual(
-            text, banner("gate **ENFORCED**", "🔔") + "\nsample: spawned 89")
+            text, banner("gate **ENFORCED**", "🔔") + "\nsample: spawned 89"
+            + "\n\n" + STAMP_HTML)
         self.assertEqual(kw["parse_mode"], "")   # F1 path untouched
 
     def test_doc_send_degrades_on_old_gateway(self):
@@ -422,7 +424,8 @@ class NotifierDocTests(unittest.TestCase):
                                     doc={"not": "a doc"})
         self.assertTrue(out["delivered"], out)
         self.assertEqual(gw.sent[0][2],
-                         "🔔 **Plain title**\nplain body")
+                         "🔔 **Plain title**\nplain body"
+                         + "\n\n" + STAMP_HTML)
 
     def test_notify_doc_helper(self):
         from nomorals.agents.notifier import notify_doc

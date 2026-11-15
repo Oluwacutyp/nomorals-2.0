@@ -42,6 +42,7 @@ from nomorals.agents.repurpose import (
 from nomorals.social.chat.typography import (
     DEFAULT_STAMP_TEXT,
     STAMP_HTML,
+    STAMP_TEXT_STYLED,
     apply_stamp,
 )
 from nomorals.social.drafts import (
@@ -350,7 +351,10 @@ def test_quoted_stamp_text_still_gets_footer():
     text = f'he ended his post with "{DEFAULT_STAMP_TEXT}" again'
     out = apply_stamp(text)
     assert out == text + "\n\n" + STAMP_HTML
-    assert out.count(DEFAULT_STAMP_TEXT) == 2
+    # the quoted mention stays plain (content, not a footer);
+    # the appended footer carries the brandmark face
+    assert out.count(DEFAULT_STAMP_TEXT) == 1
+    assert out.count(STAMP_TEXT_STYLED) == 1
 
 
 def test_stamp_text_as_trailing_sentence_still_gets_footer():

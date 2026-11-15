@@ -29,7 +29,7 @@ from nomorals.social.chat.control import (
     menu_sections,
     menu_session_render,
 )
-from nomorals.social.chat.typography import DIVIDER
+from nomorals.social.chat.typography import DIVIDER, STAMP_TEXT_STYLED
 from nomorals.storage.db import Database
 
 # ── the designed session home ────────────────────────────────────
@@ -57,7 +57,7 @@ class SessionHomeCompositionTests(unittest.TestCase):
                 self.assertIn(escape(title), text)
                 self.assertIn(f"{len(items)} commands", text)
         # Stamp policy unchanged; no pin fallback anywhere.
-        self.assertIn("Powered by peacethefirst", text)
+        self.assertIn(STAMP_TEXT_STYLED, text)
         self.assertNotIn("📌", text)
 
     def test_public_home_omits_owner_field_and_names_its_mode(self):
@@ -76,7 +76,7 @@ class SessionHomeCompositionTests(unittest.TestCase):
         self.assertIn("┃ ✫✧│ 🎬 media", text)  # rows ride ✫✧│
         self.assertIn("ᴛᴀʟᴋ ᴛᴏ ᴍᴇ", text)     # cluster titles small-capped
         self.assertNotIn("📌", text)
-        self.assertIn("_Powered by peacethefirst_", text)
+        self.assertIn(f"_{STAMP_TEXT_STYLED}_", text)
 
     def test_no_section_falls_back_to_the_pin_emoji(self):
         for platform in ("telegram", "telegram-bot", "whatsapp"):

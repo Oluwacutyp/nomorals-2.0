@@ -43,6 +43,7 @@ from nomorals.social.chat.chunking import strip_label, utf16_len
 from nomorals.social.chat.gateway import ChatGateway
 from nomorals.social.chat.platforms import to_telegram
 from nomorals.social.chat.telegram import TelegramAdapter, TelegramBotAdapter
+from nomorals.social.chat.typography import STAMP_HTML
 
 
 # ── converter ────────────────────────────────────────────────────────
@@ -375,7 +376,8 @@ class NotifierEndToEndTests(unittest.TestCase):
         self.assertEqual(
             sends[0].get("text"),
             "🔔 <b>Finance alerts</b>\n"
-            "checked <b>0</b> alerts &amp; &lt;none&gt; fired")
+            "checked <b>0</b> alerts &amp; &lt;none&gt; fired"
+            "\n\n" + STAMP_HTML)
 
     def test_log_and_digest_tiers_never_delivered(self):
         gw, ad = _gateway("telegram-bot")

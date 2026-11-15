@@ -33,6 +33,7 @@ from nomorals.social.chat import control as C
 from nomorals.social.chat import hub as H
 from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef
 from nomorals.social.chat.tgbot_buttons import buttons_for_text
+from nomorals.social.chat.typography import STAMP_TEXT_STYLED
 
 _TMP = os.environ.get("NM_TEST_TMPDIR") or None
 
@@ -428,7 +429,7 @@ class PipelineLawTests(unittest.TestCase):
         sends = self.drive(_msg("/joke", "telegram", ChatKind.DM,
                                 owner=True))
         self.assertEqual(len(sends), 1)
-        self.assertIn(STAMP, sends[0])
+        self.assertIn(STAMP_TEXT_STYLED, sends[0])
 
 
 class ConversationalStampTests(unittest.TestCase):
@@ -450,6 +451,7 @@ class ConversationalStampTests(unittest.TestCase):
         self.assertEqual(len(sends), 1)
         self.assertIn("canned answer", sends[0])
         self.assertNotIn(STAMP, sends[0])
+        self.assertNotIn(STAMP_TEXT_STYLED, sends[0])
 
 
 if __name__ == "__main__":

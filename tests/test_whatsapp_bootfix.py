@@ -48,6 +48,7 @@ from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef, SendResult
 from nomorals.social.chat.gateway import ChatGateway
 from nomorals.social.chat.platform_limits import for_platform
 from nomorals.social.chat.send_retry import BackoffPolicy
+from nomorals.social.chat.style import small_caps
 from nomorals.social.chat.whatsapp import (
     STALE_INBOUND_S,
     UNCONFIRMED_SEND_ERROR,
@@ -395,11 +396,11 @@ class RuntimeBootfixTests(unittest.TestCase):
         self.runtime._process(_self_chat_msg("/help", mid="wa-h1"))
         wa_sends = [t for p, t in self.gateway.sent if p == "whatsapp"]
         self.assertEqual(len(wa_sends), 1)
-        self.assertIn("command menu", wa_sends[0])
+        self.assertIn(small_caps("command menu"), wa_sends[0])
         self.runtime._process(_self_chat_msg("/help", mid="wa-h2"))
         wa_sends = [t for p, t in self.gateway.sent if p == "whatsapp"]
         self.assertEqual(len(wa_sends), 2)
-        self.assertIn("command menu", wa_sends[1])
+        self.assertIn(small_caps("command menu"), wa_sends[1])
 
     def test_stale_help_is_observed_never_answered(self) -> None:
         # The boot flood itself: attach delivers the offline /help —

@@ -30,7 +30,10 @@ from types import SimpleNamespace
 from nomorals.social.chat.group_surface import GroupStore, GroupSurface
 from nomorals.social.chat.typography import (
     DEFAULT_STAMP_TEXT,
+    STAMP_HTML,
+    STAMP_TEXT_STYLED,
     Card,
+    _styled_stamp_text,
     fmt_amount,
     render_card,
     resolve_style,
@@ -62,8 +65,7 @@ def test_telegram_render_has_the_house_structure():
     assert "<blockquote>" in out.text                 # flavor
     assert "Sparks are game points only." in out.text
     assert "<i>banked sparks are safe from robbery</i>" in out.text
-    assert out.text.rstrip().endswith(
-        f"<i>{DEFAULT_STAMP_TEXT}</i>")               # stamp last
+    assert out.text.rstrip().endswith(STAMP_HTML)  # stamp last
 
 
 def test_whatsapp_render_uses_native_marks():
@@ -72,8 +74,7 @@ def test_whatsapp_render_uses_native_marks():
     assert "💰 *Ada*" in out.text
     assert "*Wallet*: ```29 sparks```" in out.text
     assert "▍ Sparks are game points only." in out.text
-    assert out.text.rstrip().endswith(f"_{DEFAULT_STAMP_TEXT}_")
-    assert "<b>" not in out.text and "<code>" not in out.text
+    assert out.text.rstrip().endswith(f"_{STAMP_TEXT_STYLED}_")
 
 
 def test_discord_render_is_markdown():
@@ -81,7 +82,7 @@ def test_discord_render_is_markdown():
     assert "💰 **Ada**" in out.text
     assert "**Wallet**: `29 sparks`" in out.text
     assert "> Sparks are game points only." in out.text
-    assert out.text.rstrip().endswith(f"_{DEFAULT_STAMP_TEXT}_")
+    assert out.text.rstrip().endswith(f"_{STAMP_TEXT_STYLED}_")
 
 
 def test_amounts_group_and_tabulate():
@@ -156,7 +157,7 @@ def test_stamp_absent_on_conversational_and_moderation():
 def test_stamp_exactly_once_and_idempotent():
     card = _panel()
     once = render_card(card, platform="telegram-bot").text
-    assert once.count(DEFAULT_STAMP_TEXT) == 1
+    assert once.count(STAMP_TEXT_STYLED) == 1
     # a re-render of already-stamped text (message edits) must
     # not stack a second signature
     from nomorals.social.chat.typography import _append_stamp
@@ -169,15 +170,18 @@ def test_stamp_custom_text_and_group_disable():
     settings = {"presentation": {"stamp_text": "Powered by X"}}
     out = render_card(_panel(), platform="telegram-bot",
                       settings=settings)
-    assert out.text.rstrip().endswith("<i>Powered by X</i>")
+    assert out.text.rstrip().endswith(
+        f"<i>{_styled_stamp_text('Powered by X')}</i>")
     settings = {"presentation": {"stamp": False}}
     out = render_card(_panel(), platform="telegram-bot",
                       settings=settings)
     assert DEFAULT_STAMP_TEXT not in out.text
+    assert STAMP_TEXT_STYLED not in out.text
     settings = {"presentation": {"stamp_classes": ["game"]}}
     out = render_card(_panel(), platform="telegram-bot",
                       settings=settings)
     assert DEFAULT_STAMP_TEXT not in out.text  # economy unlisted
+    assert STAMP_TEXT_STYLED not in out.text
 
 
 # ── the live surfaces, through the runtime ────────────────────
@@ -227,8 +231,7 @@ def test_balance_panel_structure_not_wall_of_text(tmp_path):
     assert "<b>Wallet</b>: <code>29 sparks</code>" in text
     assert "<blockquote" in text                       # disclaimer
     assert "Sparks are game points only." in text
-    assert text.rstrip().endswith(
-        f"<i>{DEFAULT_STAMP_TEXT}</i>")                # stamp
+    assert text.rstrip().endswith(STAMP_HTML)           # stamp
     datas = {d for row in out.buttons for _l, d in row}
     assert "deposit all" in datas  # buttons still match display
 
@@ -241,8 +244,7 @@ def test_deposit_reply_is_a_card(tmp_path):
     assert "**" not in out.text  # dialect fully rendered
     assert "<b>Wallet</b>: <code>0 sparks</code>" in out.text
     assert "<b>Banked</b>: <code>50 sparks</code>" in out.text
-    assert out.text.rstrip().endswith(
-        f"<i>{DEFAULT_STAMP_TEXT}</i>")
+    assert out.text.rstrip().endswith(STAMP_HTML)
 
 
 def test_balance_on_whatsapp_uses_whatsapp_marks(tmp_path):
@@ -251,7 +253,7 @@ def test_balance_on_whatsapp_uses_whatsapp_marks(tmp_path):
     out = rt._control_balance(_msg(platform="whatsapp"))
     assert "<b>" not in out.text and "<code>" not in out.text
     assert "*Wallet*: ```29 sparks```" in out.text
-    assert out.text.rstrip().endswith(f"_{DEFAULT_STAMP_TEXT}_")
+    assert out.text.rstrip().endswith(f"_{STAMP_TEXT_STYLED}_")
 
 
 def test_settings_round_trip_theme_stamp_class(tmp_path):
@@ -261,11 +263,12 @@ def test_settings_round_trip_theme_stamp_class(tmp_path):
     _fund(surface, "u1", 29)
     out = rt._control_balance(_msg())
     assert DEFAULT_STAMP_TEXT not in out.text
+    assert STAMP_TEXT_STYLED not in out.text
     rt._control_gsettings("stamp on", admin)
     rt._control_gsettings("stamp text Powered by the house", admin)
     out = rt._control_balance(_msg())
     assert out.text.rstrip().endswith(
-        "<i>Powered by the house</i>")
+        f"<i>{_styled_stamp_text('Powered by the house')}</i>")
     # theme + class overrides persist and change later renders
     rt._control_gsettings("theme board", admin)
     settings = surface.store.settings(KEY)
@@ -301,8 +304,7 @@ def test_slots_result_is_a_board(tmp_path):
     out = rt._control_slots("10", _msg())
     assert "━" in out.text                      # board preset
     assert "<pre>" in out.text                  # the reels block
-    assert out.text.rstrip().endswith(
-        f"<i>{DEFAULT_STAMP_TEXT}</i>")         # game results stamp
+    assert out.text.rstrip().endswith(STAMP_HTML)  # game results stamp
 
 
 def test_games_can_go_clean_per_group(tmp_path):

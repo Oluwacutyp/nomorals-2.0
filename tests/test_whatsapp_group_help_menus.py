@@ -47,6 +47,7 @@ from nomorals.social.chat.control import (
     public_menu_text,
     whatsapp_menu,
 )
+from nomorals.social.chat.typography import STAMP_HTML
 
 _TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
 
@@ -355,8 +356,9 @@ def test_whatsapp_group_mute_gets_truth_no_mod_run(rig, monkeypatch):
     runtime._process_inner(
         _msg("/mute @member 10m", "whatsapp", ChatKind.GROUP))
     # one reply, the platform truth — no moderation attempt,
-    # so nothing for _mod_run to audit as failed
-    assert sends == [NO_MUTE_LINE]
+    # so nothing for _mod_run to audit as failed; the light
+    # stamp rides the conversational reply seam
+    assert sends == [NO_MUTE_LINE + "\n" + STAMP_HTML]
     assert calls == []
 
 
@@ -368,7 +370,7 @@ def test_whatsapp_group_unmute_gets_truth_no_mod_run(rig, monkeypatch):
         lambda *a, **k: calls.append((a, k)) or True)
     runtime._process_inner(
         _msg("/unmute @member", "whatsapp", ChatKind.GROUP))
-    assert sends == [NO_MUTE_LINE]
+    assert sends == [NO_MUTE_LINE + "\n" + STAMP_HTML]
     assert calls == []
 
 
