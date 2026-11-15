@@ -15,6 +15,7 @@ registered and returns the ticket shape end to end.
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import unittest
@@ -142,7 +143,7 @@ FENCE = '```python\n# commentaire\nx = "ne pas traduire"\n```'
 class _TempHome(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(
-            dir="/home/hatch/workspace/d1921t2-verify/tmp")
+            dir=os.environ.get("NM_TEST_TMPDIR"))
         self.addCleanup(self._tmp.cleanup)
         self.home = self._tmp.name
         self.store = TranslationReceiptStore(db=None, home=self.home)

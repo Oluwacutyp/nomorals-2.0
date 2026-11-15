@@ -14,6 +14,7 @@ breaks a translation.
 
 from __future__ import annotations
 
+import os
 import re
 import tempfile
 import unittest
@@ -134,7 +135,7 @@ class FakeLocalBackend:
 class _TempHome(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory(
-            dir="/home/hatch/workspace/d1921t1-verify/tmp")
+            dir=os.environ.get("NM_TEST_TMPDIR"))
         self.addCleanup(self._tmp.cleanup)
         self.home = self._tmp.name
         self.store = TranslationReceiptStore(db=None, home=self.home)
