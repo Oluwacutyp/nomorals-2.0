@@ -103,7 +103,8 @@ def _split_ids(raw: Any) -> set[str]:
 
 def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
                   db: Any = None,
-                  whatsapp_port: int | None = None) -> ChatAdapter | None:
+                  whatsapp_port: int | None = None,
+                  telegram_session: str | None = None) -> ChatAdapter | None:
     """Build one adapter by name; None when unavailable (missing dependency,
     disabled, or bad credentials). Used both at boot and for hot starts.
 
@@ -111,7 +112,12 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
     whatsapp adapter — the pairing pool launches one bridge per
     account on its own port, and the live-attach reconcile points
     the conversational adapter at the resolved account's bridge
-    rather than the static config endpoint."""
+    rather than the static config endpoint.
+
+    ``telegram_session`` overrides the configured session file for
+    the telegram adapter — the Telegram live-attach reconcile
+    points the conversational adapter at the resolved account's
+    own session file rather than the static config session."""
     name = name.strip().lower()
     chat = settings.chat
     if name == "local":
@@ -152,7 +158,8 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
                 # (Path("") == Path(".")), and TelegramClient cannot use a
                 # directory as a SQLite session file.
                 session_path=settings.resolve(
-                    chat.telegram_session or "data/telegram.session"),
+                    telegram_session or chat.telegram_session
+                    or "data/telegram.session"),
                 chat_allow=chat.telegram_chats,
                 media_dir=str(settings.resolve("data/media/telegram")),
                 media_in_groups=chat.media_in_groups,

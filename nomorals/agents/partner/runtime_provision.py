@@ -1133,6 +1133,10 @@ class RuntimeProvisionMixin:
     #: successful attach clears exactly its own notes and never a
     #: bridge error the supervisor recorded.
     _WA_SURFACE_NOTE_PREFIX = "chat surface: "
+    #: The Telegram reconcile's own tag (same shape, distinct
+    #: prefix — a WhatsApp attach must never retire a Telegram
+    #: session-down note, or the other way round).
+    _TG_SURFACE_NOTE_PREFIX = "telegram surface: "
 
     def _wa_surface_note(self, sup: Any, rec_id: str, note: str) -> str:
         """Record a surface failure on the account (visible in
@@ -1176,6 +1180,50 @@ class RuntimeProvisionMixin:
             _log.warning("whatsapp surface not attached for %s: %s",
                          rec.id, note)
         return self._wa_surface_note(sup, rec.id, note)
+
+    def _tg_surface_note(self, sup: Any, rec_id: str, note: str) -> str:
+        """Record a Telegram surface failure on the account
+        (visible in /pair) and return it for the caller's reply.
+        Never raises."""
+        try:
+            if rec_id:
+                sup.registry.set_error(
+                    rec_id, self._TG_SURFACE_NOTE_PREFIX + note)
+        except Exception as exc:  # noqa: BLE001 - noting never dies
+            record_failure("runtime_provision.tg_surface_note", exc)
+        return note
+
+    def _tg_surface_clear_note(self, sup: Any, rec: Any) -> None:
+        """A successful attach retires this reconcile's own earlier
+        failure note on the account. Never raises."""
+        try:
+            if rec is not None and str(
+                    getattr(rec, "last_error", "") or "").startswith(
+                    self._TG_SURFACE_NOTE_PREFIX):
+                sup.registry.set_error(rec.id, "")
+        except Exception as exc:  # noqa: BLE001
+            record_failure("runtime_provision.tg_surface_clear", exc)
+
+    def _tg_session_down(self, sup: Any, rec: Any, reason: str) -> str:
+        """The session-down verdict for one reconcile pass: the
+        note the caller answers with (also recorded on the
+        account via :meth:`_tg_surface_note`, so /pair shows it),
+        plus ONE failure-ledger entry per EPISODE.  An episode is
+        one (account, reason) signature — beats that keep finding
+        the same dead session do not spam the ledger; a recovery
+        (the reconcile clears the signature when the session
+        authorizes again) or a new reason re-arms the recording."""
+        note = f"session down — {reason}"
+        sig = f"{rec.id}|{reason}"
+        if getattr(self, "_tg_session_down_sig", "") != sig:
+            self._tg_session_down_sig = sig
+            record_failure(
+                "runtime_provision.tg_session_down",
+                RuntimeError(
+                    f"telegram session down for {rec.id}: {reason}"))
+            _log.warning("telegram surface not attached for %s: %s",
+                         rec.id, note)
+        return self._tg_surface_note(sup, rec.id, note)
 
     def _presence_suffix(self, platform: str) -> str:
         """The /platforms suffix for always-online (§15 presence
@@ -1375,6 +1423,177 @@ class RuntimeProvisionMixin:
                     pass
             return ""
 
+    def _sync_telegram_surface(self) -> str:
+        """Live-attach the Telegram conversational surface to the
+        pool — the WhatsApp reconcile's mirror.
+
+        The gateway's telegram adapter is built ONCE at boot against
+        the static config session, and gateway start drops it when
+        the session does not authorize yet — so an account paired
+        mid-session used to stay conversationally dark until a
+        restart that happened to coincide with a live session, and
+        a `/pair use` switch never moved the surface at all.  This
+        reconcile runs on the pairing lifecycle points (`/pair
+        telegram|tgcode|tgpass|start|stop|restart|remove|use`) and
+        on the supervision beat, and keeps exactly one truth: the
+        resolved Telegram account (the §15 routing primitive:
+        primary → first linked → first registered) whose session
+        the pairer can verify gets an adapter pointed at ITS
+        session file, started in the running process via the
+        gateway's own ``start_one``; when no account qualifies any
+        more, an adapter this reconcile attached (or adopted — one
+        already serving that very session) is stopped again.  An
+        adapter running for a session outside the pool is left
+        alone whenever the pool has no qualifying account: the
+        reconcile only ever stops what it owns
+        (``_tg_surface_account``).
+
+        The probe-before-attach is LOAD-BEARING, not a nicety:
+        ``adapter.start`` runs preflight internally, and the
+        Telegram preflight does an INTERACTIVE first-run login on
+        an unauthorized session (prints + reads stdin) — attaching
+        an unverified session from a beat or a /pair reply would
+        race the console for the keyboard.  A session the probe
+        finds dead is never attached; the verdict is a
+        "session down — <reason>" note on the reply AND the
+        account record.
+
+        Returns "" on success/no-op, else a plain-words note
+        naming why the surface did not come up; the note is ALSO
+        recorded on the account's ``last_error`` (tagged, see
+        ``_TG_SURFACE_NOTE_PREFIX``) so the supervision-beat caller
+        — which has no reply to append to — still surfaces it in
+        /pair, never silently.  Never raises."""
+        desired_id = ""
+        try:
+            gateway = getattr(self, "gateway", None)
+            if gateway is None:
+                return ""
+            from ...social.pairing import resolve_account, same_session_path
+
+            sup = self._pairing_supervisor()
+            pairer = self._pairing_personal()["pairer"]
+            if sup.registry.owner_stopped("telegram"):
+                # The owner ordered this surface down; the order
+                # stands until an owner start path clears it.  Keep
+                # it down — stop any adapter that is somehow up
+                # (a beat that raced the stop, a boot-time builder)
+                # — and never attach.
+                if gateway.adapters.get("telegram") is not None:
+                    gateway.stop_one("telegram")
+                self._tg_surface_account = ""
+                return ""
+            rec = resolve_account(sup.registry, "telegram")
+            desired_session = ""
+            if rec is not None and rec.status in ("linked", "down"):
+                desired_id = rec.id
+                desired_session = pairer.session_path_for(rec)
+            attached = getattr(self, "_tg_surface_account", "") or ""
+            running = gateway.adapters.get("telegram")
+            running_live = bool(
+                running is not None
+                and getattr(running, "_thread", None) is not None
+                and running._thread.is_alive())
+            if not desired_id:
+                if attached:
+                    gateway.stop_one("telegram")
+                    self._tg_surface_account = ""
+                return ""
+            # The session itself, before any attach/adopt decision:
+            # a registry status is a MEMORY of liveness, not
+            # liveness — a persisted "linked" used to qualify a
+            # session whose authorization had since died, and the
+            # adapter then sat "live-attached" to it while preflight
+            # waited on a keyboard nobody owns.  The pairer PROBES
+            # the session on EVERY pass — a fresh client asking
+            # MTProto whether it authorizes — and only a verified
+            # session earns an adapter or keeps one.  (WhatsApp can
+            # adopt blind because its sweep RELAUNCHES a dead
+            # bridge; the Telegram sweep never relaunches a session,
+            # so adopting without a probe would park the surface on
+            # a dead session until something else noticed.)
+            try:
+                state = pairer.probe(rec)
+            except Exception as exc:  # noqa: BLE001 - missing
+                # MTProto credentials, dead network: unverifiable
+                # is not linked, and the surface must say so.
+                return self._tg_surface_note(
+                    sup, desired_id,
+                    "the Telegram session cannot be verified: "
+                    f"{exc}")
+            if state != "linked":
+                # Never sit attached to a dead session: an adapter
+                # this reconcile owns comes down, the episode is
+                # recorded once, and the answer is the session-down
+                # note — on the reply AND on the account record.
+                if attached == desired_id and \
+                        gateway.adapters.get("telegram") is not None:
+                    gateway.stop_one("telegram")
+                    self._tg_surface_account = ""
+                if rec.status == "linked":
+                    sup.registry.set_status(desired_id, "down")
+                reason = ("the saved session no longer authorizes "
+                          "— re-pair it with /pair telegram <number>")
+                return self._tg_session_down(sup, rec, reason)
+            # A serving session ends any session-down episode: the
+            # next distinct failure records afresh.  A probe-earned
+            # "linked" also earns a down record back.
+            self._tg_session_down_sig = ""
+            if rec.status != "linked":
+                sup.registry.set_status(desired_id, "linked")
+            if running_live and same_session_path(
+                    getattr(running, "session_path", "") or "",
+                    desired_session):
+                # Already serving this account's session (boot start
+                # or an earlier attach): adopt it so a later removal
+                # of the account still tears the surface down — no
+                # rebuild, the probe above already verified it.
+                self._tg_surface_account = desired_id
+                self._tg_surface_clear_note(sup, rec)
+                return ""
+            if running is not None:
+                gateway.stop_one("telegram")
+            from ...social.chat import build_adapter
+
+            adapter = build_adapter(self.settings, "telegram",
+                                    telegram_session=desired_session)
+            if adapter is None:
+                # chat.telegram_enabled is off — paired but
+                # surfaceless; say so on the record AND the reply.
+                self._tg_surface_account = ""
+                return self._tg_surface_note(
+                    sup, desired_id,
+                    "the Telegram platform is disabled in config "
+                    "(chat.telegram_enabled=false) — this account "
+                    "has no live chat surface until it's enabled")
+            result = gateway.start_one("telegram", self.on_message,
+                                       adapter=adapter)
+            if result.get("ok") or "already running" in str(
+                    result.get("error") or ""):
+                self._tg_surface_account = desired_id
+                self._tg_surface_clear_note(sup, rec)
+                _log.info("telegram surface live-attached to %s "
+                          "(session %s)", desired_id, desired_session)
+                return ""
+            _log.warning("telegram surface attach for %s failed: %s",
+                         desired_id, result.get("error"))
+            return self._tg_surface_note(
+                sup, desired_id,
+                "the Telegram chat surface didn't start: "
+                f"{result.get('error') or 'unknown error'}")
+        except Exception as e:  # noqa: BLE001 - reconcile never
+            record_failure(       # breaks intake or a /pair reply
+                "runtime_provision.tg_surface_sync", e)
+            if desired_id:
+                try:
+                    sup = self._pairing_supervisor()
+                    return self._tg_surface_note(
+                        sup, desired_id,
+                        f"the Telegram chat surface didn't start: {e}")
+                except Exception:  # noqa: BLE001 - noting is best-effort
+                    pass
+            return ""
+
     def _start_whatsapp_surface(self) -> dict[str, Any] | None:
         """The /start whatsapp route (see ``PartnerRuntime.
         start_platform``): the surface's start is the reconcile's
@@ -1391,8 +1610,7 @@ class RuntimeProvisionMixin:
         account is paired (the caller's generic start owns that
         case, exactly as before).  Never raises."""
         try:
-            from ...social.pairing import PairingUnavailable, \
-                resolve_account
+            from ...social.pairing import PairingUnavailable, resolve_account
 
             gateway = getattr(self, "gateway", None)
             if gateway is None:
@@ -1419,16 +1637,72 @@ class RuntimeProvisionMixin:
                 "runtime_provision.start_whatsapp", exc)
             return None
 
+    def _start_telegram_surface(self) -> dict[str, Any] | None:
+        """The /start telegram route (see ``PartnerRuntime.
+        start_platform``): the surface's start is the reconcile's
+        start — the resolved account's session is part of the
+        surface.  An account the owner stopped at the pool level
+        (registry status "stopped") is first revived through the
+        probe — the session file either still authorizes or it
+        does not; there is no process to relaunch — then the
+        reconcile attaches the adapter to it.  The generic gateway
+        start knows none of this: it would start an adapter
+        against the static config session with no pool truth
+        behind it.
+
+        Returns the start verdict, or None when no Telegram
+        account is paired (the caller's generic start owns that
+        case, exactly as before).  Never raises."""
+        try:
+            from ...social.pairing import resolve_account
+
+            gateway = getattr(self, "gateway", None)
+            if gateway is None:
+                return None
+            sup = self._pairing_supervisor()
+            rec = resolve_account(sup.registry, "telegram")
+            if rec is None:
+                return None
+            if rec.status == "stopped":
+                try:
+                    state = self._pairing_personal()["pairer"].probe(
+                        rec)
+                except Exception as exc:  # noqa: BLE001 - an
+                    return {"ok": False, "error": str(exc)}
+                if state == "linked":
+                    sup.registry.set_status(rec.id, "linked")
+                else:
+                    sup.registry.set_status(rec.id, "down")
+                    return {
+                        "ok": False,
+                        "error": "session down — the saved session "
+                        "no longer authorizes — re-pair it with "
+                        "/pair telegram <number>"}
+            note = self._sync_telegram_surface()
+            if gateway.adapters.get("telegram") is not None:
+                return {"ok": True, "platform": "telegram"}
+            if note:
+                return {"ok": False, "error": note}
+            return {"ok": False,
+                    "error": "the Telegram surface did not start"}
+        except Exception as exc:  # noqa: BLE001 - a broken route
+            record_failure(       # falls back, never breaks /start
+                "runtime_provision.start_telegram", exc)
+            return None
+
     def _housekeeping_beat(self) -> None:
         """The throttled §15 housekeeping cycle, drivable by ANY
         inbound message.
 
         One beat, three jobs: the supervision sweep (dropped
         sessions flip honestly, dead bridges relaunch, stale
-        pairing flows expire), the WhatsApp live-attach reconcile
-        (a bridge the sweep just relaunched, or a probe-earned
-        "linked", raises the conversational surface in this
-        process — no restart), and the Telegram story sweep.
+        pairing flows expire), the always-online keepalive (which
+        runs FIRST, through the adapters live right now, so an
+        owner stop releases presence before the reconciles kill
+        the adapter), the WhatsApp live-attach reconcile (a bridge
+        the sweep just relaunched, or a probe-earned "linked",
+        raises the conversational surface in this process — no
+        restart), and the Telegram story sweep.
         Message-driven, like every other cycle in this runtime —
         no new daemon.
 
@@ -1456,10 +1730,28 @@ class RuntimeProvisionMixin:
         except Exception as e:  # noqa: BLE001 - housekeeping
             record_failure(           # never breaks intake
                 "runtime_provision.supervision_sweep", e)
+        # Always-online keepalive FIRST (§15 presence pack) — it
+        # asserts/releases presence THROUGH the adapters that are
+        # live right now, so it runs before the reconciles below
+        # stop or re-point one: an owner stop releases presence
+        # gracefully (set_presence(False) lands on the adapter)
+        # instead of the reconcile killing the adapter first and
+        # the release verb dying with it.  A keepalive re-sent
+        # every beat tolerates the one-beat lag on a fresh attach.
+        try:
+            svc["personal"].cycle_presence()
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime_provision.presence_cycle", e)
         # Same beat: a bridge the sweep just relaunched, or a
         # probe-earned "linked", raises the conversational
         # surface in this process — no restart (live-attach).
         self._sync_whatsapp_surface()
+        # Same beat, Telegram half: a session the sweep just
+        # probe-earned "linked", or a primary switch, re-points
+        # the userbot adapter at the resolved account's session
+        # file — no restart (live-attach).
+        self._sync_telegram_surface()
         try:
             svc["personal"].cycle_stories("telegram")
         except Exception as e:  # noqa: BLE001
@@ -1485,14 +1777,6 @@ class RuntimeProvisionMixin:
         except Exception as e:  # noqa: BLE001
             record_failure(
                 "runtime_provision.status_cycle", e)
-        # Same beat: always-online keepalive (§15 presence pack) —
-        # re-asserts presence for the accounts the owner flagged,
-        # releases it where the flag/stop/liveness says otherwise.
-        try:
-            svc["personal"].cycle_presence()
-        except Exception as e:  # noqa: BLE001
-            record_failure(
-                "runtime_provision.presence_cycle", e)
         # Same beat: the disk watch (2026-11-08 disk discipline) —
         # free space on the install volume vs. what one update
         # needs. A crossing journals one disk_low row per day, so
@@ -2148,6 +2432,9 @@ class RuntimeProvisionMixin:
                 rec = svc["pairer"].start(parts[1], label)
             except Exception as exc:  # noqa: BLE001 - the flow's own
                 return f"⚠️ {exc}"     # words are the honest answer
+            # A fresh pair is an owner start: any earlier stop
+            # order for the platform is revoked.
+            self._set_platform_owner_stopped("telegram", False)
             return (f"📟 login code sent to the Telegram account "
                     f"+{rec.identity} ({rec.id}). When the code "
                     f"arrives (Telegram service message or SMS), "
@@ -2180,9 +2467,17 @@ class RuntimeProvisionMixin:
                         f"the password:\n/pair tgpass {rec.id} "
                         "your-password\nIt goes straight to the sign-in "
                         "and is not kept.")
-            return (f"✅ {rec.id} is linked — its session file is "
-                    "saved under its own name and the account is a "
-                    "live member of the pool.")
+            # The link landed: attach the conversational surface to
+            # it NOW, so the account is live in this process
+            # (live-attach).  A surface failure rides THIS reply —
+            # never silent.
+            surface_note = self._sync_telegram_surface()
+            reply = (f"✅ {rec.id} is linked — its session file is "
+                     "saved under its own name and the account is a "
+                     "live member of the pool.")
+            if surface_note:
+                reply += f"\n⚠️ {surface_note}"
+            return reply
         if sub in ("start", "stop", "restart", "remove"):
             rec = self._pair_find(sup, parts[1] if len(parts) > 1
                                   else "")
@@ -2193,17 +2488,28 @@ class RuntimeProvisionMixin:
                     self._set_platform_owner_stopped(
                         rec.platform, False)
                     sup.remove(rec.id)
+                    self._sync_telegram_surface()
                     return (f"🗑️ {rec.id} removed from the pool. "
                             "Its session file stays on disk; the "
                             "number can be paired again any time.")
                 if sub == "stop":
+                    # An account-level stop is an owner stop of the
+                    # surface too: record the intent so the
+                    # reconcile never resurrects it behind the
+                    # owner's back (the WhatsApp stopfix lesson).
+                    self._set_platform_owner_stopped(
+                        rec.platform, True)
                     sup.registry.set_status(rec.id, "stopped")
+                    self._sync_telegram_surface()
                     return (f"⏸️ {rec.id} marked stopped — Devon "
                             "will not treat it as connected. Its "
                             "session file is untouched.")
                 # start/restart on Telegram = an authorization probe:
                 # there is no process to launch; the session file
-                # either still authorizes or it does not.
+                # either still authorizes or it does not.  A start
+                # is an owner start: any earlier stop order for the
+                # platform is revoked first.
+                self._set_platform_owner_stopped(rec.platform, False)
                 try:
                     state = self._pairing_personal()["pairer"].probe(
                         rec)
@@ -2211,7 +2517,12 @@ class RuntimeProvisionMixin:
                     return f"⚠️ probe failed for {rec.id}: {exc}"
                 if state == "linked":
                     sup.registry.set_status(rec.id, "linked")
-                    return f"▶️ {rec.id} — session authorized, live."
+                    surface_note = self._sync_telegram_surface()
+                    reply = (f"▶️ {rec.id} — session authorized, "
+                             "live.")
+                    if surface_note:
+                        reply += f"\n⚠️ {surface_note}"
+                    return reply
                 sup.registry.set_status(rec.id, "down")
                 return (f"⚠️ {rec.id} — the saved session no longer "
                         "authorizes. Re-pair it: /pair telegram "
@@ -2272,6 +2583,10 @@ class RuntimeProvisionMixin:
                 # The conversational surface serves the resolved
                 # (primary-first) account — follow the switch.
                 surface_note = self._sync_whatsapp_surface()
+            elif rec.platform == "telegram":
+                # Same switch, Telegram half: the userbot adapter
+                # re-points at the new primary's session file.
+                surface_note = self._sync_telegram_surface()
             reply = (f"🎯 {rec.id} is now the default {rec.platform} "
                      "account — surfaces that act as you on "
                      f"{rec.platform} use it unless they name another.")

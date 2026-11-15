@@ -3036,6 +3036,16 @@ class PartnerRuntime(
             except Exception as e:  # noqa: BLE001 - attach is
                 record_failure(           # never load-bearing
                     "runtime.PartnerRuntime.start:wa_attach", e)
+            try:
+                # Telegram cold-start attach (§15): same story as
+                # WhatsApp — an account paired in a PREVIOUS run
+                # would stay conversationally dark until some
+                # inbound message drove the housekeeping beat.
+                # Reconcile once here, now that the gateway is live.
+                self._sync_telegram_surface()
+            except Exception as e:  # noqa: BLE001 - attach is
+                record_failure(           # never load-bearing
+                    "runtime.PartnerRuntime.start:tg_attach", e)
         if self.settings.partner.enabled and not self.dry_run:
             try:
                 from ..autonomy import AutonomyAgent
@@ -7982,6 +7992,45 @@ class PartnerRuntime(
                         "the bridge process is not running")
             except Exception:  # noqa: BLE001 - listing never dies
                 wa_bridge_down = ""
+            # Telegram's truth is its session: an adapter can be
+            # "running" (thread alive) while the session behind it
+            # is dead — the reconcile + sweep keep the record
+            # honest, so a resolved account sitting at "down"
+            # means the session is known-unauthorized.  The line
+            # says "session down" with the reason, never a bare
+            # "running" / "not running".  The adapter-session guard
+            # matters: a boot adapter on a session OUTSIDE the pool
+            # (the live userbot, never paired) is a healthy surface
+            # even while some other paired account is down — the
+            # line only fires when the running adapter serves the
+            # down record's session, or when no adapter runs at
+            # all.  Stored truth only — no MTProto probe in a
+            # listing.
+            tg_session_down = ""
+            try:
+                from ...social.pairing import resolve_account, same_session_path
+
+                sup = self._pairing_supervisor()
+                tg_rec = resolve_account(sup.registry, "telegram")
+                if tg_rec is not None \
+                        and tg_rec.status == "down" \
+                        and "telegram" not in stopped_by_owner:
+                    running = self.gateway.adapters.get("telegram")
+                    desired = self._pairing_personal()["pairer"] \
+                        .session_path_for(tg_rec)
+                    if running is None or same_session_path(
+                            getattr(running, "session_path", "") or "",
+                            desired):
+                        reason = tg_rec.last_error or ""
+                        prefix = getattr(
+                            self, "_TG_SURFACE_NOTE_PREFIX", "")
+                        if prefix and reason.startswith(prefix):
+                            reason = reason[len(prefix):]
+                        tg_session_down = reason or (
+                            "the saved session no longer authorizes "
+                            "— re-pair it")
+            except Exception:  # noqa: BLE001 - listing never dies
+                tg_session_down = ""
             seen: set[str] = set()
             for name, info in sorted(status.items()):
                 if name.startswith("_") or not isinstance(info, dict):
@@ -7998,6 +8047,12 @@ class PartnerRuntime(
                     lines.append(
                         f"  whatsapp: bridge down — "
                         f"{wa_bridge_down}")
+                    continue
+                if name == "telegram" and tg_session_down and \
+                        not info.get("connected"):
+                    lines.append(
+                        f"  telegram: session down — "
+                        f"{tg_session_down}")
                     continue
                 state = "running" if info.get("running_in_session") else "not running"
                 suffix = "" if info.get("running") else " (adapter thread down)"
@@ -8059,6 +8114,10 @@ class PartnerRuntime(
                         lines.append(
                             f"  whatsapp: bridge down — "
                             f"{wa_bridge_down}")
+                    elif name == "telegram" and tg_session_down:
+                        lines.append(
+                            f"  telegram: session down — "
+                            f"{tg_session_down}")
                     else:
                         lines.append(
                             f"  {name}: not running — "
@@ -10298,6 +10357,19 @@ class PartnerRuntime(
             # None = no account paired; the generic start owns
             # that case as before.
             routed = self._start_whatsapp_surface()
+            if routed is not None:
+                return routed
+        if name == "telegram":
+            # The Telegram surface starts through its reconcile:
+            # the resolved account's session is verified through
+            # the pairer and the adapter attaches to THAT session
+            # file — the generic gateway start would raise an
+            # adapter against the static config session with no
+            # pool truth behind it (and preflight would block on
+            # an interactive login for an unauthorized session).
+            # None = no account paired; the generic start owns
+            # that case as before.
+            routed = self._start_telegram_surface()
             if routed is not None:
                 return routed
         return self.gateway.start_one(name, self.on_message)

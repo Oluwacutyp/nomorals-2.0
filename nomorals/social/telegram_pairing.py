@@ -184,6 +184,13 @@ class TelegramPairer:
         self.sessions_root.mkdir(parents=True, exist_ok=True)
         return str(self.sessions_root / f"tg-{digits}")
 
+    def session_path_for(self, rec: AccountRecord) -> str:
+        """The session file stem this account speaks on: the
+        record's own path when it has one, else the pairer's stem
+        for its identity — the live-attach reconcile's desired
+        session, and the /platforms session-truth comparison."""
+        return rec.session_path or self._session_stem(rec.identity)
+
     def _drop_flow(self, account_id: str) -> _Flow | None:
         with self._lock:
             flow = self._flows.pop(account_id, None)

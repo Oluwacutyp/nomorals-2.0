@@ -866,6 +866,21 @@ def resolve_account(registry: PairingRegistry, platform: str,
     return select_account(registry.accounts_for(platform), account_id)
 
 
+def same_session_path(a: str | Path, b: str | Path) -> bool:
+    """True when two session paths name the same file: the
+    live-attach reconciles compare the adapter's serving session
+    against the resolved account's session file, and the two arrive
+    in different spellings (a ``settings.resolve`` absolute path, a
+    pairer stem, a test tmp path).  Empty never matches."""
+    from pathlib import Path as _Path
+
+    left, right = str(a or ""), str(b or "")
+    if not left or not right:
+        return False
+    return _Path(left).expanduser().resolve() == \
+        _Path(right).expanduser().resolve()
+
+
 def registry_path_for(workspace_dir: str | Path) -> Path:
     """Where the durable registry lives under a workspace — the one
     path derivation, shared with :func:`default_supervisor`."""
