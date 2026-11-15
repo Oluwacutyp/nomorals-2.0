@@ -1922,6 +1922,123 @@ class RuntimeReachMixin:
             return "will deleted."
         return usage
 
+    def _publicface_store(self) -> Any:
+        """PublicPageStore on the durable home path (E-6 public-face wiring)."""
+        from ...publicface.publish import PublicPageStore
+
+        path = self.context.settings.home_path / "data" / "publicface.json"
+        return PublicPageStore(str(path))
+
+    def _resolve_publicface(self, store: Any, ref: str) -> Any:
+        """Exact id, else unique id-prefix, else None."""
+        ref = (ref or "").strip()
+        if ref in store.pages:
+            return store.pages[ref]
+        matches = [p for pid, p in store.pages.items()
+                   if pid.startswith(ref)]
+        return matches[0] if len(matches) == 1 else None
+
+    def _control_publicface(self, tail: str, *, chat_key: str = "") -> str:
+        """Public face: /publicface list|draft|approve|unpublish|remove|show.
+
+        The MORE_TO_ADD gap 10 organ (nomorals/publicface/publish.py)
+        had no durable surface at all — its only production importer,
+        publish_episode in shows/composer.py, itself has no production
+        callers, and the gate keeps pages in memory only. This is its
+        surface. Owner-only: the kind is absent from PUBLIC_COMMANDS,
+        so caller_may_run denies non-owners before this runs.
+        Approving IS the approval — drafting never publishes, and the
+        gate still refuses content carrying private-data markers. The
+        link a published page gets (/p/<slug>) is the descriptor the
+        gate returns; no route serves that path yet, and the reply says
+        so instead of pretending the page is live.
+        """
+        from ...publicface.publish import PublicPage, publish, unpublish
+
+        usage = ("usage: /publicface list | draft <pack> | <title> | "
+                 "<content> | approve <id> | unpublish <id> | remove <id> "
+                 "| show <id>")
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1] if len(parts) > 1 else ""
+        store = self._publicface_store()
+        if verb in ("list", ""):
+            if not store.pages:
+                return ("no pages yet — /publicface draft <pack> | <title> "
+                        "| <content> records one.")
+            lines = [f"pages ({len(store.pages)}):"]
+            for page in store.pages.values():
+                line = (f"  {page.id}: {page.title} ({page.pack}) — "
+                        f"{page.status}")
+                if page.status == "public":
+                    line += f" — /p/{page.slug}"
+                lines.append(line)
+            return "\n".join(lines)
+        if verb == "draft":
+            fields = [f.strip() for f in rest.split("|", 2)]
+            pack = fields[0] if fields else ""
+            title = fields[1] if len(fields) > 1 else ""
+            content = fields[2] if len(fields) > 2 else ""
+            if not pack or not title or not content:
+                return ("usage: /publicface draft <pack> | <title> | "
+                        "<content>")
+            try:
+                page = store.add(PublicPage(
+                    title=title, content=content, pack=pack))
+            except ValueError as exc:
+                return str(exc)
+            return (f"draft recorded: {page.id}: {page.title} "
+                    f"({page.pack}) — approve it with "
+                    f"/publicface approve {page.id}")
+        if verb == "show":
+            page = self._resolve_publicface(store, rest)
+            if page is None:
+                return (f"no page matching {rest.strip()!r} — "
+                        "/publicface list shows ids.")
+            body = page.content
+            if len(body) > 1000:
+                body = body[:1000] + f"\n… ({len(page.content)} chars total)"
+            lines = [
+                f"{page.title} ({page.pack}) — {page.id}",
+                f"  status: {page.status} · slug: {page.slug} · "
+                f"created: {page.created.isoformat()}",
+            ]
+            if page.status == "public":
+                lines.append(f"  link: /p/{page.slug}")
+            lines.append("  " + body.replace("\n", "\n  "))
+            return "\n".join(lines)
+        if verb == "approve":
+            page = self._resolve_publicface(store, rest)
+            if page is None:
+                return (f"no page matching {rest.strip()!r} — "
+                        "/publicface list shows ids.")
+            result = publish(page, owner_approved=True)
+            store.put(page)
+            if not result.published:
+                return (f"left as draft: {page.title} — {result.reason}")
+            return (f"published: {page.title} — /p/{page.slug}. "
+                    "No route serves that path yet — the link is the "
+                    "descriptor the gate returns, not a live page.")
+        if verb == "unpublish":
+            page = self._resolve_publicface(store, rest)
+            if page is None:
+                return (f"no page matching {rest.strip()!r} — "
+                        "/publicface list shows ids.")
+            unpublish(page)
+            store.put(page)
+            return f"back to draft: {page.title}"
+        if verb == "remove":
+            page = self._resolve_publicface(store, rest)
+            if page is None:
+                return (f"no page matching {rest.strip()!r} — "
+                        "/publicface list shows ids.")
+            if page.status == "public":
+                return (f"cannot remove {page.title} while it is public — "
+                        f"/publicface unpublish {page.id} first.")
+            store.remove(page.id)
+            return f"removed draft: {page.title}"
+        return usage
+
     def _control_decisions(self, tail: str, *, chat_key: str = "") -> str:
         """The decision journal: /decisions list|add|resolve|review|calibration.
 

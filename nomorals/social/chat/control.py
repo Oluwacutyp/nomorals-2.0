@@ -456,6 +456,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "focus": (0, None),      # /focus start|pause|resume|stop|status|today|week|month
     "assets": (0, None),     # /assets list|add <name> [| kind | interval_km | interval_days | odometer_km]|service <id> <description> [| cost | odometer_km | vendor | YYYY-MM-DD]|due [days]|costs [id]|show <id>
     "legacy": (0, None),     # /legacy show|create <owner> | <executor> [| contact | backup]|executor <name> [| contact | backup]|beneficiary <name> [| relationship | share note]|asset <label> [| kind | location hint | instruction]|instruction <text>|witness <name>|seal <text>|reveal|reset yes (owner-only, sealed)
+    "publicface": (0, None),  # /publicface list|draft <pack> | <title> | <content>|approve <id>|unpublish <id>|remove <id>|show <id> (owner-only, publishing gate)
     "backup": (0, 1),        # /backup status | verify — read-only backup health (runs need the vault, stay scheduled)
     # expansion wave
     "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
@@ -1090,6 +1091,7 @@ _HELP_TEXT = "\n".join(
         "  /focus start [label] | pause | resume | stop [note] | status | today | week",
         "  /assets add <name> [| kind | interval_km | interval_days | odometer_km] | service <id> <description> [| cost | odometer_km | vendor] | due | costs | show <id> | list",
         "  /legacy show | create <owner> | <executor> | beneficiary <name> | asset <label> | instruction <text> | witness <name> | seal <text> | reveal | reset yes",
+        "  /publicface list | draft <pack> | <title> | <content> | approve <id> | unpublish <id> | remove <id> | show <id>",
         "  /subscriptions [list | upcoming [days] | used <merchant> [YYYY-MM-DD] | cancel <merchant>]   detected subscriptions, renewals, unused flags, draft cancel notes",
         "  /backup status | verify                backup health (read-only; runs need the vault, stay scheduled)",
         "  — expansion —",
@@ -4553,7 +4555,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "checkpoint", "checkpoints", "rewind", "novel"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
                            "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible",
-                           "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy"]),
+                           "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
                           "balances", "goal", "goals", "careers", "ideas", "insights", "subscriptions", "alert"]),
     ("games — 41, DM + group, start them directly",
@@ -4888,7 +4890,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
-      "immune", "impossible", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy"]),
+      "immune", "impossible", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "publicface"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -5392,6 +5394,7 @@ LIST_ONELINERS: dict[str, str] = {
     "focus": "focus sessions: /focus start [label] | pause | resume | stop [note] | status | today | week | month",
     "assets": "vehicle & asset maintenance: /assets add <name> [| kind | interval_km | interval_days | odometer_km] | service <id> <description> [| cost | odometer_km | vendor | date] | due [days] | costs [id] | show <id> | list",
     "legacy": "digital will (owner-only, sealed): /legacy create <owner> | <executor> [| contact | backup] | beneficiary <name> | asset <label> | instruction <text> | witness <name> | seal <text> | reveal | show | reset yes",
+    "publicface": "public face — owner-approved publishing gate: /publicface list | draft <pack> | <title> | <content> | approve <id> | unpublish <id> | remove <id> | show <id>",
     "backup": "backup health (read-only): /backup status | verify — generations, manifest, DB integrity",
     "alert": "price/money alerts: /alert add|list|remove|check|snooze|sync-bills",
     "balances": "unified money view across rails: /balances [rail…]",

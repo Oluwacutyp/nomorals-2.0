@@ -25,15 +25,21 @@ is accepted and recorded — Nigeria default, never a boundary.
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
+_log = logging.getLogger(__name__)
+
 __all__ = [
     "KNOWN_PACKS",
     "PublicPage",
+    "PublicPageStore",
     "LinkDescriptor",
     "PublishResult",
     "scan_private_data",
@@ -85,6 +91,52 @@ class PublicPage:
             self.slug = base or f"page-{self.id}"
         if self.status not in ("draft", "public"):
             raise ValueError(f"unknown status {self.status!r}")
+
+    def to_dict(self) -> dict[str, Any]:
+        """Plain JSON shape (date as an ISO string)."""
+        return {
+            "id": self.id,
+            "title": self.title,
+            "content": self.content,
+            "pack": self.pack,
+            "slug": self.slug,
+            "status": self.status,
+            "owner_approved": self.owner_approved,
+            "created": self.created.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, row: dict[str, Any]) -> PublicPage:
+        """Rebuild from :meth:`to_dict`; a bad/missing field fails honestly."""
+        title = row.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f"bad page row: no title in {row!r}")
+        content = row.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise ValueError(f"bad page row: no content in {row!r}")
+        pack = row.get("pack")
+        if not isinstance(pack, str) or not pack.strip():
+            raise ValueError(f"bad page row: no pack in {row!r}")
+        status = row.get("status", "draft")
+        if status not in ("draft", "public"):
+            raise ValueError(f"bad page row: unknown status {status!r}")
+        created = row.get("created")
+        try:
+            created_date = (
+                date.fromisoformat(created) if created else date.today())
+        except ValueError as exc:
+            raise ValueError(
+                f"bad page row: bad created date {created!r}") from exc
+        return cls(
+            id=str(row["id"]) if row.get("id") else uuid.uuid4().hex[:12],
+            title=title,
+            content=content,
+            pack=pack,
+            slug=str(row.get("slug", "")),
+            status=status,
+            owner_approved=bool(row.get("owner_approved", False)),
+            created=created_date,
+        )
 
 
 @dataclass(frozen=True)
@@ -170,3 +222,77 @@ def list_public(pages: list[PublicPage]) -> list[LinkDescriptor]:
         for p in pages
         if p.status == "public"
     ]
+
+
+class PublicPageStore:
+    """Durable registry of public-face pages (<home>/data/publicface.json).
+
+    JSON-backed when a ``path`` is given (the /publicface surface stores
+    it at ``<home>/data/publicface.json``); in-memory when it is not.
+    The persistence shape mirrors
+    :class:`nomorals.assets.maintenance.AssetLedger`: tolerant load (a
+    missing/corrupt file starts empty, a bad row is skipped), atomic
+    tmp+replace save after every mutation. The gate itself stays pure —
+    this store is what makes an approval survive a restart.
+    """
+
+    def __init__(self, path: str | None = None) -> None:
+        self.path = path
+        self.pages: dict[str, PublicPage] = {}
+        if path:
+            self._load()
+
+    # ── persistence ──────────────────────────────────────────────
+    def _load(self) -> None:
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError):
+            return
+        for row in raw.get("pages") or []:
+            try:
+                page = PublicPage.from_dict(row)
+            except (TypeError, ValueError, KeyError):
+                continue
+            self.pages[page.id] = page
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        try:
+            parent = os.path.dirname(self.path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"pages": [p.to_dict() for p in self.pages.values()]},
+                    fh, ensure_ascii=False)
+            os.replace(tmp, self.path)
+        except OSError:
+            _log.debug("publicface._save failed", exc_info=True)
+
+    # -- pages --------------------------------------------------------
+    def add(self, page: PublicPage) -> PublicPage:
+        """Record a new page (draft by construction) and persist it."""
+        self.pages[page.id] = page
+        self._save()
+        return page
+
+    def put(self, page: PublicPage) -> PublicPage:
+        """Persist a page after an in-place change (approve/unpublish)."""
+        self.pages[page.id] = page
+        self._save()
+        return page
+
+    def get(self, page_id: str) -> PublicPage | None:
+        """Exact id lookup, else None."""
+        return self.pages.get(page_id)
+
+    def remove(self, page_id: str) -> bool:
+        """Delete a page; False when the id is not in the store."""
+        if page_id not in self.pages:
+            return False
+        del self.pages[page_id]
+        self._save()
+        return True

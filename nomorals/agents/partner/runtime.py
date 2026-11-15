@@ -9026,6 +9026,8 @@ class PartnerRuntime(
             return self._control_assets(command.tail or arg, chat_key=chat_key)
         if kind == "legacy":
             return self._control_legacy(command.tail or arg, chat_key=chat_key)
+        if kind == "publicface":
+            return self._control_publicface(command.tail or arg, chat_key=chat_key)
         if kind == "backup":
             return self._control_backup(command.tail or arg, chat_key=chat_key)
 

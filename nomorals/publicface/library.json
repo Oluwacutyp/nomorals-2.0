@@ -1,5 +1,1 @@
-{
-  "library": true,
-  "reason": "Public-face publishing gate \u2014 small pure API (publish/unpublish/scan_private_data/list_public). Genuine import-only library; the publish surface itself needs an owner-approval design decision.",
-  "owner_decision_needed": "Wire into CLI/chat with an owner-approval gate or keep as import-only library. Owner decision needed: public publishing surface."
-}
+{"library":true,"owner_decision_needed":"Hosting for /p/<slug>: the published link is a descriptor only — no API or web route serves public pages yet. Owner decision needed: serve public pages from Devon's own host surface, or hand the descriptors to an external host.","reason":"Public-face publishing gate — wired into production (E-6, MORE_TO_ADD gap 10): durable PublicPageStore at <home>/data/publicface.json plus owner-only /publicface chat surface (draft | approve | unpublish | remove | show | list). The gate itself (publish/unpublish/scan_private_data/list_public) is unchanged; the link a published page gets (/p/<slug>) is a descriptor, no route serves it."}
