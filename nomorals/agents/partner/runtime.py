@@ -10019,6 +10019,23 @@ class PartnerRuntime(
                 return  # no adapter / platform down — stop, don't retry blindly
             stop.wait(max(0.05, tick - (time.time() - started)))
 
+    def _note_control_delivery(self) -> None:
+        """Record one delivery made during this control dispatch.
+
+        The no-empty law in :meth:`handle_control` (register #32)
+        treats a parsed command's empty reply as silence UNLESS a
+        delivery was recorded during the dispatch. Handlers that
+        answer by sending through a seam that never touches
+        :meth:`_send_long` — a tool call such as ``file_send`` — mark
+        the delivery here, on success only, so a delivered answer is
+        never followed by a false "bug on my end". Marking never
+        breaks a send.
+        """
+        try:
+            _control_deliveries.set(_control_deliveries.get() + 1)
+        except Exception as exc:  # noqa: BLE001 - marking never breaks a send
+            _log.debug("control delivery mark failed: %s", exc)
+
     def _send_long(self, platform: str, chat, text: str, limit: int = 3800) -> int:
         """Send a long text in chunks (Telegram's hard cap is 4096 chars).
 

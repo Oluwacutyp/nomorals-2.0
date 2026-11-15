@@ -16,6 +16,7 @@ Covers the Round 9 audit fixes:
 
 from __future__ import annotations
 
+import os
 import tempfile
 import threading
 import time
@@ -280,6 +281,42 @@ class RuntimeQueueTests(unittest.TestCase):
 
 class DatabaseThreadLeakTests(unittest.TestCase):
     def test_release_thread_drops_connection(self):
+        # R9 fd-leak contract: a one-shot worker thread's connection
+        # is dropped by release_thread(). Post writer-actor (c3e75420)
+        # the case that still opens a connection ON THE WORKER THREAD
+        # is a plain read on a file-backed db — routed work opens no
+        # thread-local connection at all (see the :memory: test
+        # below), so the drop is proven here, where the connection
+        # genuinely belongs to the worker.
+        tmp = tempfile.TemporaryDirectory(prefix="nm-r9-leak-")
+        try:
+            db = Database(os.path.join(tmp.name, "leak.db"))
+            baseline = db.connection_count()
+            self.assertGreaterEqual(baseline, 1)  # eager open on this thread
+
+            def worker():
+                db.execute("SELECT 1")
+                self.assertEqual(db.connection_count(), baseline + 1)
+                db.release_thread()
+
+            t = threading.Thread(target=worker)
+            t.start()
+            t.join()
+            self.assertEqual(db.connection_count(), baseline)
+        finally:
+            db.close()
+            tmp.cleanup()
+
+    def test_release_thread_noop_for_routed_work(self):
+        # :memory: statements route to the writer actor (c3e75420), so
+        # a worker thread's execute opens NO connection of its own:
+        # release_thread() has nothing of that thread's to drop. The
+        # +1 is the actor's connection — shared infrastructure for the
+        # Database's lifetime, not a leak — and it stays live and
+        # usable afterwards; close() is what drops it. (The pre-actor
+        # form of this test asserted the count returned to baseline;
+        # that premise died with the actor: the worker never owned
+        # the connection, so there is nothing for release to drop.)
         db = Database(":memory:")
         baseline = db.connection_count()
         self.assertGreaterEqual(baseline, 1)  # eager open on this thread
@@ -287,13 +324,16 @@ class DatabaseThreadLeakTests(unittest.TestCase):
         def worker():
             db.execute("SELECT 1")
             self.assertEqual(db.connection_count(), baseline + 1)
+            self.assertIsNone(getattr(db._local, "conn", None))
             db.release_thread()
 
         t = threading.Thread(target=worker)
         t.start()
         t.join()
-        self.assertEqual(db.connection_count(), baseline)
+        self.assertEqual(db.connection_count(), baseline + 1)
+        self.assertEqual(db.execute("SELECT 2").fetchall()[0][0], 2)
         db.close()
+        self.assertEqual(db.connection_count(), 0)
 
     def test_release_thread_noop_when_unused(self):
         db = Database(":memory:")

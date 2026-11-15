@@ -1448,6 +1448,16 @@ class RuntimeSystemMixin:
                         if isinstance(value, dict) else "")
             self._complete_artifact_transfer(
                 transfer, ok=True, send_ref=send_ref)
+            # The file landed through the file_send tool, not
+            # _send_long — mark the delivery so handle_control's
+            # no-empty law (register #32) reads this "" as a
+            # delivered answer, not silence. Without the mark the
+            # 2026-11-05 surface-laws wave converts a successful
+            # send into the fallback bug text: the no-meta-narration
+            # sweep (7729382f) made success return "" while the law
+            # only exempts recorded deliveries and MEDIA_DELIVERED
+            # kinds — and a tool call records neither.
+            self._note_control_delivery()
             # The artifact file IS the delivery — no "📎 sent …"
             # receipt beside it in the same chat (owner
             # no-meta-narration rule, 2026-11-01).  A converted send
