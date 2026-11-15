@@ -1494,11 +1494,11 @@ class TrialFlow:
                         pass
                 if code:
                     result = f"📩 verification code: {code}"
-                    _finish(wid, "done", code, result)
+                    _state, _code = "done", code
                 elif error:
                     result = (f"⚠️ the resumed sms code watch on {number} "
                               f"errored: {error}. try again: /trial sms code")
-                    _finish(wid, "timeout", "", result)
+                    _state, _code = "timeout", ""
                 else:
                     result = (
                         f"no code arrived on {number} within "
@@ -1506,7 +1506,17 @@ class TrialFlow:
                         "may not have sent one yet. try again: "
                         "/trial sms code"
                     )
-                    _finish(wid, "timeout", "", result)
+                    _state, _code = "timeout", ""
+                # Report BEFORE the state flip: the state is the
+                # signal a reader uses for "the watch finished",
+                # and the report must already exist by then.  The
+                # old order (finish, then report) left a window
+                # where the row said "done" while the code
+                # notification was still in flight — a reader in
+                # that window saw a finished watch with no code
+                # reported.  _finish still runs even when the
+                # report fails (the try below never raises), so
+                # the row still records the outcome either way.
                 try:
                     from ..alert_templates import trial_notice_doc
                     from ...social.chat.present import body_text
@@ -1526,6 +1536,7 @@ class TrialFlow:
                 except Exception:  # noqa: BLE001 - reporting never crashes
                     _log.exception("resumed sms watch report failed: %s",
                                    wid)
+                _finish(wid, _state, _code, result)
 
             thread = threading.Thread(target=_resumed,
                                       name="trial-sms-watch-resumed",

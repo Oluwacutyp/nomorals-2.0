@@ -578,6 +578,14 @@ def test_view_once_pathless_media_entry_is_a_miss(tmp_path):
 
 
 def test_view_once_redelivery_writes_one_trace(tmp_path):
+    """A view-once arrival fed twice leaves exactly one trace row
+    AND exactly one capture.  The adapter's groupdup dedupe eats
+    the replay (0 deliveries on the second feed — one platform
+    message, one turn), and a replay that still reaches the organ
+    — a second intake handing the same message over — must not
+    re-save the media: the trace dedupe used to run after the
+    save loop, so the replay wrote a second vault entry while
+    writing no second trace."""
     surface = _FakeSurfaceAdapter()
     rt, svc, rec = _runtime(tmp_path, surface, view_once=True)
     personal = svc["personal"]
@@ -586,8 +594,21 @@ def test_view_once_redelivery_writes_one_trace(tmp_path):
     wire = _vo_wire("vo4", [
         {"path": src, "mime": "image/jpeg", "kind": "image"}])
     _feed_dm(rt, wa, wire)
-    _feed_dm(rt, wa, wire)
     assert len(_rows(personal, "view_once_trace")) == 1
+    assert len([r for r in personal.vault.saved_entries(rec.id)
+                if r.get("kind") == "view_once"]) == 1
+    redelivered: list = []
+    wa._dispatch(wire, redelivered.append)
+    assert redelivered == []
+    personal.observe_message(
+        "whatsapp", chat_key=f"whatsapp:{TARGET_JID}",
+        counterpart_id=TARGET_JID, sender_id=TARGET_JID,
+        sender_name="Ada", message_id="vo4", text="",
+        media=[{"path": src, "kind": "image"}],
+        view_once=True, ts=time.time())
+    assert len(_rows(personal, "view_once_trace")) == 1
+    assert len([r for r in personal.vault.saved_entries(rec.id)
+                if r.get("kind") == "view_once"]) == 1
 
 
 # ── 4b. /viewonce reveal attempts journal ───────────────────

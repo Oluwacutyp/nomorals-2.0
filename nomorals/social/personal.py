@@ -829,6 +829,17 @@ class PersonalSurfaces:
                 "incoming": bool(incoming), "ts": ts})
         ephemeral = bool(view_once) or int(ttl_seconds or 0) > 0
         if ephemeral:
+            vo_tkey = (rec.id, str(message_id or ""))
+            if message_id and vo_tkey in self._view_once_traced:
+                # Redelivery of an arrival already traced: the
+                # adapter's groupdup dedupe normally eats these,
+                # but a second intake can still hand one over —
+                # and the trace dedupe below used to run AFTER
+                # the save loop, so the replay re-saved the
+                # media (a second vault entry) while writing no
+                # second trace.  One arrival, one capture, one
+                # trace — the replay writes nothing at all.
+                return out
             # EVERY view-once-class arrival leaves a trace row
             # (2026-11-08 truth fix): with the toggle OFF the
             # branches below used to write nothing at all, so a
@@ -932,7 +943,6 @@ class PersonalSurfaces:
                 vo_outcome = "missed"
             else:
                 vo_outcome = "no_media"
-            vo_tkey = (rec.id, str(message_id or ""))
             if not message_id or vo_tkey not in \
                     self._view_once_traced:
                 if message_id:
