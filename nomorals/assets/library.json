@@ -1,5 +1,5 @@
 {
   "library": true,
-  "reason": "Vehicle/device/appliance maintenance ledger \u2014 pure domain classes (Asset, AssetLedger, Reminder, ServiceRecord) with no service wiring. Genuine import-only library.",
-  "owner_decision_needed": "Wire into CLI/chat (e.g. nm assets / maintenance reminders) or keep as import-only library."
+  "owner_decision_needed": "Wired into chat as /assets (add/service/due/costs/show/list) on <home>/data/assets.json; on-demand /assets due covers reminders (no scheduled job).",
+  "reason": "Vehicle/device/appliance maintenance ledger — domain classes (Asset, AssetLedger, Reminder, ServiceRecord) plus the /assets chat surface and durable JSON store (E-6 vehicle wiring, 2026-11-15). The seed-library file stays in the package-data inventory; the wiring lives in runtime_reach.py, not here."
 }

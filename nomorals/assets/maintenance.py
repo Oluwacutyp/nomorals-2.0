@@ -22,10 +22,15 @@ new records (use ``adjustment`` in the description).
 
 from __future__ import annotations
 
+import json
+import logging
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 __all__ = [
     "Asset",
@@ -41,6 +46,30 @@ DEFAULT_CURRENCY = "₦"
 #: Extensible asset kinds. ``other`` is the escape hatch — new kinds never
 #: require a code change, just a kind string.
 ASSET_KINDS = ("vehicle", "generator", "ac", "laptop", "appliance", "other")
+
+
+def _parse_date(value: Any) -> date | None:
+    """ISO date (or ``None``) from a stored value; junk fails honestly."""
+    if value is None or value == "":
+        return None
+    if isinstance(value, date):
+        return value
+    try:
+        return date.fromisoformat(str(value))
+    except ValueError:
+        raise ValueError(f"bad date {value!r}") from None
+
+
+def _as_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    return float(value)
+
+
+def _as_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
 
 
 @dataclass
@@ -75,6 +104,44 @@ class Asset:
         if self.odometer_km < 0:
             raise ValueError("odometer_km must not be negative")
 
+    def to_dict(self) -> dict[str, Any]:
+        """Plain JSON shape (dates as ISO strings, ``None`` stays ``None``)."""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "kind": self.kind,
+            "currency": self.currency,
+            "pack": self.pack,
+            "purchase_date": self.purchase_date.isoformat() if self.purchase_date else None,
+            "odometer_km": self.odometer_km,
+            "interval_km": self.interval_km,
+            "interval_days": self.interval_days,
+            "last_service_date": self.last_service_date.isoformat() if self.last_service_date else None,
+            "last_service_km": self.last_service_km,
+            "notes": self.notes,
+        }
+
+    @classmethod
+    def from_dict(cls, row: dict[str, Any]) -> Asset:
+        """Rebuild from :meth:`to_dict`; a missing/ill-typed name fails honestly."""
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError(f"bad asset row: no name in {row!r}")
+        return cls(
+            id=str(row["id"]) if row.get("id") else uuid.uuid4().hex[:12],
+            name=name,
+            kind=str(row.get("kind", "other")),
+            currency=str(row.get("currency", DEFAULT_CURRENCY)),
+            pack=str(row.get("pack", "NG")),
+            purchase_date=_parse_date(row.get("purchase_date")),
+            odometer_km=float(row.get("odometer_km", 0.0)),
+            interval_km=_as_float(row.get("interval_km")),
+            interval_days=_as_int(row.get("interval_days")),
+            last_service_date=_parse_date(row.get("last_service_date")),
+            last_service_km=float(row.get("last_service_km", 0.0)),
+            notes=str(row.get("notes", "")),
+        )
+
 
 @dataclass(frozen=True)
 class ServiceRecord:
@@ -93,6 +160,36 @@ class ServiceRecord:
         if self.cost_minor < 0:
             raise ValueError("cost_minor must not be negative")
 
+    def to_dict(self) -> dict[str, Any]:
+        """Plain JSON shape (date as an ISO string)."""
+        return {
+            "id": self.id,
+            "asset_id": self.asset_id,
+            "service_date": self.service_date.isoformat(),
+            "description": self.description,
+            "cost_minor": self.cost_minor,
+            "odometer_km": self.odometer_km,
+            "vendor": self.vendor,
+            "receipt_ref": self.receipt_ref,
+        }
+
+    @classmethod
+    def from_dict(cls, row: dict[str, Any]) -> ServiceRecord:
+        """Rebuild from :meth:`to_dict`; a bad/missing date fails honestly."""
+        service_date = _parse_date(row.get("service_date"))
+        if service_date is None:
+            raise ValueError(f"bad service record row: no service_date in {row!r}")
+        return cls(
+            id=str(row["id"]) if row.get("id") else uuid.uuid4().hex[:12],
+            asset_id=str(row["asset_id"]),
+            service_date=service_date,
+            description=str(row.get("description", "")),
+            cost_minor=int(row.get("cost_minor", 0)),
+            odometer_km=_as_float(row.get("odometer_km")),
+            vendor=str(row.get("vendor", "")),
+            receipt_ref=str(row.get("receipt_ref", "")),
+        )
+
 
 @dataclass(frozen=True)
 class Reminder:
@@ -108,17 +205,67 @@ class Reminder:
 
 
 class AssetLedger:
-    """Registry of assets + their full service/cost history."""
+    """Registry of assets + their full service/cost history.
 
-    def __init__(self) -> None:
+    JSON-backed when a ``path`` is given (the /assets surface stores it
+    at ``<home>/data/assets.json``); in-memory when it is not. The
+    persistence shape mirrors :class:`nomorals.decisions.journal.DecisionJournal`:
+    tolerant load (a missing/corrupt file starts empty, a bad row is
+    skipped), atomic tmp+replace save after every mutation.
+    """
+
+    def __init__(self, path: str | None = None) -> None:
+        self.path = path
         self.assets: dict[str, Asset] = {}
         self.records: list[ServiceRecord] = []
+        if path:
+            self._load()
+
+    # ── persistence ──────────────────────────────────────────────
+    def _load(self) -> None:
+        try:
+            with open(self.path, encoding="utf-8") as fh:
+                raw = json.load(fh)
+        except (OSError, ValueError):
+            return
+        for row in raw.get("assets") or []:
+            try:
+                asset = Asset.from_dict(row)
+                self.assets[asset.id] = asset
+            except (TypeError, ValueError):
+                continue
+        for row in raw.get("records") or []:
+            try:
+                record = ServiceRecord.from_dict(row)
+            except (TypeError, ValueError, KeyError):
+                continue
+            if record.asset_id not in self.assets:
+                continue
+            self.records.append(record)
+
+    def _save(self) -> None:
+        if not self.path:
+            return
+        try:
+            parent = os.path.dirname(self.path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            tmp = self.path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"assets": [a.to_dict() for a in self.assets.values()],
+                     "records": [r.to_dict() for r in self.records]},
+                    fh, ensure_ascii=False)
+            os.replace(tmp, self.path)
+        except OSError:
+            _log.debug("assets._save failed", exc_info=True)
 
     # -- assets ---------------------------------------------------------
     def add_asset(self, asset: Asset) -> Asset:
         if asset.id in self.assets:
             raise ValueError(f"asset {asset.id!r} already registered")
         self.assets[asset.id] = asset
+        self._save()
         return asset
 
     def get_asset(self, asset_id: str) -> Asset:
@@ -133,16 +280,20 @@ class AssetLedger:
 
         The record is appended, never mutated — the ledger is the audit
         trail. ``odometer_km`` on the record also advances the asset's
-        odometer when it moves forward.
+        odometer when it moves forward. Validation runs BEFORE the
+        append, so a refused record leaves no trace (in memory or on
+        disk).
         """
         asset = self.get_asset(record.asset_id)
+        if (record.odometer_km is not None
+                and record.odometer_km < asset.last_service_km):
+            raise ValueError("odometer reading went backwards")
         self.records.append(record)
         asset.last_service_date = record.service_date
         if record.odometer_km is not None:
-            if record.odometer_km < asset.last_service_km:
-                raise ValueError("odometer reading went backwards")
             asset.last_service_km = record.odometer_km
             asset.odometer_km = max(asset.odometer_km, record.odometer_km)
+        self._save()
         return record
 
     # -- reminders --------------------------------------------------------

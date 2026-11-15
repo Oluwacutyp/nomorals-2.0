@@ -9014,6 +9014,8 @@ class PartnerRuntime(
             )
         if kind == "focus":
             return self._control_focus(command.tail or arg, chat_key=chat_key)
+        if kind == "assets":
+            return self._control_assets(command.tail or arg, chat_key=chat_key)
         if kind == "backup":
             return self._control_backup(command.tail or arg, chat_key=chat_key)
 

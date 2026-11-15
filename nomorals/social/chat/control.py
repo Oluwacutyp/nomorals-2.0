@@ -454,6 +454,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "decisions": (0, None),  # /decisions list|add <decision> [| chosen | prediction | conf%]|resolve <id> [good|bad] <outcome>|review|calibration
     "iddocs": (0, None),     # /iddocs list|add <type> <expiry YYYY-MM-DD> <vault:ref> [country]|expiring [days]|overdue|renew <id> (owner-only)
     "focus": (0, None),      # /focus start|pause|resume|stop|status|today|week|month
+    "assets": (0, None),     # /assets list|add <name> [| kind | interval_km | interval_days | odometer_km]|service <id> <description> [| cost | odometer_km | vendor | YYYY-MM-DD]|due [days]|costs [id]|show <id>
     "backup": (0, 1),        # /backup status | verify — read-only backup health (runs need the vault, stay scheduled)
     # expansion wave
     "game": (0, 12),         # /game [list|<name>|quit|leaderboard|stats|shop|balance]
@@ -1085,6 +1086,7 @@ _HELP_TEXT = "\n".join(
         "  /commitments list | add <what> [by <deadline>] | kept|broken|cancel <id> [evidence]",
         "   /commitments overdue | due | reliability [promisee] | verify",
         "  /focus start [label] | pause | resume | stop [note] | status | today | week",
+        "  /assets add <name> [| kind | interval_km | interval_days | odometer_km] | service <id> <description> [| cost | odometer_km | vendor] | due | costs | show <id> | list",
         "  /backup status | verify                backup health (read-only; runs need the vault, stay scheduled)",
         "  — expansion —",
         "  /game [list|<name>|quit]                41 games (DM + group): /game list",
@@ -4547,7 +4549,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "checkpoint", "checkpoints", "rewind", "novel"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
                            "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible",
-                           "people", "commitments", "decisions", "iddocs", "focus"]),
+                           "people", "commitments", "decisions", "iddocs", "focus", "assets"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
                           "balances", "goal", "goals", "careers", "ideas", "insights", "alert"]),
     ("games — 41, DM + group, start them directly",
@@ -4882,7 +4884,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
-      "immune", "impossible", "people", "commitments", "decisions", "iddocs", "focus"]),
+      "immune", "impossible", "people", "commitments", "decisions", "iddocs", "focus", "assets"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -5384,6 +5386,7 @@ LIST_ONELINERS: dict[str, str] = {
     "decisions": "the decision journal — calibrate your own calls: /decisions add <decision> [| chosen | prediction | conf%] | resolve <id> [good|bad] <outcome> | list | review [weekly|monthly] | calibration",
     "iddocs": "identity document expiry tracker (owner-only): /iddocs list | add <type> <expiry YYYY-MM-DD> <vault:ref> [country] | expiring [days] | overdue | renew <id> — vault references only, never document numbers",
     "focus": "focus sessions: /focus start [label] | pause | resume | stop [note] | status | today | week | month",
+    "assets": "vehicle & asset maintenance: /assets add <name> [| kind | interval_km | interval_days | odometer_km] | service <id> <description> [| cost | odometer_km | vendor | date] | due [days] | costs [id] | show <id> | list",
     "backup": "backup health (read-only): /backup status | verify — generations, manifest, DB integrity",
     "alert": "price/money alerts: /alert add|list|remove|check|snooze|sync-bills",
     "balances": "unified money view across rails: /balances [rail…]",

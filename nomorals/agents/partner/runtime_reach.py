@@ -1524,6 +1524,186 @@ class RuntimeReachMixin:
                    if did.startswith(ref)]
         return matches[0] if len(matches) == 1 else None
 
+    def _assets_ledger(self) -> Any:
+        """AssetLedger on the durable home path (E-6 vehicle wiring)."""
+        from ...assets.maintenance import AssetLedger
+
+        path = self.context.settings.home_path / "data" / "assets.json"
+        return AssetLedger(str(path))
+
+    def _resolve_asset(self, ledger: Any, ref: str) -> Any:
+        """Exact id, else unique id-prefix, else None."""
+        ref = (ref or "").strip()
+        if ref in ledger.assets:
+            return ledger.assets[ref]
+        matches = [a for aid, a in ledger.assets.items()
+                   if aid.startswith(ref)]
+        return matches[0] if len(matches) == 1 else None
+
+    def _control_assets(self, tail: str, *, chat_key: str = "") -> str:
+        """Vehicle & asset maintenance: /assets list|add|service|due|costs|show.
+
+        The MORE_TO_ADD gap 7 organ (nomorals/assets/maintenance.py) had
+        no production importer at all — this is its surface. Costs are
+        typed in major units and stored as integer minor units; a service
+        defaults to today and takes an optional YYYY-MM-DD.
+        """
+        import datetime as _dt
+
+        from ...assets.maintenance import Asset, AssetLedger, ServiceRecord
+
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1] if len(parts) > 1 else ""
+        ledger = self._assets_ledger()
+        if verb in ("list", ""):
+            if not ledger.assets:
+                return ("no assets yet — /assets add <name> [| kind | "
+                        "interval_km | interval_days | odometer_km] records one.")
+            lines = [f"assets ({len(ledger.assets)}):"]
+            for asset in ledger.assets.values():
+                last = (asset.last_service_date.isoformat()
+                        if asset.last_service_date else "never")
+                lines.append(
+                    f"  {asset.id}: {asset.name} ({asset.kind}) — "
+                    f"{asset.odometer_km:,.0f} km, last service {last}")
+            return "\n".join(lines)
+        if verb == "add":
+            fields = [f.strip() for f in rest.split("|")]
+            name = fields[0] if fields else ""
+            if not name:
+                return ("usage: /assets add <name> [| kind | interval_km | "
+                        "interval_days | odometer_km]")
+            kind = fields[1] if len(fields) > 1 and fields[1] else "other"
+            try:
+                interval_km = (float(fields[2])
+                               if len(fields) > 2 and fields[2] else None)
+                interval_days = (int(fields[3])
+                                 if len(fields) > 3 and fields[3] else None)
+                odometer_km = (float(fields[4])
+                               if len(fields) > 4 and fields[4] else 0.0)
+            except ValueError:
+                return ("intervals and odometer must be numbers — e.g. "
+                        "/assets add Camry | vehicle | 5000 | 180 | 14000")
+            try:
+                asset = ledger.add_asset(Asset(
+                    name=name, kind=kind, interval_km=interval_km,
+                    interval_days=interval_days, odometer_km=odometer_km))
+            except ValueError as exc:
+                return str(exc)
+            out = f"recorded: {asset.id}: {asset.name} ({asset.kind})"
+            if interval_km:
+                out += f" — service every {interval_km:,.0f} km"
+            if interval_days:
+                out += f" / {interval_days} days"
+            return out + (" — log a service with "
+                          f"/assets service {asset.id} <what> "
+                          "[| cost | odometer_km | vendor]")
+        if verb == "service":
+            fields = [f.strip() for f in rest.split("|")]
+            head = fields[0].split(None, 1) if fields else []
+            if len(head) < 2:
+                return ("usage: /assets service <id> <description> "
+                        "[| cost | odometer_km | vendor | YYYY-MM-DD]")
+            asset = self._resolve_asset(ledger, head[0])
+            if asset is None:
+                return (f"no asset matching {head[0]!r} — "
+                        "/assets list shows ids.")
+            try:
+                cost_minor = 0
+                if len(fields) > 1 and fields[1]:
+                    cost_minor = int(round(float(fields[1]) * 100))
+                odometer_km = (float(fields[2])
+                               if len(fields) > 2 and fields[2] else None)
+                vendor = fields[3] if len(fields) > 3 else ""
+                service_date = _dt.date.today()
+                if len(fields) > 4 and fields[4]:
+                    service_date = _dt.date.fromisoformat(fields[4])
+            except ValueError:
+                return ("cost and odometer must be numbers and the date "
+                        "YYYY-MM-DD — e.g. /assets service <id> oil change "
+                        "| 45000 | 15000 | AutoServe")
+            try:
+                ledger.log_service(ServiceRecord(
+                    asset_id=asset.id, service_date=service_date,
+                    description=head[1], cost_minor=cost_minor,
+                    odometer_km=odometer_km, vendor=vendor))
+            except ValueError as exc:
+                return str(exc)
+            cost_text = AssetLedger.format_cost(cost_minor, asset.currency)
+            return (f"logged: {asset.name} — {head[1]} on "
+                    f"{service_date.isoformat()} ({cost_text})")
+        if verb == "due":
+            try:
+                upcoming = int(rest.strip()) if rest.strip() else 14
+            except ValueError:
+                return "/assets due [days] — days must be a number."
+            reminders = ledger.due_reminders(
+                _dt.date.today(), upcoming_days=upcoming)
+            if not reminders:
+                return f"no services due in the next {upcoming} days."
+            lines = [f"services due ({len(reminders)}):"]
+            for reminder in reminders:
+                lines.append(f"  {reminder.detail}")
+            return "\n".join(lines)
+        if verb == "costs":
+            if rest.strip():
+                asset = self._resolve_asset(ledger, rest.strip())
+                if asset is None:
+                    return (f"no asset matching {rest.strip()!r} — "
+                            "/assets list shows ids.")
+                total = ledger.total_cost(asset.id)
+                count = sum(1 for r in ledger.records
+                            if r.asset_id == asset.id)
+                return (f"{asset.name}: "
+                        f"{AssetLedger.format_cost(total, asset.currency)} "
+                        f"across {count} service(s).")
+            if not ledger.assets:
+                return "no assets yet — /assets add <name> records one."
+            lines = ["service costs:"]
+            for asset in ledger.assets.values():
+                total = ledger.total_cost(asset.id)
+                lines.append(f"  {asset.name}: "
+                             f"{AssetLedger.format_cost(total, asset.currency)}")
+            return "\n".join(lines)
+        if verb == "show":
+            asset = self._resolve_asset(ledger, rest.strip())
+            if asset is None:
+                return (f"no asset matching {rest.strip()!r} — "
+                        "/assets list shows ids.")
+            last = (asset.last_service_date.isoformat()
+                    if asset.last_service_date else "never")
+            lines = [
+                f"{asset.name} ({asset.kind}) — {asset.id}",
+                f"  odometer: {asset.odometer_km:,.0f} km · last service: {last}",
+            ]
+            if asset.interval_km:
+                every = f"  service every {asset.interval_km:,.0f} km"
+                if asset.interval_days:
+                    every += f" / {asset.interval_days} days"
+                lines.append(every)
+            elif asset.interval_days:
+                lines.append(f"  service every {asset.interval_days} days")
+            rows = [r for r in ledger.records if r.asset_id == asset.id]
+            if not rows:
+                lines.append("  no services logged yet.")
+            else:
+                lines.append(f"  services ({len(rows)}):")
+                for record in rows:
+                    odo = (f", {record.odometer_km:,.0f} km"
+                           if record.odometer_km is not None else "")
+                    vendor = f" — {record.vendor}" if record.vendor else ""
+                    lines.append(
+                        f"    {record.service_date.isoformat()}: "
+                        f"{record.description} "
+                        f"({AssetLedger.format_cost(record.cost_minor, asset.currency)}"
+                        f"{odo}{vendor})")
+            return "\n".join(lines)
+        return ("usage: /assets list | add <name> [| kind | interval_km | "
+                "interval_days | odometer_km] | service <id> <description> "
+                "[| cost | odometer_km | vendor | YYYY-MM-DD] | due [days] | "
+                "costs [id] | show <id>")
+
     def _control_decisions(self, tail: str, *, chat_key: str = "") -> str:
         """The decision journal: /decisions list|add|resolve|review|calibration.
 
