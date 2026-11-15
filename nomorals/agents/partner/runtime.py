@@ -7637,6 +7637,10 @@ class PartnerRuntime(
             # /pair (control dispatch never reaches non-operators).
             return self._control_mass(kind, command.tail)
 
+        if kind == "obroadcast":
+            # §20b owner broadcast — owner-only like the mass tools.
+            return self._control_obroadcast(command.tail)
+
         if kind == "rules":
             return self._control_rules(message)
 

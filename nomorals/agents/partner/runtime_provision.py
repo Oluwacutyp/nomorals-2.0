@@ -2756,6 +2756,212 @@ class RuntimeProvisionMixin:
             return f"⚠️ {exc}"
         return render_run(run, tool_label=f"/{tool}")
 
+    # ── owner broadcast (§20b: the mass tool that speaks as the bot) ──
+    def _obroadcast_service(self) -> dict[str, Any]:
+        """The /obroadcast arms + journal, built once, lazily — the
+        SAME store files the §14 mass tools use (one arms store,
+        one journal, keyed by tool name), but the broadcast's own
+        pacing floor (3s between rooms, not 20s between accounts).
+        No pairing supervisor: this tool posts as the bot through
+        the gateway, never through a paired account."""
+        svc = getattr(self, "_obroadcast_svc", None)
+        if svc is not None:
+            return svc
+        from pathlib import Path
+
+        from ...social.mass_actions import MassArms, MassJournal, default_mass_root
+
+        ws = Path(getattr(self.context.settings, "workspace_dir", "."))
+        root = default_mass_root(ws)
+        svc = {"arms": MassArms(root / "arms.json"),
+               "journal": MassJournal(root / "journal.jsonl")}
+        self._obroadcast_svc = svc
+        return svc
+
+    def _control_obroadcast(self, tail: str) -> str:
+        """/obroadcast — the owner speaks through Devon to all
+        claimed groups/channels at once (DESIGN §20b).
+
+        /obroadcast <text> [| groups|channels|all] [| live|dry]
+        /obroadcast arm|disarm|status|runs|pacing <seconds>
+
+        Owner-only (control dispatch never reaches non-operators).
+        A run dry-runs unless you say ``| live``, and a live run
+        refuses until the tool is ARMED (its warning is shown
+        then).  Pacing is per room, floor 3s, and every run —
+        live, dry, refused — lands in the journal complete.
+        A live run BLOCKS this chat's turn for its paced duration
+        — the pacing is the safety control, and the reply when it
+        lands IS the run report (the design's deliverable shape).
+        """
+        from ...social.chat.group_broadcast import (
+            BROADCAST_WARN_TEXT,
+            DEFAULT_PACE_S,
+            PACE_FLOOR_S,
+            BroadcastRefused,
+            broadcast_targets,
+            preview_broadcast,
+            run_owner_broadcast,
+        )
+        from ...social.mass_actions import MassRefusal
+
+        tool = "obroadcast"
+        svc = self._obroadcast_service()
+        arms, journal = svc["arms"], svc["journal"]
+        raw = str(tail or "").strip()
+        segments = [s.strip() for s in raw.split("|")]
+        head = segments[0] if segments else ""
+        words = head.split()
+        meta = words[0].lower() if words else ""
+
+        def _journal_row(**extra: Any) -> dict[str, Any]:
+            row = {"tool": tool,
+                   "run_id": f"ob-{int(time.time())}",
+                   "ts": time.time()}
+            row.update(extra)
+            return journal.append(row)
+
+        if meta == "arm":
+            arms.arm(tool)
+            return (f"{BROADCAST_WARN_TEXT}\n\n✅ /obroadcast is "
+                    "ARMED. Live runs are possible now; a run still "
+                    "dry-runs unless you say “| live”. Disarm any "
+                    "time: /obroadcast disarm")
+        if meta == "disarm":
+            arms.disarm(tool)
+            return ("⏸️ /obroadcast disarmed — live runs refuse "
+                    "until you arm it again.")
+        if meta == "pacing":
+            if len(words) < 2:
+                return (f"/obroadcast pacing is "
+                        f"{arms.pacing(tool, floor=PACE_FLOOR_S, default=DEFAULT_PACE_S):.0f}s "
+                        "between rooms. Raise it: "
+                        "/obroadcast pacing <seconds>")
+            try:
+                value = arms.set_pacing(
+                    tool, float(words[1]), floor=PACE_FLOOR_S,
+                    unit="rooms")
+            except (MassRefusal, ValueError) as exc:
+                return f"⚠️ {exc}"
+            return f"⏱️ /obroadcast pacing set to {value:.0f}s."
+        if meta == "status":
+            st = arms.state(tool, pacing_default=DEFAULT_PACE_S)
+            targets = broadcast_targets(self._group_surface())
+            total = len(targets["groups"]) + len(targets["channels"])
+            return "\n".join([
+                f"🎛️ /obroadcast: "
+                f"{'ARMED' if st.get('armed') else 'disarmed'} · "
+                f"pacing {arms.pacing(tool, floor=PACE_FLOOR_S, default=DEFAULT_PACE_S):.0f}s · "
+                f"{int(st.get('live_runs') or 0)} live run(s) so far",
+                f"rooms: {len(targets['groups'])} groups · "
+                f"{len(targets['channels'])} channels "
+                f"({total} total, claimed rooms only)",
+                BROADCAST_WARN_TEXT if not st.get("armed") else
+                "armed — the platform-risk warning was shown "
+                "at arm time and stands."])
+        if meta == "runs":
+            rows = journal.tail(5, tool=tool)
+            if not rows:
+                return "no /obroadcast runs journaled yet."
+            lines = ["📓 recent /obroadcast runs:"]
+            for row in rows:
+                mode = "dry" if row.get("dry_run") else (
+                    "refused" if row.get("refused") else "live")
+                lines.append(
+                    f"  {row.get('run_id', '?')} · {mode} "
+                    f"· {row.get('sent', 0)}/{row.get('targets', 0)} "
+                    f"sent · “{(row.get('text') or '')[:60]}”")
+            return "\n".join(lines)
+        if not head:
+            targets = broadcast_targets(self._group_surface())
+            lines = [
+                "usage: /obroadcast <text> [| groups|channels|all] "
+                "[| live|dry] — or /obroadcast "
+                "arm|status|runs|pacing <s>",
+                "",
+                "rooms it would reach right now "
+                f"({len(targets['groups'])} groups · "
+                f"{len(targets['channels'])} channels):"]
+            for row in targets["groups"] + targets["channels"]:
+                lines.append(f"  · {row['title']} ({row['key']})")
+            if not targets["groups"] and not targets["channels"]:
+                lines.append("  (none — claim a room first)")
+            return "\n".join(lines)
+
+        # ── a run: first segment is the text, the rest are options ──
+        text = head
+        scope = "all"
+        live = False
+        for seg in segments[1:]:
+            low = seg.lower()
+            if low == "live":
+                live = True
+            elif low in ("dry", "dry-run", "dryrun"):
+                live = False
+            elif low in ("all", "groups", "channels"):
+                scope = low
+            elif seg:
+                text = f"{text} | {seg}"
+        gateway = getattr(self, "gateway", None)
+        if gateway is None:
+            return ("⚠️ no gateway attached — the broadcast has "
+                    "nothing to send through.")
+        if not live:
+            try:
+                record = preview_broadcast(
+                    self._group_surface(), text, scope=scope)
+            except BroadcastRefused as exc:
+                return f"⚠️ {exc}"
+            _journal_row(live=False, dry_run=True, scope=scope,
+                         text=record["text"],
+                         targets=len(record["targets"]),
+                         sent=0, failed=0, aborted=False,
+                         results=[])
+            lines = [
+                "📣 broadcast dry-run — nothing sent.",
+                "",
+                f"would reach {len(record['targets'])} room(s) "
+                f"({scope}):"]
+            for row in record["targets"]:
+                lines.append(f"  · {row['title']} ({row['key']})")
+            lines.append(
+                "say “| live” to send it — arm first: "
+                "/obroadcast arm")
+            return "\n".join(lines)
+        if not arms.armed(tool):
+            _journal_row(live=False, dry_run=False, scope=scope,
+                         text=text, targets=0, sent=0, failed=0,
+                         refused="disarmed")
+            return (f"{BROADCAST_WARN_TEXT}\nArm it with: "
+                    "/obroadcast arm")
+        try:
+            record = run_owner_broadcast(
+                surface=self._group_surface(), gateway=gateway,
+                text=text, scope=scope,
+                pace_seconds=arms.pacing(
+                    tool, floor=PACE_FLOOR_S, default=DEFAULT_PACE_S))
+        except BroadcastRefused as exc:
+            return f"⚠️ {exc}"
+        arms.note_live_run(tool)
+        _journal_row(live=True, dry_run=False, scope=scope,
+                     text=record["text"],
+                     targets=len(record["targets"]),
+                     sent=record["sent"], failed=record["failed"],
+                     aborted=record["aborted"],
+                     results=record["results"])
+        total = len(record["targets"])
+        lines = [f"📣 broadcast live: sent {record['sent']} of "
+                 f"{total} rooms."]
+        if record["aborted"]:
+            lines.append("⚠️ aborted early after consecutive "
+                         "failures — the rooms after the break "
+                         "were never tried.")
+        for item in record["results"]:
+            if not item.get("ok"):
+                lines.append(f"  ✗ {item.get('chat')}: "
+                             f"{item.get('error') or 'failed'}")
+        return "\n".join(lines)
+
     def _control_browser_watch(self, tail: str, *, chat_key: str = "",
                                message: Any = None) -> str:
         """``/browser watch [session]`` — attach a LiveView to a live

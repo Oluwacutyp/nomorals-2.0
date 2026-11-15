@@ -290,14 +290,20 @@ class MassArms:
                        encoding="utf-8")
         os.replace(tmp, self.path)
 
-    def _row(self, tool: str) -> dict[str, Any]:
-        return self._tools.setdefault(tool, {
-            "armed": False, "armed_at": 0.0,
-            "pacing_s": PACING_FLOOR_S, "live_runs": 0})
+    def _row(self, tool: str, *,
+             pacing_default: float = PACING_FLOOR_S) -> dict[str, Any]:
+        row = self._tools.get(tool)
+        if row is None:
+            row = {"armed": False, "armed_at": 0.0,
+                   "pacing_s": pacing_default, "live_runs": 0}
+            self._tools[tool] = row
+        return row
 
-    def state(self, tool: str) -> dict[str, Any]:
+    def state(self, tool: str, *,
+              pacing_default: float = PACING_FLOOR_S) -> dict[str, Any]:
         with self._lock:
-            return dict(self._row(tool))
+            return dict(self._row(
+                tool, pacing_default=pacing_default))
 
     def armed(self, tool: str) -> bool:
         return bool(self.state(tool).get("armed"))
@@ -305,10 +311,16 @@ class MassArms:
     def live_runs(self, tool: str) -> int:
         return int(self.state(tool).get("live_runs") or 0)
 
-    def pacing(self, tool: str) -> float:
-        return max(PACING_FLOOR_S,
-                   float(self.state(tool).get("pacing_s")
-                         or PACING_FLOOR_S))
+    def pacing(self, tool: str, *, floor: float = PACING_FLOOR_S,
+               default: float = PACING_FLOOR_S) -> float:
+        """The tool's pacing, never under its floor.  The floor is
+        per-tool: the account tools pace between ACCOUNTS (20s),
+        the broadcast paces between ROOMS (3s) — one store, two
+        floors, and a tool's default is its own floor."""
+        return max(float(floor),
+                   float(self.state(
+                       tool, pacing_default=default).get("pacing_s")
+                       or default))
 
     def arm(self, tool: str, *, at: float | None = None) -> dict[str, Any]:
         with self._lock:
@@ -325,12 +337,14 @@ class MassArms:
             self._save()
             return dict(row)
 
-    def set_pacing(self, tool: str, seconds: float) -> float:
+    def set_pacing(self, tool: str, seconds: float, *,
+                   floor: float = PACING_FLOOR_S,
+                   unit: str = "accounts") -> float:
         seconds = float(seconds)
-        if seconds < PACING_FLOOR_S:
+        if seconds < floor:
             raise MassRefusal(
-                f"pacing floor is {PACING_FLOOR_S:.0f}s between "
-                f"accounts — {seconds:g}s is below it. The floor "
+                f"pacing floor is {floor:.0f}s between {unit} — "
+                f"{seconds:g}s is below it. The floor "
                 "is the safety control, not a suggestion; raise "
                 "it freely, it cannot go under.")
         with self._lock:

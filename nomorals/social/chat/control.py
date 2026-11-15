@@ -746,6 +746,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "massreact": (0, None),   # /massreact <post link> | <emoji> [| count] [| live] — react from every paired account (§14; owner only, arm-gated)
     "pollvote": (0, None),    # /pollvote <poll link> | <option> [| count] [| live] — vote from every paired account (§14; owner only, arm-gated)
     "chfollow": (0, None),    # /chfollow <channel link> [| live] — every paired account follows (§14; owner only, arm-gated)
+    "obroadcast": (0, None),  # /obroadcast <text> [| groups|channels|all] [| live] — owner speaks through Devon to all claimed groups/channels (§20b; owner only, arm-gated)
     "rules": (0, 0),          # /rules — this group's rules, rendered from the settings the enforcer reads (P1)
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
     "lookup": (0, 1),         # /lookup <id|@username> — the account dossier: ID, account-age estimate, phone when visible, groups, username/name history, economy + moderation record (DM + group)
@@ -3688,6 +3689,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/chfollow <channel link> [| count] [| live|dry] · /chfollow arm|disarm|status|pacing <s>|runs",
             "example": "/chfollow https://whatsapp.com/channel/0029VaExample",
             "related": "/massreact /pollvote /pair"},
+    "obroadcast": {"what": "owner broadcast (§20b): speak through Devon to all claimed groups and channels at once — one message, paced room by room, with a per-room delivery report. It posts as Devon herself (the bot), never as you, into claimed rooms only. Arm-gated like the §14 mass tools; a run dry-runs unless you say live.",
+            "usage": "/obroadcast <text> [| groups|channels|all] [| live|dry] · /obroadcast arm|disarm|status|pacing <s>|runs",
+            "example": "/obroadcast maintenance tonight 9pm, back by 10 | live",
+            "related": "/massreact /groups /gbackup"},
     "rules": {"what": "this group's rules — rendered live from the same settings the moderation enforcer reads, so what you see is what's enforced.",
             "usage": "/rules",
             "example": "/rules",
@@ -4652,7 +4657,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion",
+    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
@@ -4985,7 +4990,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
-      "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "notion", "gcal", "trello", "exness", "stripe",
+      "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "worldmodel", "glossary", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",

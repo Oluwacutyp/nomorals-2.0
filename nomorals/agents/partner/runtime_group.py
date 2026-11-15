@@ -579,6 +579,68 @@ class RuntimeGroupMixin:
             return None
         return own
 
+    def _bot_self_id(self, platform: str) -> str | None:  # type: ignore[no-untyped-def]
+        """This runtime's own id on a platform, for telling the
+        bot apart from a member (re-add detection, §9.8):
+        Telegram reads the adapter's ``_bot_id``; WhatsApp proves
+        the bot account JID the way the claim probe does.  None
+        when the platform cannot say — the join path then treats
+        every arrival as a member, as before."""
+        adapter = self._group_adapter(platform)
+        bot_id = getattr(adapter, "_bot_id", None) \
+            if adapter is not None else None
+        if bot_id is None and platform == "whatsapp":
+            bot_id = self._whatsapp_bot_account_id(adapter)
+        return str(bot_id) if bot_id else None
+
+    def _notify_owner(self, text: str, *, platform: str) -> bool:  # type: ignore[no-untyped-def]
+        """Best-effort DM to the owner on the given platform (the
+        _appeal_notify pattern): the record is already durable
+        where it matters; the DM is the announcement, never the
+        state.  Falls back to any platform the registry knows
+        the owner on when the event's platform has no identity.
+        The DM rides the ADAPTER platform (``telegram-bot`` for
+        Telegram — the registry keeps the canonical name)."""
+        from ...social.chat.base import ChatKind, ChatRef
+        from ...social.chat.owner_system import canon_platform
+
+        adapter_platform = {"telegram": "telegram-bot",
+                            "whatsapp": "whatsapp",
+                            "discord": "discord"}
+        try:
+            registry = self._owner_registry()
+            tried = [canon_platform(platform), "telegram",
+                     "whatsapp", "discord"]
+            for plat in dict.fromkeys(tried):
+                ids = registry.identities(plat) or []
+                if not ids:
+                    continue
+                result = self._send(
+                    ChatRef(platform=adapter_platform.get(plat, plat),
+                            chat_id=str(ids[0]), kind=ChatKind.DM),
+                    text)
+                return bool(getattr(result, "ok", False))
+            return False
+        except Exception:  # noqa: BLE001 - reported, not raised
+            return False
+
+    def _on_bot_readded(self, surface, key, message, *,
+                        bot_id):  # type: ignore[no-untyped-def]
+        """The bot itself was (re-)added to this room (§9.8
+        recovery): if Devon served the room before, the owner
+        gets a DM naming the latest backup and the exact restore
+        command.  The restore itself never auto-applies — the
+        owner decides, and the existing preview + ``yes`` flow is
+        the only way it lands.  A first add returns silently
+        (the offer is None)."""
+        from ...social.chat.group_broadcast import readd_recovery_offer
+
+        offer = readd_recovery_offer(surface, key, bot_id=bot_id)
+        if offer is None:
+            return
+        platform = str(getattr(message.chat, "platform", "") or "")
+        self._notify_owner(offer["text"], platform=platform)
+
     def _send_action_notice(self, surface, key, message,  # type: ignore[no-untyped-def]
                             action) -> None:
         """Post one §31 notice for an executed action.  The text
@@ -1046,11 +1108,26 @@ class RuntimeGroupMixin:
             inert = (str(acc_cfg.get("mode") or "open") == "open"
                      and not any(criteria.values()))
             welcomed = []
+            # The bot itself, (re-)added (§9.8 recovery): it is
+            # never welcomed or ledger-joined, and a re-add to a
+            # room Devon already served tells the owner what can
+            # be restored.  A first add stays quiet — claiming
+            # rides the console as today.
+            self_id = self._bot_self_id(message.chat.platform)
+            if self_id:
+                for member in meta.get("new_members") or []:
+                    if isinstance(member, dict) \
+                            and str(member.get("id") or "") == self_id:
+                        self._on_bot_readded(
+                            surface, key, message, bot_id=self_id)
+                        break
             for member in meta.get("new_members") or []:
                 if not isinstance(member, dict):
                     continue
                 user_id = str(member.get("id") or "")
                 if not user_id:
+                    continue
+                if self_id and user_id == self_id:
                     continue
                 if inert:
                     text = surface.record_join(
