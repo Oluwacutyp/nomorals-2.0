@@ -41,6 +41,7 @@ from nomorals.social.chat.group_community import (
 )
 from nomorals.social.chat.group_surface import GroupStore, GroupSurface
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
 
 OWNER_ID = "5478650254"
 ADMIN_ID = "9001"
@@ -49,7 +50,7 @@ GROUP_A = "telegram-bot:-100111"
 GROUP_B = "telegram-bot:-100222"
 CHANNEL = "telegram-bot:-100333"
 WA_GROUP = "whatsapp:120363111111111111@g.us"
-NOW = time.time()
+NOW = MIDDAY_TS
 COMMUNITY = {"id": "777", "name": "Builders United"}
 COMMUNITY_2 = {"id": "888", "name": "Second Circle"}
 

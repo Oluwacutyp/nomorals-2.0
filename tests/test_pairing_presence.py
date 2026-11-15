@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,6 +31,7 @@ from nomorals.social.pairing import (
     PairingRegistry,
 )
 from nomorals.social.personal import PersonalSurfaces, PersonalVault
+from tests.frozen_clock import MIDDAY_TS
 
 
 # ── organ fakes ─────────────────────────────────────────────────────
@@ -542,7 +542,7 @@ def _ttl_event(tmp_path, download_mode, src=""):
     media = SimpleNamespace(ttl_seconds=30, document=None)
     message = SimpleNamespace(
         id=42, raw_text="", media=media, voice=None,
-        date=datetime.now(timezone.utc), reply_to=None,
+        date=datetime(2026, 10, 14, 12, 0, 0, tzinfo=timezone.utc), reply_to=None,
         from_id=SimpleNamespace(user_id=999), peer_id=None)
     event = SimpleNamespace(
         message=message, chat_id=999, sender_id=999,
@@ -599,7 +599,7 @@ def test_telegram_plain_textless_medialess_still_dropped(tmp_path):
                            username="ada", bot=False, photo=None)
     message = SimpleNamespace(
         id=43, raw_text="", media=None, voice=None,
-        date=datetime.now(timezone.utc), reply_to=None,
+        date=datetime(2026, 10, 14, 12, 0, 0, tzinfo=timezone.utc), reply_to=None,
         from_id=SimpleNamespace(user_id=999), peer_id=None)
     event = SimpleNamespace(
         message=message, chat_id=999, sender_id=999,
@@ -708,7 +708,7 @@ def test_runtime_turn_captures_telegram_view_once(tmp_path):
         incoming=True, text="", sender="Ada", sender_id="999",
         message_id="42",
         media=[MediaRef(path=src, mime="image/jpeg", kind="image")],
-        ts=time.time(), meta={"ttl_seconds": 30})
+        ts=MIDDAY_TS, meta={"ttl_seconds": 30})
     rt._personal_surface_turn(msg)
     rows = svc["personal"].vault.saved_entries(rec.id)
     assert len(rows) == 1
@@ -730,7 +730,7 @@ def test_runtime_turn_journals_telegram_view_once_miss(tmp_path):
         chat=ChatRef(platform="telegram", chat_id="999",
                      kind=ChatKind.DM, title="Ada", peer="999"),
         incoming=True, text="", sender="Ada", sender_id="999",
-        message_id="43", media=[], ts=time.time(),
+        message_id="43", media=[], ts=MIDDAY_TS,
         meta={"ttl_seconds": 30, "view_once_media_missing": True})
     rt._personal_surface_turn(msg)
     rows = svc["personal"].vault.journal(rec.id)

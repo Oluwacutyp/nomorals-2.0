@@ -111,6 +111,13 @@ BASELINE: dict[str, int] = {
     # read as already expired.
     "tests/test_group_economy_system.py": 2,
     "tests/test_group_travel.py": 2,
+    # Grandfathered (batch H9): the dashboard seed stages a flag
+    # proposal whose proposed_ts must be near-real — the dashboard
+    # reads flag_proposals() on the real clock and prunes anything
+    # older than REPUTATION_PROPOSAL_TTL_S (3 days), so a frozen
+    # stamp reads as expired and "flags 1" vanishes (proved:
+    # freezing NOW drops the flag from the waiting line).
+    "tests/test_groups_command.py": 1,
     "tests/test_health_sweep.py": 17,
     "tests/test_health_timeline.py": 3,
     # Grandfathered (batch H8): the blacklisted-deposit test's
@@ -188,6 +195,14 @@ BASELINE: dict[str, int] = {
     "tests/test_swarm_specialists.py": 3,
     "tests/test_sync.py": 3,
     "tests/test_sync_sweep.py": 11,
+    # Grandfathered (batch H9): the stale-session-token test seats
+    # a console session whose "at" must be fresh — the console
+    # re-checks time.time() - at > _CONSOLE_TTL_S (1800s) on the
+    # real clock, so a frozen "at" reads as expired and the link
+    # lands on the console home instead of the "don't admin"
+    # refusal. The file's other read (NOW for joins/dates) is
+    # frozen; only this one stays real.
+    "tests/test_telegram_communities.py": 1,
     "tests/test_tools_sweep.py": 2,
     "tests/test_trading.py": 3,
     "tests/test_trading_risk.py": 3,
@@ -203,6 +218,13 @@ BASELINE: dict[str, int] = {
     "tests/test_wave_e_gaps.py": 7,
     "tests/test_wave_f1_honesty.py": 1,
     "tests/test_whatsapp.py": 2,
+    # Grandfathered (batch H9): the economy-page awards must be
+    # stamped on the real clock — economy_health/issuance_state
+    # read the real clock over a 7-day window, so frozen awards
+    # fall outside it and the throttled-policy test reads
+    # throttled False (proved: freezing _fund's now flips the
+    # assertion). Same family as H8's economy grandfathering.
+    "tests/test_wp_economy_pages.py": 2,
     "tests/test_wisdom_ingestor.py": 1,
     "tests/test_workspace_sweep.py": 2,
 }

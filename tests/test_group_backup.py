@@ -37,13 +37,14 @@ from nomorals.social.chat.control import (
 )
 from nomorals.social.chat.group_surface import GroupStore, GroupSurface
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
 
 OWNER_ID = "111"
 MEMBER_ID = "u99"
 GROUP_A = "telegram-bot:-100111"
 GROUP_B = "telegram-bot:-100222"
 CHANNEL = "telegram-bot:-100333"
-NOW = time.time()
+NOW = MIDDAY_TS
 
 
 def _bare_runtime(community_dir: str) -> PartnerRuntime:
@@ -345,7 +346,7 @@ class TestGroupBackupOrgan(_BackupCase):
         cfg = backup_settings(self.surface, GROUP_A)
         self.assertEqual(cfg["cadence"], "off")
         self.assertEqual(cfg["keep"], 7)
-        self.assertFalse(backup_due(cfg, time.time()))
+        self.assertFalse(backup_due(cfg, MIDDAY_TS))
         out = set_backup_schedule(self.surface, GROUP_A,
                                   cadence="daily", hour=2, keep=5,
                                   by=OWNER_ID)

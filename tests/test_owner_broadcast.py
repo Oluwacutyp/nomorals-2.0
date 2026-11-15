@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import json
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +34,7 @@ from nomorals.social.chat.control import (
 )
 from nomorals.social.chat.group_surface import GroupStore, GroupSurface
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
 
 OWNER_ID = "111"
 BOT_ID = "999888777"
@@ -43,7 +43,7 @@ GROUP_A = "telegram-bot:-100111"
 GROUP_B = "telegram-bot:-100222"
 CHANNEL = "telegram-bot:-100333"
 FOREIGN = "discord:444555"
-NOW = time.time()
+NOW = MIDDAY_TS
 
 
 def _bare_runtime(tmp_path: Path) -> PartnerRuntime:
