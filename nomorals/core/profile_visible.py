@@ -136,6 +136,8 @@ def profile_summary(profile: EnvironmentProfile | str | None = None,
             line += f" gpu {prof.gpu.name} {prof.gpu.vram_gb:.0f}GB"
         else:
             line += f" gpu forwarded {prof.gpu.forward_url}"
+    if prof.antivirus.has_engine:
+        line += f" av {prof.antivirus.primary}"
     return {
         "profile": prof.kind,
         "kind": prof.kind,
@@ -154,6 +156,7 @@ def profile_summary(profile: EnvironmentProfile | str | None = None,
         "shed": shed_lvl,
         "cloud": prof.cloud,
         "gpu": prof.gpu.to_dict(),
+        "antivirus": prof.antivirus.to_dict(),
         "detail": prof.detail,
         "line": line,
     }

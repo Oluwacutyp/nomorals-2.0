@@ -288,14 +288,15 @@ class RuntimeProfileManager:
         elif kind:
             new = resolve_profile(kind)
         else:
-            # full re-detection, GPU probe refreshed: a docked/undocked
-            # GPU is exactly the kind of change this method must notice
-            new = detect_profile(refresh_gpu=True)
+            # full re-detection, GPU + antivirus probes refreshed: a
+            # docked/undocked GPU — or an installed/uninstalled engine —
+            # is exactly the kind of change this method must notice
+            new = detect_profile(refresh_gpu=True, refresh_antivirus=True)
         changes: dict[str, Any] = {}
         for attr in ("kind", "min_vcpus", "target_vcpus", "max_vcpus",
-                     "cpu", "memory_mb", "cloud", "gpu"):
+                     "cpu", "memory_mb", "cloud", "gpu", "antivirus"):
             o, n = getattr(old, attr, None), getattr(new, attr, None)
-            if attr == "gpu":
+            if attr in ("gpu", "antivirus"):
                 # keep changes JSON-plain (the history is dumped)
                 o = o.to_dict() if o is not None else None
                 n = n.to_dict() if n is not None else None

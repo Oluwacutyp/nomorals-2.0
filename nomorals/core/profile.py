@@ -23,6 +23,7 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
+from .antivirus import AntivirusInfo, detect_antivirus
 from .gpu import GpuInfo, detect_gpu
 
 __all__ = ["EnvironmentProfile", "detect_profile", "detect_cloud",
@@ -146,6 +147,10 @@ class EnvironmentProfile:
     #: GPU capability on this box (see nomorals.core.gpu): local /
     #: forwarded / cpu — detected, never pinned by the profile kind.
     gpu: GpuInfo = field(default_factory=GpuInfo)
+    #: Antivirus capability on this box (see nomorals.core.antivirus):
+    #: which engines exist, in precedence order — detected, never
+    #: pinned by the profile kind.
+    antivirus: AntivirusInfo = field(default_factory=AntivirusInfo)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -159,6 +164,7 @@ class EnvironmentProfile:
             "detected": self.detected,
             "cloud": self.cloud,
             "gpu": self.gpu.to_dict(),
+            "antivirus": self.antivirus.to_dict(),
         }
 
     @classmethod
@@ -171,7 +177,8 @@ class EnvironmentProfile:
         return cls(kind=kind, min_vcpus=lo, target_vcpus=mid, max_vcpus=hi,
                    cpu=cpu_count(), memory_mb=memory_mb(),
                    detail=f"configured as {kind}", detected=False,
-                   cloud=detect_cloud(), gpu=detect_gpu())
+                   cloud=detect_cloud(), gpu=detect_gpu(),
+                   antivirus=detect_antivirus())
 
 
 def _looks_like_termux(system: str, machine: str,
@@ -205,7 +212,9 @@ def is_termux() -> bool:
 def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                    system: str | None = None,
                    machine: str | None = None,
-                   refresh_gpu: bool = False) -> EnvironmentProfile:
+                   refresh_gpu: bool = False,
+                   refresh_antivirus: bool = False
+                   ) -> EnvironmentProfile:
     """Inspect the environment and return the matching profile.
 
     Order of precedence: Android/Termux → embedded (very small) →
@@ -213,6 +222,9 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
     The GPU capability (see :mod:`nomorals.core.gpu`) is detected on
     every call — cached per process unless ``refresh_gpu`` re-probes,
     so a docked/undocked GPU is noticed by an explicit re-detect.
+    The antivirus capability (see :mod:`nomorals.core.antivirus`) is
+    detected the same way — cached unless ``refresh_antivirus``
+    re-probes, so an installed/uninstalled engine is noticed too.
     """
     ncpu = cpu if cpu is not None else cpu_count()
     mem = mem_mb if mem_mb is not None else memory_mb()
@@ -221,6 +233,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
     env = dict(os.environ)
     cloud = detect_cloud()
     gpu = detect_gpu(refresh=refresh_gpu)
+    antivirus = detect_antivirus(refresh=refresh_antivirus)
 
     if _looks_like_termux(system, machine, env):
         return EnvironmentProfile(
@@ -229,6 +242,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
             cpu=ncpu, memory_mb=mem,
             detail=f"Android/Termux ({machine or 'arm'})",
             cloud=cloud, gpu=gpu,
+            antivirus=antivirus,
         )
 
     # very small boxes: ≤1 core or ≤1 GB of RAM
@@ -239,6 +253,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
             cpu=ncpu, memory_mb=mem,
             detail=f"constrained ({ncpu} cpu, {mem} MB)",
             cloud=cloud, gpu=gpu,
+            antivirus=antivirus,
         )
 
     if mem >= 32 * 1024:
@@ -249,6 +264,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
             cpu=ncpu, memory_mb=mem,
             detail=f"{ncpu} cpu, {mem // 1024} GB RAM",
             cloud=cloud, gpu=gpu,
+            antivirus=antivirus,
         )
 
     # small cloud boxes are usually 1-4 cores with ≤16 GB
@@ -259,6 +275,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
             cpu=ncpu, memory_mb=mem,
             detail=f"{ncpu} cpu, {mem // 1024} GB RAM (small box)",
             cloud=cloud, gpu=gpu,
+            antivirus=antivirus,
         )
 
     return EnvironmentProfile(
@@ -267,6 +284,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
         cpu=ncpu, memory_mb=mem,
         detail=f"{ncpu} cpu, {mem // 1024 if mem else '?'} GB RAM",
         cloud=cloud, gpu=gpu,
+            antivirus=antivirus,
     )
 
 
@@ -274,7 +292,9 @@ def resolve_profile(kind: str = "", *, cpu: int | None = None,
                     mem_mb: int | None = None,
                     system: str | None = None,
                     machine: str | None = None,
-                    refresh_gpu: bool = False) -> EnvironmentProfile:
+                    refresh_gpu: bool = False,
+                    refresh_antivirus: bool = False
+                    ) -> EnvironmentProfile:
     """Config first (``workspace.profile``), detection second.
 
     ``kind`` = "auto"/"" → detect; a known name → pin that envelope
@@ -284,7 +304,8 @@ def resolve_profile(kind: str = "", *, cpu: int | None = None,
     if not kind or kind == "auto":
         return detect_profile(cpu=cpu, mem_mb=mem_mb,
                               system=system, machine=machine,
-                              refresh_gpu=refresh_gpu)
+                              refresh_gpu=refresh_gpu,
+                              refresh_antivirus=refresh_antivirus)
     return EnvironmentProfile.from_config(kind)
 
 
