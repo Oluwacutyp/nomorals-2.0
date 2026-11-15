@@ -419,8 +419,8 @@ def test_control_explore_adopt_and_dismiss_verbs(
     surface._scheduler = None
 
     niches_text = surface._control_explore("niches")
-    assert "gold_trading" in niches_text
-    assert "NOT live" in niches_text
+    assert "gold_trading" in niches_text.text
+    assert "NOT live" in niches_text.text
 
     adopted = surface._control_explore("adopt #1")
     assert "adopted into the overlay" in adopted

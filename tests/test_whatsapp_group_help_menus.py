@@ -211,14 +211,26 @@ def test_whatsapp_start_and_menu_group_context(rig):
 
 
 def test_telegram_start_and_menu_unchanged(rig):
+    # DELIBERATELY RE-PINNED (presentation Phase 2, 2026-11-11):
+    # /start and /menu for the owner in a Telegram DM serve the
+    # live menu session render (ActionableMessage, session
+    # "menu", HTML owner menu), not the text-only
+    # public_menu_text() frame — that frame is only the fallback
+    # for buttonless contexts (runtime.py, the /start branch).
     runtime, _sends = rig
+    outs = []
     for text in ("/start", "/menu"):
         out = runtime.handle_control(
             text, "telegram:999",
             message=_msg(text, "telegram", ChatKind.DM, owner=True,
                          chat_id="999"))
-        assert out == public_menu_text()
-        assert TAP_A_BUTTON in out
+        assert not isinstance(out, str)
+        assert out.session == "menu"
+        assert out.buttons
+        assert "Devon — command menu" in out.text
+        assert "owner: peacethefirst" in out.text
+        outs.append(out.text)
+    assert outs[0] == outs[1]
 
 
 def test_whatsapp_dm_help_takes_the_session_render(rig):

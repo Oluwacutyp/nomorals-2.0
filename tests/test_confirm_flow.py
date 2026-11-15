@@ -47,9 +47,13 @@ class ConfirmFlowTests(unittest.TestCase):
     def test_quit_prompt_then_confirm_runs(self):
         prompt = self.rt.handle_control("/quit", CHAT,
                                         message=_msg(OWNER_CHAT, "/quit"))
-        self.assertIn("⚠️ confirm: /quit", prompt)
-        self.assertIn("/quit confirm", prompt)
-        self.assertIn("/quit cancel", prompt)
+        self.assertIn("⚠️ confirm: /quit", prompt.text)
+        # The confirm/cancel lines moved off the text and onto the
+        # prompt's buttons (Presentation: the confirm line becomes
+        # Confirm/Cancel buttons) — the payloads are the pin now.
+        payloads = [p for _row in prompt.buttons for _l, p in _row]
+        self.assertIn("quit confirm", payloads)
+        self.assertIn("quit cancel", payloads)
         self.assertEqual(self.calls, [])
         out = self.rt.handle_control("/quit confirm", CHAT,
                                      message=_msg(OWNER_CHAT, "/quit confirm"))
@@ -72,8 +76,8 @@ class ConfirmFlowTests(unittest.TestCase):
     def test_forget_confirm_runs_original_tail(self):
         prompt = self.rt.handle_control("/forget abc-123", CHAT,
                                         message=_msg(OWNER_CHAT, "/forget abc-123"))
-        self.assertIn("⚠️ confirm: /forget", prompt)
-        self.assertIn("'abc-123'", prompt)
+        self.assertIn("⚠️ confirm: /forget", prompt.text)
+        self.assertIn("'abc-123'", prompt.text)
         out = self.rt.handle_control("/forget confirm", CHAT,
                                      message=_msg(OWNER_CHAT, "/forget confirm"))
         self.assertEqual(self.calls, [("forget", "abc-123")])

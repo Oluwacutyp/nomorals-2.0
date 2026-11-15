@@ -362,8 +362,11 @@ class PeopleCommitmentsFocusTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def _run(self, text: str) -> str:
-        return self.runtime.handle_control(
+        out = self.runtime.handle_control(
             text, "telegram:1", message=_owner_msg("telegram:1"))
+        # Presentation: some commands answer ActionableMessage
+        # (text + buttons); the assertions here are about the text.
+        return out.text if hasattr(out, "text") else out
 
     def test_people_round_trip(self):
         self.assertIn("no people recorded", self._run("/people list"))

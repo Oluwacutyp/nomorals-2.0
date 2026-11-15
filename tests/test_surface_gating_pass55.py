@@ -211,7 +211,8 @@ class OperatorSurfaceTests(unittest.TestCase):
             "/quit", f"telegram-personal:{OWNER_ID}",
             message=_owner_msg("telegram-personal", "/quit"))
         self.assertNotEqual(out, PUBLIC_BOT_DENIAL)
-        self.assertTrue(out.startswith("⚠️ confirm:"), out[:60])
+        self.assertTrue(out.text.startswith("⚠️ confirm:"),
+                        out.text[:60])
 
     def test_stack_cannot_smuggle_owner_command_on_public_bot(self):
         out = self.rt.handle_control(

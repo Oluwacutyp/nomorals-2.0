@@ -89,7 +89,10 @@ def control(ctx, tail, chat_key="local:console"):
         _find_mission=PartnerRuntime._find_mission,
         _mission_template_spec=PartnerRuntime._mission_template_spec,
     )
-    return PartnerRuntime._control_mission(ctrl, tail, chat_key)
+    out = PartnerRuntime._control_mission(ctrl, tail, chat_key)
+    # Presentation: some verbs answer ActionableMessage (text +
+    # buttons); the assertions here are about the text.
+    return out.text if hasattr(out, "text") else out
 
 
 class RunnerStub(RealRunner):

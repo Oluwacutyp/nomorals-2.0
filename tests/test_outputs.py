@@ -93,7 +93,7 @@ class TestConfirmGateExactBound(unittest.TestCase):
         rt = self._runtime()
         reply, proceed, _ = rt._confirm_gate("forget", "abc", "chat1")
         self.assertFalse(proceed)
-        self.assertIn("confirm", reply.lower())
+        self.assertIn("confirm", reply.text.lower())
         reply, proceed, effective = rt._confirm_gate("forget", "confirm", "chat1")
         self.assertTrue(proceed)
         self.assertEqual(effective, "abc")

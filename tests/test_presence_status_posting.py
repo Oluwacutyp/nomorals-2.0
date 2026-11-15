@@ -28,6 +28,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from nomorals.social.chat.typography import STAMP_TEXT_STYLED
 from nomorals.social.pairing import (
     AccountRecord,
     PairingRegistry,
@@ -583,6 +584,13 @@ def test_whatsapp_group_owner_menu_turn_is_owner_command():
 
 
 def test_menu_command_on_whatsapp_surface_serves_xmd(tmp_path):
+    # DELIBERATELY RE-PINNED (presentation Phase 2, 2026-11-11):
+    # /menu on WhatsApp serves the live category menu in XMD
+    # marks (ActionableMessage, boxed header, category rows,
+    # XMD footer) — not the pre-Phase-2 full-catalog text dump
+    # (no "ᴛᴏᴛᴀʟ ᴄᴏᴍᴍᴀɴᴅs" line, no per-command listing, far
+    # shorter than 10,000 chars). The frame itself is the pin:
+    # box-drawing header, category rows, no HTML.
     rt, svc = _beat_runtime(tmp_path)
     adapter = _wa_menu_adapter()
     got = []
@@ -592,9 +600,11 @@ def test_menu_command_on_whatsapp_surface_serves_xmd(tmp_path):
     turn = got[0]
     reply = rt.handle_control("/menu", turn.chat.key,
                               message=turn)
-    assert isinstance(reply, str)
-    # the XMD frame: boxed header + the registry's real catalog
-    assert "╭━━〔 🤖" in reply
-    assert "ᴛᴏᴛᴀʟ ᴄᴏᴍᴍᴀɴᴅs" in reply
-    assert "/poststatus" in reply
-    assert len(reply) > 10000
+    assert not isinstance(reply, str)
+    text = reply.text
+    # the XMD frame: boxed header + category rows + XMD footer
+    assert "╭━━〔 ✨ ᴅᴇᴠᴏɴ — ᴄᴏᴍᴍᴀɴᴅ ᴍᴇɴᴜ 〕━━┈⊷" in text
+    assert "groups & communities" in text
+    assert "<b>" not in text and "<code>" not in text
+    assert text.rstrip().endswith(f"_{STAMP_TEXT_STYLED}_")
+    assert len(text) > 1000

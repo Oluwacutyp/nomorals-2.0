@@ -126,7 +126,10 @@ class ControlVerbTests(unittest.TestCase):
         self.rt = _RuntimeStub(self.ctx)
 
     def call(self, tail, chat_key="telegram:9"):
-        return self.rt._control_mission(tail, chat_key=chat_key)
+        out = self.rt._control_mission(tail, chat_key=chat_key)
+        # Presentation: some verbs answer ActionableMessage (text +
+        # buttons); the assertions here are about the text.
+        return out.text if hasattr(out, "text") else out
 
     # pause ──
 
