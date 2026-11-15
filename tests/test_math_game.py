@@ -19,7 +19,7 @@ from typing import Any
 from unittest import mock
 
 from nomorals.agents.context import build_context
-from nomorals.agents.partner_runtime import PartnerRuntime
+from nomorals.agents.partner_runtime import PartnerRuntime, PresenceOutcome
 from nomorals.core.config import load_settings
 from nomorals.games.math_commands import MathCommandHandler
 from nomorals.games.math_persist import (
@@ -299,6 +299,14 @@ class RuntimeMathTest(unittest.TestCase):
         self._old_modes = os.environ.get("NOMORALS_CHAT_MODES_PATH")
         os.environ["NOMORALS_MATH_STATE_PATH"] = self.math_path
         os.environ["NOMORALS_CHAT_MODES_PATH"] = self.modes_path
+        # Isolate the shared claims store per test (dupfix3
+        # conversational exactly-once): the shared claims DB
+        # keys a plain-text turn on (chat, sender, words) with
+        # a 30s window, so two tests processing the same words
+        # in the same chat stand the second one down silently.
+        self._old_claims = os.environ.get("NM_SHARED_CLAIMS")
+        os.environ["NM_SHARED_CLAIMS"] = os.path.join(
+            self.tmp.name, "shared_claims.db")
         settings = load_settings(overrides={
             "home": self.tmp.name,
             "partner.platforms": "local",
@@ -328,6 +336,10 @@ class RuntimeMathTest(unittest.TestCase):
             os.environ.pop("NOMORALS_CHAT_MODES_PATH", None)
         else:
             os.environ["NOMORALS_CHAT_MODES_PATH"] = self._old_modes
+        if self._old_claims is None:
+            os.environ.pop("NM_SHARED_CLAIMS", None)
+        else:
+            os.environ["NM_SHARED_CLAIMS"] = self._old_claims
         self.tmp.cleanup()
 
     def test_handle_control_owner_dm_math_starts_problem(self) -> None:
@@ -393,7 +405,7 @@ class RuntimeMathTest(unittest.TestCase):
                 self.runtime, "_route_game_move", return_value=None), \
                 mock.patch.object(
                     self.runtime.brain, "handle_message",
-                    return_value=SimpleNamespace(parts=["hello back"])):
+                    return_value=PresenceOutcome(parts=["hello back"])):
             self.runtime._process(_msg("/math"))
         # No math problem sent; the brain's conversation reply was.
         self.assertFalse(any("🧮" in text for _, text in gateway.sent))

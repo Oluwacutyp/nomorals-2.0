@@ -16,7 +16,7 @@ from typing import Any
 from unittest import mock
 
 from nomorals.agents.context import build_context
-from nomorals.agents.partner_runtime import PartnerRuntime
+from nomorals.agents.partner_runtime import PartnerRuntime, PresenceOutcome
 from nomorals.core.config import load_settings
 from nomorals.partner import chat_modes
 from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef
@@ -154,6 +154,20 @@ class ChatmodeCommandTest(unittest.TestCase):
         self.modes_path = os.path.join(self.tmp.name, "chat_modes.json")
         self._old = os.environ.get("NOMORALS_CHAT_MODES_PATH")
         os.environ["NOMORALS_CHAT_MODES_PATH"] = self.modes_path
+        # Isolate the shared claims store per test (dupfix3
+        # conversational exactly-once). The shared claims DB
+        # (~/.nomorals/shared/claims.db, or NM_SHARED_CLAIMS)
+        # keys a plain-text turn on (chat, sender, words) with a
+        # 30s window — and the claim check runs BEFORE the
+        # games-only gate, so even a dropped message claims the
+        # turn. Without isolation, the first test to process
+        # "hey how are you" in telegram:999 claims it and every
+        # later test with the same words stands down silently
+        # (conversation_claim_held), so the reply is never sent.
+        # A per-test file keeps each test's claims to itself.
+        self._old_claims = os.environ.get("NM_SHARED_CLAIMS")
+        os.environ["NM_SHARED_CLAIMS"] = os.path.join(
+            self.tmp.name, "shared_claims.db")
         settings = load_settings(overrides={
             "home": self.tmp.name,
             "partner.platforms": "local",
@@ -179,6 +193,10 @@ class ChatmodeCommandTest(unittest.TestCase):
             os.environ.pop("NOMORALS_CHAT_MODES_PATH", None)
         else:
             os.environ["NOMORALS_CHAT_MODES_PATH"] = self._old
+        if self._old_claims is None:
+            os.environ.pop("NM_SHARED_CLAIMS", None)
+        else:
+            os.environ["NM_SHARED_CLAIMS"] = self._old_claims
         self.tmp.cleanup()
 
     def test_owner_sets_games_only_for_current_chat(self) -> None:
@@ -327,7 +345,7 @@ class GamesOnlyGateTest(ChatmodeCommandTest):
                 self.runtime, "_route_game_move", return_value=None), \
                 mock.patch.object(
                     self.runtime.brain, "handle_message",
-                    return_value=SimpleNamespace(parts=["hello back"])):
+                    return_value=PresenceOutcome(parts=["hello back"])):
             self.runtime._process(_msg("hey how are you"))
         self.assertTrue(any("hello back" in text for _, text in gateway.sent))
 
@@ -584,7 +602,7 @@ class FeatureGateTest(ChatmodeCommandTest):
                 self.runtime, "_route_game_move", return_value=None), \
                 mock.patch.object(
                     self.runtime.brain, "handle_message",
-                    return_value=SimpleNamespace(parts=["hello back"])):
+                    return_value=PresenceOutcome(parts=["hello back"])):
             self.runtime._process(_msg("hey how are you"))
         self.assertTrue(any("hello back" in text for _, text in gateway.sent))
 
@@ -650,7 +668,7 @@ class FeatureGateTest(ChatmodeCommandTest):
                     return_value=("", "no STT backend")), \
                 mock.patch.object(
                     self.runtime.brain, "handle_message",
-                    return_value=SimpleNamespace(parts=["heard nothing"])):
+                    return_value=PresenceOutcome(parts=["heard nothing"])):
             self.runtime._process(voice_msg)
         self.assertFalse(any("Voice replies are turned off" in text
                              or "Voice is turned off" in text
@@ -677,7 +695,7 @@ class FeatureGateTest(ChatmodeCommandTest):
                     return_value=("", "no STT backend")), \
                 mock.patch.object(
                     self.runtime.brain, "handle_message",
-                    return_value=SimpleNamespace(parts=["heard nothing"])):
+                    return_value=PresenceOutcome(parts=["heard nothing"])):
             self.runtime._process(voice_msg)
         self.assertFalse(any("Voice is turned off" in text
                              for _, text in gateway.sent))
