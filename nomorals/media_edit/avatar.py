@@ -353,7 +353,7 @@ def _run_wav2lip(video: Path, audio: Path, out: Path) -> Path:
                  "use) — prefer LatentSync for anything public")
     cmd = [
         wav2lip_python(), "inference.py",
-        "--checkpoint", str(ckpt_path),
+        "--checkpoint_path", str(ckpt_path),
         "--face", str(video),
         "--audio", str(audio),
         "--outfile", str(out),
@@ -418,11 +418,10 @@ def talking_head(photo: str | os.PathLike[str],
         return result
     if backend == "echomimic":
         raise NotConfigured(
-            "EchoMimicV2 is not wired yet (upgrade path for half-body "
-            "gestures). Setup when ready:\n"
-            "  git clone https://github.com/antgroup/echomimic_v2\n"
-            "  # follow its README (needs ~24GB VRAM), then ask for the "
-            "backend to be implemented against its inference CLI.")
+            "EchoMimicV2 is not available on this box (upgrade path for "
+            "half-body gestures). There is no install path for it yet — "
+            "Devon cannot provision it herself, so it stays unavailable "
+            "until a provision is built for it.")
     if backend == "api":
         raise NotConfigured(
             "PrunaAI P-Video API fallback is not wired yet. When you want "

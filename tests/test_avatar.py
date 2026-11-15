@@ -22,6 +22,7 @@ from nomorals.media_edit.avatar import (
     talking_head,
     _audio_duration_s,
     _resolve_audio,
+    _run_wav2lip,
 )
 from nomorals.agents.coremind import _avatar_intent, understand
 
@@ -199,10 +200,58 @@ def test_latentsync_nonzero_exit(fake_repo, monkeypatch, tmp_path, wav_file,
         talking_head(photo_file, str(wav_file), workdir=tmp_path)
 
 
+def test_wav2lip_driver_passes_checkpoint_path(monkeypatch, tmp_path):
+    # Upstream Wav2Lip's inference.py takes --checkpoint_path
+    # (required); --checkpoint is not an argument and argparse would
+    # reject it. The driver must pass the upstream flag name.
+    repo = tmp_path / "Wav2Lip"
+    (repo / "checkpoints").mkdir(parents=True)
+    (repo / "inference.py").write_text("# fake\n")
+    (repo / "checkpoints" / "wav2lip_gan.pth").write_bytes(b"fake-ckpt")
+    monkeypatch.setenv("WAV2LIP_REPO", str(repo))
+    monkeypatch.delenv("WAV2LIP_CKPT", raising=False)
+    monkeypatch.delenv("WAV2LIP_PYTHON", raising=False)
+    video = tmp_path / "still.mp4"
+    video.write_bytes(b"fake-video")
+    audio = tmp_path / "voice.wav"
+    audio.write_bytes(b"fake-audio")
+    out = tmp_path / "synced.mp4"
+    seen = {}
+
+    def fake_run(cmd, **kw):
+        seen["cmd"] = list(cmd)
+        out.write_bytes(b"fake-mp4-bytes")
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert _run_wav2lip(video, audio, out) == out
+    cmd = seen["cmd"]
+    assert cmd[1] == "inference.py"
+    # Exact-element membership: "--checkpoint" is a substring of
+    # "--checkpoint_path", so only list membership distinguishes them.
+    assert "--checkpoint_path" in cmd
+    assert "--checkpoint" not in cmd
+    assert cmd[cmd.index("--checkpoint_path") + 1] == str(
+        repo / "checkpoints" / "wav2lip_gan.pth")
+    assert "--face" in cmd and "--audio" in cmd and "--outfile" in cmd
+
+
 def test_echomimic_honest_stub(tmp_path, photo_file, wav_file):
+    # Fixed 2026-11-15 (avatar driver fix): the old message carried a
+    # manual-step list ("git clone ...") that the owner's
+    # no-manual-chore-lists rule forbids. The stub stays honest (raises,
+    # never fakes a video) and reports there is no install path yet.
     with pytest.raises(NotConfigured, match="EchoMimicV2"):
         talking_head(photo_file, str(wav_file), backend="echomimic",
                      workdir=tmp_path)
+    with pytest.raises(NotConfigured) as excinfo:
+        talking_head(photo_file, str(wav_file), backend="echomimic",
+                     workdir=tmp_path)
+    msg = str(excinfo.value)
+    assert "git clone" not in msg
+    assert "export" not in msg
+    assert "pip install" not in msg
+    assert "no install path" in msg
 
 
 def test_api_honest_stub(tmp_path, photo_file, wav_file):
