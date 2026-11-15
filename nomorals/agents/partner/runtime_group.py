@@ -1537,7 +1537,8 @@ class RuntimeGroupMixin:
     def _sensor_flag_proposal(self, surface, key, action):  # type: ignore[no-untyped-def]
         """Map an executed sensor ban to a §32 flag proposal
         (spam-ring for the spam-family sensors, raid for the
-        crash sensor).  Acceptance/manual actions never propose —
+        crash sensor, scam for the scam-link sensor).
+        Acceptance/manual actions never propose —
         only defense rules do — and a person already carrying a
         live same-category record from THIS group is not
         re-proposed."""
@@ -1551,7 +1552,8 @@ class RuntimeGroupMixin:
                     "antitag": "spam-ring",
                     "media_locks": "spam-ring",
                     "flood": "spam-ring",
-                    "repeat": "spam-ring"}.get(rule)
+                    "repeat": "spam-ring",
+                    "scamlink": "scam"}.get(rule)
         if not category:
             return
         user_id = str(action.get("user_id") or "")
@@ -1571,7 +1573,9 @@ class RuntimeGroupMixin:
             category=category,
             note=f"auto-proposed: the {rule} sensor banned them "
                  f"here — an admin must confirm before this "
-                 f"brands anyone",
+                 f"brands anyone"
+                 + (f" (link: {action.get('url')})"
+                    if action.get("url") else ""),
             by=f"sensor:{rule}", by_label=f"the {rule} sensor",
             direct=False, source="sensor")
 
@@ -3493,6 +3497,7 @@ class RuntimeGroupMixin:
             d_tg = d.get("antitag") or {}
             d_dl = d.get("antidelete") or {}
             d_ed = d.get("antiedit") or {}
+            d_sl = d.get("scamlink") or {}
             d_esc = d.get("escalation") or {}
             avail = defense_availability(
                 str(message.chat.platform or ""),
@@ -3572,6 +3577,11 @@ class RuntimeGroupMixin:
                 f"{_duration_text(int(s.get('mute_default_s') or 0)) if s.get('mute_default_s') else 'ask'}",
                 f"media locks: "
                 f"{_describe_media_locks(d.get('media_locks') or {})}",
+                f"scamlink: "
+                f"{'on' if d_sl.get('enabled', True) else 'off'}"
+                f" (≤{d_sl.get('max_links', 3)} links per message"
+                f" · suspicious: "
+                f"{d_sl.get('suspicious', 'flag')})",
             ]
             defense_lines += [f"⚠ {note}" for note in honesty]
             if degraded:
@@ -4340,7 +4350,7 @@ class RuntimeGroupMixin:
                        " Sensors still watch and log to /glog — "
                        "nothing is enforced or announced."))
         if head in ("anticrash", "antichannel", "antitag",
-                    "antidelete", "antiedit"):
+                    "antidelete", "antiedit", "scamlink"):
             if rest.lower() in ("on", "off"):
                 self._defense_update(surface, key, head,
                                      enabled=on)
@@ -4356,6 +4366,19 @@ class RuntimeGroupMixin:
                 self._defense_update(surface, key, head,
                                      max_mentions=ceiling)
                 return f"antitag ceiling: {ceiling} mentions."
+            if head == "scamlink" and rest.isdigit():
+                cap = max(1, int(rest))
+                self._defense_update(surface, key, head,
+                                     max_links=cap)
+                return (f"scamlink checks up to {cap} links "
+                        "per message.")
+            if head == "scamlink" \
+                    and rest.lower() == "suspicious" \
+                    and rest2.lower() in ("flag", "off"):
+                self._defense_update(surface, key, head,
+                                     suspicious=rest2.lower())
+                return (f"scamlink suspicious links: "
+                        f"{rest2.lower()}.")
             if head in ("antidelete", "antiedit") \
                     and rest.lower() == "mode" \
                     and rest2.lower() in ("log", "callout"):
@@ -7204,6 +7227,11 @@ class RuntimeGroupMixin:
                 f"{'on' if (d.get('antiedit') or {}).get('enabled', True) else 'off'}",
                 f"media locks: "
                 f"{_describe_media_locks(d.get('media_locks') or {})}",
+                f"scamlink "
+                f"{'on' if (d.get('scamlink') or {}).get('enabled', True) else 'off'}"
+                f" (≤{(d.get('scamlink') or {}).get('max_links', 3)}"
+                f" links · suspicious: "
+                f"{(d.get('scamlink') or {}).get('suspicious', 'flag')})",
                 f"moderation: flood "
                 f"{(s.get('moderation') or {}).get('flood_max', 6)}"
                 f" per window · filters "
@@ -7257,6 +7285,9 @@ class RuntimeGroupMixin:
                  _toggle("medialock-channel-posts", "Channel posts",
                          "medialock channel_posts",
                          bool(ml.get("channel_posts")))],
+                [_toggle("scamlink", "Scamlink", "scamlink",
+                         bool((d.get('scamlink') or {})
+                              .get('enabled', True)))],
             ]
             if key.partition(":")[0].strip().lower() \
                     not in ("whatsapp", "wa"):
@@ -7835,7 +7866,7 @@ class RuntimeGroupMixin:
                                      autonomy=on)
                 return f"defense autonomy {'on' if on else 'off'}."
             if head in ("anticrash", "antichannel", "antitag",
-                        "antidelete", "antiedit"):
+                        "antidelete", "antiedit", "scamlink"):
                 if rest in ("on", "off"):
                     self._defense_update(surface, key, head,
                                          enabled=on)
@@ -7850,6 +7881,19 @@ class RuntimeGroupMixin:
                         surface, key, head,
                         max_mentions=max(1, int(rest)))
                     return f"antitag ceiling: {rest} mentions."
+                if head == "scamlink" and rest.isdigit():
+                    self._defense_update(
+                        surface, key, head,
+                        max_links=max(1, int(rest)))
+                    return (f"scamlink checks up to {rest} "
+                            "links per message.")
+                if head == "scamlink" and rest == "suspicious" \
+                        and len(words) > 2 \
+                        and words[2].lower() in ("flag", "off"):
+                    self._defense_update(surface, key, head,
+                                         suspicious=words[2].lower())
+                    return (f"scamlink suspicious links: "
+                            f"{words[2].lower()}.")
                 if head in ("antidelete", "antiedit") \
                         and rest == "mode" and len(words) > 2 \
                         and words[2].lower() in ("log", "callout"):

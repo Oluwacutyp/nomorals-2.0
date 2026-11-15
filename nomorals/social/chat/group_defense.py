@@ -43,6 +43,9 @@ DEFAULTS: dict[str, Any] = {
                     "photos": False, "videos": False,
                     "audio": False, "documents": False,
                     "forwards": False, "channel_posts": False},
+    "scamlink": {"enabled": True, "action": "delete_warn",
+                 "suspicious": "flag", "max_links": 3,
+                 "young_days": 30},
     "escalation": {"window_days": 7, "mute_minutes": 60,
                    "kick_at": 5, "ban_at": 7},
 }
@@ -318,6 +321,13 @@ class DefenseConfig:
     # Media locks (DESIGN §4): the merged block, read by the
     # sensor — `enabled` + `action` + one bool per kind.
     media_locks: dict[str, Any] = field(default_factory=dict)
+    scamlink_enabled: bool = True
+    scamlink_action: str = "delete_warn"
+    scamlink_suspicious: str = "flag"   # flag | off — what a
+                                        # suspicious link does
+                                        # (never a delete)
+    scamlink_max_links: int = 3
+    scamlink_young_days: int = 30
     window_days: int = 7
     mute_minutes: int = 60
     kick_at: int = 5
@@ -332,6 +342,7 @@ class DefenseConfig:
         dl = raw["antidelete"]
         ed = raw["antiedit"]
         ml = raw["media_locks"]
+        sl = raw["scamlink"]
         esc = raw["escalation"]
         # The §30 ladder is the source of truth when the group
         # has an escalation block: the flat fields below are
@@ -370,6 +381,15 @@ class DefenseConfig:
                 antiedit_callout_to=str(
                     ed.get("callout_to") or "admins").lower(),
                 media_locks=dict(ml),
+                scamlink_enabled=bool(sl.get("enabled", True)),
+                scamlink_action=str(sl.get("action")
+                                    or "delete_warn"),
+                scamlink_suspicious=str(
+                    sl.get("suspicious") or "flag").lower(),
+                scamlink_max_links=max(
+                    1, int(sl.get("max_links") or 3)),
+                scamlink_young_days=max(
+                    1, int(sl.get("young_days") or 30)),
                 window_days=ladder.window_days,
                 mute_minutes=ladder.mute_minutes(),
                 kick_at=int(kick_step["at"]) if kick_step else 0,
@@ -401,6 +421,15 @@ class DefenseConfig:
             antiedit_callout_to=str(
                 ed.get("callout_to") or "admins").lower(),
             media_locks=dict(ml),
+            scamlink_enabled=bool(sl.get("enabled", True)),
+            scamlink_action=str(sl.get("action")
+                                or "delete_warn"),
+            scamlink_suspicious=str(
+                sl.get("suspicious") or "flag").lower(),
+            scamlink_max_links=max(
+                1, int(sl.get("max_links") or 3)),
+            scamlink_young_days=max(
+                1, int(sl.get("young_days") or 30)),
             window_days=max(1, int(esc.get("window_days") or 7)),
             mute_minutes=max(1, int(esc.get("mute_minutes") or 60)),
             kick_at=max(0, int(esc.get("kick_at") or 0)),
@@ -684,6 +713,7 @@ RULE_PHRASES: dict[str, str] = {
     "anticrash": "that payload can crash members' phones",
     "antichannel": "channel posts don't belong in this group",
     "antitag": "mass-tagging the group isn't allowed",
+    "scamlink": "that link is a known scam",
     "flood": "flooding the group isn't allowed",
     "links": "that link isn't allowed here",
     "words": "that word is filtered here",

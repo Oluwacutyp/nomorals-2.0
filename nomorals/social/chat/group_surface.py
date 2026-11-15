@@ -131,6 +131,7 @@ from .group_defense import (
     recent_strikes,
     render_warning,
 )
+from .group_scamlink import check_scamlink
 
 AUDIT_RING = 500
 NOTICE_RING = 100
@@ -587,6 +588,12 @@ class GroupSurface:
         self.durable_claims: Any = None
         self._moderators: dict[str, Moderator] = {}
         self._msg_cache: dict[str, deque] = {}
+        #: The scam-link checker (DESIGN §4): a ``(url) ->
+        #: LinkVerdict`` callable.  None = the real OSINT feed
+        #: ladder from group_scamlink; tests and the runtime may
+        #: inject a fake.  The surface never builds a transport
+        #: itself — the organ owns the network.
+        self.link_checker: Any = None
         self._signatures: SignatureStore | None = None
         self._reputation: ReputationBook | None = None
         self._conflict: GroupConflict | None = None
@@ -2543,6 +2550,62 @@ class GroupSurface:
                     "group_id": group_key})
             strike("antitag", hit.rule,
                    "delete" if "delete" in hit.action else "warn")
+
+        # ── stage 3b: the scam-link OSINT sensor (DESIGN §4) ──
+        # A BAD link is a safety delete on anyone except the
+        # owner ladder — the strike is what privilege blocks,
+        # not the delete (the admin-payload rule).  A SUSPICIOUS
+        # link never deletes or strikes: it stages a `scam`
+        # flag proposal for an admin to confirm, and only for a
+        # non-privileged sender on weak evidence.
+        hit = check_scamlink(
+            env, cfg, checker=self.link_checker,
+            cache=self._extras(group_key).setdefault(
+                "scamlink_cache", {}),
+            now=now)
+        if hit is not None:
+            signal = hit.signal or {}
+            if signal.get("verdict") == "suspicious":
+                self._audit(group_key, "scamlink_suspect",
+                            user_id=user_id, action="flag",
+                            reason=hit.reason, signal=signal,
+                            **({"suppressed": "autonomy_off"}
+                               if suppressed else {}))
+                if not privileged and not suppressed \
+                        and cfg.scamlink_suspicious == "flag":
+                    person = self.reputation_person(
+                        group_key, user_id, username=username,
+                        name=name)
+                    self.stage_flag(
+                        group_key, user_id=user_id, person=person,
+                        category="scam",
+                        note=f"scam-link sensor: {hit.reason}",
+                        by="sensor:scamlink",
+                        by_label="the scam-link sensor",
+                        direct=False, source="sensor", now=now)
+            else:
+                self._audit(group_key, hit.rule, user_id=user_id,
+                            action=hit.action, reason=hit.reason,
+                            signal=signal,
+                            **({"suppressed": "autonomy_off"}
+                               if suppressed else {}))
+                if not role_exempt:
+                    if "delete" in hit.action:
+                        actions.append({
+                            "kind": "delete", "rule": hit.rule,
+                            "reason": hit.reason,
+                            "user_id": user_id,
+                            "group_id": group_key,
+                            "url": str(signal.get("url") or "")})
+                    else:
+                        actions.append({
+                            "kind": "warn", "rule": hit.rule,
+                            "reason": hit.reason,
+                            "user_id": user_id,
+                            "group_id": group_key})
+                strike("scamlink", hit.rule,
+                       "delete" if "delete" in hit.action
+                       else "warn")
 
         # ── stage 3c: media locks (DESIGN §4) ──────────────────
         # The admin's per-kind toggles over the envelope: a
