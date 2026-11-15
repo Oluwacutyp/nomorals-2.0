@@ -26,7 +26,8 @@ from typing import Any
 from .profile import detect_profile
 
 __all__ = ["PROFILES", "get_profile", "get_profile_kind", "profile_value",
-           "describe_profile", "format_profile", "KNOWN_PROFILE_NAMES"]
+           "describe_profile", "format_profile", "KNOWN_PROFILE_NAMES",
+           "gpu_info", "gpu_up"]
 
 #: profile name → tuning values. ``threads: 0`` means auto-detect all cores.
 PROFILES: dict[str, dict[str, Any]] = {
@@ -170,10 +171,34 @@ def describe_profile(pinned: str = "") -> dict[str, Any]:
         "kind": kind,
         "pin_source": source,
         "cloud": env_info.get("cloud") or detect_cloud(),
+        "gpu": env_info.get("gpu") or {},
         "environment": env_info,
         "values": get_profile(kind),
         "known_kinds": KNOWN_PROFILE_NAMES,
     }
+
+
+def gpu_info() -> dict[str, Any]:
+    """Current GPU capability as a plain dict (see :mod:`nomorals.core.gpu`).
+
+    The profile layer's one import point for "is there a GPU path" —
+    organs ask here instead of probing torch/nvidia-smi themselves.
+    """
+    from .gpu import detect_gpu
+
+    return detect_gpu().to_dict()
+
+
+def gpu_up(family: str) -> bool:
+    """True when ``family`` should run on the GPU on this box.
+
+    ``seeing`` / ``speaking`` / ``generating`` / ``training`` are GPU
+    work when a GPU path exists (local or forwarded); ``text`` never
+    is. The activation seam — organs route through here.
+    """
+    from .gpu import gpu_up as _gpu_up
+
+    return _gpu_up(family)
 
 
 def get_profile(kind: str = "") -> dict[str, Any]:
@@ -204,6 +229,9 @@ def format_profile(pinned: str = "", *, color: bool | None = None,
     lines = [header(f"profile: {info['kind']}", theme, color=color), ""]
     lines.append(paint(f"pin source: {info['pin_source']}   "
                        f"cloud: {info['cloud']}", "muted", theme, color=color))
+    gpu = info.get("gpu") or {}
+    lines.append(paint(f"gpu: {gpu.get('detail') or 'no GPU detected'}",
+                       "muted", theme, color=color))
     lines.append("")
     lines.append(paint("TUNING VALUES", "label", theme, color=color))
     lines.extend(kv_lines({k: v for k, v in info["values"].items()},

@@ -23,6 +23,8 @@ import sys
 from dataclasses import dataclass, field
 from typing import Any
 
+from .gpu import GpuInfo, detect_gpu
+
 __all__ = ["EnvironmentProfile", "detect_profile", "detect_cloud",
            "memory_mb", "cpu_count", "is_termux", "KNOWN_CLOUDS"]
 
@@ -141,6 +143,9 @@ class EnvironmentProfile:
     detected: bool = True
     #: cloud host: none|aws|gcp|azure|other (see detect_cloud)
     cloud: str = "none"
+    #: GPU capability on this box (see nomorals.core.gpu): local /
+    #: forwarded / cpu — detected, never pinned by the profile kind.
+    gpu: GpuInfo = field(default_factory=GpuInfo)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -153,6 +158,7 @@ class EnvironmentProfile:
             "detail": self.detail,
             "detected": self.detected,
             "cloud": self.cloud,
+            "gpu": self.gpu.to_dict(),
         }
 
     @classmethod
@@ -165,7 +171,7 @@ class EnvironmentProfile:
         return cls(kind=kind, min_vcpus=lo, target_vcpus=mid, max_vcpus=hi,
                    cpu=cpu_count(), memory_mb=memory_mb(),
                    detail=f"configured as {kind}", detected=False,
-                   cloud=detect_cloud())
+                   cloud=detect_cloud(), gpu=detect_gpu())
 
 
 def _looks_like_termux(system: str, machine: str,
@@ -198,11 +204,15 @@ def is_termux() -> bool:
 
 def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                    system: str | None = None,
-                   machine: str | None = None) -> EnvironmentProfile:
+                   machine: str | None = None,
+                   refresh_gpu: bool = False) -> EnvironmentProfile:
     """Inspect the environment and return the matching profile.
 
     Order of precedence: Android/Termux → embedded (very small) →
     workstation (≥32 GB) → vps (few cores, ≤16 GB) → pc (default).
+    The GPU capability (see :mod:`nomorals.core.gpu`) is detected on
+    every call — cached per process unless ``refresh_gpu`` re-probes,
+    so a docked/undocked GPU is noticed by an explicit re-detect.
     """
     ncpu = cpu if cpu is not None else cpu_count()
     mem = mem_mb if mem_mb is not None else memory_mb()
@@ -210,6 +220,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
     machine = machine or _platform.machine() or ""
     env = dict(os.environ)
     cloud = detect_cloud()
+    gpu = detect_gpu(refresh=refresh_gpu)
 
     if _looks_like_termux(system, machine, env):
         return EnvironmentProfile(
@@ -217,7 +228,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                                       ENVELOPES["termux"])),
             cpu=ncpu, memory_mb=mem,
             detail=f"Android/Termux ({machine or 'arm'})",
-            cloud=cloud,
+            cloud=cloud, gpu=gpu,
         )
 
     # very small boxes: ≤1 core or ≤1 GB of RAM
@@ -227,7 +238,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                                         ENVELOPES["embedded"])),
             cpu=ncpu, memory_mb=mem,
             detail=f"constrained ({ncpu} cpu, {mem} MB)",
-            cloud=cloud,
+            cloud=cloud, gpu=gpu,
         )
 
     if mem >= 32 * 1024:
@@ -237,7 +248,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                        ENVELOPES["workstation"])),
             cpu=ncpu, memory_mb=mem,
             detail=f"{ncpu} cpu, {mem // 1024} GB RAM",
-            cloud=cloud,
+            cloud=cloud, gpu=gpu,
         )
 
     # small cloud boxes are usually 1-4 cores with ≤16 GB
@@ -247,7 +258,7 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                                    ENVELOPES["vps"])),
             cpu=ncpu, memory_mb=mem,
             detail=f"{ncpu} cpu, {mem // 1024} GB RAM (small box)",
-            cloud=cloud,
+            cloud=cloud, gpu=gpu,
         )
 
     return EnvironmentProfile(
@@ -255,14 +266,15 @@ def detect_profile(*, cpu: int | None = None, mem_mb: int | None = None,
                               ENVELOPES["pc"])),
         cpu=ncpu, memory_mb=mem,
         detail=f"{ncpu} cpu, {mem // 1024 if mem else '?'} GB RAM",
-        cloud=cloud,
+        cloud=cloud, gpu=gpu,
     )
 
 
 def resolve_profile(kind: str = "", *, cpu: int | None = None,
                     mem_mb: int | None = None,
                     system: str | None = None,
-                    machine: str | None = None) -> EnvironmentProfile:
+                    machine: str | None = None,
+                    refresh_gpu: bool = False) -> EnvironmentProfile:
     """Config first (``workspace.profile``), detection second.
 
     ``kind`` = "auto"/"" → detect; a known name → pin that envelope
@@ -271,7 +283,8 @@ def resolve_profile(kind: str = "", *, cpu: int | None = None,
     kind = (kind or "auto").strip().lower()
     if not kind or kind == "auto":
         return detect_profile(cpu=cpu, mem_mb=mem_mb,
-                              system=system, machine=machine)
+                              system=system, machine=machine,
+                              refresh_gpu=refresh_gpu)
     return EnvironmentProfile.from_config(kind)
 
 

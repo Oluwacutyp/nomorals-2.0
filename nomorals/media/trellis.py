@@ -132,73 +132,28 @@ def is_installed() -> bool:
 
 # ── GPU probe + gate ─────────────────────────────────────────────────
 
-def _probe_gpu_nvidia_smi() -> dict[str, Any] | None:
-    """VRAM via nvidia-smi. None when it cannot answer."""
-    if not shutil.which("nvidia-smi"):
-        return None
-    try:
-        proc = _run(["nvidia-smi", "--query-gpu=name,memory.total",
-                     "--format=csv,noheader,nounits"], timeout=60)
-    except Exception:  # noqa: BLE001 - a failed probe is "no GPU"
-        return None
-    if proc.returncode != 0:
-        return None
-    line = (proc.stdout or "").strip().splitlines()
-    if not line:
-        return None
-    parts = [p.strip() for p in line[0].split(",")]
-    if len(parts) < 2:
-        return None
-    try:
-        vram_mib = float(parts[1])
-    except ValueError:
-        return None
-    return {"has_gpu": True, "name": parts[0],
-            "vram_gb": round(vram_mib / 1024.0, 2),
-            "source": "nvidia-smi"}
-
-
-def _probe_gpu_torch() -> dict[str, Any] | None:
-    """VRAM via torch.cuda. None when torch/CUDA cannot answer."""
-    snippet = ("import torch; "
-               "p = torch.cuda.get_device_properties(0); "
-               "print(p.name); print(p.total_memory)")
-    try:
-        proc = _run([sys.executable, "-c", snippet], timeout=120)
-    except Exception:  # noqa: BLE001 - a failed probe is "no GPU"
-        return None
-    if proc.returncode != 0:
-        return None
-    lines = (proc.stdout or "").strip().splitlines()
-    if len(lines) < 2:
-        return None
-    try:
-        total_bytes = float(lines[1])
-    except ValueError:
-        return None
-    return {"has_gpu": True, "name": lines[0].strip(),
-            "vram_gb": round(total_bytes / 1e9, 2),
-            "source": "torch.cuda"}
-
-
 def probe_gpu() -> dict[str, Any]:
     """Measure this box's GPU. Never raises.
 
     ``{"has_gpu", "name", "vram_gb", "source", "detail"}`` — vram_gb
     is 0.0 when no NVIDIA GPU answers.
+
+    Delegates to the shared detector (:mod:`nomorals.core.gpu`) — one
+    detection point for the whole codebase. The local probing here
+    (nvidia-smi, then torch) is exactly the shared detector's local
+    path, run fresh every call (``refresh=True``), so the gate always
+    measures the box as it is right now. A pinned ``NM_GPU`` /
+    ``NM_GPU_URL`` is honoured: a forwarded GPU reports
+    ``has_gpu`` True with unknown VRAM, so a VRAM floor gate still
+    refuses honestly (it cannot verify the floor over an endpoint
+    that was never probed).
     """
-    for probe in (_probe_gpu_nvidia_smi, _probe_gpu_torch):
-        try:
-            found = probe()
-        except Exception:  # noqa: BLE001 - a probe never kills the gate
-            found = None
-        if found is not None:
-            found["detail"] = (f"{found['name']} with "
-                               f"{found['vram_gb']} GB VRAM "
-                               f"({found['source']})")
-            return found
-    return {"has_gpu": False, "name": "", "vram_gb": 0.0,
-            "source": "", "detail": "no NVIDIA GPU detected"}
+    from ..core.gpu import detect_gpu
+
+    info = detect_gpu(refresh=True)
+    return {"has_gpu": info.has_gpu, "name": info.name,
+            "vram_gb": info.vram_gb, "source": info.source,
+            "detail": info.detail}
 
 
 def gpu_gate(box: dict[str, Any] | None = None) -> tuple[bool, str]:

@@ -6,9 +6,11 @@ Console and dashboard show *one line* for the machine, not a dump::
 
 That line is :func:`profile_visible_line` / ``profile_summary()["line"]``:
 profile kind, live worker count from the envelope, free RAM, and the
-power shed level. :func:`profile_summary` returns the same line plus
-the full dict (vcpu envelope, cpu, RAM total/free, power shed, cloud)
-for dashboards that want the breakdown.
+power shed level — plus a ``gpu <name> <vram>GB`` token when a GPU path
+exists (absent on CPU-only boxes, so the line is unchanged there).
+:func:`profile_summary` returns the same line plus the full dict (vcpu
+envelope, cpu, RAM total/free, power shed, cloud, gpu) for dashboards
+that want the breakdown.
 
 NOTE on layering: this module lives in ``nomorals.core`` (L1) but is
 deliberately *not* imported by ``nomorals/core/__init__.py`` — L1 may
@@ -129,6 +131,11 @@ def profile_summary(profile: EnvironmentProfile | str | None = None,
     workers = _workers_for(prof, shed_lvl)
     line = (f"{prof.kind} {workers} vcpu {free_mb / 1024:.1f}GB free "
             f"{shed_lvl} shed")
+    if prof.gpu.has_gpu:
+        if prof.gpu.name:
+            line += f" gpu {prof.gpu.name} {prof.gpu.vram_gb:.0f}GB"
+        else:
+            line += f" gpu forwarded {prof.gpu.forward_url}"
     return {
         "profile": prof.kind,
         "kind": prof.kind,
@@ -146,6 +153,7 @@ def profile_summary(profile: EnvironmentProfile | str | None = None,
         "power_shed": shed_lvl,
         "shed": shed_lvl,
         "cloud": prof.cloud,
+        "gpu": prof.gpu.to_dict(),
         "detail": prof.detail,
         "line": line,
     }

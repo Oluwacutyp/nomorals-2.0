@@ -12,13 +12,17 @@ env, no real 4B weights. The seams are module-level functions on
 ``nomorals.media.trellis`` (``_run``, ``probe_gpu``,
 ``_trellis_python``, ``is_installed``) and on
 ``nomorals.tools.models_provision`` (``_run``, ``_GATES``,
-``_provision_trellis``), patched per test.
+``_provision_trellis``), patched per test — except the GPU probe
+itself, which delegates to the shared detector
+(``nomorals.core.gpu``), so probe tests patch the detector's ``_run``.
 """
 
 from __future__ import annotations
 
 import types
 from typing import Any
+
+import pytest
 
 EC2_BOX = {"ok": True, "total_ram_gb": 2.0, "free_ram_gb": 1.0,
            "free_disk_gb": 20.0, "cpus": 2, "platform": "win32",
@@ -37,6 +41,26 @@ def _trellis():
     import nomorals.media.trellis as t
 
     return t
+
+
+def _gpu_mod():
+    """The shared detector — trellis.probe_gpu delegates to it, so
+    probe tests patch ITS _run seam, not trellis's."""
+    import nomorals.core.gpu as g
+
+    return g
+
+
+@pytest.fixture(autouse=True)
+def _restore_gpu_cache():
+    yield
+    # trellis.probe_gpu re-probes fresh every call, so a faked probe
+    # leaves a faked GPU in the process-wide detector cache — restore
+    # the real box state here (this teardown runs after monkeypatch's,
+    # so the fakes are already undone).
+    from nomorals.core.gpu import detect_gpu
+
+    detect_gpu(refresh=True)
 
 
 def _modelsprov():
@@ -87,7 +111,7 @@ def test_probe_gpu_nvidia_smi(monkeypatch):
     monkeypatch.setattr(shutil, "which",
                         lambda name: "/usr/bin/nvidia-smi")
     monkeypatch.setattr(
-        t, "_run",
+        _gpu_mod(), "_run",
         lambda args, timeout=None, cwd=None: types.SimpleNamespace(
             returncode=0, stdout="NVIDIA H100 80GB HBM3, 81559\n",
             stderr=""))
@@ -104,7 +128,7 @@ def test_probe_gpu_torch_fallback(monkeypatch):
 
     monkeypatch.setattr(shutil, "which", lambda name: None)
     monkeypatch.setattr(
-        t, "_run",
+        _gpu_mod(), "_run",
         lambda args, timeout=None, cwd=None: types.SimpleNamespace(
             returncode=0,
             stdout="NVIDIA GeForce RTX 4090\n25769803776\n", stderr=""))
@@ -119,7 +143,7 @@ def test_probe_gpu_none_when_nothing_answers(monkeypatch):
     import shutil
 
     monkeypatch.setattr(shutil, "which", lambda name: None)
-    monkeypatch.setattr(t, "_run", _ok_run)  # stdout "ok" is unparseable
+    monkeypatch.setattr(_gpu_mod(), "_run", _ok_run)  # stdout "ok" is unparseable
     got = t.probe_gpu()
     assert got["has_gpu"] is False
     assert got["vram_gb"] == 0.0
