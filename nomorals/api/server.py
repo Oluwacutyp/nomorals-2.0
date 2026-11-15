@@ -443,6 +443,10 @@ class APIServer:
         # public like /live, so the throttle below — not bearer auth —
         # bounds proof allocations to one per ATTEST_THROTTLE_S.
         self._attest_last_at: float = 0.0
+        # One render at a time on /gpu/imggen: the GPU is a bounded
+        # resource, so a second render while one is in flight gets
+        # 429 instead of queueing behind it.
+        self._imggen_lock = threading.Lock()
         self._routes: dict[tuple[str, str], Callable[..., Any]] = {}
         # (method, path) keys whose handler declares a ``raw_body`` keyword
         # and therefore receives the raw request bytes (see ``route``):
@@ -674,6 +678,45 @@ class APIServer:
                     retry_after=gpu_mod.ATTEST_THROTTLE_S)
             server._attest_last_at = now
             return gpu_mod.probe_attestation(challenge, n_bytes)
+
+        @self.route("POST", "/gpu/imggen", public=True,
+                   description="Text-to-image on this host's GPU for "
+                               "another Devon whose own box cannot "
+                               "render (remote render routing — the "
+                               "client is the owner's own Devon; same "
+                               "trust model as /gpu/attest)")
+        def gpu_imggen(body: dict[str, Any],
+                       query: dict[str, str]) -> dict[str, Any]:
+            # Public like /gpu/attest — the rendering client is the
+            # owner's own Devon on another box, and there is no shared
+            # secret between the two yet. The guards are the one-render
+            # lock below and the attestation the client must pass
+            # before it ever routes here (an unattested endpoint is
+            # never routed to). The API server binds loopback by
+            # default; do not expose it to the open internet without
+            # bearer auth in front of it. The render runs the same
+            # Studio.generate the local /image command runs, with
+            # remote routing disabled — a forwarded request is never
+            # forwarded on.
+            from ..media.imggen import ImgGenError
+            from ..media.imggen.remote import serve_render, validate_render_params
+
+            params = validate_render_params(body)
+            prompt = params.pop("prompt")
+            if not server._imggen_lock.acquire(blocking=False):
+                raise RateLimited(
+                    "a render is already running on this GPU host — "
+                    "try again shortly",
+                    retry_after=60.0)
+            try:
+                return serve_render(prompt, **params)
+            except ImgGenError as exc:
+                # ImgGenError is not a NoMoralsError, so dispatch
+                # would answer 500 with only the type name — the
+                # client needs the reason.
+                raise NoMoralsError(str(exc)) from exc
+            finally:
+                server._imggen_lock.release()
 
         @self.route("POST", "/site/publish",
                     description="Publish Devon's web presence (her page + "

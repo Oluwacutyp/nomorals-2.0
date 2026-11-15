@@ -74,6 +74,10 @@ class Studio:
         #: checkpoint has no BPE vocab nearby). Also written into the
         #: output sidecar and the imggen log — never silent.
         self.last_warnings: list[str] = []
+        #: Where the most recent generate() actually rendered: "local",
+        #: or "forwarded <url>" when the job routed to the attested
+        #: forwarded GPU. ``generate_document`` names it in the rung.
+        self.last_route: str = "local"
 
     # -- pipeline ----------------------------------------------------
     def _resolve_entry(self) -> dict:
@@ -164,6 +168,69 @@ class Studio:
                 f"machine just can't run it well")
 
     # -- generation --------------------------------------------------
+    def _local_ready(self) -> tuple[bool, str]:
+        """Can this box render locally, without loading weights?
+
+        ``True`` when torch imports and the registry resolves a
+        loadable checkpoint (``_resolve_entry`` raises
+        :class:`ImgGenError` with the reason otherwise — no torch, no
+        checkpoint, or the named checkpoint missing). This is the
+        routing probe: it never loads the pipeline, so it is cheap
+        enough to run on every generate().
+        """
+        if not TORCH_AVAILABLE:
+            return False, "torch is not installed on this box"
+        try:
+            self._resolve_entry()
+        except ImgGenError as exc:
+            return False, str(exc)
+        return True, ""
+
+    def _generate_remote(self, prompt: str, *, save_to, local_reason,
+                         **kwargs) -> list[str]:
+        """Render on the attested forwarded GPU and save locally.
+
+        Only the single-image sampling knobs travel (see
+        :mod:`.remote`); the returned PNG is decoded with PIL and
+        saved through the same :meth:`_finalize` as a local render,
+        so the sidecar prompt + warnings land exactly as usual. A
+        remote failure raises naming both failures — the remote one
+        and the local unavailability that caused the routing — never
+        a faked image and never a silent fall-through.
+        """
+        from .remote import remote_generate
+
+        params = {k: kwargs[k] for k in (
+            "seed", "steps", "guidance_scale", "width", "height",
+            "negative_prompt", "sampler",
+        ) if kwargs.get(k) is not None}
+        try:
+            raw, info = remote_generate(
+                prompt, checkpoint=self.config.checkpoint, **params)
+        except ImgGenError as exc:
+            raise ImgGenError(
+                f"remote render failed: {exc}; "
+                f"local unavailable: {local_reason}") from exc
+        from io import BytesIO
+
+        from PIL import Image
+
+        try:
+            image = Image.open(BytesIO(raw))
+            image.load()
+        except Exception as exc:  # noqa: BLE001 - undecodable is a failure
+            raise ImgGenError(
+                "remote render returned undecodable image bytes: "
+                f"{exc}") from exc
+        url = str(info.get("endpoint") or "")
+        model = str(info.get("model") or "")
+        self.last_warnings = [
+            "rendered on the forwarded GPU at " + url
+            + (f" ({model})" if model else "")
+        ]
+        self.last_route = f"forwarded {url}"
+        return self._finalize([image], prompt, save_to)
+
     def generate(self, prompt: str, **kwargs):
         """Text-to-image. kwargs → PipelineConfig fields + save path.
 
@@ -172,19 +239,39 @@ class Studio:
         PipelineConfig field, so without the translation it was
         silently dropped by the field filter below and a 16:9 request
         rendered square. Explicit width/height always win.
+
+        ``allow_remote`` (default True): when this box cannot render
+        locally and an attested forwarded GPU clears the generating
+        floor, the job routes there (see :mod:`.remote`). The endpoint
+        passes ``allow_remote=False`` — a forwarded request is never
+        forwarded on. A multi-image request (``batch_size`` > 1) never
+        routes: the wire carries one image.
         """
         from .pipeline import PipelineConfig, resolve_aspect_ratio
 
         save_to = kwargs.pop("save_to", None)
+        allow_remote = kwargs.pop("allow_remote", True)
         aspect = kwargs.pop("aspect_ratio", None)
         if aspect:
             aw, ah = resolve_aspect_ratio(str(aspect))
             kwargs.setdefault("width", aw)
             kwargs.setdefault("height", ah)
+        ready, local_reason = self._local_ready()
+        batch = kwargs.get("batch_size", 1)
+        if (not ready and allow_remote
+                and (batch == 1 or batch is None)):
+            from .remote import remote_available
+
+            ok, _why = remote_available()
+            if ok:
+                return self._generate_remote(
+                    prompt, save_to=save_to, local_reason=local_reason,
+                    **kwargs)
         pipe = self.pipeline()
         cfg = PipelineConfig(**{k: v for k, v in kwargs.items()
                                  if k in PipelineConfig.__dataclass_fields__})
         images = pipe.generate(prompt, cfg)
+        self.last_route = "local"
         self.last_warnings = list(
             getattr(pipe, "last_warnings", None) or [])
         if self.last_warnings:
@@ -266,8 +353,12 @@ class Studio:
 
         paths = self.generate(prompt, **kwargs)
         pipe = self._pipeline
-        rung = (f"imggen generate via {type(pipe).__name__}"
-                if pipe is not None else "imggen generate")
+        if self.last_route != "local":
+            rung = f"imggen generate via {self.last_route}"
+        elif pipe is not None:
+            rung = f"imggen generate via {type(pipe).__name__}"
+        else:
+            rung = "imggen generate"
         notes = list(self.last_warnings)
         if kwargs.get("seed") is not None:
             notes.append(f"seed={kwargs['seed']}")
