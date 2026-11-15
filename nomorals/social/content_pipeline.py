@@ -648,11 +648,15 @@ def weekly_content(
     # queued draft carries that platform's own adapt_tone text — the
     # owner reviews the exact words each surface will post. Every
     # platform draft of one text shares the text's window and carries
-    # a common fanout_group stamp in its metadata. The per-draft
-    # schedule fallback semantics are unchanged from the single-draft
-    # loop this replaces (schedule_post queues before it touches the
-    # scheduler; a scheduler-side failure falls back to q.schedule
-    # only when the queue does not already show the draft scheduled).
+    # a common fanout_group stamp in its metadata. Scheduling is
+    # once per scored draft (per fanout group): the first platform's
+    # row arms the group through schedule_post, and a scheduler-side
+    # failure falls back to q.schedule only when the queue does not
+    # already show the draft scheduled; the sibling rows stay in
+    # review. (schedule_post refuses a scheduler without
+    # schedule_once BEFORE any state moves, so the fallback — not
+    # schedule_post itself — does the queueing when the scheduler
+    # cannot arm the group.)
     q = queue or DraftQueue()
     fan_platforms = list(platforms) if platforms else ["x"]
     for i, d in enumerate(scored):
@@ -714,6 +718,13 @@ def weekly_content(
                             src.get("artifact_id") or "")
                         claim_meta["artifact_uri"] = str(
                             src.get("artifact_uri") or "")
+            # One schedule attempt per scored draft (per fanout group):
+            # the first platform's row arms the group; the sibling
+            # rows stay in review. Without this the fallback re-runs
+            # q.schedule once per platform row (24 calls for 6 drafts):
+            # each row is a new draft id, so the per-row "already
+            # scheduled" guard can never see the siblings.
+            group_scheduled = False
             for p in list(d.platform_texts):
                 draft = q.create_draft(
                     d.platform_texts[p], platforms=[p],
@@ -728,18 +739,23 @@ def weekly_content(
                               **claim_meta})
                 q.propose(draft.id)  # → pending_review: Devon asks, never auto-posts
                 d.draft_ids[p] = draft.id
+                if group_scheduled:
+                    continue
                 if scheduler is not None:
                     try:
                         schedule_post(scheduler, q, draft.id, win_ts,
                                       platforms=[p])
+                        group_scheduled = True
                     except Exception as exc:  # noqa: BLE001 - scheduler optional
                         _log.debug("schedule_post failed (%s); "
                                    "checking queue state", exc)
                         current = q.get(draft.id)
                         if current is None or current.status != "scheduled":
                             q.schedule(draft.id, win_ts)
+                            group_scheduled = True
                 else:
                     q.schedule(draft.id, win_ts)
+                    group_scheduled = True
             d.draft_id = d.draft_ids.get(fan_platforms[0], "")
             d.scheduled_for = win_ts
         except Exception as exc:  # noqa: BLE001 - one bad draft ≠ dead pipeline

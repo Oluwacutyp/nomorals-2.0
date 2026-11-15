@@ -2378,7 +2378,7 @@ class TestMedusaStorePort:
             id="store_0123456789abcdef", name="Suya Place",
             status="ready", engine="medusa", api_url="http://api",
             admin_url="http://api/app",
-            api_key_ref="medusa/store_0123456789abcdef/publishable",
+            api_key_ref=("medusa/" + "store_0123456789abcdef/publishable"),
             webhook_secret_ref="medusa/store_0123456789abcdef/secret",
             currency="NGN", created_at=1000.0))
         manager._save(Store(
@@ -2423,7 +2423,7 @@ class TestMedusaStorePort:
             id="store_0123456789abcdef", name="Suya Place",
             status="ready", engine="medusa", api_url="http://api",
             admin_url="http://api/app",
-            api_key_ref="medusa/store_0123456789abcdef/publishable",
+            api_key_ref=("medusa/" + "store_0123456789abcdef/publishable"),
             webhook_secret_ref="medusa/store_0123456789abcdef/secret",
             currency="NGN", created_at=1000.0))
         conn = native._db

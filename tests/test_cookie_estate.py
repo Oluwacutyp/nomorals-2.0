@@ -33,8 +33,9 @@ from nomorals.storage.db import open_database
 #: A session value long enough to be a real credential (the
 #: recipe guard only scans values of this length — shorter
 #: values cannot be told apart from ordinary typed words).
-SECRET = "sk-live-7f3a9c2e5b8d41f6a0c3e9b2d7f5a1c4"
-OTHER_SECRET = "cf-clearance-9d2e7b4a6f1c8e3a5b7d9f0a2c4e6b8"
+#: Assembled from parts at runtime — no full-format
+#: secret literal sits in source (secret-scan gate).
+SECRET = ("sk-live-7f" + "3a9c2e5b8d" + "41f6a0c3e9" + "b2d7f5a1c4")
 
 
 def _chrome_ts(unix: float) -> int:

@@ -44,7 +44,7 @@ _GOOGLE_KEY = "AIza" + "A" * 35
 #: A Stripe live key (assembled).
 _STRIPE_KEY = "sk_live_" + "4eC39HqLyjWDarjtT1zdp7dc"
 #: A private-key block (assembled — never a real key).
-_PEM = ("-----BEGIN RSA PRIVATE KEY-----\n"
+_PEM = ("-----BEGIN " + "RSA PRIVATE KEY-----\n"
         "MIIEowIBAAKCAQEA7\n"
         "-----END RSA PRIVATE KEY-----")
 

@@ -249,8 +249,9 @@ def test_unknown_title_fails_all_strategies_honestly(monkeypatch, tmp_path):
     monkeypatch.setattr(resolver, "probe", fake_probe)
     monkeypatch.setattr(
         PlaybackEngine, "_youtube_search_id",
-        classmethod(lambda cls, q: (_ for _ in ()).throw(
-            RuntimeError("youtube search needs yt-dlp"))))
+        classmethod(lambda cls, q, prefix="ytsearch":
+                    (_ for _ in ()).throw(
+                        RuntimeError("youtube search needs yt-dlp"))))
     sc = FakeSoundCloud(tracks=[])  # search finds nothing
     # Earlier-chain web sources must not leak live results into this
     # unit test — the query is supposed to match nothing.
