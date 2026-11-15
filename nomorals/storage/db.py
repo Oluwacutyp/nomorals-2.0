@@ -750,6 +750,21 @@ class Database:
         before running. Never call this inside :meth:`transaction` — use
         :meth:`execute_statements` instead, which keeps atomicity.
         """
+        # Fail fast instead of deadlocking: the writer actor defers script
+        # jobs while a transaction is open, so executescript inside a
+        # transaction waits out the whole write-lock timeout and then
+        # raises the holder error. The same-thread check covers both
+        # transaction() (thread-local depth) and a manual BEGIN issued via
+        # execute() (the actor's recorded owner).
+        actor = self._writer_actor
+        if self.in_transaction or (
+                actor is not None
+                and actor.txn_owner == threading.get_ident()):
+            raise StorageError(
+                "executescript() cannot run inside transaction() — the "
+                "writer actor defers script jobs while a transaction is "
+                "open, so this would wait out the write-lock timeout; use "
+                "execute_statements() instead, which keeps atomicity")
         if not self.readonly:
             self._routed_script(script)
             return

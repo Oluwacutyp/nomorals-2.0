@@ -285,7 +285,14 @@ class SignupAttemptStore:
     def __init__(self, db: Database) -> None:
         self.db = db
         with self.db.transaction():
-            self.db.executescript(_SIGNUP_ATTEMPTS_DDL)
+            # execute_statements, not executescript: the writer actor
+            # defers script jobs while a transaction is open (executescript
+            # issues an implicit COMMIT), so executescript inside
+            # transaction() self-deadlocks for the full write-lock timeout
+            # (regression from the single-writer actor, c3e75420 — Pass #78
+            # predates it). execute_statements is the transaction-safe
+            # counterpart and keeps the DDL atomic.
+            self.db.execute_statements(_SIGNUP_ATTEMPTS_DDL)
 
     def create(self, *, service: str, persona: Persona, signup_url: str = "",
                supersedes: str = "", note: str = "") -> SignupAttempt:
