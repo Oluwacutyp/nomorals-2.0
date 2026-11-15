@@ -61,7 +61,7 @@ from .commands.learn import _cmd_learn
 from .commands.legal import _cmd_legal
 from .commands.immune import _cmd_immune
 from .commands.impossible import _cmd_impossible
-from .commands.media import _cmd_media, _cmd_studio
+from .commands.media import _cmd_media, _cmd_studio, _cmd_trendops
 from .commands.memory import _cmd_memory
 from .commands.meta import _cmd_commands, _cmd_connectors, _cmd_deliver, _cmd_help, _cmd_zip
 from .commands.mind import _cmd_mind
@@ -401,6 +401,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "browse": _CommandSpec(_cmd_browse),
     "repo": _CommandSpec(_cmd_repo),
     "media": _CommandSpec(_cmd_media),
+    "trendops": _CommandSpec(_cmd_trendops),
     "studio": _CommandSpec(_cmd_studio),
     "voice": _CommandSpec(_cmd_voice),
     "captcha": _CommandSpec(_cmd_captcha),

@@ -94,6 +94,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "swarm": ["sw"],
     "tools": ["t"],
     "trade": ["td"],
+    "trendops": ["trend"],
     "trace": [],
     "prompt": [],
     "trial": ["trl"],
@@ -1019,6 +1020,73 @@ def _parser() -> argparse.ArgumentParser:
     m_conv.add_argument("--wait", action="store_true",
                         help="with video: block until the background job finishes")
     m_conv.add_argument("--json", action="store_true", help="Output as JSON")
+
+    trendops = sub.add_parser("trendops", aliases=CLI_ALIASES["trendops"],
+        help="Trend-driven video editing: cut footage to a trend format",
+        description=("nm trendops list [--root DIR]\n"
+                     "nm trendops apply <format> <footage>... [--music <audio>] [--caption \"text\"] [--beats 1.0,2.0] [--out FILE]\n"
+                     "nm trendops capture <url> [--name <slug>] [--niche X]\n"
+                     "nm trendops propose [--limit N]\n"
+                     "nm trendops get <slug>\n"
+                     "nm trendops add --spec-file <json> | --spec '<json>'\n"
+                     "nm trendops remove <slug>"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    trendops_sub = trendops.add_subparsers(dest="trendops_action",
+                                           required=True)
+
+    def _trendops_common(sub_p: argparse.ArgumentParser) -> None:
+        sub_p.add_argument(
+            "--root",
+            help="TrendOps root (formats + renders; "
+                 "default: ~/workspace/devon/.trendops)")
+        sub_p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+
+    t_list = trendops_sub.add_parser(
+        "list", aliases=["formats"], help="list live trend formats")
+    _trendops_common(t_list)
+    t_apply = trendops_sub.add_parser(
+        "apply", help="cut footage to a format")
+    t_apply.add_argument("format", help="trend format slug")
+    t_apply.add_argument("footage", nargs="+",
+                         help="footage file(s) to cut")
+    t_apply.add_argument("--music", default="",
+                         help="music file for beat detection")
+    t_apply.add_argument("--caption", default="",
+                         help="caption text for the cut")
+    t_apply.add_argument("--beats", default="",
+                         help="comma list of cut seconds, "
+                              "e.g. 1.0,2.0,3.0")
+    t_apply.add_argument("--out", default="",
+                         help="output MP4 path (default: renders dir)")
+    _trendops_common(t_apply)
+    t_capture = trendops_sub.add_parser(
+        "capture", help="catch a trending clip into a new format")
+    t_capture.add_argument("url", help="trending clip URL")
+    t_capture.add_argument("--name", default="",
+                           help="slug for the new format")
+    t_capture.add_argument("--niche", default="",
+                           help="niche for the new format")
+    _trendops_common(t_capture)
+    t_propose = trendops_sub.add_parser(
+        "propose", help="peaking formats, ranked")
+    t_propose.add_argument("--limit", type=int, default=5,
+                           help="how many proposals (default 5)")
+    _trendops_common(t_propose)
+    t_get = trendops_sub.add_parser("get", help="show one format")
+    t_get.add_argument("slug", help="trend format slug")
+    _trendops_common(t_get)
+    t_add = trendops_sub.add_parser(
+        "add", help="add a format from a JSON spec")
+    t_add.add_argument("--spec", default="",
+                       help="format spec as a JSON string")
+    t_add.add_argument("--spec-file", default="",
+                       help="path to a JSON file with the format spec")
+    _trendops_common(t_add)
+    t_remove = trendops_sub.add_parser("remove", help="drop a format")
+    t_remove.add_argument("slug", help="trend format slug")
+    _trendops_common(t_remove)
 
     studio = sub.add_parser("studio", aliases=CLI_ALIASES["studio"],
         help="Pro edit sessions: filters, grading, layers, AI edits, templates",

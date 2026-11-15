@@ -43,6 +43,152 @@ def _cmd_media(args: argparse.Namespace, context: Any) -> int:
     return 2
 
 
+def _cmd_trendops(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm trendops` to list/apply/capture/propose/get/add/remove.
+
+    Same actions as /trendops in chat, through the same TrendOps
+    methods — no duplicated logic, no new render path. The CLI
+    returns the render path + report; it creates no draft (that is
+    the chat path's delivery) and never posts anything.
+    """
+    from ...media.trendops import TrendOps
+    from ...media.trendops.formats import TrendFormat
+    from ...media_edit.videos import MediaEditError
+    from ..emit import _emit
+
+    action = args.trendops_action
+    try:
+        ops = TrendOps(context=context, root=getattr(args, "root", None))
+        if action == "list":
+            rows = ops.list_formats()
+            if not rows:
+                text = ("no live trend formats — capture one: "
+                        "nm trendops capture <url>")
+            else:
+                lines = []
+                for r in rows:
+                    left = (f"{r['days_left']:.0f}d left"
+                            if r["days_left"] is not None
+                            else "never expires")
+                    lines.append(
+                        f"• {r['slug']} ({r['niche'] or 'no niche'}) — "
+                        f"{left}, used {r['uses']}x — "
+                        f"{r['description'][:60]}")
+                text = "\n".join(lines)
+            _emit(args, {"formats": rows}, text)
+            return 0
+        if action == "get":
+            fmt = ops.get_format(args.slug)
+            data = fmt.to_dict()
+            days = fmt.days_left()
+            left = (f"{days:.0f}d left" if days is not None
+                    else "never expires")
+            text = (f"{fmt.slug} — {fmt.name}\n"
+                    f"niche: {fmt.niche or '—'} · source: "
+                    f"{fmt.source or '—'} · style: {fmt.base_style}\n"
+                    f"cut: {fmt.cut_rule} · uses: {fmt.uses} · {left}\n"
+                    f"{fmt.description}")
+            _emit(args, data, text)
+            return 0
+        if action == "add":
+            spec_raw = ""
+            if getattr(args, "spec_file", ""):
+                spec_raw = Path(args.spec_file).read_text(
+                    encoding="utf-8")
+            elif getattr(args, "spec", ""):
+                spec_raw = args.spec
+            if not spec_raw.strip():
+                print("usage: nm trendops add --spec-file <json> | "
+                      "--spec '<json>'", file=sys.stderr)
+                return 2
+            try:
+                spec = json.loads(spec_raw)
+            except ValueError:
+                print("add: --spec is not valid JSON", file=sys.stderr)
+                return 2
+            if not isinstance(spec, dict):
+                print("add: the spec must be a JSON object",
+                      file=sys.stderr)
+                return 2
+            fmt = ops.add_format(TrendFormat.from_dict(spec))
+            days = fmt.days_left()
+            left = (f"expires in {days:.0f}d" if days is not None
+                    else "never expires")
+            _emit(args, fmt.to_dict(),
+                  f"added trend format {fmt.slug} — {fmt.name} ({left})")
+            return 0
+        if action == "remove":
+            if ops.remove_format(args.slug):
+                _emit(args, {"removed": True, "slug": args.slug},
+                      f"removed trend format {args.slug}")
+            else:
+                _emit(args, {"removed": False, "slug": args.slug},
+                      f"no trend format {args.slug!r}")
+            return 0
+        if action == "propose":
+            rows = ops.propose(limit=int(args.limit))
+            if not rows:
+                text = ("no live trend formats — capture one: "
+                        "nm trendops capture <url>")
+            else:
+                text = "\n".join(
+                    f"• {r['why']}\n  {r['apply']}" for r in rows)
+            _emit(args, {"proposals": rows}, text)
+            return 0
+        if action == "capture":
+            got = ops.capture_trend(
+                args.url, name=getattr(args, "name", "") or None,
+                niche=getattr(args, "niche", "") or "")
+            measured = got.get("measured", {})
+            text = (f"caught the trend → format {got['slug']}\n"
+                    f"{measured.get('duration', 0):.1f}s · "
+                    f"{measured.get('beat_count', 0)} beats measured · "
+                    f"expires in {got['expires_in_days']:.0f}d\n"
+                    f"cut it: nm trendops apply {got['slug']} <footage>")
+            _emit(args, got, text)
+            return 0
+        if action == "apply":
+            grid: list[float] | None = None
+            if getattr(args, "beats", ""):
+                try:
+                    grid = [float(b) for b in args.beats.split(",")
+                            if b.strip()]
+                except ValueError:
+                    print("--beats takes a comma list of seconds, "
+                          "e.g. --beats 1.0,2.0,3.0", file=sys.stderr)
+                    return 2
+            footage = [str(p) for p in (args.footage or [])]
+            result = ops.apply_format(
+                footage[0] if len(footage) == 1 else footage,
+                args.format, music=getattr(args, "music", "") or None,
+                caption=getattr(args, "caption", "") or None,
+                beats=grid, out=getattr(args, "out", "") or None)
+            review = result.get("review", {})
+            problems = review.get("problems") or []
+            note = (" (review flags: " + "; ".join(problems) + ")"
+                    if problems else "")
+            text = (f"cut to {result['format_name']} → "
+                    f"{result['output']}\n"
+                    f"{result['duration']:.1f}s · "
+                    f"{result['width']}x{result['height']} · "
+                    f"{result['segments']} segments · "
+                    f"{result['beats_used']} beats{note}")
+            qa = review.get("qa") or {}
+            if qa.get("status") in ("pass", "fail"):
+                text += (f"\ntemporal QA {qa['status']}: "
+                         f"{qa.get('notes', '')}")
+            _emit(args, result, text)
+            return 0
+        print(f"unknown trendops action: {action}", file=sys.stderr)
+        return 2
+    except MediaEditError as exc:
+        print(f"trendops {action} failed: {exc}", file=sys.stderr)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - CLI surface: report, don't trace
+        print(f"trendops {action} failed: {exc}", file=sys.stderr)
+        return 1
+
+
 def _cmd_studio(args: argparse.Namespace, context: Any) -> int:
     """Route `nm studio` to the EditStudio tools."""
     action = args.studio_action
