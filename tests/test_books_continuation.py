@@ -81,6 +81,36 @@ class TestContinuation(unittest.TestCase):
                                           direction="Quinn meets the Vigil's captain")
         self.assertIn("Vigil", text)
 
+    def test_compose_continuation_consumes_scene_anchor(self) -> None:
+        # B-3 (2026-10-21): the heuristic composer opened from bible
+        # threads only and never saw the final-scene anchor, so the
+        # brain-less floor re-staged the opening while the model path
+        # picked up mid-flow.  The anchor's on-stage cast now leads
+        # the cold open.
+        ctx, _ = _ctx()
+        cont = StoryContinuer(ctx)
+        bible = cont.prepare_from_text("The Night Ledger", PASTED)
+        # the on-stage character is someone OTHER than the protagonist
+        # (in this bible Mara is the protagonist, Quinn the support),
+        # so the contrast pins the anchor, not the bible's casting
+        protag = next((c for c in bible.characters
+                       if c.role == "protagonist"), bible.characters[0])
+        other = next(c for c in bible.characters if c is not protag)
+        scene = {"present": [other.name],
+                 "last_lines": f"{other.name} closed the book."}
+        text = cont._compose_continuation(bible, 3, [], words=400,
+                                          direction="", scene=scene)
+        first_para = text.split("\n\n")[0]
+        self.assertIn(other.name, first_para)
+        # without the scene the same call opens on the protagonist
+        plain = cont._compose_continuation(bible, 3, [], words=400,
+                                           direction="")
+        self.assertIn(protag.name, plain.split("\n\n")[0])
+        # the anchor does not break determinism
+        again = cont._compose_continuation(bible, 3, [], words=400,
+                                           direction="", scene=scene)
+        self.assertEqual(text, again)
+
 
 if __name__ == "__main__":
     unittest.main()

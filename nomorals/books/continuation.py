@@ -403,7 +403,7 @@ class StoryContinuer:
             if not text:
                 text = self._compose_continuation(
                     bible, chapter_no, tails, words, direction,
-                    seed_salt=take_i)
+                    seed_salt=take_i, scene=scene)
             if text:
                 candidates.append(text)
         if not candidates:
@@ -654,11 +654,21 @@ class StoryContinuer:
     # -- heuristic composer (the floor) ---------------------------------------
     def _compose_continuation(self, bible: StoryBible, chapter_no: int,
                               tails: list[str], words: int,
-                              direction: str, seed_salt: int = 0) -> str:
+                              direction: str, seed_salt: int = 0,
+                              scene: dict[str, Any] | None = None) -> str:
         """Real prose from the bible: advance the hottest open thread,
         keep the cast in character, land on a hook.  Deterministic per
         chapter number (seeded) so re-runs are stable; ``seed_salt``
-        varies alternate takes."""
+        varies alternate takes.
+
+        ``scene`` is the final-scene anchor (:meth:`_final_scene_anchor`):
+        who is on stage when the last chapter stopped.  The cold open
+        resumes on the first on-stage character instead of the generic
+        protagonist, so the brain-less floor picks up mid-flow like the
+        model path does.  The anchor's literal closing lines are NOT
+        echoed — repeating them would re-stage the previous chapter's
+        ending, which the anchor's own anti-restart law forbids.
+        """
         rng = random.Random(
             hash((bible.story_slug, chapter_no, seed_salt)) & 0xFFFFFFFF)
         threads = bible.open_threads()
@@ -675,9 +685,18 @@ class StoryContinuer:
         d_name = deut.name if deut else None
 
         beats: list[str] = []
-        # 1. cold open — resume mid-motion from the tail
-        beats.append(
-            f"The moment did not wait for {p_name} to catch {self._possessive(p_name)} breath.")
+        # 1. cold open — resume mid-motion from the tail; when the
+        # scene anchor says who is on stage, open on them, not on the
+        # generic protagonist (the anchor's "their" is gender-neutral —
+        # the composer's _possessive cannot know a name's gender)
+        present = list((scene or {}).get("present") or [])
+        if present:
+            beats.append(
+                f"The moment did not wait for {present[0]} to catch "
+                f"their breath.")
+        else:
+            beats.append(
+                f"The moment did not wait for {p_name} to catch {self._possessive(p_name)} breath.")
         # 2. thread pressure
         if thread:
             beats.append(

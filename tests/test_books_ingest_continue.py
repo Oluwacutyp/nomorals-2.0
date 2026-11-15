@@ -155,6 +155,23 @@ class TestIngest(_ReaderCase):
         self.assertEqual(self.r.get_progress(slug)["chapter"], 1)
         self.assertEqual(StoryReader(self.ctx)._load(slug).current_chapter, 1)
 
+    def test_chapter_text_never_moves_reading_position(self) -> None:
+        # B-1 (2026-10-21): chapter_text routed through read(), which
+        # set the owner's current_chapter whenever the chapter wasn't
+        # cached — a bible fold or continuation tail silently moved
+        # where the owner stopped reading.  A fetch here is a cache
+        # fill for a non-reading consumer, not a read.
+        slug = self.follow()
+        self.r.read(slug, chapter=1)
+        self.assertEqual(self.r._load(slug).current_chapter, 1)
+        text = self.r.chapter_text(slug, 5)
+        self.assertIn("EMBER-MARKER-5", text)
+        self.assertEqual(self.adapter.fetch_log, [1, 5])
+        # the chapter is cached now, but the position never moved
+        self.assertEqual(self.r._load(slug).current_chapter, 1)
+        self.assertEqual(
+            StoryReader(self.ctx)._load(slug).current_chapter, 1)
+
     def test_ingest_state_reports_honestly(self) -> None:
         slug = self.follow()
         state = self.r.ingest_state(slug)
@@ -172,9 +189,10 @@ class TestContinueFromTrueEnd(_ReaderCase):
         seen: list[dict] = []
 
         def fake_compose(bible, chapter_no, tails, words, direction,
-                         seed_salt=0):
+                         seed_salt=0, scene=None):
             seen.append({"chapter_no": chapter_no, "tails": list(tails),
-                         "digested": bible.chapters_digested})
+                         "digested": bible.chapters_digested,
+                         "scene": scene})
             return (f"DEVON-WROTE-{chapter_no} — Quinn stepped through "
                     "the ember gate and the night held its breath. "
                     '"We end this," Mara said.')
@@ -196,6 +214,16 @@ class TestContinueFromTrueEnd(_ReaderCase):
         joined = "\n".join(seen[0]["tails"])
         self.assertIn("EMBER-MARKER-9", joined)
         self.assertIn("FINAL-LINE-TEN", joined)
+        # B-3: the fallback composer received the final-scene anchor
+        # (on-stage cast + literal closing lines), not just the tails.
+        # The bible's miner knows Mara and the Vigil from these
+        # chapters (Quinn is never mined as a character here), so the
+        # anchor's cast is Mara + Vigil — the point is the composer
+        # got a real anchor computed from the final chapter.
+        scene = seen[0]["scene"]
+        self.assertIsNotNone(scene)
+        self.assertIn("Mara", scene["present"])
+        self.assertIn("FINAL-LINE-TEN", scene["last_lines"])
         # the written chapter is persisted in the story's library
         path = (self.r.story_dir(slug) / "continuations"
                 / "chapter-00011.md")

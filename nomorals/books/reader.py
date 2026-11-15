@@ -493,8 +493,15 @@ class StoryReader:
             f"chapter {number} of {story.title!r}: no URL found "
             f"(source lists {len(links)} chapters)")
 
-    def read(self, slug: str, chapter: int = 0) -> dict[str, Any]:
-        """Read a chapter (cached when available); updates progress."""
+    def read(self, slug: str, chapter: int = 0, *,
+             track: bool = True) -> dict[str, Any]:
+        """Read a chapter (cached when available); updates progress.
+
+        ``track=False`` fetches and caches exactly like a read but
+        leaves the owner's reading position alone — for non-reading
+        consumers (bible digestion, continuation tails) that need a
+        chapter's text without moving where the owner stopped reading.
+        """
         story = self._load(slug)
         slug = story.slug
         number = chapter or max(1, story.current_chapter or 1)
@@ -502,6 +509,7 @@ class StoryReader:
             number = 1
         ch = self._cached_chapter(slug, number)
         source_note = "cache"
+        fetched = False
         if ch is None:
             adapter = self._adapter(story.url)
             url = self._chapter_url(story, number)
@@ -516,10 +524,13 @@ class StoryReader:
             story.chapters_cached = len(
                 list((self.story_dir(slug) / "chapters").glob("*.md")))
             source_note = adapter.name
-        story.current_chapter = ch.number
-        story.current_offset = 0
-        story.last_read_at = _now()
-        self._save(story)
+            fetched = True
+        if track:
+            story.current_chapter = ch.number
+            story.current_offset = 0
+            story.last_read_at = _now()
+        if track or fetched:
+            self._save(story)
         return {
             "slug": slug, "title": story.title,
             "chapter": ch.number, "chapter_title": ch.title,
@@ -539,11 +550,16 @@ class StoryReader:
         return self.read(slug, chapter=number)
 
     def chapter_text(self, slug: str, number: int) -> str:
-        """Full raw text of a chapter (fetching it first when needed)."""
+        """Full raw text of a chapter (fetching it first when needed).
+
+        Never moves the owner's reading position: a fetch here is a
+        cache fill for a non-reading consumer (bible digestion,
+        continuation tails), not a read.
+        """
         slug = self.resolve_slug(slug)
         ch = self._cached_chapter(slug, number)
         if ch is None:
-            self.read(slug, chapter=number)
+            self.read(slug, chapter=number, track=False)
             ch = self._cached_chapter(slug, number)
         if ch is None:
             raise ReaderError(f"chapter {number} unavailable")
