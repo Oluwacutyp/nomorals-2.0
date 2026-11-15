@@ -255,9 +255,24 @@ def test_echomimic_honest_stub(tmp_path, photo_file, wav_file):
 
 
 def test_api_honest_stub(tmp_path, photo_file, wav_file):
-    with pytest.raises(NotConfigured, match="PRUNAAI_API_KEY"):
+    # Fixed 2026-11-15 (avatar api stub): the old message carried a
+    # manual-step list (endpoint URL / key env / pricing) that the owner's
+    # no-manual-chore-lists rule forbids. The stub stays honest (raises,
+    # never fakes a video) and reports there is no install path yet.
+    with pytest.raises(NotConfigured, match="PrunaAI"):
         talking_head(photo_file, str(wav_file), backend="api",
                      workdir=tmp_path)
+    with pytest.raises(NotConfigured) as excinfo:
+        talking_head(photo_file, str(wav_file), backend="api",
+                     workdir=tmp_path)
+    msg = str(excinfo.value)
+    assert "git clone" not in msg
+    assert "export" not in msg
+    assert "pip install" not in msg
+    assert "api.pruna.ai" not in msg
+    assert "PRUNAAI_API_KEY" not in msg
+    assert "$0.025" not in msg
+    assert "no install path" in msg
 
 
 def test_unknown_backend(tmp_path, photo_file, wav_file):

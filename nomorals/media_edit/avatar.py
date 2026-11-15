@@ -34,8 +34,8 @@ there), ``LATENTSYNC_UNET_CONFIG``, ``LATENTSYNC_CKPT``,
 
 Upgrade path: ``backend="echomimic"`` (EchoMimicV2, half-body gestures)
 is an honest stub — raises with setup steps, never fake video.
-API fallback: ``backend="api"`` (PrunaAI P-Video) is an honest stub with
-the endpoint, key env var, and pricing — the termux path.
+API fallback: ``backend="api"`` (PrunaAI P-Video) is an honest stub —
+not wired, no install path yet — the termux path.
 
 Nothing here fakes a video: every unavailable path raises AvatarError
 with exact remediation.
@@ -424,13 +424,10 @@ def talking_head(photo: str | os.PathLike[str],
             "until a provision is built for it.")
     if backend == "api":
         raise NotConfigured(
-            "PrunaAI P-Video API fallback is not wired yet. When you want "
-            "it:\n"
-            "  endpoint: https://api.pruna.ai (see PrunaAI docs for the "
-            "current lip-sync route)\n"
-            "  key env: PRUNAAI_API_KEY\n"
-            "  pricing: ~$0.025/sec of output (check current pricing)\n"
-            "Then ask for the API backend to be implemented.")
+            "PrunaAI P-Video API fallback is not available on this box "
+            "(cloud talking-head backend). There is no install path for "
+            "it yet — Devon cannot provision it herself, so it stays "
+            "unavailable until a provision is built for it.")
     if backend != "latentsync":
         raise AvatarError(
             f"unknown avatar backend {backend!r}; "
