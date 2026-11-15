@@ -156,6 +156,9 @@ def test_sweep_excludes_previews_keeps_full_and_attempts():
         ok=True, path_or_url=YT_URL, title="FEAR", artist="NF",
         duration=213.0, kind="youtube",
         source_name="YouTube search (yt-dlp)")
+    # The mock list must cover EVERY source in search_candidates_detailed's
+    # sweep, in sweep order: an unmocked source runs live, and Mdundo did
+    # (returning 8 real hits that filled the limit before YouTube).
     with mock.patch.object(r, "_itunes_search_many",
                            return_value=[itunes_hit]), \
             mock.patch.object(r, "_deezer_search_many", return_value=[]), \
@@ -165,6 +168,7 @@ def test_sweep_excludes_previews_keeps_full_and_attempts():
             mock.patch.object(r, "_notjustok_search_many", return_value=[]), \
             mock.patch.object(r, "_tooxclusive_search_many",
                               return_value=[]), \
+            mock.patch.object(r, "_mdundo_search_many", return_value=[]), \
             mock.patch.object(r, "_soundcloud_search_many",
                               return_value=[]), \
             mock.patch.object(r, "_bandcamp_search_many", return_value=[]), \
@@ -172,6 +176,9 @@ def test_sweep_excludes_previews_keeps_full_and_attempts():
                               return_value=[]), \
             mock.patch.object(r, "_archiveorg_search_many",
                               return_value=[]), \
+            mock.patch.object(r, "_jamendo_search_many", return_value=[]), \
+            mock.patch.object(r, "_fma_search_many", return_value=[]), \
+            mock.patch.object(r, "_jiosaavn_search_many", return_value=[]), \
             mock.patch.object(r, "_musicbrainz_search_many",
                               return_value=[]), \
             mock.patch.object(r, "_openverse_search_many", return_value=[]), \
