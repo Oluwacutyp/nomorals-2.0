@@ -56,13 +56,13 @@
     },
     {
       "canon_status": "gnostic",
-      "license": "fair-use",
+      "license": "public-domain",
       "slug": "gospel-of-philip",
-      "source_url": "https://www.gnosis.org/naghamm/gop.htm",
+      "source_url": "https://www.gospels.net/philip",
       "title": "The Gospel of Philip",
       "tradition": "christian-gnostic",
-      "translator": "Wesley W. Isenberg",
-      "notes": "mirror unreachable 2026-10-02: gnosis.org blocked from this network. 2026-10-19: archive.org 'Gospel Of Philip 2004' scan is the copyrighted Leloup/Inner Traditions (2004) edition — not usable; Mattison public-domain translation exists but is login-walled on academia.edu; kept original URL for retry"
+      "translator": "Mark M. Mattison (public domain)",
+      "notes": "mirror switched 2026-11-14: gnosis.org refuses all connections from this network (empty reply, 2026-10-02 and 2026-11-14); now uses gospels.net (Mark M. Mattison public-domain translation, verified HTTP 200 + ingested 2026-11-14). 2026-10-19: archive.org 'Gospel Of Philip 2004' scan is the copyrighted Leloup/Inner Traditions (2004) edition — not usable."
     },
     {
       "canon_status": "gnostic",
@@ -253,7 +253,7 @@
       "title": "The Zohar (selections)",
       "tradition": "judaism",
       "translator": "Denison Ross",
-      "notes": "mirror switched 2026-10-19: www.sacred-texts.com blocked from this network; now uses ISTA's own archive.sacred-texts.com mirror (same text, verified HTTP 200)"
+      "notes": "mirror switched 2026-10-19: www.sacred-texts.com blocked from this network; now uses ISTA's own archive.sacred-texts.com mirror (same text, verified HTTP 200). 2026-11-14: the ISTA mirror now returns Cloudflare 403 from this network (IP-reputation; was HTTP 200 on 2026-10-19) — source alive, not dead; no single-file public-domain copy of the Manhar text found (archive.org has no Manhar full text; Wikisource Rothenberg Vol. I is a different translation, CC BY-SA, incomplete); retry on EC2: nm wisdom ingest zohar-selections"
     },
     {
       "canon_status": "canon",
@@ -335,7 +335,7 @@
       "title": "The Philokalia (selections)",
       "tradition": "christianity",
       "translator": "Palmer, Sherrard & Ware",
-      "notes": "mirror unreachable 2026-10-02: sacred-texts.com blocked from this network; archive.org copy (philokaliacompl00gehp) is access-restricted (401). 2026-10-19: only other full text found is the copyrighted Palmer/Ware translation — not usable; kept original URL for retry"
+      "notes": "mirror unreachable 2026-10-02: sacred-texts.com blocked from this network; archive.org copy (philokaliacompl00gehp) is access-restricted (401). 2026-10-19: only other full text found is the copyrighted Palmer/Ware translation — not usable; kept original URL for retry. 2026-11-14: sacred-texts.com still Cloudflare 403 from this network (IP-reputation) — source alive, not dead; no Wayback snapshots exist; archive.org 'Writings' copies are access-restricted (401); retry on EC2: nm wisdom ingest philokalia-selections"
     },
     {
       "canon_status": "esoteric",
