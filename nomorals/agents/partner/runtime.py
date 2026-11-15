@@ -3656,6 +3656,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "season tick job not registered: %s", exc)
+                # Group backups (§9.8): one durable "group backup
+                # tick" job (every 1h) backing up every group
+                # whose cadence is due — the builder is the
+                # per-group backup organ; the tick itself posts
+                # nothing and journals to each group's audit log.
+                # Idempotent; best-effort.
+                try:
+                    from ...social.chat.group_backup import ensure_group_backup_job
+
+                    ensure_group_backup_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "group backup tick job not registered: %s", exc)
                 # Community orchestration (AA-18): one durable
                 # "community orchestration tick" job (every 1m)
                 # heartbeating this device into the fleet session
@@ -7599,6 +7612,8 @@ class PartnerRuntime(
             return self._control_console(command.tail, message)
         if kind == "groups":
             return self._control_groups(command.tail, message)
+        if kind == "gbackup":
+            return self._control_gbackup(command.tail, message)
         if kind == "undonotice":
             return self._control_undonotice(command.tail, message)
         if kind == "flag":

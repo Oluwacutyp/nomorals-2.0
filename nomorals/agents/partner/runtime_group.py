@@ -6077,6 +6077,399 @@ class RuntimeGroupMixin:
             parts.append(f"appeals {appeals}")
         return " · ".join(parts)
 
+    # ── group backup / export (§9.8) ──────────────────────────
+
+    def _gbackup_usage(self) -> str:
+        return ("usage: /gbackup — your groups and their backups · "
+                "/gbackup <g1> — list one group's backups · "
+                "/gbackup export <g1> — back up now and send the file · "
+                "/gbackup restore <g1> <id> — show what a restore "
+                "would change (add yes to apply it) · "
+                "/gbackup schedule <g1> <off|daily|weekly> [hour N] "
+                "[keep N] · /gbackup delete <g1> <id>")
+
+    def _control_gbackup(self, tail, message):  # type: ignore[no-untyped-def]
+        """The §9.8 group backup/export command (/gbackup): one
+        group's full state — settings, roster, economy ledger,
+        audit log — as a file, restorable, on a schedule. DM-only
+        (a backup file carries the whole group state, so it never
+        posts into the group itself); same gate as /groups — the
+        operator sees all, anyone else only groups they admin
+        (proved per group through the platform's own admin
+        surface, never assumed from the DM)."""
+        from ...social.chat.base import ChatKind
+
+        if message is None or getattr(message, "chat", None) is None:
+            return ("group backups live in my DM — open a chat "
+                    "with me there and send /gbackup.")
+        if message.chat.kind != ChatKind.DM:
+            return ("group backups live in my DM — open a chat "
+                    "with me there and send /gbackup.")
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        skey = f"{message.chat.platform}:{sender}"
+        session = self._console_session_map().get(skey) or {}
+        if time.time() - float(session.get("at") or 0) \
+                > self._CONSOLE_TTL_S:
+            session = {}
+        words = str(tail or "").split()
+        if not words:
+            return self._gbackup_board(surface, message, sender, skey)
+        verb = words[0].lower()
+        if verb in ("help", "?"):
+            return self._gbackup_usage()
+        if verb == "export":
+            if len(words) < 2:
+                return self._gbackup_usage()
+            key, error = self._gbackup_resolve(
+                surface, message, sender, session, words[1])
+            if error:
+                return error
+            return self._gbackup_export(surface, message, key, sender)
+        if verb == "restore":
+            if len(words) < 3:
+                return self._gbackup_usage()
+            key, error = self._gbackup_resolve(
+                surface, message, sender, session, words[1])
+            if error:
+                return error
+            return self._gbackup_restore(surface, message, key, sender,
+                                         words)
+        if verb == "schedule":
+            if len(words) < 3:
+                return self._gbackup_usage()
+            key, error = self._gbackup_resolve(
+                surface, message, sender, session, words[1])
+            if error:
+                return error
+            return self._gbackup_schedule(surface, message, key, sender,
+                                          words)
+        if verb == "delete":
+            if len(words) < 3:
+                return self._gbackup_usage()
+            key, error = self._gbackup_resolve(
+                surface, message, sender, session, words[1])
+            if error:
+                return error
+            return self._gbackup_delete(surface, message, key, sender,
+                                        words)
+        if verb == "list":
+            if len(words) < 2:
+                return self._gbackup_usage()
+            key, error = self._gbackup_resolve(
+                surface, message, sender, session, words[1])
+            if error:
+                return error
+            return self._gbackup_list(surface, message, key, words[1])
+        key, error = self._gbackup_resolve(
+            surface, message, sender, session, words[0])
+        if error:
+            return error
+        return self._gbackup_list(surface, message, key, words[0])
+
+    def _gbackup_resolve(self, surface, message, sender, session,
+                         token):  # type: ignore[no-untyped-def]
+        """Resolve a /gbackup group handle to a store key: the
+        console session-map token first (g1… from /groups or
+        /console), then the exact key, then one unique substring
+        match over the groups this sender admins. Returns
+        (key, None) or (None, error)."""
+        groups = session.get("groups") or {}
+        key = groups.get(token)
+        if key is None and (session.get("channels") or {}).get(token):
+            return None, ("channels have no roster or economy to "
+                          "back up — their queue and settings live "
+                          "in the same store and survive a kick.")
+        if key is None:
+            admin_keys = [
+                k for k in sorted(surface.store.data.keys())
+                if self._operator_or_false(message)
+                or self._console_is_admin(k, sender)]
+            # A cold typed handle (no board tap first): gN is the
+            # Nth group the sender admins in the board's own
+            # order, cN the Nth channel — so /gbackup export g1
+            # works straight from the DM without a prior /gbackup.
+            import re as _re
+
+            match = _re.fullmatch(r"g(\d+)", token.lower())
+            match_c = _re.fullmatch(r"c(\d+)", token.lower())
+            if match:
+                group_keys = [k for k in admin_keys
+                             if not surface.is_channel(k)]
+                index = int(match.group(1)) - 1
+                if 0 <= index < len(group_keys):
+                    key = group_keys[index]
+            elif match_c:
+                channel_keys = [k for k in admin_keys
+                                if surface.is_channel(k)]
+                index = int(match_c.group(1)) - 1
+                if 0 <= index < len(channel_keys):
+                    return None, (
+                        "channels have no roster or economy to "
+                        "back up — their queue and settings live "
+                        "in the same store and survive a kick.")
+            if key is None and token in admin_keys:
+                key = token
+            elif key is None:
+                matches = [k for k in admin_keys
+                           if token.lower() in k.lower()]
+                if len(matches) == 1:
+                    key = matches[0]
+                elif len(matches) > 1:
+                    return None, (
+                        f"more than one group matches “{token}” — "
+                        "run /gbackup and use its handle (g1, g2…).")
+        if key is None:
+            return None, ("that group handle expired — run /gbackup "
+                          "and pick again.")
+        if surface.is_channel(key):
+            return None, ("channels have no roster or economy to "
+                          "back up — their queue and settings live "
+                          "in the same store and survive a kick.")
+        if not (self._operator_or_false(message)
+                or self._console_is_admin(key, sender)):
+            return None, ("you don't admin that group — backups "
+                          "open for its admins.")
+        return key, None
+
+    def _gbackup_board(self, surface, message, sender,
+                       skey):  # type: ignore[no-untyped-def]
+        """Bare /gbackup: every group the sender admins, with its
+        backup count, latest backup, and schedule. Buttons open
+        the per-group list (a tap re-enters as /gbackup g1)."""
+        from ...social.chat import group_backup as _gb
+        from ...social.chat.typography import Card
+
+        all_keys = [k for k in sorted(surface.store.data.keys())
+                    if self._operator_or_false(message)
+                    or self._console_is_admin(k, sender)]
+        keys = [k for k in all_keys if not surface.is_channel(k)]
+        if not keys:
+            return ("you don't admin any group I serve — the board "
+                    "opens for group admins.")
+        groups: dict = {}
+        rows: list = []
+        buttons: list = []
+        for i, key in enumerate(keys, 1):
+            token = f"g{i}"
+            groups[token] = key
+            infos, corrupt = _gb.list_backups(surface, key)
+            cfg = _gb.backup_settings(surface, key)
+            latest = infos[0] if infos else None
+            when = (time.strftime(
+                "%d %b %H:%M",
+                time.localtime(latest["created_ts"]))
+                if latest else "none yet")
+            line = (f"{token} — {key} · {len(infos)} backup(s) · "
+                    f"latest {when} · {cfg['cadence']}")
+            if cfg["cadence"] != "off":
+                line += f" {cfg['hour']:02d}:00"
+            if corrupt:
+                line += f" · {corrupt} unreadable file(s)"
+            rows.append(line)
+            buttons.append([(f"💾 {token} · {key}",
+                             f"gbackup {token}")])
+        existing = self._console_session_map().get(skey) or {}
+        self._console_session_map()[skey] = {
+            "groups": groups,
+            "channels": existing.get("channels") or {},
+            "at": time.time()}
+        flat_buttons = [row[0] for row in buttons if row]
+        buttons = [flat_buttons[i:i + 2]
+                   for i in range(0, len(flat_buttons), 2)]
+        card = Card("settings", title="Group backups", icon="💾")
+        card.block_lines(rows, title="Your groups")
+        card.note("tap a group to list its backups, or type "
+                  "/gbackup g1 — export, restore, schedule and "
+                  "delete live there")
+        return self._card(message, card, buttons,
+                          session="gbackup", session_edit=True)
+
+    def _gbackup_list(self, surface, message, key,
+                      token):  # type: ignore[no-untyped-def]
+        """One group's backups, newest first, with the schedule
+        and the verbs that act on them."""
+        from ...social.chat import group_backup as _gb
+        from ...social.chat.typography import Card
+
+        infos, corrupt = _gb.list_backups(surface, key)
+        cfg = _gb.backup_settings(surface, key)
+        rows: list = []
+        for info in infos:
+            when = time.strftime(
+                "%d %b %Y %H:%M",
+                time.localtime(info["created_ts"]))
+            counts = info["counts"] or {}
+            rows.append(
+                f"{info['backup_id']} · {when} · "
+                f"by {info['created_by'] or '—'} · "
+                f"{info['reason'] or 'manual'} · "
+                f"{counts.get('members', 0)} members · "
+                f"{counts.get('ledger_entries', 0)} ledger entries · "
+                f"{info['size_bytes']} bytes"
+                + (" · economy degraded"
+                   if info["economy_status"] != "ok" else ""))
+        if not rows:
+            rows.append("no backups on file yet — /gbackup export "
+                        f"{token} makes one now.")
+        card = Card("settings", title=f"Backups — {key}", icon="💾")
+        card.block_lines(rows, title="Backups")
+        sched = (f"schedule: {cfg['cadence']}"
+                 + (f" at {cfg['hour']:02d}:00"
+                    if cfg["cadence"] != "off" else "")
+                 + f", keeping the newest {cfg['keep']}")
+        card.note(f"{sched} · export: /gbackup export {token} · "
+                  f"restore: /gbackup restore {token} <id> · "
+                  f"delete: /gbackup delete {token} <id>"
+                  + (f" · {corrupt} unreadable backup file(s) on "
+                     "disk" if corrupt else ""))
+        return self._card(message, card, None,
+                          session="gbackup", session_edit=True)
+
+    def _gbackup_export(self, surface, message, key,
+                        sender):  # type: ignore[no-untyped-def]
+        """Build a fresh backup now and send the file (the owner's
+        standing delivery rule — the export IS the file, the reply
+        carries the summary)."""
+        from ...social.chat import group_backup as _gb
+
+        try:
+            info = _gb.create_backup(surface, key, by=sender,
+                                     reason="manual")
+        except _gb.GroupBackupRefused as exc:
+            return str(exc)
+        except _gb.GroupBackupError as exc:
+            return f"the backup failed: {exc}"
+        counts = info["counts"] or {}
+        summary = (
+            f"💾 backup of {key} — {info['backup_id']} · "
+            f"{counts.get('members', 0)} members · "
+            f"{counts.get('ledger_entries', 0)} ledger entries · "
+            f"{counts.get('audit_entries', 0)} audit entries · "
+            f"{counts.get('economy_files', 0)} economy files · "
+            f"{info['size_bytes']} bytes")
+        if info["economy_status"] != "ok":
+            summary += (f" — economy degraded: "
+                        f"{info['economy_reason']}")
+        if info["pruned"]:
+            summary += (f" — pruned {len(info['pruned'])} older "
+                        "backup(s)")
+        gateway = getattr(self, "gateway", None)
+        send_file = getattr(gateway, "send_file", None)
+        if gateway is None or send_file is None:
+            return (f"{summary} The file is built at "
+                    f"{info['path']}, but this surface can't carry "
+                    "files back.")
+        filename = (f"{key.replace(':', '_').replace('/', '_')}"
+                    f"-backup-{info['backup_id']}.json")
+        result = send_file(
+            str(getattr(message.chat, "platform", "") or ""),
+            message.chat, str(info["path"]), caption=summary,
+            name=filename)
+        if not getattr(result, "ok", False):
+            return (f"{summary} Sending the file failed: "
+                    f"{getattr(result, 'error', '') or 'send refused'} "
+                    f"(it is kept at {info['path']}.)")
+        return summary
+
+    def _gbackup_restore(self, surface, message, key, sender,
+                         words):  # type: ignore[no-untyped-def]
+        """Two steps by design: without `yes` this shows the
+        preview — what the restore would change. With `yes` it
+        applies it. A restore never applies from a preview-less
+        call."""
+        from ...social.chat import group_backup as _gb
+
+        backup_id = words[2]
+        try:
+            backup = _gb.load_backup(surface, key, backup_id)
+        except (_gb.GroupBackupCorrupt,
+                _gb.GroupBackupRefused) as exc:
+            return str(exc)
+        if len(words) >= 4 and words[3].lower() == "yes":
+            try:
+                applied = _gb.apply_restore(surface, key, backup,
+                                            by=sender)
+            except _gb.GroupBackupError as exc:
+                return f"the restore failed: {exc}"
+            return (f"restored {key} from backup {backup_id} — "
+                    f"{applied['members']} members, "
+                    f"{applied['ledger_entries']} ledger entries, "
+                    f"{applied['economy_files']} economy files. "
+                    "The restore itself is in the group's audit log.")
+        preview = _gb.preview_restore(surface, key, backup)
+        when = time.strftime(
+            "%d %b %Y %H:%M",
+            time.localtime(preview["created_ts"]))
+        lines = [f"restore {key} from backup {backup_id} (made "
+                 f"{when}, by {preview['created_by'] or '—'}, "
+                 f"{preview['reason'] or 'manual'}) — this is what "
+                 "changes:"]
+        lines.extend(preview["lines"])
+        lines.append("")
+        lines.append(f"to apply it: /gbackup restore {words[1]} "
+                     f"{backup_id} yes")
+        return "\n".join(lines)
+
+    def _gbackup_schedule(self, surface, message, key, sender,
+                          words):  # type: ignore[no-untyped-def]
+        """Set one group's backup cadence: /gbackup schedule <g1>
+        <off|daily|weekly> [hour N] [keep N]."""
+        from ...social.chat import group_backup as _gb
+
+        cadence = words[2].lower()
+        hour: int | None = None
+        keep: int | None = None
+        i = 3
+        while i < len(words):
+            word = words[i].lower()
+            if word == "hour" and i + 1 < len(words):
+                try:
+                    hour = int(words[i + 1])
+                except ValueError:
+                    return (f"hour is a number 0–23 — not "
+                            f"{words[i + 1]!r}.")
+                i += 2
+            elif word == "keep" and i + 1 < len(words):
+                try:
+                    keep = int(words[i + 1])
+                except ValueError:
+                    return (f"keep is a number 1–30 — not "
+                            f"{words[i + 1]!r}.")
+                i += 2
+            else:
+                return (f"I didn't follow {words[i]!r} — /gbackup "
+                        f"schedule {words[1]} daily [hour N] "
+                        "[keep N].")
+        try:
+            out = _gb.set_backup_schedule(
+                surface, key, cadence=cadence, hour=hour, keep=keep,
+                by=sender)
+        except _gb.GroupBackupRefused as exc:
+            return str(exc)
+        cfg = out["settings"]
+        line = (f"backups for {key}: {cfg['cadence']}"
+                + (f" at {cfg['hour']:02d}:00"
+                   if cfg["cadence"] != "off" else "")
+                + f", keeping the newest {cfg['keep']}. "
+                f"{out['next']}.")
+        return line
+
+    def _gbackup_delete(self, surface, message, key, sender,
+                        words):  # type: ignore[no-untyped-def]
+        """Delete one stored backup. The live group is untouched —
+        only the file goes."""
+        from ...social.chat import group_backup as _gb
+
+        backup_id = words[2]
+        try:
+            _gb.delete_backup(surface, key, backup_id, by=sender)
+        except (_gb.GroupBackupRefused,
+                _gb.GroupBackupError) as exc:
+            return str(exc)
+        return (f"deleted backup {backup_id} for {key}. The live "
+                "group is untouched.")
+
     def _console_home(self, surface, message, sender, skey,  # type: ignore[no-untyped-def]
                       note: str = ""):
         from ...social.chat.typography import Card

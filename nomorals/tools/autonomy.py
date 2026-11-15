@@ -59,6 +59,10 @@ nervous system through plain language:
   quarter and pay closed seasons' prizes through the group economy.
   Same closure pattern. Routine job (silent at the scheduler);
   the summary lands in the scheduler journal only.
+* ``__group_backup_tick__`` — scheduler-internal group backup tick
+  (§9.8): back up every group whose backup cadence is due.
+  Same closure pattern. Routine job (silent at the scheduler);
+  each run journals to its group's audit log.
 """
 
 from __future__ import annotations
@@ -450,6 +454,27 @@ def register(registry: Any) -> None:
         except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
             return {"ok": False,
                     "error": f"season tick failed: {exc}"}
+
+    @registry.register(
+        "__group_backup_tick__",
+        description="Run one group backup tick (§9.8): back up "
+        "every group whose backup cadence is due (daily/weekly at "
+        "its configured hour). Scheduler-internal; runs every ~1h. "
+        "Routine and silent — each run journals to its group's "
+        "audit log and never posts anywhere.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _group_backup_tick_tool() -> dict[str, Any]:
+        from ..social.chat.group_backup import (
+            run_group_backup_tick_once,
+        )
+
+        try:
+            return run_group_backup_tick_once(context=_context)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"group backup tick failed: {exc}"}
 
     @registry.register(
         "__orchestration__",

@@ -58,6 +58,7 @@ import contextlib
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from dataclasses import asdict, dataclass, field
@@ -432,6 +433,57 @@ class GroupEconomy:
                 yield
             finally:
                 stack.pop()
+
+    def read_state_files(self, group_id: str
+                         ) -> tuple[dict[str, Any], dict[str, str]]:
+        """The group's whole state-file set for backup: ({name:
+        parsed JSON}, {name: reason} for files that would not
+        parse). Never raises for a bad file — the caller reports
+        the unreadable names instead of silently dropping them.
+        The lock file is not state and is never returned."""
+        out: dict[str, Any] = {}
+        unreadable: dict[str, str] = {}
+        gdir = self._group_dir(group_id)
+        if not gdir.exists():
+            return out, unreadable
+        for path in sorted(gdir.glob("*.json")):
+            name = path.stem
+            try:
+                out[name] = json.loads(
+                    path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                unreadable[name] = str(exc)
+        return out, unreadable
+
+    def write_state_files(self, group_id: str,
+                          files: dict[str, Any]) -> None:
+        """Replace the group's state-file set exactly with `files`
+        (a restore): files present now but absent from `files`
+        are removed, every file is written temp-then-replace under
+        the group's writer lock. Names are validated — an unsafe
+        name refuses the whole write, nothing half-applied. The
+        lock file is never touched."""
+        for name in files:
+            if (not re.match(r"^[A-Za-z0-9][A-Za-z0-9_.\-]*$",
+                             str(name))
+                    or ".." in str(name)):
+                raise EconomyPersistenceError(
+                    f"refusing to write unsafe economy file name "
+                    f"{name!r} for {group_id}")
+        with self._locked(group_id):
+            gdir = self._group_dir(group_id)
+            gdir.mkdir(parents=True, exist_ok=True)
+            for path in sorted(gdir.glob("*.json")):
+                if path.stem not in files:
+                    try:
+                        path.unlink()
+                    except OSError as exc:
+                        raise EconomyPersistenceError(
+                            f"group economy restore failed for "
+                            f"{group_id}/{path.stem}: {exc} — the "
+                            "operation was not committed") from exc
+            for name in sorted(files):
+                self._save_json(group_id, name, files[name])
 
     def _load_json(self, group_id: str, name: str, default: Any) -> Any:
         try:

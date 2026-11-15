@@ -74,6 +74,7 @@ from ...security.payload_inspection import (
 )
 from .failures import record_failure
 from .group_acceptance import ACCEPTANCE_DEFAULTS
+from .group_backup import BACKUP_DEFAULTS
 from .group_cleanup import CLEANUP_DEFAULTS
 from .group_p5 import P5_DEFAULTS
 from .group_reputation import (
@@ -238,6 +239,14 @@ def _default_settings() -> dict[str, Any]:
                                         # duty + per-member
                                         # command scopes — both
                                         # ship OFF (§28 precedent)
+        "backup": copy.deepcopy(BACKUP_DEFAULTS),
+                                        # per-group backup (§9.8):
+                                        # scheduled cadence
+                                        # (off/daily/weekly),
+                                        # wall-clock hour, newest
+                                        # backups kept — cadence
+                                        # defaults OFF, an admin
+                                        # turns it on
         "system_claim": {"designated": False,
                          "bot_admin": None},
                                         # the §33 claim: may
@@ -418,7 +427,7 @@ class GroupStore:
                                      "conflict", "rhythm",
                                      "channel", "boards",
                                      "exchange", "gangs",
-                                     "cleanup")})
+                                     "cleanup", "backup")})
         mod = dict(merged["moderation"])
         mod.update((stored.get("moderation") or {}))
         merged["moderation"] = mod
@@ -467,6 +476,9 @@ class GroupStore:
         merged["cleanup"] = _deep_merge(
             copy.deepcopy(CLEANUP_DEFAULTS),
             stored.get("cleanup") or {})
+        merged["backup"] = _deep_merge(
+            copy.deepcopy(BACKUP_DEFAULTS),
+            stored.get("backup") or {})
         merged["p5"] = _deep_merge(
             copy.deepcopy(P5_DEFAULTS),
             stored.get("p5") or {})

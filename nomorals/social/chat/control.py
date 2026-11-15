@@ -210,7 +210,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "rules", "member", "glog", "gsettings", "strikes",
-    "recheck", "joinq", "console", "groups", "undonotice",
+    "recheck", "joinq", "console", "groups", "gbackup", "undonotice",
     "flag", "rep", "repclear", "repdismiss",
     "steal", "sticker", "convert", "gif", "emoji", "customemoji",
     "emojiart", "react",
@@ -754,6 +754,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "joinq": (0, None),       # /joinq [approve|decline <id>|all] — the admin join queue: requests + raid holds (§28)
     "console": (0, None),     # /console [gN [section [grammar]]] — the DM admin console: groups the sender admins, configured in tappable sections (§30)
     "groups": (0, None),      # /groups — the §8 dashboard: every group/channel you admin — status, member count, economy health, pending actions — deep-links into /console
+    "gbackup": (0, None),     # /gbackup — the §9.8 group backup/export: one group's full state (settings, roster, economy ledger, audit log) as a file, restorable, on a schedule (DM-only, admins)
     "undonotice": (0, None),  # /undonotice <id> — undo one automated action from its notice: strike removed, platform action reversed (§31)
     "flag": (0, None),        # /flag [@member <category> [note]|ok|no <id>|queue|retract @member] — cross-group reputation flags: staged, admin-confirmed (§32)
     "rep": (0, None),         # /rep [@member] — the reputation book: one person's file, or the book's shape (§32)
@@ -3714,7 +3715,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "related": "/gsettings /glog /strikes"},
     "groups": {"what": "the §8 dashboard: message Devon privately and she lists every group and channel where YOU hold admin — status, member count, economy health (treasury, holders, active members, faucet throttle), and pending actions (join requests, restricted holds, flag proposals, governance proposals, open appeals) — with deep-links into /console per group. The operator sees all; anyone else sees only groups they actually admin.",
             "usage": "/groups",
-            "example": "/groups",
+            "example": "/groups"},
+    "gbackup": {"what": "the §9.8 group backup/export: message Devon privately and she backs up one group you admin — settings, roster, economy ledger with balances, audit log — as a file you can download, restores it into the group from a stored backup (a preview shows what would change first, and only an explicit yes applies it), and runs scheduled backups per group (off, daily or weekly). The operator sees all; anyone else sees only groups they actually admin. The file is the backup itself; the reply carries the summary.",
+            "usage": "/gbackup | /gbackup <g1> | /gbackup export <g1> | /gbackup restore <g1> <id> [yes] | /gbackup schedule <g1> <off|daily|weekly> [hour N] [keep N] | /gbackup delete <g1> <id>",
+            "example": "/gbackup export g1",
             "related": "/console /glog /treasury"},
     "undonotice": {"what": "undo one automated action from its notice (§31): the strike it recorded is removed, a fine is refunded, and the platform action is reversed as far as the platform allows (mute lifted, ban lifted, restriction released; a removal needs nothing — the member can rejoin; a deleted message can't be restored and the undo says so). The notice edits in place where the platform supports it. Admins only; the undo is journaled in /glog like the action.",
             "usage": "/undonotice <notice id> (or tap the notice's Undo button)",
@@ -4646,7 +4650,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                           "update", "pull", "deploy", "restart"]),
     ("groups & communities", ["rules", "member", "glog", "gsettings",
                             "strikes", "recheck", "joinq", "console",
-                            "groups",
+                            "groups", "gbackup",
                             "undonotice", "flag", "rep", "repclear",
                             "repdismiss",
                             "balance", "mine", "work", "pay", "gshop",
@@ -4973,7 +4977,8 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
      ["rules", "member", "glog", "gsettings", "strikes",
-      "recheck", "joinq", "console", "groups", "undonotice",
+      "recheck", "joinq", "console", "groups", "gbackup",
+      "undonotice",
       "flag", "rep", "repclear", "repdismiss",
       "balance", "mine", "work", "pay", "gshop", "quests",
       "treasury", "deposit", "withdraw", "rob", "bail", "coinflip",
