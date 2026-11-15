@@ -444,6 +444,12 @@ class APIServer:
         # HMAC verification must run over the exact bytes the sender
         # signed, never a re-encoding of the parsed JSON.
         self._routes_raw_body: dict[tuple[str, str], bool] = {}
+        # (method, path) keys whose handler declares a ``headers``
+        # keyword and therefore receives the request headers (see
+        # ``route``): a provider signature that travels in a header
+        # (``X-Hub-Signature-256``, ``Stripe-Signature``) can only be
+        # verified when the handler sees it.
+        self._routes_headers: dict[tuple[str, str], bool] = {}
         # (method, path) -> human description, surfaced by GET /docs.
         self._route_docs: dict[tuple[str, str], str] = {}
         # (method, path) keys that skip bearer auth entirely — tokenless
@@ -514,6 +520,7 @@ class APIServer:
         query: dict[str, str],
         principal: Principal | None = None,
         raw_body: bytes = b"",
+        headers: dict[str, str] | None = None,
     ) -> tuple[int, Any]:
         """Route a request. ``principal`` defaults to the bounded default
         principal, so direct callers get the safe grant, never ``all()``.
@@ -521,7 +528,13 @@ class APIServer:
         direct callers that never saw the wire); routes whose handler
         declares a ``raw_body`` keyword receive it, so HMAC verification
         can run over the bytes the sender signed instead of a re-encoding
-        of the parsed JSON."""
+        of the parsed JSON. ``headers`` is the request headers as received
+        (``None`` for direct callers); routes whose handler declares a
+        ``headers`` keyword receive them with keys lowercased (HTTP header
+        names are case-insensitive), so a provider signature that travels
+        in a header (``X-Hub-Signature-256``, ``Stripe-Signature``) can be
+        verified. Every other handler keeps the plain ``(body, query)``
+        call shape."""
         handler = self._routes.get((method.upper(), path))
         if handler is None:
             # A known path under a different method is 405, not 404 — the
@@ -538,9 +551,15 @@ class APIServer:
         self._tls.principal = principal if principal is not None else self.default_principal
         try:
             try:
+                kwargs: dict[str, Any] = {}
                 if self._routes_raw_body.get((method.upper(), path)):
-                    return 200, handler(body, query, raw_body=raw_body)
-                return 200, handler(body, query)
+                    kwargs["raw_body"] = raw_body
+                if self._routes_headers.get((method.upper(), path)):
+                    kwargs["headers"] = {
+                        str(k).lower(): v
+                        for k, v in (headers or {}).items()
+                    }
+                return 200, handler(body, query, **kwargs)
             except CapabilityDenied as exc:
                 return 403, {"error": str(exc) or "capability denied",
                              "kind": "CapabilityDenied"}
@@ -567,12 +586,17 @@ class APIServer:
             # A handler that declares a ``raw_body`` keyword opts into
             # receiving the raw request bytes at dispatch time (HMAC
             # verification must run over the bytes the sender signed).
-            # Every other handler keeps the (body, query) call shape.
+            # A handler that declares a ``headers`` keyword opts into
+            # receiving the request headers the same way (a provider
+            # signature that travels in a header). Every other handler
+            # keeps the (body, query) call shape.
             try:
                 params = inspect.signature(fn).parameters
                 self._routes_raw_body[key] = "raw_body" in params
+                self._routes_headers[key] = "headers" in params
             except (TypeError, ValueError):
                 self._routes_raw_body[key] = False
+                self._routes_headers[key] = False
             # An explicit description wins; otherwise fall back to the
             # handler's name so /docs never shows a blank line.
             self._route_docs[key] = description or fn.__name__
@@ -1599,9 +1623,14 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                         return
                     body = parsed_body
             query = {k: v[0] for k, v in parse_qs(parsed.query).items()}
+            # The raw headers ride to dispatch alongside the raw body:
+            # a provider signature travels in a header, and a handler
+            # that declares ``headers`` receives them (keys are lowercased
+            # at dispatch time — HTTP header names are case-insensitive).
+            headers = dict(self.headers.items())
             status, payload = server.dispatch(
                 method, parsed.path, body, query, principal=principal,
-                raw_body=raw_body,
+                raw_body=raw_body, headers=headers,
             )
             if status >= 400:
                 payload, is_problem = self._wrap_dispatch_error(status, payload)
