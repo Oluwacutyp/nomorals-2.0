@@ -16721,7 +16721,14 @@ class RuntimeGroupMixin:
 
         surface = self._group_surface()
         s = surface.store.settings(key)
-        policy = surface.economy.issuance_state(key)
+        # The card renders the policy as of the command's own
+        # timestamp (message.ts, real clock when absent) — the
+        # same seam the neighbouring control handlers use — so a
+        # caller that seeds issuance at a given time sees the
+        # policy for that time, not for whenever the handler ran.
+        policy = surface.economy.issuance_state(
+            key, now=float(getattr(message, "ts", 0)
+                           or time.time()))
         state = ("throttled (activity pays half)"
                  if policy["throttled"] else "normal")
         card = Card("economy", title="The group's monetary "

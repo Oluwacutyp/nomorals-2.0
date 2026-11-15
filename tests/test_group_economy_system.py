@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from nomorals.social.chat.group_surface import GroupStore, GroupSurface
+from tests.frozen_clock import MIDDAY_TS
 
 KEY = "telegram-bot:-1001234567"
 
@@ -48,13 +49,13 @@ def _rig(tmp_path: Path, *, operator_id: str | None = None):
 
 
 def _msg(*, sender_id="55", sender="Bola", username="bola",
-         text="", meta=None):
+         text="", meta=None, ts=None):
     return SimpleNamespace(
         chat=SimpleNamespace(key=KEY, platform="telegram-bot",
                              kind="group", title="Builders"),
         sender_id=sender_id, sender=sender,
         sender_username=username, text=text, meta=meta or {},
-        message_id="1")
+        message_id="1", ts=ts)
 
 
 def _seed(surface, amount=300, *, user_id="55", name="Bola",
@@ -66,7 +67,7 @@ def _seed(surface, amount=300, *, user_id="55", name="Bola",
     (seed + today's streak spark)."""
     surface.handle_message(KEY, user_id, username=username,
                            name=name, text="hello group")
-    base = time.time()
+    base = MIDDAY_TS
     remaining, step = amount, 0
     while remaining > 0:
         chunk = min(190, remaining)
@@ -108,6 +109,11 @@ def test_daily_once_a_day_and_streak_grows(tmp_path):
     assert "daily claimed" in out.text and "+25" in out.text, out
     out = rt._control_group_daily(_msg())
     assert "already claimed" in str(out), out
+    # LIVE CLOCK (grandfathered, baseline 2 — this read): the
+    # first claim above went through the runtime control, which
+    # stamps the real clock; the streak only grows on the
+    # CONSECUTIVE day, so this second claim must be the real
+    # tomorrow, not a frozen one.
     now = time.time()
     nxt = surface.daily_claim(KEY, "55", now=now + 86400 + 60)
     assert nxt["ok"] and nxt["streak"] == 2
@@ -158,6 +164,11 @@ def test_rob_success_moves_wallet_only_failure_jails(tmp_path):
     assert econ.balance(KEY, "55") == 46
     assert econ.bank_balance(KEY, "55") == 150    # vault untouched
     assert econ.balance(KEY, "77") == 14      # his streak 5 + the 9
+    # LIVE CLOCK (grandfathered, baseline 2 — this read): the
+    # jail this robbery opens is read back below through
+    # jail_state() with no now (real clock) and through the
+    # runtime _control_work, which also reads the real clock —
+    # a frozen robbery time would read as already expired.
     caught = surface.rob(KEY, "77", "55", rng=_Rigged(draw=0.9),
                          now=time.time() + 700)
     assert caught["ok"] and caught["jailed"]
@@ -281,7 +292,7 @@ def test_group_quest_pays_treasury_once(tmp_path):
     surface.handle_message(KEY, "55", username="bola", name="Bola",
                            text="hi")
     econ = surface.economy
-    now = time.time()
+    now = MIDDAY_TS
     for _i in range(500):
         econ.record_activity(KEY, "55", "message", now=now)
     extras = surface._extras(KEY)
@@ -301,13 +312,13 @@ def test_season_rollover_crowns_and_archives(tmp_path):
                            text="hi")
     econ = surface.economy
     from nomorals.community.group_economy import season_key
-    old = time.time() - 40 * 7 * 86400  # a long-past season
+    old = MIDDAY_TS - 40 * 7 * 86400  # a long-past season
     econ.award(KEY, "55", 50, "old season work", now=old)
     extras = surface._extras(KEY)
     extras["season_seen"] = season_key(old)
-    note = surface.season_cycle(KEY, now=time.time())
+    note = surface.season_cycle(KEY, now=MIDDAY_TS)
     assert note and "champions" in note and "Bola" in note, note
-    assert extras["season_seen"] == season_key(time.time())
+    assert extras["season_seen"] == season_key(MIDDAY_TS)
     archived = econ._load_json(KEY, f"archive-{season_key(old)}", [])
     assert len(archived) >= 1
 
@@ -319,7 +330,7 @@ def test_monetary_policy_throttles_the_faucet(tmp_path):
     surface.handle_message(KEY, "77", username="crim", name="Crim",
                            text="hi")
     econ = surface.economy
-    now = time.time()
+    now = MIDDAY_TS
     # Seed HOT ISSUANCE through a channel the policy counts and the
     # earn caps do not bind: conversion-in (§25).  issuance_state
     # counts positive convert legs as earned BY DESIGN (the policy
@@ -342,7 +353,7 @@ def test_monetary_policy_throttles_the_faucet(tmp_path):
     assert state["earned"] >= seeded and state["throttled"], state
     entry = econ.record_activity(KEY, "55", "streak_day", now=now)
     assert entry is not None and entry.amount == 2  # 5 halved
-    out = rt._control_tax(_msg())
+    out = rt._control_tax(_msg(ts=now))
     assert "throttled" in out, out
 
 
@@ -361,7 +372,7 @@ def test_monetary_policy_seed_does_not_ride_the_faucet(tmp_path):
     surface.handle_message(KEY, "77", username="crim", name="Crim",
                            text="hi")
     econ = surface.economy
-    now = time.time()
+    now = MIDDAY_TS
     # Saturate member 55's faucet for today: the message earn (5)
     # + a 195 grind award fills the 200 daily cap exactly.
     assert econ.award(KEY, "55", 195, "grind", now=now) is not None

@@ -97,9 +97,28 @@ BASELINE: dict[str, int] = {
     "tests/test_gifting.py": 1,
     "tests/test_goals_sweep.py": 18,
     "tests/test_goals_tracker.py": 7,
+    # Grandfathered (batch H8): the feed/claim test opens a drop
+    # with an explicit now and claims it through the runtime
+    # control, which stamps the real clock — claim_sysdrop
+    # refuses a drop whose expires (open + 900s) has passed, so
+    # the open must stay on the real clock.
+    "tests/test_group_conflict.py": 1,
+    # Grandfathered (batch H8): the daily-streak test's first
+    # claim goes through the runtime control (real clock) and
+    # the second must be the consecutive real day; the rob test's
+    # jail is read back through jail_state() and _control_work
+    # with no now (real clock), so a frozen robbery time would
+    # read as already expired.
+    "tests/test_group_economy_system.py": 2,
     "tests/test_group_travel.py": 2,
     "tests/test_health_sweep.py": 17,
     "tests/test_health_timeline.py": 3,
+    # Grandfathered (batch H8): the blacklisted-deposit test's
+    # bust goes through heist_go at the real clock because the
+    # blacklist (48h from the bust) is enforced through the
+    # runtime control (_control_deposit) on the real clock — a
+    # frozen bust-now would read as expired before the deposit.
+    "tests/test_heist_consequences.py": 1,
     "tests/test_hub_sweep.py": 4,
     "tests/test_id_prefix_resolution.py": 2,
     "tests/test_idempotency.py": 2,

@@ -45,6 +45,7 @@ from nomorals.social.chat.group_surface import (
     GroupStore,
     GroupSurface,
 )
+from tests.frozen_clock import MIDDAY_TS
 
 KEY = "telegram-bot:-1001234567"      # a claimed bot room
 KEY2 = "telegram-bot:-1007654321"     # a second claimed room
@@ -91,8 +92,8 @@ def _seed(surface: GroupSurface, key: str, uid: str,
     the way the economy rig seeds (earn caps are real)."""
     surface.handle_message(key, uid, username=f"u{uid}",
                            name=name or f"User {uid}",
-                           text="hello group")
-    base = time.time()
+                           text="hello group", ts=MIDDAY_TS)
+    base = MIDDAY_TS
     remaining, step = amount, 0
     while remaining > 0:
         chunk = min(190, remaining)
@@ -108,7 +109,7 @@ def _gems(surface: GroupSurface, key: str, uid: str,
     """Fixture gems through a REAL faucet source (season)."""
     out = surface.estate.credit_gems(
         key, uid, amount, source="season", reason="test seed",
-        now=time.time())
+        now=MIDDAY_TS)
     assert out is not None
 
 
@@ -137,7 +138,7 @@ def _fund_gang(surface: GroupSurface, key: str, leader: str,
 def test_mode_off_nothing_exists(tmp_path):
     surface = _surface(tmp_path)
     _seed(surface, KEY, "55", 500)
-    now = time.time()
+    now = MIDDAY_TS
     assert surface.gear_buy(KEY, "55", "lockpick_set",
                             now=now)["reason"] == "mode"
     assert surface.gang_create(KEY, "55", "Night Owls",
@@ -159,7 +160,7 @@ def test_arsenal_purchase_sparks_and_gems(tmp_path):
     surface = _surface(tmp_path)
     _mode(surface, KEY, "crime")
     base = _seed(surface, KEY, "55", 4000)
-    now = time.time()
+    now = MIDDAY_TS
     econ = surface.economy
     out = surface.gear_buy(KEY, "55", "lockpick_set", now=now)
     assert out["ok"] and econ.balance(KEY, "55") == base - 120
@@ -187,7 +188,7 @@ def test_nuke_is_admin_minted_and_unique(tmp_path):
     _mode(surface, KEY, "crime")
     _seed(surface, KEY, "55", 100)
     _gems(surface, KEY, "55", 1200)
-    now = time.time()
+    now = MIDDAY_TS
     out = surface.gear_buy(KEY, "55", "nuke", now=now)
     assert out["reason"] == "admin_only"
     out = surface.gear_buy(KEY, "55", "nuke", now=now,
@@ -233,7 +234,7 @@ def _heist_rig(tmp_path):
 
 def test_heist_strong_kit_vs_weak_vault_succeeds(tmp_path):
     surface = _heist_rig(tmp_path)
-    now = time.time()
+    now = MIDDAY_TS
     surface.gear_buy(KEY, "11", "thermite_charge", now=now)
     surface.gear_buy(KEY, "11", "vault_drill", now=now)
     start = surface.heist_start(KEY, "11", "vault", "13",
@@ -264,7 +265,7 @@ def test_heist_strong_kit_vs_weak_vault_succeeds(tmp_path):
 
 def test_heist_naked_crew_vs_bunker_busts(tmp_path):
     surface = _heist_rig(tmp_path)
-    now = time.time()
+    now = MIDDAY_TS
     _gems(surface, KEY, "13", 20)
     assert surface.gear_buy(KEY, "13", "bunker", now=now)["ok"]
     out = surface.gear_install(KEY, "13", "bunker",
@@ -285,7 +286,7 @@ def test_heist_naked_crew_vs_bunker_busts(tmp_path):
 
 def test_heist_partial_band_pays_less_and_jails_nobody(tmp_path):
     surface = _heist_rig(tmp_path)
-    now = time.time()
+    now = MIDDAY_TS
     assert surface.heist_start(KEY, "11", "vault", "13",
                                now=now)["ok"]
     assert surface.heist_join(KEY, "12", now=now)["ok"]
@@ -300,7 +301,7 @@ def test_heist_partial_band_pays_less_and_jails_nobody(tmp_path):
 
 def test_heist_decoy_vault_pays_nothing(tmp_path):
     surface = _heist_rig(tmp_path)
-    now = time.time()
+    now = MIDDAY_TS
     surface.gear_buy(KEY, "11", "thermite_charge", now=now)
     surface.gear_buy(KEY, "13", "decoy_vault", now=now)
     assert surface.gear_install(KEY, "13", "decoy_vault",
@@ -322,7 +323,7 @@ def test_kill_hospitalizes_and_bail_or_medkit_discharges(
     _mode(surface, KEY, "crime")
     _seed(surface, KEY, "11", 1500, name="Hit")
     _seed(surface, KEY, "13", 800, name="Mark")
-    now = time.time()
+    now = MIDDAY_TS
     # bare hands cannot kill: the weapon gate is real
     out = surface.crime_verb(KEY, "11", "13", "kill",
                              rng=_Rng(), now=now)
@@ -359,7 +360,7 @@ def test_failed_verb_jails_the_actor(tmp_path):
     _mode(surface, KEY, "crime")
     _seed(surface, KEY, "11", 500)
     _seed(surface, KEY, "13", 500)
-    now = time.time()
+    now = MIDDAY_TS
     out = surface.crime_verb(KEY, "11", "13", "shoot",
                              rng=_Rng(0.99), now=now)
     assert out["ok"] and not out["success"]
@@ -372,7 +373,7 @@ def test_sabotage_bills_through_the_estate(tmp_path):
     _mode(surface, KEY, "crime")
     _seed(surface, KEY, "11", 900, name="Wrecker")
     _seed(surface, KEY, "13", 3000, name="Owner")
-    now = time.time()
+    now = MIDDAY_TS
     bought = surface.estate_buy(KEY, "13", "old_town", "shop",
                                 now=now)
     assert bought["ok"], bought
@@ -394,7 +395,7 @@ def test_sabotage_bills_through_the_estate(tmp_path):
 def test_gang_lifecycle_lifestyle_and_strength(tmp_path):
     surface = _surface(tmp_path)
     _mode(surface, KEY, "crime")
-    now = time.time()
+    now = MIDDAY_TS
     members = ["21", "22", "23", "24", "25"]
     for uid in members:
         _seed(surface, KEY, uid, 800)
@@ -448,7 +449,7 @@ def test_gang_lifecycle_lifestyle_and_strength(tmp_path):
 def test_gang_treasury_is_reserved_from_grants(tmp_path):
     surface = _surface(tmp_path)
     _mode(surface, KEY, "crime")
-    now = time.time()
+    now = MIDDAY_TS
     _seed(surface, KEY, "21", 1000)
     _seed(surface, KEY, "22", 100)
     _gang(surface, KEY, "21", [], name="Owls",
@@ -477,7 +478,7 @@ def test_gang_treasury_is_reserved_from_grants(tmp_path):
 def _war_rig(tmp_path):
     surface = _surface(tmp_path)
     _mode(surface, KEY, "warfare")
-    now = time.time()
+    now = MIDDAY_TS
     a = ["a1", "a2", "a3", "a4", "a5"]
     b = ["b1", "b2", "b3", "b4", "b5"]
     for uid in a + b:
@@ -537,7 +538,7 @@ def test_war_rounds_escrow_spoils_and_territory(tmp_path):
 def test_territory_income_pays_from_treasury_not_air(tmp_path):
     surface = _surface(tmp_path)
     _mode(surface, KEY, "warfare")
-    now = time.time()
+    now = MIDDAY_TS
     members = ["31", "32", "33", "34", "35"]
     for uid in members:
         _seed(surface, KEY, uid, 900)
@@ -576,7 +577,7 @@ def test_territory_income_pays_from_treasury_not_air(tmp_path):
 def test_inter_group_war_through_the_book(tmp_path):
     surface_a = _surface(tmp_path, "ga.json")
     surface_b = _surface(tmp_path, "gb.json")
-    now = time.time()
+    now = MIDDAY_TS
     for surface, key, prefix in ((surface_a, KEY, "a"),
                                  (surface_b, KEY2, "b")):
         _mode(surface, key, "warfare")
@@ -638,7 +639,7 @@ def _farmer(tmp_path, hits: int = 3):
     # the farmer banks a vault for the raid to find, and the
     # treasury holds funds for fines to join
     surface.deposit(KEY, "66", 1000)
-    now = time.time()
+    now = MIDDAY_TS
     for step in range(hits):
         out = surface.crime_verb(KEY, "66", "77", "shoot",
                                  rng=_Rng(0.0),
@@ -650,7 +651,7 @@ def _farmer(tmp_path, hits: int = 3):
 def test_police_ordinary_play_never_escalates(tmp_path):
     surface = _surface(tmp_path)
     _mode(surface, KEY, "crime")
-    now = time.time()
+    now = MIDDAY_TS
     _seed(surface, KEY, "66", 5000, name="Peer")
     _seed(surface, KEY, "77", 5000, name="PeerTwo")
     # established members both (aged past the 24h newcomer
@@ -762,7 +763,7 @@ def test_bribe_success_forgives_and_failure_adds_heat(tmp_path):
     _mode(surface3, KEY, "crime")
     _seed(surface3, KEY, "66", 5000, name="Farmer")
     _seed(surface3, KEY, "77", 60, name="Newbie")
-    t0 = time.time()
+    t0 = MIDDAY_TS
     for step in range(3):
         surface3.crime_verb(KEY, "66", "77", "shoot",
                             rng=_Rng(0.0), now=t0 + step * 601)
@@ -782,7 +783,7 @@ def test_bribe_success_forgives_and_failure_adds_heat(tmp_path):
 def test_bounty_claimed_by_geared_hit_and_by_hunt(tmp_path):
     surface = _surface(tmp_path)
     _mode(surface, KEY, "crime")
-    now = time.time()
+    now = MIDDAY_TS
     _seed(surface, KEY, "81", 1500, name="Poster")
     _seed(surface, KEY, "82", 900, name="Mark")
     _seed(surface, KEY, "83", 900, name="Hunter")
@@ -815,7 +816,7 @@ def test_governance_capture_moves_levers_not_mechanisms(
         tmp_path):
     surface = _surface(tmp_path)
     _mode(surface, KEY, "warfare")
-    now = time.time()
+    now = MIDDAY_TS
     members = ["41", "42", "43", "44", "45"]
     for uid in members:
         _seed(surface, KEY, uid, 2000)
@@ -864,7 +865,7 @@ def test_drops_budget_contents_slots_and_expiry(tmp_path):
     _mode(surface, KEY, "crime")
     organ = surface.conflict
     cfg = surface.conflict_cfg(KEY)
-    now = time.time()
+    now = MIDDAY_TS
     for uid in ("51", "52", "53", "54", "55", "56"):
         surface.handle_message(KEY, uid, username=f"u{uid}",
                                name=f"U{uid}", text="hi")
@@ -923,7 +924,7 @@ def test_drop_contents_vary_and_gems_ride_the_faucet(tmp_path):
     kinds = set()
     for seed in range(60):
         drop = organ.roll_drop(rng=_random.Random(seed),
-                               now=time.time())
+                               now=MIDDAY_TS)
         kinds.add(drop["kind"])
         assert 1 <= drop["slots"] <= 5
     assert len(kinds) >= 4, kinds
@@ -931,15 +932,15 @@ def test_drop_contents_vary_and_gems_ride_the_faucet(tmp_path):
     # faucet (source "drop"), never around it
     surface.handle_message(KEY, "51", username="u51",
                            name="U51", text="hi")
-    drop = organ.roll_drop(rng=_Rng(0.90), now=time.time())
+    drop = organ.roll_drop(rng=_Rng(0.90), now=MIDDAY_TS)
     assert drop["kind"] == "gems", drop
     state = organ._load_state(KEY)
     drop["id"] = "drop-test"
-    drop["expires"] = time.time() + 900
+    drop["expires"] = MIDDAY_TS + 900
     state["drops"]["drop-test"] = drop
     organ._save_state(KEY, state)
     out = surface.sysdrop_claim(KEY, "51", "drop-test",
-                                now=time.time())
+                                now=MIDDAY_TS)
     assert out["ok"], out
     assert surface.estate.gems_balance(KEY, "51") \
         == drop["amount"]
@@ -951,7 +952,7 @@ def test_drops_suppressed_in_an_unclaimed_room(tmp_path):
     surface.handle_message(FOREIGN, "51", username="u51",
                            name="U51", text="hi")
     notices = surface.conflict_cycle(FOREIGN, rng=_Rng(0.0),
-                                     now=time.time())
+                                     now=MIDDAY_TS)
     assert notices == []
     state = surface.conflict._load_state(FOREIGN)
     assert state["drops"] == {}
@@ -966,7 +967,7 @@ def test_drops_suppressed_in_an_unclaimed_room(tmp_path):
     state["drop_day"] = {}
     surface.conflict._save_state(KEY, state)
     surface._extras(KEY)["conflict_feed"] = []
-    surface.conflict_cycle(KEY, rng=_Rng(0.0), now=time.time())
+    surface.conflict_cycle(KEY, rng=_Rng(0.0), now=MIDDAY_TS)
     state = surface.conflict._load_state(KEY)
     assert len(state["drops"]) == 1
     feed = surface._extras(KEY).get("conflict_feed") or []
@@ -1062,6 +1063,15 @@ def test_runtime_feed_posts_drop_and_claim_settles(tmp_path):
     surface.handle_message(KEY, "55", username="bola",
                            name="Bola", text="hi")
     surface.conflict_cycle(KEY, rng=_Rng(0.0),
+                           # LIVE CLOCK (grandfathered, baseline 1):
+                           # the drop opened here is claimed below
+                           # through the runtime control
+                           # (_control_claimdrop -> sysdrop_claim),
+                           # which stamps the real clock — and
+                           # claim_sysdrop refuses a drop whose
+                           # expires (open + 900s) has passed. A
+                           # frozen open-time would read as expired
+                           # a month before the real-clock claim.
                            now=time.time())
     rt._post_conflict_feed(surface, KEY, _msg())
     assert any("Supply drop" in text for text, _b in rt.sent), \
@@ -1082,7 +1092,7 @@ def test_runtime_police_jail_undo_lifts_jail_only(tmp_path):
     _seed(surface, KEY, "66", 5000, name="Farmer")
     _seed(surface, KEY, "77", 60, name="Newbie")
     surface.deposit(KEY, "66", 1000)
-    t0 = time.time()
+    t0 = MIDDAY_TS
     for step in range(6):
         surface.crime_verb(KEY, "66", "77", "shoot",
                            rng=_Rng(0.0), now=t0 + step * 601)
@@ -1107,7 +1117,7 @@ def test_runtime_police_jail_undo_lifts_jail_only(tmp_path):
 def test_runtime_capture_lets_the_power_gang_grant(tmp_path):
     rt, surface = _rig(tmp_path)
     _mode(surface, KEY, "warfare")
-    now = time.time()
+    now = MIDDAY_TS
     members = ["41", "42", "43", "44", "45"]
     for uid in members:
         _seed(surface, KEY, uid, 2000)

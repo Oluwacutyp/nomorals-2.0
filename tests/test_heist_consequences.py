@@ -40,6 +40,7 @@ from nomorals.social.chat.group_surface import (
     GroupStore,
     GroupSurface,
 )
+from tests.frozen_clock import MIDDAY_TS
 
 KEY = "telegram-bot:-1001234567"
 HOUR = 3600.0
@@ -75,7 +76,7 @@ def _seed(surface: GroupSurface, uid: str, amount: int,
     surface.handle_message(KEY, uid, username=f"u{uid}",
                            name=name or f"User {uid}",
                            text="hello group")
-    base = time.time()
+    base = MIDDAY_TS
     remaining, step = amount, 0
     while remaining > 0:
         chunk = min(190, remaining)
@@ -146,7 +147,7 @@ def _owner_of(surface: GroupSurface, pid: str) -> str:
 # ── the conviction itself ─────────────────────────────────────
 
 def test_bank_bust_opens_one_case_and_settles_it(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     bank_before = surface.economy.bank_balance(KEY, "11")
     wallet_before = surface.economy.balance(KEY, "11")
@@ -178,7 +179,7 @@ def test_bank_bust_opens_one_case_and_settles_it(tmp_path):
 
 
 def test_bust_seizes_crew_property_into_recovery_estate(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     mine_before = {p["id"] for p in
                    surface.estate.portfolio(KEY, "11")}
@@ -220,7 +221,7 @@ def test_bust_seizes_crew_property_into_recovery_estate(tmp_path):
 
 
 def test_zero_property_offender_still_convicts(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface = _surface(tmp_path)
     for uid, amount in (("11", 3000), ("12", 900), ("13", 800),
                         ("14", 800), ("15", 800)):
@@ -235,7 +236,7 @@ def test_zero_property_offender_still_convicts(tmp_path):
 
 def test_seizure_cancels_open_auction_and_refunds_the_bid(
         tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, props = _rig(tmp_path, now)
     pid = next(iter(props["12"]))
     auction = surface.estate.start_auction(KEY, "12", pid, 300,
@@ -261,7 +262,7 @@ def test_seizure_cancels_open_auction_and_refunds_the_bid(
 
 
 def test_seizure_carries_a_mortgage_as_encumbrance(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, props = _rig(tmp_path, now)
     pid = next(p for p in props["11"]
                if not (surface.estate._load_state(KEY)
@@ -286,7 +287,7 @@ def test_seizure_carries_a_mortgage_as_encumbrance(tmp_path):
 
 
 def test_decoy_bank_result_never_convicts(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     # the bank's own decoy vault, installed at the bank scope,
     # plus a strong crew: the roll SUCCEEDS and still nobody
@@ -313,7 +314,7 @@ def test_decoy_bank_result_never_convicts(tmp_path):
 # ── the blacklist: enforced at the bank operation ─────────────
 
 def test_blacklist_binds_every_vault_credit_route(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     _bank_bust(surface, now)
     econ = surface.economy
@@ -341,7 +342,7 @@ def test_indirect_credits_are_judged_not_deposits(tmp_path):
     deposit, it goes through; the offender banking it after is
     the deposit, and that is refused. Withdrawals and bank
     debits (mortgage-style) are not deposits either."""
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     _bank_bust(surface, now)
     econ = surface.economy
@@ -362,7 +363,7 @@ def test_indirect_credits_are_judged_not_deposits(tmp_path):
 
 
 def test_repeat_bust_blacklists_96_hours(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     first = _bank_bust(surface, now)
     assert first["case"]["offenders"]["11"]["blacklist_hours"] \
@@ -383,7 +384,7 @@ def test_repeat_bust_blacklists_96_hours(tmp_path):
 
 def test_blacklist_lifts_automatically_and_status_says_so(
         tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     out = _bank_bust(surface, now)
     case_id = out["case"]["id"]
@@ -407,7 +408,7 @@ def test_blacklist_lifts_automatically_and_status_says_so(
 
 
 def test_bail_changes_custody_only(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     out = _bank_bust(surface, now)
     case = out["case"]
@@ -428,7 +429,7 @@ def test_bail_changes_custody_only(tmp_path):
 # ── settlement integrity ──────────────────────────────────────
 
 def test_settlement_retry_never_double_settles(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     out = _bank_bust(surface, now)
     case = out["case"]
@@ -455,7 +456,7 @@ def test_settlement_retry_never_double_settles(tmp_path):
 
 def test_settlement_failure_is_recovery_required_not_success(
         tmp_path, monkeypatch):
-    now = time.time()
+    now = MIDDAY_TS
     surface, props = _rig(tmp_path, now)
     real_seize = surface.estate.seize_member_property
 
@@ -486,7 +487,7 @@ def test_settlement_failure_is_recovery_required_not_success(
 
 
 def test_case_blacklist_and_jail_survive_restart(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     out = _bank_bust(surface, now)
     case_id = out["case"]["id"]
@@ -503,7 +504,7 @@ def test_case_blacklist_and_jail_survive_restart(tmp_path):
 # ── what never convicts ───────────────────────────────────────
 
 def test_partial_bank_result_never_convicts(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     # fund the treasury: a partial take must exist to land in
     # the partial band at all (an empty till reads "empty")
@@ -529,7 +530,7 @@ def test_vault_bust_jails_but_never_convicts(tmp_path):
     """Robbing a MEMBER's vault is the street crime it always
     was: the bust jails the crew, but it is not a bank robbery
     — no case, no blacklist, no seizure."""
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     start = surface.heist_start(KEY, "11", "vault", "13",
                                 now=now)
@@ -544,7 +545,7 @@ def test_vault_bust_jails_but_never_convicts(tmp_path):
 
 
 def test_unresolved_and_malformed_never_convict(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     surface, _props = _rig(tmp_path, now)
     # no lobby at all
     out = surface.heist_go(KEY, "11", rng=_Rng(0.99), now=now)
@@ -596,7 +597,7 @@ def _chat_seed(surface: GroupSurface, uid: str, amount: int,
                name: str) -> None:
     surface.handle_message(KEY, uid, username=f"u{uid}",
                            name=name, text="hello group")
-    base = time.time()
+    base = MIDDAY_TS
     remaining, step = amount, 0
     while remaining > 0:
         chunk = min(190, remaining)
@@ -663,6 +664,12 @@ def test_chat_same_card_new_amount_is_a_new_operation(tmp_path):
 
 def test_chat_blacklisted_deposit_names_the_case(tmp_path):
     rt, surface = _rt_rig(tmp_path)
+    # LIVE CLOCK (grandfathered, baseline 1): the bust below is
+    # enforced through the runtime control (_control_deposit),
+    # which stamps the real clock — and the blacklist runs 48h
+    # from the bust. A frozen bust-now would read as expired a
+    # month before the real-clock deposit, so the deposit would
+    # land instead of naming the case.
     now = time.time()
     for uid, amount in (("55", 9000), ("56", 5000), ("57", 800),
                         ("58", 800), ("59", 800)):

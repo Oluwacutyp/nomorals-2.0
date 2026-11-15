@@ -39,6 +39,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from nomorals.social.chat.group_surface import GroupStore, GroupSurface
+from tests.frozen_clock import MIDDAY_TS
 
 G = "telegram-bot:-100111"          # the group of record
 C = "telegram-bot:-100222"          # a channel Devon admins
@@ -46,7 +47,7 @@ C2 = "telegram:-100333"             # a foreign channel (userbot)
 D = "discord:777"                   # a discord group
 KEY = G
 
-NOW = time.time()
+NOW = MIDDAY_TS
 
 
 def _surface(tmp_path: Path) -> GroupSurface:
@@ -59,7 +60,7 @@ def _seed(surface, uid, name, username, amount, *, day0=0,
     chunks spread over past days under the earn caps)."""
     surface.handle_message(key, uid, username=username,
                            name=name, text="hello group")
-    base = time.time() - day0 * 86400
+    base = MIDDAY_TS - day0 * 86400
     remaining, step = amount, 0
     while remaining > 0:
         chunk = min(150, remaining)
@@ -229,11 +230,11 @@ def test_trigger_season_podium_crossposts(tmp_path):
     econ = surface.economy
     from nomorals.community.group_economy import season_key
 
-    old = time.time() - 40 * 7 * 86400
+    old = MIDDAY_TS - 40 * 7 * 86400
     econ.award(G, "55", 50, "old season work", now=old)
     extras = surface._extras(G)
     extras["season_seen"] = season_key(old)
-    note = surface.season_cycle(G, now=time.time())
+    note = surface.season_cycle(G, now=MIDDAY_TS)
     assert note and "champions" in note
     queue = surface.channel_queue(C)
     assert len(queue) == 1
@@ -241,7 +242,7 @@ def test_trigger_season_podium_crossposts(tmp_path):
     assert queue[0]["trigger"] == "season_podium"
     assert queue[0]["source_group"] == G
     send = _Send()
-    posts = surface.channel_cycle(C, now=time.time(), send=send,
+    posts = surface.channel_cycle(C, now=MIDDAY_TS, send=send,
                                   force=True)
     assert len(posts) == 1
     assert posts[0]["source"] == "trigger:season_podium"
@@ -705,7 +706,7 @@ def test_group_turn_drives_channel_posts(tmp_path):
     _claimed_channel(surface)
     surface.channel_enqueue(C, {
         "kind": "once", "text": "driven by the group",
-        "due": time.time() - 5, "source": "dm"})
+        "due": MIDDAY_TS - 5, "source": "dm"})
     chat = _Chat(key=G, kind="group")
     rt.turn(_Msg(chat=chat, sender_id="7", text="hello group"))
     posted = [t for (_p, k, t) in rt.gateway.sent if k == C]
@@ -721,7 +722,7 @@ def test_channel_message_notes_registry_and_drives(tmp_path):
     surface.note_channel_seen(C, title="Gold Signals")
     surface.channel_enqueue(C, {
         "kind": "once", "text": "on channel activity",
-        "due": time.time() - 5, "source": "dm"})
+        "due": MIDDAY_TS - 5, "source": "dm"})
     chat = _Chat(key=C, kind="channel", title="Gold Signals")
     rt._channel_note_and_drive(_Msg(chat=chat, sender_id="5",
                                     text="a channel post"))
