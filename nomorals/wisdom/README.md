@@ -80,11 +80,39 @@ nm wisdom timeline [tradition] [n] [--start Y] [--end Y] [--json]
 nm wisdom compare <topic> [--json]
 nm wisdom practice list [--json]
 nm wisdom practice <session-id> [--rounds N]
+nm wisdom oral submit <id> --file <transcript> [--language L] [--pack P]
+nm wisdom oral verify <id> [--notes ...] [--reject]
+nm wisdom oral ingest <id>
+nm wisdom oral list [--status S] [--json]
+nm wisdom oral read <id> [--json]
 ```
 
 Telegram mirrors the CLI: `/wisdom read <work> [chapter] [page]`,
 `/wisdom traditions`, `/wisdom seeds`, `/wisdom <tradition>`,
-`/wisdom timeline <tradition> [n]` (full summaries), `/wisdom status`.
+`/wisdom timeline <tradition> [n]` (full summaries), `/wisdom status`,
+`/wisdom oral submit <id>` (transcript on the following lines),
+`/wisdom oral verify <id>`, `/wisdom oral ingest <id>`,
+`/wisdom oral list`, `/wisdom oral read <id>`.
+
+## Oral tradition
+
+`oral.py` is the oral-tradition-native ingest pipeline: recordings →
+transcribe → diarize → align → provenance → index. The loop is
+draft → owner verifies → ingest, and nothing ingests unverified.
+Restricted material (`initiated` / `do-not-digitize` /
+`community-permission`) stops at submit without a permission record
+from the tradition's custodians — the system never scrapes around
+the restriction (`traditions.py: check_ingest` enforces the same
+rule). Drafts are durable on disk (`<wisdom>/oral/<id>.draft.json`),
+so submit / verify / ingest may run as separate one-shot `nm`
+invocations; ingest writes `<wisdom>/oral/<id>.json` and the record
+becomes searchable through `nm wisdom ask` / `/wisdom ask` (oral
+passages fill the slots the corpus leaves under `--limit`, and carry
+their draft id + contributor as provenance). Transcription is an
+injectable callable — the surfaces take transcript text (`SPEAKER:
+text` lines); no transcriber is faked. The Nigeria tradition pack
+(`traditions.py`) describes Ifa as a 256-odu oral corpus,
+descriptor-only.
 
 ## Corpus seed
 

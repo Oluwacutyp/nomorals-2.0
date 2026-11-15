@@ -1016,6 +1016,8 @@ _HELP_TEXT = "\n".join(
         "  /wisdom traditions [tradition]         what each tradition is + its works",
         "  /wisdom seeds                          every seed source + its works",
         "  /wisdom timeline [tradition] [n] | /wisdom compare <topic> | /wisdom status",
+        "  /wisdom oral submit <id> [--lang L] [--pack P] — then the transcript",
+        "  /wisdom oral verify <id> | ingest <id> | list | read <id>",
         "  — decode & crypto —",
         "  /decode <data> | /decode file:<path>     Universal Decoder (sends binary back)",
         "  /decode hash <digest> | /decode decoders identify hashes / list engine",

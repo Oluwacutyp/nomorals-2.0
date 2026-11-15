@@ -36,7 +36,7 @@ from .traditions import RestrictedCorpusError, check_ingest
 __all__ = [
     "OralError", "MissingTranscriberError", "PermissionRecord",
     "Turn", "DraftTranscript", "OralIngest", "split_turns",
-    "align_words",
+    "align_words", "search_ingested", "parse_oral_flags",
 ]
 
 _SPEAKER_LINE = re.compile(r"^([A-Za-z0-9 _-]{1,40}):\s*(.+)$")
@@ -133,6 +133,98 @@ def align_words(turns: list[Turn], *,
     return out
 
 
+def search_ingested(store_dir: Path | str, query: str, *,
+                    top: int = 5) -> list[dict[str, Any]]:
+    """Keyword search over ingested oral records on disk.
+
+    Reads the store's ``*.json`` files (ingest wrote them; a file
+
+    Reads the store's ``*.json`` files (ingest wrote them; a file
+    exists only for an ingested draft). A turn scores by how many
+    distinct query terms (2+ chars, lowercased) its text contains;
+    zero-score turns are dropped. Ranked by score desc, then draft
+    id, then turn order. No embeddings, no invented relevance.
+    """
+    terms = {t for t in re.findall(r"[a-z0-9\u00c0-\uffff]{2,}",
+                                   (query or "").lower())}
+    if not terms:
+        return []
+    hits: list[dict[str, Any]] = []
+    store = Path(store_dir)
+    if not store.is_dir():
+        return []
+    for path in sorted(store.glob("*.json")):
+        if path.name.endswith(".draft.json"):
+            continue
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(raw, dict) or "draft_id" not in raw:
+            continue
+        prov = raw.get("provenance", {}) or {}
+        for turn in raw.get("turns", []):
+            text = str(turn.get("text", ""))
+            low = text.lower()
+            score = sum(1 for t in terms if t in low)
+            if not score:
+                continue
+            hits.append({
+                "draft_id": str(raw.get("draft_id", path.stem)),
+                "speaker": str(turn.get("speaker", "unknown")),
+                "text": text,
+                "language": str(raw.get("language", "")),
+                "tradition_pack_id": str(raw.get("tradition_pack_id", "")),
+                "contributor": str(prov.get("contributor", "")),
+                "permission_ref": str(prov.get("permission_ref", "")),
+                "score": score,
+            })
+    hits.sort(key=lambda h: (-h["score"], h["draft_id"]))
+    return hits[:max(0, top)]
+
+
+#: ``--key`` flags the oral surfaces accept (CLI + chat share this).
+ORAL_FLAG_KEYS = {
+    "file", "language", "lang", "pack", "restriction", "granted-by",
+    "scope", "contact-ref", "audio-ref", "contributor", "notes",
+    "status",
+}
+#: Boolean ``--flag`` forms (no value follows).
+ORAL_BOOL_FLAGS = {"reject"}
+
+
+def parse_oral_flags(words: list[str]) -> tuple[dict[str, Any], list[str]]:
+    """Parse ``--key value`` / ``--flag`` pairs out of a word list.
+
+    Returns (flags, positionals). An unknown ``--key`` raises
+    ValueError with the key named — a mistyped flag is never silently
+    dropped. Shared by the CLI and chat surfaces so both parse the
+    same way.
+    """
+    flags: dict[str, Any] = {}
+    pos: list[str] = []
+    i = 0
+    while i < len(words):
+        w = words[i]
+        if w.startswith("--"):
+            key = w[2:]
+            if key in ORAL_BOOL_FLAGS:
+                flags[key] = True
+                i += 1
+            elif key not in ORAL_FLAG_KEYS:
+                raise ValueError(f"unknown oral flag --{key}")
+            elif i + 1 < len(words) and not words[i + 1].startswith("--"):
+                flags[key] = words[i + 1]
+                i += 2
+            else:
+                flags[key] = ""
+                i += 1
+        else:
+            pos.append(w)
+            i += 1
+    return flags, pos
+
+
 @dataclass
 class DraftTranscript:
     """One oral draft: transcript + provenance + verification state."""
@@ -167,12 +259,68 @@ class DraftTranscript:
 
 class OralIngest:
     """Draft → owner verifies → ingest. Restriction checked twice
-    (submit + ingest); either check can STOP the pipeline."""
+    (submit + ingest); either check can STOP the pipeline.
+
+    Drafts are DURABLE: ``submit_draft`` / ``verify`` write the draft
+    to ``<store>/<draft_id>.draft.json`` (atomic tmp+replace), so a
+    draft submitted by one process (``nm wisdom oral submit``) can be
+    verified and ingested by a later one. ``ingest`` writes the final
+    ``<draft_id>.json`` and removes the draft file. Files in the store
+    exist only because ingest wrote them, so a stored JSON is an
+    ingested record even though its recorded status is "verified"
+    (the status is snapshotted before the ingest flips it).
+    """
 
     def __init__(self, store_dir: Path | str) -> None:
         self.store_dir = Path(store_dir)
         self.store_dir.mkdir(parents=True, exist_ok=True)
         self._drafts: dict[str, DraftTranscript] = {}
+
+    def _draft_path(self, draft_id: str) -> Path:
+        return self.store_dir / f"{draft_id}.draft.json"
+
+    def _save_draft(self, draft: DraftTranscript) -> None:
+        path = self._draft_path(draft.draft_id)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(draft.to_dict(), indent=2,
+                                  ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+
+    def _load_draft(self, draft_id: str) -> DraftTranscript | None:
+        path = self._draft_path(draft_id)
+        if not path.is_file():
+            return None
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return None
+        try:
+            turns = [Turn(speaker=str(t.get("speaker", "unknown")),
+                          text=str(t.get("text", "")),
+                          start_s=float(t.get("start_s", 0.0)),
+                          end_s=float(t.get("end_s", 0.0)))
+                     for t in raw.get("turns", [])]
+            perm = raw.get("permission")
+            permission = (PermissionRecord(
+                granted_by=str(perm.get("granted_by", "")),
+                scope=str(perm.get("scope", "")),
+                date=str(perm.get("date", "")),
+                contact_ref=str(perm.get("contact_ref", "")),
+                notes=str(perm.get("notes", ""))) if perm else None)
+            draft = DraftTranscript(
+                draft_id=str(raw.get("draft_id", draft_id)),
+                audio_ref=str(raw.get("audio_ref", "")),
+                language=str(raw.get("language", "")),
+                tradition_pack_id=str(raw.get("tradition_pack_id", "")),
+                restriction=str(raw.get("restriction", "open")),
+                turns=turns, permission=permission,
+                status=str(raw.get("status", "draft")),
+                provenance=dict(raw.get("provenance", {})),
+                verified_by=str(raw.get("verified_by", "")),
+                verify_notes=str(raw.get("verify_notes", "")))
+        except (AttributeError, TypeError, ValueError):
+            return None
+        return draft
 
     def transcribe(self, audio_ref: str, *,
                    transcriber: Callable[[str], str] | None = None) -> str:
@@ -222,6 +370,7 @@ class OralIngest:
                             permission.contact_ref if permission else ""),
                         "source": "oral recording (draft transcript)"})
         self._drafts[draft_id] = draft
+        self._save_draft(draft)  # durable across processes
         return draft
 
     def verify(self, draft_id: str, *, owner: str = "",
@@ -238,6 +387,7 @@ class OralIngest:
         draft.verified_by = owner
         draft.verify_notes = notes
         draft.status = "verified" if approve else "rejected"
+        self._save_draft(draft)  # durable across processes
         return draft
 
     def ingest(self, draft_id: str) -> dict[str, Any]:
@@ -280,6 +430,7 @@ class OralIngest:
                        encoding="utf-8")
         tmp.replace(path)
         draft.status = "ingested"
+        self._draft_path(draft_id).unlink(missing_ok=True)
         return {"ok": True, "draft_id": draft_id, "path": str(path),
                 "turns": len(draft.turns),
                 "words": len(payload["text"].split()),
@@ -289,12 +440,85 @@ class OralIngest:
         return self._get(draft_id)
 
     def list_drafts(self, *, status: str = "") -> list[dict[str, Any]]:
-        out = [d.to_dict() for d in self._drafts.values()
-               if not status or d.status == status]
+        """All drafts: in-memory + durable ``.draft.json`` files.
+
+        In-memory wins on id collision (same draft, newer state).
+        """
+        merged: dict[str, dict[str, Any]] = {}
+        for path in sorted(self.store_dir.glob("*.draft.json")):
+            loaded = self._load_draft(path.name[:-len(".draft.json")])
+            if loaded is not None:
+                merged[loaded.draft_id] = loaded.to_dict()
+        for d in self._drafts.values():
+            merged[d.draft_id] = d.to_dict()
+        out = [d for d in merged.values()
+               if not status or d["status"] == status]
+        return sorted(out, key=lambda d: d["draft_id"])
+
+    def list_ingested(self) -> list[dict[str, Any]]:
+        """Durable listing of ingested records (the store's ``*.json``).
+
+        A file exists in the store only because ingest wrote it, so
+        every entry here is an ingested record; the recorded status
+        is "verified" (snapshotted before ingest flipped it — see the
+        class docstring).
+        """
+        out: list[dict[str, Any]] = []
+        for path in sorted(self.store_dir.glob("*.json")):
+            if path.name.endswith(".draft.json"):
+                continue
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if not isinstance(raw, dict) or "draft_id" not in raw:
+                continue
+            turns = raw.get("turns", [])
+            out.append({
+                "draft_id": str(raw.get("draft_id", path.stem)),
+                "status": str(raw.get("status", "verified")),
+                "language": str(raw.get("language", "")),
+                "tradition_pack_id": str(raw.get("tradition_pack_id", "")),
+                "restriction": str(raw.get("restriction", "open")),
+                "turns": len(turns),
+                "words": len(str(raw.get("text", "")).split()),
+                "provenance": dict(raw.get("provenance", {})),
+                "path": str(path),
+            })
         return out
+
+    def search(self, query: str, *, top: int = 5) -> list[dict[str, Any]]:
+        """Keyword search over INGESTED oral records on disk.
+
+        Honest keyword matching: a turn scores by how many distinct
+        query terms (2+ chars) it contains; turns scoring zero are
+        dropped. No embeddings, no invented relevance — the score is
+        the term count.
+        """
+        return search_ingested(self.store_dir, query, top=top)
+
+    def read_ingested(self, draft_id: str) -> dict[str, Any]:
+        """The full ingested record for one draft (or OralError)."""
+        path = self.store_dir / f"{draft_id}.json"
+        if not path.is_file():
+            raise OralError(f"no ingested oral draft {draft_id!r}")
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise OralError(
+                f"ingested oral draft {draft_id!r} is unreadable: {exc}"
+            ) from exc
+        if not isinstance(raw, dict):
+            raise OralError(f"ingested oral draft {draft_id!r} is malformed")
+        return raw
 
     def _get(self, draft_id: str) -> DraftTranscript:
         try:
             return self._drafts[draft_id]
         except KeyError:
+            pass
+        loaded = self._load_draft(draft_id)
+        if loaded is None:
             raise OralError(f"unknown draft {draft_id!r}") from None
+        self._drafts[draft_id] = loaded
+        return loaded

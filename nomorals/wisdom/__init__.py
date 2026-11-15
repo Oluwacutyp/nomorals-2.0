@@ -11,6 +11,8 @@ from .errors import (CorpusError, EmbeddingError, HistoryError, IngestError,
 from .hybrid import fuse_hits, reciprocal_rank_fusion, weighted_rrf
 from .vectorstore import VectorIndex, open_index
 from .ingestor import ArchiveIngestor
+from .oral import (MissingTranscriberError, OralError, OralIngest,
+                   PermissionRecord)
 from .autonomy import WisdomOrgan, mmr_order, textrank
 from .history import ERAS, HistoryEngine, era_of
 from .reading import (PAGE_CHARS, SEEDS, TRADITION_INFO, dehyphenate,
@@ -37,7 +39,11 @@ __all__ = [
     "HistoryEngine",
     "IngestError",
     "ManifestEntry",
+    "MissingTranscriberError",
     "OllamaBackend",
+    "OralError",
+    "OralIngest",
+    "PermissionRecord",
     "PracticeError",
     "ProvenanceHit",
     "SAFETY_TEXT",

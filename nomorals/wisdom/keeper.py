@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .corpus import Answer, CanonCorpus
+from .corpus import Answer, CanonCorpus, ProvenanceHit
 
 
 class WisdomKeeper:
@@ -18,6 +18,7 @@ class WisdomKeeper:
         self.corpus = CanonCorpus(context)
         self._history: Any = None
         self._practice: Any = None
+        self._oral: Any = None
 
     @property
     def history(self) -> Any:
@@ -33,10 +34,20 @@ class WisdomKeeper:
             self._practice = PracticeGuide(self.context)
         return self._practice
 
+    @property
+    def oral(self) -> Any:
+        """The oral-tradition ingest pipeline (draft → owner verifies
+        → ingest), rooted at the wisdom store next to the corpus
+        manifest. Lazily built like history/practice."""
+        if self._oral is None:
+            from .oral import OralIngest
+            self._oral = OralIngest(self.corpus._wisdom_root() / "oral")
+        return self._oral
+
     # ── ask ───────────────────────────────────────────────────────────
     def ask(self, query: str, *, top: int = 5,
             tradition: str = "", mode: str = "keyword",
-            **kwargs: Any) -> Answer:
+            include_oral: bool = True, **kwargs: Any) -> Answer:
         """Ask the corpus. Every returned passage carries provenance.
 
         ``mode``: ``"keyword"`` (FTS5/BM25), ``"semantic"`` (vector KNN),
@@ -44,9 +55,58 @@ class WisdomKeeper:
         arguments (``expand``, ``min_score``, ``diversify``,
         ``mmr_lambda``, ``weights``) forward to
         :meth:`CanonCorpus.ask`.
+
+        Ingested oral-tradition records are searched too (keyword match
+        over their turns) and fill any slots the corpus leaves under
+        ``top`` — an oral passage never displaces a corpus passage.
+        ``include_oral=False`` opts out.
         """
-        return self.corpus.ask(query, top=top, tradition=tradition,
-                               mode=mode, **kwargs)
+        ans = self.corpus.ask(query, top=top, tradition=tradition,
+                              mode=mode, **kwargs)
+        if include_oral:
+            found = self._oral_hits(query, limit=top - len(ans.passages))
+            if found:
+                for f in found:
+                    lang = f" ({f['language']})" if f["language"] else ""
+                    ans.passages.append(ProvenanceHit(
+                        work="oral tradition",
+                        translator=f.get("contributor", ""),
+                        section=f"draft {f['draft_id']} · {f['speaker']}{lang}",
+                        url="", snippet=f["text"],
+                        score=float(f["score"]),
+                        canon_status="oral-tradition"))
+                ans.confidence = CanonCorpus._confidence(ans.passages)
+                ids = sorted({f["draft_id"] for f in found})
+                ans.synthesis += (
+                    "\n\nOral-tradition passage(s) above — read the full "
+                    "draft with /wisdom oral read " + " / ".join(ids) + ".")
+        return ans
+
+    def _oral_hits(self, query: str, *, limit: int) -> list[dict[str, Any]]:
+        """Ingested oral turns matching the query (keyword, durable).
+
+        Never breaks ask: a missing/unreadable oral store yields no
+        hits, not an error.
+        """
+        if limit <= 0:
+            return []
+        try:
+            return self.oral.search(query, top=limit)
+        except Exception:  # noqa: BLE001 - oral store is best-effort here
+            return []
+
+    def read_oral(self, draft_id: str) -> dict[str, Any]:
+        """The full ingested oral record for one draft (or OralError)."""
+        return self.oral.read_ingested(draft_id)
+
+    def oral_status(self) -> dict[str, Any]:
+        """Durable oral counts for status surfaces."""
+        try:
+            ingested = self.oral.list_ingested()
+        except Exception:  # noqa: BLE001 - store missing reads as empty
+            ingested = []
+        return {"ingested": len(ingested),
+                "store": str(self.oral.store_dir)}
 
     def build_semantic_index(self, backend_name: str = "", *,
                              rebuild: bool = False,
@@ -65,6 +125,7 @@ class WisdomKeeper:
             "corpus": self.corpus.status(),
             "practice": self.practice.stats(),
             "semantic": self.corpus.semantic_index_status(),
+            "oral": self.oral_status(),
         }
 
     # ── readability: read / traditions / seeds ────────────────────────

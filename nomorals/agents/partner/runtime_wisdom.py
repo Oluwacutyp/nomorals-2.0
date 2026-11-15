@@ -21,6 +21,10 @@ _WISDOM_USAGE = (
     "  /wisdom practice stop                stop the running session\n"
     "  /wisdom timeline [tradition] [n]     history timeline (full summaries)\n"
     "  /wisdom compare <topic>              cross-tradition comparison\n"
+    "  /wisdom oral submit <id> [--lang L] [--pack P] [--restriction R]\n"
+    "      [--granted-by NAME --scope S] — then the transcript on the next lines\n"
+    "  /wisdom oral verify <id> [--notes ...] [--reject]\n"
+    "  /wisdom oral ingest <id> | list [--status S] | read <id>\n"
     "  /wisdom status                       corpus status with per-work receipts"
 )
 
@@ -85,6 +89,8 @@ class RuntimeWisdomMixin:
             return self._control_wisdom_timeline(keeper, rest, chat)
         if verb == "compare":
             return self._control_wisdom_compare(keeper, rest, chat)
+        if verb == "oral":
+            return self._control_wisdom_oral(keeper, rest, chat)
         # Bare tradition: `/wisdom christian-gnostic` lists its works.
         if not rest:
             from ...wisdom.reading import normalize_tradition
@@ -107,6 +113,8 @@ class RuntimeWisdomMixin:
             return f"⚠️ wisdom status failed: {type(exc).__name__}: {exc}"
         c = full["corpus"]
         lines = [f"📚 corpus: {c['ingested']}/{c['texts']} texts ingested",
+                 f"🎙️ oral tradition: "
+                 f"{full.get('oral', {}).get('ingested', 0)} ingested draft(s)",
                  "A \"tradition\" = a family of texts + teachings that grew "
                  "together around shared scriptures and practices."]
         for trad in detail:
@@ -362,3 +370,169 @@ class RuntimeWisdomMixin:
             lines.append(f"  {e['start']}: {e['title']} — {e.get('summary', '')}")
         return self._send_long_checked(
             chat.platform, chat, "\n".join(lines).strip())
+
+    # ── /wisdom oral ────────────────────────────────────────────────
+    def _control_wisdom_oral(self, keeper, rest: str, chat) -> str:
+        """Dispatch ``/wisdom oral <subverb>``.
+
+        Submit takes its transcript from the lines AFTER the first
+        (the command line carries the id + ``--flags``); verify /
+        ingest / list / read take only the first line.
+        """
+        import shlex
+
+        from ...wisdom.oral import parse_oral_flags
+
+        lines = (rest or "").splitlines()
+        try:
+            head = shlex.split(lines[0]) if lines else []
+        except ValueError as exc:
+            return f"⚠️ oral: cannot parse the command line: {exc}"
+        if not head:
+            return ("usage:\n"
+                    "  /wisdom oral submit <id> [--lang L] [--pack P] "
+                    "[--restriction R]\n"
+                    "      [--granted-by NAME --scope S] — then the "
+                    "transcript on the next lines\n"
+                    "  /wisdom oral verify <id> [--notes ...] [--reject]\n"
+                    "  /wisdom oral ingest <id> | list [--status S] | "
+                    "read <id>")
+        sub = head[0].lower()
+        try:
+            flags, pos = parse_oral_flags(head[1:])
+        except ValueError as exc:
+            return f"⚠️ oral: {exc}"
+        if sub == "submit":
+            return self._oral_chat_submit(keeper, flags, pos,
+                                          "\n".join(lines[1:]).strip())
+        if sub == "verify":
+            return self._oral_chat_verify(keeper, flags, pos)
+        if sub == "ingest":
+            return self._oral_chat_ingest(keeper, pos)
+        if sub == "list":
+            return self._oral_chat_list(keeper, flags)
+        if sub == "read":
+            return self._oral_chat_read(keeper, pos, chat)
+        return f"unknown /wisdom oral verb {sub!r}\n\n{_WISDOM_USAGE}"
+
+    def _oral_chat_permission(self, flags):
+        granted_by = str(flags.get("granted-by", "") or "")
+        scope = str(flags.get("scope", "") or "")
+        contact_ref = str(flags.get("contact-ref", "") or "")
+        if not granted_by and (scope or contact_ref):
+            raise ValueError(
+                "--scope / --contact-ref need --granted-by (who granted it)")
+        if not granted_by:
+            return None
+        from ...wisdom import PermissionRecord
+        return PermissionRecord(granted_by=granted_by, scope=scope,
+                                contact_ref=contact_ref)
+
+    def _oral_chat_submit(self, keeper, flags, pos, transcript: str) -> str:
+        if not pos:
+            return ("usage: /wisdom oral submit <id> [--lang L] [--pack P] "
+                    "[--restriction R] [--granted-by NAME --scope S]\n"
+                    "then the transcript on the next lines "
+                    "(\"SPEAKER: text\" lines)")
+        if not transcript:
+            return ("⚠️ oral submit needs the transcript after the first "
+                    "line — paste it on the following lines")
+        try:
+            permission = self._oral_chat_permission(flags)
+        except ValueError as exc:
+            return f"⚠️ oral: {exc}"
+        try:
+            draft = keeper.oral.submit_draft(
+                pos[0],
+                audio_ref=str(flags.get("audio-ref", "") or ""),
+                transcript=transcript,
+                language=str(flags.get("language", "")
+                             or flags.get("lang", "") or ""),
+                tradition_pack_id=str(flags.get("pack", "") or ""),
+                restriction=str(flags.get("restriction", "open") or "open"),
+                permission=permission,
+                contributor=str(flags.get("contributor", "") or ""))
+        except Exception as exc:  # noqa: BLE001 - fail fast, honestly
+            return f"⚠️ oral submit failed: {type(exc).__name__}: {exc}"
+        return (f"🎙️ draft {draft.draft_id} submitted: "
+                f"{len(draft.turns)} turn(s), "
+                f"{draft.language or '-'} / "
+                f"{draft.tradition_pack_id or '-'}, "
+                f"{draft.restriction} — verify with: "
+                f"/wisdom oral verify {draft.draft_id}")
+
+    def _oral_chat_verify(self, keeper, flags, pos) -> str:
+        if not pos:
+            return "usage: /wisdom oral verify <id> [--notes ...] [--reject]"
+        try:
+            draft = keeper.oral.verify(
+                pos[0], owner="owner",
+                approve=not bool(flags.get("reject", False)),
+                notes=str(flags.get("notes", "") or ""))
+        except Exception as exc:  # noqa: BLE001 - fail fast, honestly
+            return f"⚠️ oral verify failed: {type(exc).__name__}: {exc}"
+        if draft.status == "verified":
+            return (f"🎙️ draft {draft.draft_id} verified by owner — "
+                    f"ingest with: /wisdom oral ingest {draft.draft_id}")
+        return (f"🎙️ draft {draft.draft_id} rejected — it can never "
+                f"ingest; submit a fresh draft to try again")
+
+    def _oral_chat_ingest(self, keeper, pos) -> str:
+        if not pos:
+            return "usage: /wisdom oral ingest <id>"
+        try:
+            out = keeper.oral.ingest(pos[0])
+        except Exception as exc:  # noqa: BLE001 - fail fast, honestly
+            return f"⚠️ oral ingest failed: {type(exc).__name__}: {exc}"
+        return (f"🎙️ ingested: {out['draft_id']} ({out['turns']} turn(s), "
+                f"{out['words']} words) — ask about it with "
+                f"/wisdom ask, or read it with "
+                f"/wisdom oral read {out['draft_id']}")
+
+    def _oral_chat_list(self, keeper, flags) -> str:
+        status = str(flags.get("status", "") or "")
+        drafts = keeper.oral.list_drafts(status=status)
+        ingested = keeper.oral.list_ingested()
+        if not drafts and not ingested:
+            return ("no oral drafts yet — submit one with:\n"
+                    "/wisdom oral submit <id> [--lang L] [--pack P]\n"
+                    "then the transcript on the next lines")
+        lines = ["🎙️ oral drafts:"]
+        for d in drafts:
+            perm = ("permission on file" if d.get("permission")
+                    else "no permission")
+            lines.append(f"  {d['draft_id']}: {d['status']} — "
+                         f"{len(d.get('turns', []))} turn(s), "
+                         f"{d.get('language') or '-'} / "
+                         f"{d.get('tradition_pack_id') or '-'}, "
+                         f"{d.get('restriction')}, {perm}")
+        for e in ingested:
+            lines.append(f"  {e['draft_id']}: ingested — {e['turns']} "
+                         f"turn(s), {e['words']} words, "
+                         f"{e.get('language') or '-'} / "
+                         f"{e.get('tradition_pack_id') or '-'}, "
+                         f"{e['restriction']}")
+        return "\n".join(lines)
+
+    def _oral_chat_read(self, keeper, pos, chat) -> str:
+        if not pos:
+            return "usage: /wisdom oral read <id>"
+        try:
+            rec = keeper.read_oral(pos[0])
+        except Exception as exc:  # noqa: BLE001 - fail fast, honestly
+            return f"⚠️ oral read failed: {type(exc).__name__}: {exc}"
+        prov = rec.get("provenance", {}) or {}
+        perm = rec.get("permission") or {}
+        lines = [f"🎙️ oral draft {rec['draft_id']} — "
+                 f"{rec.get('language') or '-'} / "
+                 f"{rec.get('tradition_pack_id') or '-'} "
+                 f"({rec.get('restriction', 'open')})",
+                 f"contributor: {prov.get('contributor') or '-'} · "
+                 f"permission: {perm.get('granted_by') or '-'} "
+                 f"({perm.get('scope') or '-'})",
+                 "─" * 40]
+        for t in rec.get("turns", []):
+            lines.append(f"{t.get('speaker', 'unknown')}: "
+                         f"{t.get('text', '')}")
+        return self._send_long_checked(chat.platform, chat,
+                                       "\n".join(lines))

@@ -27,6 +27,12 @@ def _cmd_wisdom(args: Any, context: Any) -> int:
               "       nm wisdom compare <topic> [--json]\n"
               "       nm wisdom practice list [--json]\n"
               "       nm wisdom practice <session-id> [--rounds N] [--chat]\n"
+              "       nm wisdom oral submit <id> --file <transcript> [--language L] [--pack P]\n"
+              "                        [--restriction R] [--granted-by NAME --scope S]\n"
+              "       nm wisdom oral verify <id> [--notes ...] [--reject]\n"
+              "       nm wisdom oral ingest <id>\n"
+              "       nm wisdom oral list [--status S] [--json]\n"
+              "       nm wisdom oral read <id> [--json]\n"
               "       nm wisdom <tradition>  (bare tradition lists its works)",
               file=sys.stderr)
         return 2
@@ -53,6 +59,8 @@ def _cmd_wisdom(args: Any, context: Any) -> int:
         return _wisdom_compare(args, context, words[1:])
     if verb == "practice":
         return _wisdom_practice(args, context, words[1:])
+    if verb == "oral":
+        return _wisdom_oral(args, context, words[1:])
     # Bare tradition: `/wisdom christian-gnostic` lists that tradition's
     # works instead of "unknown verb" (case-insensitive). Only when the
     # whole tail is the tradition name — anything longer is a question.
@@ -88,6 +96,8 @@ def _wisdom_status(args: Any, context: Any) -> int:
         return 0
     c = full["corpus"]
     print(f"corpus: {c['ingested']}/{c['texts']} texts ingested")
+    oral = full.get("oral", {})
+    print(f"oral tradition: {oral.get('ingested', 0)} ingested draft(s)")
     print("A \"tradition\" is a family of texts + teachings that grew "
           "together around shared scriptures and practices.")
     for trad in k.corpus.traditions_detail():
@@ -438,4 +448,222 @@ def _wisdom_practice(args: Any, context: Any, rest: list[str]) -> int:
         return 1
     print(f"done: {result['phases_done']} phases, "
           f"completed={result['completed']}")
+    return 0
+
+# ── oral tradition ──────────────────────────────────────────────────
+# The pipeline itself lives in nomorals.wisdom.oral (draft → owner
+# verifies → ingest); these verbs are its CLI surface. Drafts are
+# durable on disk, so submit / verify / ingest may run as separate
+# one-shot invocations.
+
+_ORAL_USAGE = (
+    "usage: nm wisdom oral submit <id> --file <transcript> "
+    "[--language L] [--pack P]\n"
+    "                        [--restriction R] "
+    "[--granted-by NAME --scope S]\n"
+    "       nm wisdom oral verify <id> [--notes ...] [--reject]\n"
+    "       nm wisdom oral ingest <id>\n"
+    "       nm wisdom oral list [--status S] [--json]\n"
+    "       nm wisdom oral read <id> [--json]")
+
+
+def _wisdom_oral(args: Any, context: Any, rest: list[str]) -> int:
+    """Route ``nm wisdom oral <subverb>``.
+
+    Flags arrive via argparse (registered on the wisdom subparser);
+    ``rest`` carries the subverb + positionals only.
+    """
+    if not rest:
+        print(_ORAL_USAGE, file=sys.stderr)
+        return 2
+    sub = rest[0].lower()
+    flags: dict[str, Any] = {
+        "file": getattr(args, "file", "") or "",
+        "language": getattr(args, "language", "") or "",
+        "lang": getattr(args, "lang", "") or "",
+        "pack": getattr(args, "pack", "") or "",
+        "restriction": getattr(args, "restriction", "") or "",
+        "granted-by": getattr(args, "granted_by", "") or "",
+        "scope": getattr(args, "scope", "") or "",
+        "contact-ref": getattr(args, "contact_ref", "") or "",
+        "audio-ref": getattr(args, "audio_ref", "") or "",
+        "contributor": getattr(args, "contributor", "") or "",
+        "notes": getattr(args, "notes", "") or "",
+        "status": getattr(args, "status", "") or "",
+        "reject": bool(getattr(args, "reject", False)),
+    }
+    pos = rest[1:]
+    if sub == "submit":
+        return _oral_submit(args, context, flags, pos)
+    if sub == "verify":
+        return _oral_verify(args, context, flags, pos)
+    if sub == "ingest":
+        return _oral_ingest(args, context, flags, pos)
+    if sub == "list":
+        return _oral_list(args, context, flags, pos)
+    if sub == "read":
+        return _oral_read(args, context, flags, pos)
+    print(f"unknown oral verb: {sub}\n{_ORAL_USAGE}", file=sys.stderr)
+    return 2
+
+
+def _oral_permission(flags: dict[str, Any]):
+    """Build a PermissionRecord from flags, or None.
+
+    A permission is only recorded when the custodian is named; a bare
+    --scope without --granted-by is a named error, not a silent drop.
+    """
+    granted_by = str(flags.get("granted-by", "") or "")
+    scope = str(flags.get("scope", "") or "")
+    contact_ref = str(flags.get("contact-ref", "") or "")
+    if not granted_by and (scope or contact_ref):
+        raise ValueError(
+            "--scope / --contact-ref need --granted-by (who granted it)")
+    if not granted_by:
+        return None
+    from ...wisdom import PermissionRecord
+    return PermissionRecord(granted_by=granted_by, scope=scope,
+                            contact_ref=contact_ref)
+
+
+def _oral_submit(args: Any, context: Any, flags: dict[str, Any],
+                 pos: list[str]) -> int:
+    if not pos:
+        print(_ORAL_USAGE, file=sys.stderr)
+        return 2
+    draft_id = pos[0]
+    path = str(flags.get("file", "") or "")
+    if not path:
+        print("oral submit needs --file <transcript> (plain text, "
+              "\"SPEAKER: text\" lines)", file=sys.stderr)
+        return 2
+    try:
+        with open(path, encoding="utf-8") as handle:
+            transcript = handle.read()
+    except OSError as exc:
+        print(f"error: cannot read transcript {path}: {exc}",
+              file=sys.stderr)
+        return 1
+    try:
+        permission = _oral_permission(flags)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    k = _keeper(context)
+    try:
+        draft = k.oral.submit_draft(
+            draft_id,
+            audio_ref=str(flags.get("audio-ref", "") or ""),
+            transcript=transcript,
+            language=str(flags.get("language", "")
+                         or flags.get("lang", "") or ""),
+            tradition_pack_id=str(flags.get("pack", "") or ""),
+            restriction=str(flags.get("restriction", "open") or "open"),
+            permission=permission,
+            contributor=str(flags.get("contributor", "") or ""))
+    except Exception as exc:  # noqa: BLE001 - fail fast, honestly
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(f"draft {draft.draft_id} submitted: {len(draft.turns)} turn(s), "
+          f"language={draft.language or '-'}, "
+          f"pack={draft.tradition_pack_id or '-'}, "
+          f"restriction={draft.restriction} — verify with: "
+          f"nm wisdom oral verify {draft.draft_id}")
+    return 0
+
+
+def _oral_verify(args: Any, context: Any, flags: dict[str, Any],
+                 pos: list[str]) -> int:
+    if not pos:
+        print(_ORAL_USAGE, file=sys.stderr)
+        return 2
+    k = _keeper(context)
+    try:
+        draft = k.oral.verify(
+            pos[0], owner="owner",
+            approve=not bool(flags.get("reject", False)),
+            notes=str(flags.get("notes", "") or ""))
+    except Exception as exc:  # noqa: BLE001 - fail fast, honestly
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    if draft.status == "verified":
+        print(f"draft {draft.draft_id} verified by owner — ingest with: "
+              f"nm wisdom oral ingest {draft.draft_id}")
+    else:
+        print(f"draft {draft.draft_id} rejected — it can never ingest; "
+              f"submit a fresh draft to try again")
+    return 0
+
+
+def _oral_ingest(args: Any, context: Any, flags: dict[str, Any],
+                 pos: list[str]) -> int:
+    if not pos:
+        print(_ORAL_USAGE, file=sys.stderr)
+        return 2
+    k = _keeper(context)
+    try:
+        out = k.oral.ingest(pos[0])
+    except Exception as exc:  # noqa: BLE001 - fail fast, honestly
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    print(f"ingested: {out['draft_id']} ({out['turns']} turn(s), "
+          f"{out['words']} words) → {out['path']}")
+    return 0
+
+
+def _oral_list(args: Any, context: Any, flags: dict[str, Any],
+               pos: list[str]) -> int:
+    k = _keeper(context)
+    status = str(flags.get("status", "") or "")
+    drafts = k.oral.list_drafts(status=status)
+    ingested = k.oral.list_ingested()
+    if _as_json(args):
+        print(json.dumps({"drafts": drafts, "ingested": ingested},
+                         indent=2, default=str))
+        return 0
+    if not drafts and not ingested:
+        print("no oral drafts yet — submit one with: "
+              "nm wisdom oral submit <id> --file <transcript>")
+        return 0
+    for d in drafts:
+        perm = "permission on file" if d.get("permission") else "no permission"
+        print(f"{d['draft_id']}: {d['status']} — "
+              f"{len(d.get('turns', []))} turn(s), "
+              f"{d.get('language') or '-'} / "
+              f"{d.get('tradition_pack_id') or '-'}, "
+              f"{d.get('restriction')}, {perm}")
+    for e in ingested:
+        print(f"{e['draft_id']}: ingested — {e['turns']} turn(s), "
+              f"{e['words']} words, {e.get('language') or '-'} / "
+              f"{e.get('tradition_pack_id') or '-'}, {e['restriction']}")
+    return 0
+
+
+def _oral_read(args: Any, context: Any, flags: dict[str, Any],
+               pos: list[str]) -> int:
+    if not pos:
+        print(_ORAL_USAGE, file=sys.stderr)
+        return 2
+    k = _keeper(context)
+    try:
+        rec = k.read_oral(pos[0])
+    except Exception as exc:  # noqa: BLE001 - fail fast, honestly
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    if _as_json(args):
+        print(json.dumps(rec, indent=2, default=str))
+        return 0
+    prov = rec.get("provenance", {}) or {}
+    perm = rec.get("permission") or {}
+    print(f"🎙️ oral draft {rec['draft_id']} — "
+          f"{rec.get('language') or '-'} / "
+          f"{rec.get('tradition_pack_id') or '-'} "
+          f"({rec.get('restriction', 'open')})")
+    print(f"   contributor: {prov.get('contributor') or '-'} · "
+          f"permission: {perm.get('granted_by') or '-'} "
+          f"({perm.get('scope') or '-'})")
+    print("─" * 60)
+    for t in rec.get("turns", []):
+        print(f"{t.get('speaker', 'unknown')}: {t.get('text', '')}")
+    print("─" * 60)
     return 0

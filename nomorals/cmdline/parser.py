@@ -4181,7 +4181,12 @@ def _parser() -> argparse.ArgumentParser:
                      "nm wisdom timeline [tradition] [n] [--from Y] [--to Y] [--json]\n"
                      "nm wisdom compare <topic> [--json]\n"
                      "nm wisdom practice list [--json]\n"
-                     "nm wisdom practice <session-id> [--rounds N] [--chat]"),
+                     "nm wisdom practice <session-id> [--rounds N] [--chat]\n"
+                     "nm wisdom oral submit <id> --file <transcript> [--language L] [--pack P]\n"
+                     "nm wisdom oral verify <id> [--reject]\n"
+                     "nm wisdom oral ingest <id>\n"
+                     "nm wisdom oral list [--status S] [--json]\n"
+                     "nm wisdom oral read <id> [--json]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     wisdom.add_argument("task", nargs="*", default=[], help="verb and arguments")
@@ -4198,6 +4203,35 @@ def _parser() -> argparse.ArgumentParser:
     wisdom.add_argument("--end", type=int, default=2100,
                         help="timeline: end year")
     wisdom.add_argument("--json", action="store_true", help="Output as JSON")
+    wisdom.add_argument("--file", default="",
+                        help="oral submit: transcript file path")
+    wisdom.add_argument("--language", default="",
+                        help="oral submit: transcript language")
+    wisdom.add_argument("--lang", default="",
+                        help="oral submit: transcript language (alias)")
+    wisdom.add_argument("--pack", default="",
+                        help="oral submit: tradition pack id")
+    wisdom.add_argument("--restriction", default="",
+                        help="oral submit: restriction "
+                             "(open|public-scholarship|community-permission|"
+                             "initiated|do-not-digitize)")
+    wisdom.add_argument("--granted-by", default="",
+                        help="oral submit: who granted the permission")
+    wisdom.add_argument("--scope", default="",
+                        help="oral submit: what the permission covers")
+    wisdom.add_argument("--contact-ref", default="",
+                        help="oral submit: pointer to the permission record")
+    wisdom.add_argument("--audio-ref", default="",
+                        help="oral submit: pointer to the recording")
+    wisdom.add_argument("--contributor", default="",
+                        help="oral submit: who collected the material")
+    wisdom.add_argument("--notes", default="",
+                        help="oral verify: verification notes")
+    wisdom.add_argument("--status", default="",
+                        help="oral list: filter by draft status")
+    wisdom.add_argument("--reject", action="store_true",
+                        help="oral verify: reject the draft instead of "
+                             "approving it")
 
     datasci = sub.add_parser("datasci", aliases=CLI_ALIASES["datasci"],
         help="data-science workspace: load, describe, query, plot",
