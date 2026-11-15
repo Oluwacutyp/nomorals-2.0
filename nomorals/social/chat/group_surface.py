@@ -125,6 +125,7 @@ from .group_defense import (
     add_strike,
     check_antichannel,
     check_antitag,
+    check_media_locks,
     consequence_text,
     ladder_label,
     recent_strikes,
@@ -2541,6 +2542,36 @@ class GroupSurface:
                     "reason": hit.reason, "user_id": user_id,
                     "group_id": group_key})
             strike("antitag", hit.rule,
+                   "delete" if "delete" in hit.action else "warn")
+
+        # ── stage 3c: media locks (DESIGN §4) ──────────────────
+        # The admin's per-kind toggles over the envelope: a
+        # locked kind is one hit — audited always, landed never
+        # on the owner ladder (§19, the antichannel shape), and
+        # struck once on the shared spine.
+        hit = check_media_locks(
+            env, cfg, linked_chat_id=linked_for_env,
+            sender_is_admin=sender_is_admin)
+        if hit is not None:
+            self._audit(group_key, "media_locks", user_id=user_id,
+                        action=hit.action, reason=hit.reason,
+                        signal=hit.signal,
+                        **({"suppressed": "autonomy_off"}
+                           if suppressed else {}),
+                        **({"role_exempt": role}
+                           if role_exempt else {}))
+            if not role_exempt:
+                if "delete" in hit.action:
+                    actions.append({
+                        "kind": "delete", "rule": hit.rule,
+                        "reason": hit.reason, "user_id": user_id,
+                        "group_id": group_key})
+                else:
+                    actions.append({
+                        "kind": "warn", "rule": hit.rule,
+                        "reason": hit.reason, "user_id": user_id,
+                        "group_id": group_key})
+            strike("media_locks", hit.rule,
                    "delete" if "delete" in hit.action else "warn")
 
         blocked = any(a.get("kind") in ("delete", "kick", "ban")

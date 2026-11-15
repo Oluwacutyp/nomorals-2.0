@@ -1549,6 +1549,7 @@ class RuntimeGroupMixin:
         category = {"anticrash": "raid",
                     "antichannel": "spam-ring",
                     "antitag": "spam-ring",
+                    "media_locks": "spam-ring",
                     "flood": "spam-ring",
                     "repeat": "spam-ring"}.get(rule)
         if not category:
@@ -3484,7 +3485,8 @@ class RuntimeGroupMixin:
             # same settings the pipeline reads + the platform-
             # honesty notes + what has degraded on THIS surface.
             from ...social.chat.group_defense import (
-                defense_availability)
+                defense_availability, describe_media_locks as
+                _describe_media_locks)
             d = s.get("defense") or {}
             d_ac = d.get("anticrash") or {}
             d_ch = d.get("antichannel") or {}
@@ -3568,6 +3570,8 @@ class RuntimeGroupMixin:
                 f" ({d_ed.get('mode', 'log')}) · "
                 f"mute default: "
                 f"{_duration_text(int(s.get('mute_default_s') or 0)) if s.get('mute_default_s') else 'ask'}",
+                f"media locks: "
+                f"{_describe_media_locks(d.get('media_locks') or {})}",
             ]
             defense_lines += [f"⚠ {note}" for note in honesty]
             if degraded:
@@ -3908,6 +3912,10 @@ class RuntimeGroupMixin:
                 "`/gsettings antidelete mode log|callout`",
                 "`/gsettings antiedit on|off` · "
                 "`/gsettings antiedit mode log|callout`",
+                "`/gsettings medialock <kind> on|off` · "
+                "`/gsettings medialock all on|off` · "
+                "`/gsettings medialock action "
+                "delete|warn|delete_warn`",
                 "`/gsettings theme house|clean|board` · "
                 "`/gsettings class game board|clean|default`",
                 "`/gsettings stamp on|off` · "
@@ -4360,6 +4368,19 @@ class RuntimeGroupMixin:
                 self._defense_update(surface, key, head,
                                      callout_to=rest2.lower())
                 return f"{head} callouts go to: {rest2.lower()}."
+        if head in ("medialock", "medialocks"):
+            # Media locks (DESIGN §4): one toggle per kind —
+            # the same helper the console's defense section
+            # applies.
+            out = self._apply_media_lock_grammar(
+                surface, key, text.split()[1:])
+            if out is not None:
+                return out
+            return ("usage: /gsettings medialock <kind> on|off · "
+                    "/gsettings medialock all on|off · "
+                    "/gsettings medialock action "
+                    "delete|warn|delete_warn · "
+                    "/gsettings medialock status")
         # ── presentation grammar (DESIGN §27) ───────────────────
         if head == "theme" and rest.lower() in (
                 "house", "clean", "board"):
@@ -6507,6 +6528,11 @@ class RuntimeGroupMixin:
         lines.append(
             "roster diff "
             f"{_rd.describe_roster_diff(_rd.roster_diff_settings(surface, key))}")
+        from ...social.chat import group_defense as _gd
+
+        lines.append(
+            "media locks "
+            f"{_gd.describe_media_locks((surface.store.settings(key).get('defense') or {}).get('media_locks') or {})}")
         waiting = self._groups_waiting(surface, key)
         lines.append(f"waiting: {waiting}" if waiting
                      else "nothing waiting")
@@ -7159,6 +7185,8 @@ class RuntimeGroupMixin:
                 in ("whatsapp", "wa") else
                 f"slow mode "
                 f"{'off' if not slow_s else _duration_text(slow_s)}")
+            from ...social.chat.group_defense import describe_media_locks as _describe_media_locks
+
             card.block_lines([
                 f"autonomy "
                 f"{'ON' if d.get('autonomy', True) else 'OFF'}"
@@ -7174,6 +7202,8 @@ class RuntimeGroupMixin:
                 f"{'on' if (d.get('antidelete') or {}).get('enabled', True) else 'off'}"
                 f" · antiedit "
                 f"{'on' if (d.get('antiedit') or {}).get('enabled', True) else 'off'}",
+                f"media locks: "
+                f"{_describe_media_locks(d.get('media_locks') or {})}",
                 f"moderation: flood "
                 f"{(s.get('moderation') or {}).get('flood_max', 6)}"
                 f" per window · filters "
@@ -7184,6 +7214,7 @@ class RuntimeGroupMixin:
                 f"{mute_truth} · {slow_txt}",
                 f"ladder: {esc.describe()}",
             ])
+            ml = d.get("media_locks") or {}
             buttons = [
                 [_toggle("autonomy", "Autonomy", "autonomy",
                          bool(d.get("autonomy", True))),
@@ -7196,6 +7227,36 @@ class RuntimeGroupMixin:
                  _toggle("antitag", "Antitag", "antitag",
                          bool((d.get('antitag') or {})
                               .get('enabled', True)))],
+                [_toggle("medialock-stickers", "Stickers",
+                         "medialock stickers",
+                         bool(ml.get("stickers"))),
+                 _toggle("medialock-gifs", "GIFs",
+                         "medialock gifs",
+                         bool(ml.get("gifs")))],
+                [_toggle("medialock-voice", "Voice",
+                         "medialock voice",
+                         bool(ml.get("voice"))),
+                 _toggle("medialock-video-notes", "Video notes",
+                         "medialock video_notes",
+                         bool(ml.get("video_notes")))],
+                [_toggle("medialock-photos", "Photos",
+                         "medialock photos",
+                         bool(ml.get("photos"))),
+                 _toggle("medialock-videos", "Videos",
+                         "medialock videos",
+                         bool(ml.get("videos")))],
+                [_toggle("medialock-audio", "Audio",
+                         "medialock audio",
+                         bool(ml.get("audio"))),
+                 _toggle("medialock-files", "Files",
+                         "medialock documents",
+                         bool(ml.get("documents")))],
+                [_toggle("medialock-forwards", "Forwards",
+                         "medialock forwards",
+                         bool(ml.get("forwards"))),
+                 _toggle("medialock-channel-posts", "Channel posts",
+                         "medialock channel_posts",
+                         bool(ml.get("channel_posts")))],
             ]
             if key.partition(":")[0].strip().lower() \
                     not in ("whatsapp", "wa"):
@@ -7251,6 +7312,8 @@ class RuntimeGroupMixin:
                 "`autonomy on|off` · `anticrash on|off|delete|flag`",
                 "`antichannel|antitag|antidelete|antiedit on|off`"
                 " · `antitag N` · `antidelete mode log|callout`",
+                "`medialock <kind> on|off` · `medialock all on|off`"
+                " · `medialock action delete|warn|delete_warn`",
                 "`flood N` · `links DOMAINS|off` · "
                 "`filter add|remove WORD` · `filter clear` · "
                 + filter_action_offer,
@@ -7800,6 +7863,14 @@ class RuntimeGroupMixin:
                         surface, key, head,
                         callout_to=words[2].lower())
                     return f"{head} callouts: {words[2].lower()}."
+                return None
+            if head in ("medialock", "medialocks"):
+                # Media locks (DESIGN §4): one toggle per kind —
+                # the same helper /gsettings applies.
+                out = self._apply_media_lock_grammar(
+                    surface, key, words[1:])
+                if out is not None:
+                    return out
                 return None
             if head == "flood" and rest.isdigit():
                 current = surface.store.settings(key)
@@ -10538,6 +10609,64 @@ class RuntimeGroupMixin:
                 line += (" · list truncated — leaves were not "
                          "asserted this run")
             return line
+        return None
+
+    def _apply_media_lock_grammar(self, surface, key, words):  # type: ignore[no-untyped-def]
+        """The media-lock grammar (DESIGN §4), shared by
+        /gsettings (words after the `medialock` head) and the
+        console's defense section.  Forms: `<kind> on|off` ·
+        `all on|off` · `action delete|warn|delete_warn` ·
+        `status`.  Returns the reply line, or None when the
+        words don't parse (the caller shows usage).  An unknown
+        kind names the kinds that exist instead of silently
+        doing nothing."""
+        from ...social.chat.group_defense import (
+            MEDIA_LOCK_KINDS,
+            MEDIA_LOCK_LABELS,
+            describe_media_locks,
+        )
+
+        w = [str(x) for x in words or []]
+        low = [x.lower() for x in w]
+        if not w:
+            return None
+        if low == ["status"]:
+            block = (surface.store.settings(key).get("defense")
+                     or {}).get("media_locks") or {}
+            return (f"media locks for {key}: "
+                    f"{describe_media_locks(block)}.")
+        if low[0] == "action" and len(low) == 2:
+            if low[1] in ("delete", "warn", "delete_warn"):
+                self._defense_update(surface, key, "media_locks",
+                                     action=low[1])
+                return (f"media lock action: {low[1]} — locked "
+                        "media is deleted, warned, or both.")
+            return None
+        aliases = {"sticker": "stickers", "gif": "gifs",
+                   "photo": "photos", "video": "videos",
+                   "file": "documents", "forward": "forwards",
+                   "channel": "channel_posts",
+                   "video_note": "video_notes",
+                   "videonote": "video_notes"}
+        kind = aliases.get(low[0], low[0])
+        if len(low) == 2 and low[1] in ("on", "off"):
+            if low[0] == "all":
+                self._defense_update(
+                    surface, key, "media_locks",
+                    **{k: low[1] == "on"
+                       for k in MEDIA_LOCK_KINDS})
+                return ("all media locks "
+                        f"{'on' if low[1] == 'on' else 'off'}.")
+            if kind not in MEDIA_LOCK_KINDS:
+                known = ", ".join(
+                    MEDIA_LOCK_LABELS[k] for k in MEDIA_LOCK_KINDS)
+                return (f"I don't lock {w[0]!r} — the kinds are: "
+                        f"{known}.")
+            self._defense_update(surface, key, "media_locks",
+                                 **{kind: low[1] == "on"})
+            state = "locked" if low[1] == "on" else "open"
+            return (f"{MEDIA_LOCK_LABELS[kind]} {state} in this "
+                    "group.")
         return None
 
     def _cleanup_gate(self, message):  # type: ignore[no-untyped-def]

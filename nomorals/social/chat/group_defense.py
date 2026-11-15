@@ -33,8 +33,58 @@ DEFAULTS: dict[str, Any] = {
                    "callout_to": "admins"},
     "antiedit": {"enabled": True, "mode": "log",
                  "callout_to": "admins"},
+    # Media locks (DESIGN §4): one toggle per media kind, all
+    # OFF by default — an unconfigured group sees no change.
+    # The sensor itself is on; with every lock off it never
+    # fires.  `action` is the antichannel vocabulary.
+    "media_locks": {"enabled": True, "action": "delete_warn",
+                    "stickers": False, "gifs": False,
+                    "voice": False, "video_notes": False,
+                    "photos": False, "videos": False,
+                    "audio": False, "documents": False,
+                    "forwards": False, "channel_posts": False},
     "escalation": {"window_days": 7, "mute_minutes": 60,
                    "kick_at": 5, "ban_at": 7},
+}
+
+
+#: The media kinds a lock can cover (DESIGN §4 names the first
+#: five; the rest are the family the envelope expresses).
+MEDIA_LOCK_KINDS: tuple[str, ...] = (
+    "stickers", "gifs", "voice", "video_notes", "photos",
+    "videos", "audio", "documents", "forwards", "channel_posts",
+)
+
+#: Display labels for the lock kinds (grammar + panels).
+MEDIA_LOCK_LABELS: dict[str, str] = {
+    "stickers": "stickers", "gifs": "GIFs", "voice": "voice",
+    "video_notes": "video notes", "photos": "photos",
+    "videos": "videos", "audio": "audio", "documents": "files",
+    "forwards": "forwards", "channel_posts": "channel posts",
+}
+
+#: Raw envelope media kinds → canonical lock kinds.  Producers
+#: spell the same media differently (Telegram `photo` vs the
+#: WhatsApp bridge's `image`), so the sensor normalizes before
+#: it compares — a lock fires on what the message IS, never on
+#: one platform's spelling of it.
+_RAW_KIND_MAP: dict[str, str] = {
+    "photo": "photos", "image": "photos",
+    "video": "videos",
+    "animation": "gifs", "gif": "gifs",
+    "audio": "audio",
+    "voice": "voice", "ptt": "voice",
+    "video_note": "video_notes",
+    "document": "documents", "file": "documents",
+    "sticker": "stickers",
+}
+
+#: MIME fallback when the envelope carries no kind at all (a
+#: bridge too old to send one): the family only, never a
+#: voice/sticker guess — those need the kind to tell them apart.
+_MIME_KIND_MAP: dict[str, str] = {
+    "image/gif": "gifs", "image": "photos",
+    "video": "videos", "audio": "audio",
 }
 
 
@@ -265,6 +315,9 @@ class DefenseConfig:
     antiedit_enabled: bool = True
     antiedit_mode: str = "log"
     antiedit_callout_to: str = "admins"
+    # Media locks (DESIGN §4): the merged block, read by the
+    # sensor — `enabled` + `action` + one bool per kind.
+    media_locks: dict[str, Any] = field(default_factory=dict)
     window_days: int = 7
     mute_minutes: int = 60
     kick_at: int = 5
@@ -278,6 +331,7 @@ class DefenseConfig:
         tg = raw["antitag"]
         dl = raw["antidelete"]
         ed = raw["antiedit"]
+        ml = raw["media_locks"]
         esc = raw["escalation"]
         # The §30 ladder is the source of truth when the group
         # has an escalation block: the flat fields below are
@@ -315,6 +369,7 @@ class DefenseConfig:
                 antiedit_mode=str(ed.get("mode") or "log").lower(),
                 antiedit_callout_to=str(
                     ed.get("callout_to") or "admins").lower(),
+                media_locks=dict(ml),
                 window_days=ladder.window_days,
                 mute_minutes=ladder.mute_minutes(),
                 kick_at=int(kick_step["at"]) if kick_step else 0,
@@ -345,6 +400,7 @@ class DefenseConfig:
             antiedit_mode=str(ed.get("mode") or "log").lower(),
             antiedit_callout_to=str(
                 ed.get("callout_to") or "admins").lower(),
+            media_locks=dict(ml),
             window_days=max(1, int(esc.get("window_days") or 7)),
             mute_minutes=max(1, int(esc.get("mute_minutes") or 60)),
             kick_at=max(0, int(esc.get("kick_at") or 0)),
@@ -451,6 +507,129 @@ def check_antitag(env: MessageEnvelope, cfg: DefenseConfig, *,
             cfg.antitag_action,
             {"mentions": mentioned, "bound": bound,
              "roster": roster_size, "everyone": everyone})
+    return None
+
+
+def _media_lock_kind(env: MessageEnvelope) -> str:
+    """The message's canonical media kind, or "" when it carries
+    no media.  The kind is the primary signal; the MIME family
+    is only a fallback for a producer that sends no kind."""
+    media = env.media or {}
+    raw = str(media.get("kind") or "").strip().lower()
+    if raw in _RAW_KIND_MAP:
+        return _RAW_KIND_MAP[raw]
+    if env.sticker is not None:
+        return "stickers"
+    mime = str(media.get("mime") or "").strip().lower()
+    if mime in _MIME_KIND_MAP:
+        return _MIME_KIND_MAP[mime]
+    family = mime.split("/", 1)[0] if "/" in mime else ""
+    return _MIME_KIND_MAP.get(family, "")
+
+
+def _is_channel_post(env: MessageEnvelope) -> bool:
+    """Channel-originated traffic: a forward from a channel, a
+    message posted as a channel identity (sender_chat), or a
+    WhatsApp newsletter posting into the group (the antichannel
+    signal, reused — the lock is the admin's explicit toggle
+    over the same family)."""
+    fwd = env.forward or {}
+    if fwd.get("origin_kind") == "channel":
+        return True
+    if fwd.get("sender_chat_id"):
+        return True
+    return (str(env.platform).startswith("whatsapp")
+            and "@newsletter"
+            in f"{env.chat_key} {env.sender_id}")
+
+
+def locked_media_kinds(block: dict[str, Any] | None) -> list[str]:
+    """The kinds this group's media-locks block has switched on,
+    in MEDIA_LOCK_KINDS order.  Unknown keys are ignored — a
+    stored typo never becomes a lock."""
+    merged = dict(DEFAULTS["media_locks"])
+    merged.update(block or {})
+    return [k for k in MEDIA_LOCK_KINDS if merged.get(k)]
+
+
+def describe_media_locks(block: dict[str, Any] | None) -> str:
+    """One state line for the panels and the dashboard: the
+    locked kinds + the action, or the open state."""
+    merged = dict(DEFAULTS["media_locks"])
+    merged.update(block or {})
+    locked = locked_media_kinds(merged)
+    if not locked:
+        return "none locked — everything open"
+    action = str(merged.get("action") or "delete_warn").lower()
+    labels = ", ".join(MEDIA_LOCK_LABELS[k] for k in locked)
+    return f"{labels} locked ({action})"
+
+
+def check_media_locks(env: MessageEnvelope, cfg: DefenseConfig, *,
+                      linked_chat_id: str = "",
+                      sender_is_admin: bool = False,
+                      ) -> SensorHit | None:
+    """Media locks (DESIGN §4): a locked kind in this group is
+    one hit — the first locked kind wins, so the pipeline
+    strikes once per message.  Admins are exempt (antitag
+    shape); the group's OWN linked channel is exempt (the
+    antichannel rule — automatic forwards and the explicit
+    linked id are the feature, not the attack, and a member
+    manually forwarding the linked channel's post is still a
+    forward, so only the channel-posts kind exempts on the id).
+    An unknown action degrades to delete_warn, never to a
+    crash and never to silently not locking."""
+    if sender_is_admin:
+        return None
+    block = cfg.media_locks or {}
+    if not block.get("enabled", True):
+        return None
+    action = str(block.get("action") or "delete_warn").lower()
+    if action not in ("delete", "warn", "delete_warn"):
+        action = "delete_warn"
+    locked = locked_media_kinds(block)
+    if not locked:
+        return None
+    fwd = env.forward or {}
+    if fwd.get("is_automatic"):
+        # An automatic forward into a group comes ONLY from the
+        # group's own linked channel (a platform invariant).
+        return None
+    sender_chat = str(fwd.get("sender_chat_id") or "")
+    if linked_chat_id and sender_chat \
+            and sender_chat == str(linked_chat_id) \
+            and not fwd.get("is_forwarded"):
+        # The message speaks AS the group's own linked channel
+        # (sender_chat, no forward header) — the feature, not
+        # an injection.  A member manually forwarding the
+        # linked channel's post IS a forward (is_forwarded),
+        # so it still meets the forwards lock below.
+        return None
+    kind = _media_lock_kind(env)
+    if kind and kind in locked:
+        return SensorHit(
+            "media_locks",
+            f"{MEDIA_LOCK_LABELS[kind]} are locked in this group",
+            action, {"kind": kind})
+    if fwd.get("is_forwarded") and "forwards" in locked:
+        return SensorHit(
+            "media_locks", "forwards are locked in this group",
+            action, {"kind": "forwards",
+                     "origin_kind": str(
+                         fwd.get("origin_kind") or "")})
+    if "channel_posts" in locked and _is_channel_post(env) \
+            and not (linked_chat_id and sender_chat
+                     and sender_chat == str(linked_chat_id)):
+        # A post FROM the group's own linked channel is the
+        # feature, not a foreign channel post — the exemption
+        # rides the sender id, not the forward header, so a
+        # member manually forwarding it still meets the
+        # forwards lock above.
+        return SensorHit(
+            "media_locks",
+            "channel posts are locked in this group",
+            action, {"kind": "channel_posts",
+                     "sender_chat_id": sender_chat})
     return None
 
 
