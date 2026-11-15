@@ -98,6 +98,19 @@ def _make_fake_torch(monkeypatch, vram_gb):
             total_memory=vram_gb * 1e9))
     fake_torch = types.SimpleNamespace(cuda=fake_cuda)
     monkeypatch.setitem(sys.modules, "torch", fake_torch)
+    # The status probes read GPU state from the shared detector now,
+    # not from in-process torch (GPU probe migration): torch presence
+    # from find_spec, CUDA + VRAM from detect_gpu. Fake both seams
+    # with the same numbers, so the gate under test still sees exactly
+    # vram_gb. (find_spec would raise on the spec-less fake above, so
+    # it is faked directly too.)
+    from nomorals.core.gpu import GpuInfo
+    monkeypatch.setattr(ls, "find_spec", lambda name: object())
+    monkeypatch.setattr(
+        ls, "detect_gpu",
+        lambda: GpuInfo(path="local", has_gpu=True, name="fake GPU",
+                        vram_gb=float(vram_gb), source="torch.cuda",
+                        detail="fake"))
     monkeypatch.setattr(ls, "_has_torch_cuda", lambda: (True, True))
 
 

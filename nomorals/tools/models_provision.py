@@ -72,6 +72,7 @@ from typing import Any
 from ..audio.pipeline import _STT_ORDER, _TTS_ORDER, detect_profile
 from ..characters import provision as _char_provision
 from ..characters.store import default_character_dir
+from ..core.gpu import detect_gpu
 from ..llm.specialists import backend_available, default_models_dir
 from ..media import dj_desk as _dj_desk
 from ..media import trellis as _trellis
@@ -343,6 +344,21 @@ def _verify_import(module: str, steps: list[str]) -> bool:
                 timeout=300)
     steps.append(f"import {module}: rc={proc.returncode}")
     return proc.returncode == 0
+
+
+def _gpu_note() -> str:
+    """Suffix for a provision report when local generation needs a GPU
+    this box does not have — "" when a local GPU is present.
+
+    Delegates to the shared detector (:mod:`nomorals.core.gpu`):
+    ACE-Step generation runs locally, so only the local path counts.
+    """
+    try:
+        if detect_gpu().path == "local":
+            return ""
+    except Exception:  # noqa: BLE001 — a failed probe is "no GPU"
+        pass
+    return " — generation needs an NVIDIA GPU, none detected here"
 
 
 def _report(ok: bool, status: str, detail: str,
@@ -761,12 +777,7 @@ def _provision_ace_step(box: dict[str, Any]) -> dict[str, Any]:
     if proc.returncode != 0:
         steps.append(f"sync stderr: {(proc.stderr or '')[-300:]}")
         return _report(False, "failed", "ACE-Step uv sync failed", steps)
-    gpu = _run([sys.executable, "-c",
-                "import torch; print(torch.cuda.is_available())"],
-               timeout=120)
-    gpu_note = ""
-    if gpu.returncode != 0 or "True" not in (gpu.stdout or ""):
-        gpu_note = " — generation needs an NVIDIA GPU, none detected here"
+    gpu_note = _gpu_note()
     return _report(True, "installed",
                    "ACE-Step engine installed; weights (~5-15 GB) "
                    f"download on first generation{gpu_note}", steps)

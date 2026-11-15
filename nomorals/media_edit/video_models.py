@@ -34,6 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from ..core.gpu import detect_gpu
 from ..core.logging_setup import get_logger
 from ..core.profiles import get_profile_kind
 
@@ -215,16 +216,18 @@ def _api_configured(model: dict[str, Any]) -> bool:
 def _cuda_vram_gb() -> float | None:
     """Total VRAM of the first CUDA device, or None when unknowable.
 
-    Best-effort: torch may not be installed, CUDA may be absent. Never
-    raises — unknown VRAM is data, not an error.
+    Delegates to the shared detector (:mod:`nomorals.core.gpu`) — the
+    local path only: a forwarded GPU has unknown VRAM, so it reports
+    None here, exactly as a box with no local CUDA does. Best-effort:
+    unknown VRAM is data, not an error. Never raises.
     """
     try:
-        import torch
-        if not torch.cuda.is_available():
-            return None
-        return float(torch.cuda.get_device_properties(0).total_memory) / 1e9
+        info = detect_gpu()
     except Exception:  # noqa: BLE001 - probe, None is a valid answer
         return None
+    if info.path != "local" or not info.vram_gb:
+        return None
+    return float(info.vram_gb)
 
 
 def _comfy_reachable() -> bool:

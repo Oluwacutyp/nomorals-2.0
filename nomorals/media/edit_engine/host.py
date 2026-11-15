@@ -33,6 +33,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
+from ...core.gpu import detect_gpu
 from ...core.profile import detect_profile
 from ...media_edit.videos import ffmpeg_path
 from .failures import record_failure
@@ -83,20 +84,21 @@ def _probe_hwaccels(ffmpeg: str) -> list[str]:
 
 
 def _probe_vram_mb() -> int | None:
+    """VRAM in MiB, or None when unknowable.
+
+    Delegates to the shared detector (:mod:`nomorals.core.gpu`) — the
+    local path only; a forwarded GPU has unknown VRAM. The detector
+    reports GB (nvidia-smi MiB / 1024, 2dp), so the round-trip to MiB
+    is exact for whole-GB cards and within a few MiB otherwise — a
+    host snapshot, not a ledger. Never raises.
+    """
     try:
-        proc = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.total",
-             "--format=csv,noheader,nounits"],
-            capture_output=True, text=True, timeout=15)
-    except Exception as exc:  # noqa: BLE001 — no NVIDIA tooling is normal
-        record_failure("host._probe_vram_mb", exc)
+        info = detect_gpu()
+    except Exception:  # noqa: BLE001 — probe, None is a valid answer
         return None
-    if proc.returncode != 0:
+    if info.path != "local" or not info.vram_gb:
         return None
-    try:
-        return int((proc.stdout or "").strip().splitlines()[0])
-    except (ValueError, IndexError):
-        return None
+    return int(round(info.vram_gb * 1024))
 
 
 def probe_host(profile: str | None = None) -> HostCapabilities:

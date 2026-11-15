@@ -24,8 +24,11 @@ import subprocess
 import sys
 import tempfile
 from dataclasses import dataclass
+from importlib.util import find_spec
 from pathlib import Path
 from typing import Any
+
+from ...core.gpu import detect_gpu
 
 try:
     import numpy as np
@@ -83,12 +86,31 @@ def _ffmpeg() -> str | None:
 
 
 def _has_torch_cuda() -> tuple[bool, bool]:
+    """(torch installed, local CUDA available). Never raises.
+
+    Delegates the CUDA half to the shared detector
+    (:mod:`nomorals.core.gpu`) — the lip-sync drivers run as local
+    subprocesses, so only the local path counts; a forwarded GPU is
+    not local CUDA. Torch presence is a package question, answered
+    with ``find_spec`` — the old code imported torch, paying a full
+    torch import + CUDA init for a yes/no. A torch that cannot be
+    found is still recorded under this site (Pass #106: a fallback
+    leaves a trace), exactly as the old failed import was.
+    """
+    err: Exception | None = None
     try:
-        import torch
-        return True, torch.cuda.is_available()
-    except Exception as e:
-        record_failure("lipsync._has_torch_cuda", e)
-        return False, False
+        has_torch = find_spec("torch") is not None
+    except Exception as e:  # noqa: BLE001 - probe, False is a valid answer
+        has_torch = False
+        err = e
+    if not has_torch:
+        record_failure("lipsync._has_torch_cuda",
+                       err or ImportError("torch is not installed"))
+    try:
+        cuda = detect_gpu().path == "local"
+    except Exception:  # noqa: BLE001 - probe, False is a valid answer
+        cuda = False
+    return has_torch, cuda
 
 
 # ── backend resolution ─────────────────────────────────────────────
@@ -228,13 +250,16 @@ def latentsync_status() -> dict:
     tiny = _latentsync_tiny()
     ok = (has_torch and cuda and repo.is_dir() and unet.exists()
           and tiny.exists())
-    vram = 0
+    # VRAM from the shared detector (local path only) — the same
+    # measurement _has_torch_cuda just made, not a second torch import
+    # for the same number. The detector never raises, but the status
+    # check stays never-raises either way.
+    vram = 0.0
     if cuda:
         try:
-            import torch
-            vram = torch.cuda.get_device_properties(0).total_memory / 1e9
-        except Exception as e:
-            record_failure("lipsync.latentsync_status", e)
+            vram = detect_gpu().vram_gb
+        except Exception:  # noqa: BLE001 - probe, 0.0 is a valid answer
+            vram = 0.0
     # The provision installs the 1.6 config (18GB floor), matching the
     # avatar gate — the 7.5GB gate was for the 1.5 config nothing
     # provisions and the driver never drove.
