@@ -105,6 +105,81 @@ def _flatten(params: dict[str, Any], prefix: str = "") -> dict[str, str]:
     return out
 
 
+def _last4_only(value: Any) -> str:
+    """Last four digits of a last4-style value, digits only.
+
+    Structural guard: even a hostile payload carrying a longer number
+    can only ever yield four digits — a full card number (PAN) or a
+    full bank account number cannot pass through this function into
+    the ledger.
+    """
+    digits = "".join(ch for ch in str(value or "") if ch.isdigit())
+    return digits[-4:] if digits else ""
+
+
+def _stripe_id(value: Any) -> str:
+    """Id string from a Stripe field that may be an id or an expanded
+    object (``"ch_1"`` or ``{"id": "ch_1", ...}``)."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        return str(value.get("id") or "").strip()
+    return ""
+
+
+def _payment_method_label(details: Any) -> str:
+    """Human label for a Stripe ``payment_method_details`` object.
+
+    Card -> "visa ending 4242"; US bank account -> "Chase ending 6789".
+    Stripe never returns a full card number (PAN) or a full bank
+    account number — brand/last4 and bank name/last4 are the most
+    specific identifiers the API ever exposes, and the only ones
+    recorded here. Returns "" when the shape carries no usable
+    identifier.
+    """
+    if not isinstance(details, dict):
+        return ""
+    kind = str(details.get("type") or "").strip()
+    sub = details.get(kind) if kind else None
+    if not isinstance(sub, dict):
+        return ""
+    last4 = _last4_only(sub.get("last4"))
+    if not last4:
+        return ""
+    if kind == "card":
+        brand = str(sub.get("brand") or "").strip()
+        return f"{brand} ending {last4}" if brand else f"card ending {last4}"
+    if kind == "us_bank_account":
+        bank = str(sub.get("bank_name") or "").strip()
+        return (f"{bank} ending {last4}" if bank
+                else f"bank account ending {last4}")
+    return f"{kind} ending {last4}"
+
+
+def _external_account_label(account: Any) -> str:
+    """Label for an expanded payout destination (BankAccount/Card
+    object): "Chase ending 6789" / "visa ending 4242". Same last4-only
+    guarantee as :func:`_payment_method_label`. Returns "" unless the
+    object carries a usable identifier."""
+    if not isinstance(account, dict):
+        return ""
+    if "bank_name" in account or account.get("object") == "bank_account":
+        bank = str(account.get("bank_name") or "").strip()
+        last4 = _last4_only(account.get("last4"))
+        if not last4:
+            return ""
+        return (f"{bank} ending {last4}" if bank
+                else f"bank account ending {last4}")
+    if "brand" in account or account.get("object") == "card":
+        brand = str(account.get("brand") or "").strip()
+        last4 = _last4_only(account.get("last4"))
+        if not last4:
+            return ""
+        return (f"{brand} ending {last4}" if brand
+                else f"card ending {last4}")
+    return ""
+
+
 @register_connector
 class StripeConnector(Connector):
     """Stripe payments on the owner's account."""
@@ -504,6 +579,25 @@ class StripeConnector(Connector):
             resume_state=resume_state,
         )
 
+    def _charge_payment_label(self, charge_id: Any) -> str:
+        """Resolve "visa ending 4242" for a charge id (one read-only GET).
+
+        The confirm/finalize responses name the charge but carry no
+        card detail — the detail lives on the Charge
+        (``payment_method_details``). Best-effort and guarded: any
+        failure returns "" and the row still logs without the label.
+        Never raises; never touches a money-moving call.
+        """
+        if not isinstance(charge_id, str) or not charge_id.strip():
+            return ""
+        try:
+            charge = self._api("GET", f"/v1/charges/{charge_id.strip()}")
+        except Exception:  # noqa: BLE001 - label is best-effort
+            return ""
+        if not isinstance(charge, dict):
+            return ""
+        return _payment_method_label(charge.get("payment_method_details"))
+
     def confirm_payment_intent(
         self,
         intent_id: str,
@@ -538,21 +632,31 @@ class StripeConnector(Connector):
             "POST", f"/v1/payment_intents/{intent_id}/confirm")
         try:
             from ..cognition.representation import log_representation_action
+            res = result if isinstance(result, dict) else {}
+            charge_id = _stripe_id(res.get("latest_charge"))
+            pm_id = _stripe_id(res.get("payment_method"))
+            label = self._charge_payment_label(charge_id)
+            description = (f"Stripe charge {amount:,.2f} {currency} "
+                           f"({intent_id})")
+            if label:
+                description += f" via {label}"
+            metadata: dict[str, Any] = {
+                "action_class": "purchase",
+                "op": "confirm_payment_intent",
+                "intent_id": intent_id,
+                "amount": amount,
+                "currency": currency,
+                "customer": intent.get("customer", ""),
+                "status": res.get("status", ""),
+            }
+            if label:
+                metadata["payment_method"] = label
+            if charge_id:
+                metadata["charge_id"] = charge_id
+            if pm_id:
+                metadata["payment_method_id"] = pm_id
             log_representation_action(
-                "purchase",
-                f"Stripe charge {amount:,.2f} {currency} ({intent_id})",
-                outcome="success",
-                metadata={
-                    "action_class": "purchase",
-                    "op": "confirm_payment_intent",
-                    "intent_id": intent_id,
-                    "amount": amount,
-                    "currency": currency,
-                    "customer": intent.get("customer", ""),
-                    "status": result.get("status", "")
-                    if isinstance(result, dict) else "",
-                },
-            )
+                "purchase", description, outcome="success", metadata=metadata)
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
         return result
@@ -591,20 +695,29 @@ class StripeConnector(Connector):
             currency = str(inv.get("currency", "")).upper()
             detail = (f" ({amount_due:,.2f} {currency})"
                       if amount_due is not None else "")
+            charge_id = _stripe_id(inv.get("charge"))
+            pi_id = _stripe_id(inv.get("payment_intent"))
+            label = self._charge_payment_label(charge_id)
+            description = f"Stripe invoice finalized: {invoice_id}{detail}"
+            if label:
+                description += f" via {label}"
+            metadata: dict[str, Any] = {
+                "action_class": "purchase",
+                "op": "finalize_invoice",
+                "invoice_id": invoice_id,
+                "amount_due": amount_due,
+                "currency": currency,
+                "customer": inv.get("customer", ""),
+                "status": inv.get("status", ""),
+            }
+            if label:
+                metadata["payment_method"] = label
+            if charge_id:
+                metadata["charge_id"] = charge_id
+            if pi_id:
+                metadata["payment_intent"] = pi_id
             log_representation_action(
-                "purchase",
-                f"Stripe invoice finalized: {invoice_id}{detail}",
-                outcome="success",
-                metadata={
-                    "action_class": "purchase",
-                    "op": "finalize_invoice",
-                    "invoice_id": invoice_id,
-                    "amount_due": amount_due,
-                    "currency": currency,
-                    "customer": inv.get("customer", ""),
-                    "status": inv.get("status", ""),
-                },
-            )
+                "purchase", description, outcome="success", metadata=metadata)
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
         return result
@@ -649,21 +762,25 @@ class StripeConnector(Connector):
         )
         try:
             from ..cognition.representation import log_representation_action
-            transfer_id = (result.get("id", "")
-                           if isinstance(result, dict) else "")
+            res = result if isinstance(result, dict) else {}
+            transfer_id = res.get("id", "")
+            metadata: dict[str, Any] = {
+                "action_class": "transfer",
+                "op": "create_transfer",
+                "transfer_id": transfer_id,
+                "amount": amount / 100,
+                "currency": currency.upper(),
+                "destination": destination,
+            }
+            dest_payment = _stripe_id(res.get("destination_payment"))
+            if dest_payment:
+                metadata["destination_payment"] = dest_payment
             log_representation_action(
                 "purchase",
                 f"Stripe transfer {amount / 100:,.2f} "
                 f"{currency.upper()} → {destination} ({transfer_id})",
                 outcome="success",
-                metadata={
-                    "action_class": "transfer",
-                    "op": "create_transfer",
-                    "transfer_id": transfer_id,
-                    "amount": amount / 100,
-                    "currency": currency.upper(),
-                    "destination": destination,
-                },
+                metadata=metadata,
             )
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
@@ -704,22 +821,38 @@ class StripeConnector(Connector):
         )
         try:
             from ..cognition.representation import log_representation_action
-            payout_id = (result.get("id", "")
-                         if isinstance(result, dict) else "")
+            res = result if isinstance(result, dict) else {}
+            payout_id = res.get("id", "")
+            dest = res.get("destination")
+            if isinstance(dest, dict):
+                dest_id = _stripe_id(dest) or destination or "default"
+                label = _external_account_label(dest)
+            else:
+                dest_id = _stripe_id(dest) or destination or "default"
+                label = ""
+            description = (f"Stripe payout {amount / 100:,.2f} "
+                           f"{currency.upper()}")
+            if dest_id != "default":
+                description += f" → {dest_id}"
+            description += f" ({payout_id})"
+            metadata: dict[str, Any] = {
+                "action_class": "transfer",
+                "op": "create_payout",
+                "payout_id": payout_id,
+                "amount": amount / 100,
+                "currency": currency.upper(),
+                "destination": dest_id,
+            }
+            if label:
+                metadata["payment_method"] = label
+            dest_type = res.get("type")
+            if isinstance(dest_type, str) and dest_type.strip():
+                metadata["destination_type"] = dest_type.strip()
+            method = res.get("method")
+            if isinstance(method, str) and method.strip():
+                metadata["method"] = method.strip()
             log_representation_action(
-                "purchase",
-                f"Stripe payout {amount / 100:,.2f} {currency.upper()} "
-                f"({payout_id})",
-                outcome="success",
-                metadata={
-                    "action_class": "transfer",
-                    "op": "create_payout",
-                    "payout_id": payout_id,
-                    "amount": amount / 100,
-                    "currency": currency.upper(),
-                    "destination": destination or "default",
-                },
-            )
+                "purchase", description, outcome="success", metadata=metadata)
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
         return result

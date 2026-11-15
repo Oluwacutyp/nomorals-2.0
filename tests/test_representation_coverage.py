@@ -547,3 +547,224 @@ def test_stripe_resume_logs_once() -> None:
     assert kwargs["metadata"]["payout_id"] == "po_9"
     assert kwargs["metadata"]["amount"] == 7.0
     assert kwargs["metadata"]["destination"] == "default"
+
+
+# ── Stripe money moves: which card/bank was used ─────────────────────
+# Owner correction 2026-11-15: the card/bank used for a payment is
+# essential. Stripe never returns a full card number (PAN) or a full
+# bank account number — brand+last4 / bank name+last4 is the most
+# specific identifier the API ever exposes, and the only one recorded.
+
+
+def test_stripe_confirm_intent_logs_payment_method() -> None:
+    conn, http = _stripe_connected()
+    http.route("GET", "/v1/payment_intents/pi_1", FakeResponse(200, {
+        "id": "pi_1", "amount": 2500, "currency": "usd",
+        "customer": "cus_1", "description": "gig"}))
+    http.route("POST", "/v1/payment_intents/pi_1/confirm", FakeResponse(200, {
+        "id": "pi_1", "status": "succeeded", "amount": 2500,
+        "currency": "usd", "customer": "cus_1",
+        "payment_method": "pm_1", "latest_charge": "ch_1"}))
+    http.route("GET", "/v1/charges/ch_1", FakeResponse(200, {
+        "id": "ch_1", "payment_method": "pm_1",
+        "payment_method_details": {
+            "type": "card",
+            "card": {"brand": "visa", "last4": "4242",
+                     "exp_month": 12, "exp_year": 2030}}}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.confirm_payment_intent("pi_1", confirmed=True)
+    assert out["status"] == "succeeded"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert "visa ending 4242" in args[1]
+    assert kwargs["metadata"]["payment_method"] == "visa ending 4242"
+    assert kwargs["metadata"]["charge_id"] == "ch_1"
+    assert kwargs["metadata"]["payment_method_id"] == "pm_1"
+
+
+def test_stripe_confirm_intent_bank_account_logs_bank_name() -> None:
+    conn, http = _stripe_connected()
+    http.route("GET", "/v1/payment_intents/pi_1", FakeResponse(200, {
+        "id": "pi_1", "amount": 2500, "currency": "usd",
+        "customer": "cus_1", "description": "gig"}))
+    http.route("POST", "/v1/payment_intents/pi_1/confirm", FakeResponse(200, {
+        "id": "pi_1", "status": "succeeded", "amount": 2500,
+        "currency": "usd", "customer": "cus_1",
+        "payment_method": "pm_1", "latest_charge": "ch_1"}))
+    http.route("GET", "/v1/charges/ch_1", FakeResponse(200, {
+        "id": "ch_1", "payment_method": "pm_1",
+        "payment_method_details": {
+            "type": "us_bank_account",
+            "us_bank_account": {"bank_name": "STRIPE TEST BANK",
+                                "last4": "6789"}}}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.confirm_payment_intent("pi_1", confirmed=True)
+    assert out["status"] == "succeeded"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert "STRIPE TEST BANK ending 6789" in args[1]
+    assert (kwargs["metadata"]["payment_method"]
+            == "STRIPE TEST BANK ending 6789")
+
+
+def test_stripe_confirm_intent_no_charge_detail_still_logs() -> None:
+    # requires_action: no charge exists yet — the row logs without a
+    # payment_method key, never crashes, never invents one, and no
+    # charge lookup is attempted.
+    conn, http = _stripe_connected()
+    http.route("GET", "/v1/payment_intents/pi_1", FakeResponse(200, {
+        "id": "pi_1", "amount": 2500, "currency": "usd",
+        "customer": "cus_1", "description": "gig"}))
+    http.route("POST", "/v1/payment_intents/pi_1/confirm", FakeResponse(200, {
+        "id": "pi_1", "status": "requires_action", "amount": 2500,
+        "currency": "usd", "customer": "cus_1"}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.confirm_payment_intent("pi_1", confirmed=True)
+    assert out["status"] == "requires_action"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert "payment_method" not in kwargs["metadata"]
+    assert kwargs["metadata"]["status"] == "requires_action"
+    assert not [c for c in http.calls if "/v1/charges/" in c[1]]
+
+
+def test_stripe_confirm_intent_charge_lookup_failure_still_logs() -> None:
+    # The charge GET fails — the label is best-effort: the charge
+    # still returns and the row still logs without it.
+    conn, http = _stripe_connected()
+    http.route("GET", "/v1/payment_intents/pi_1", FakeResponse(200, {
+        "id": "pi_1", "amount": 2500, "currency": "usd",
+        "customer": "cus_1", "description": "gig"}))
+    http.route("POST", "/v1/payment_intents/pi_1/confirm", FakeResponse(200, {
+        "id": "pi_1", "status": "succeeded", "amount": 2500,
+        "currency": "usd", "customer": "cus_1",
+        "payment_method": "pm_1", "latest_charge": "ch_1"}))
+    http.route("GET", "/v1/charges/ch_1", FakeResponse(200, {"error": {
+        "type": "invalid_request_error", "code": "bad",
+        "message": "boom"}}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.confirm_payment_intent("pi_1", confirmed=True)
+    assert out["status"] == "succeeded"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert "payment_method" not in kwargs["metadata"]
+    assert kwargs["metadata"]["charge_id"] == "ch_1"
+
+
+def test_stripe_finalize_invoice_logs_payment_method() -> None:
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/invoices/in_1/finalize", FakeResponse(200, {
+        "id": "in_1", "amount_due": 2500, "currency": "usd",
+        "customer": "cus_1", "status": "paid",
+        "charge": "ch_2", "payment_intent": "pi_2"}))
+    http.route("GET", "/v1/charges/ch_2", FakeResponse(200, {
+        "id": "ch_2", "payment_method": "pm_2",
+        "payment_method_details": {
+            "type": "card",
+            "card": {"brand": "mastercard", "last4": "5555"}}}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.finalize_invoice("in_1", confirmed=True)
+    assert out["status"] == "paid"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert "mastercard ending 5555" in args[1]
+    assert kwargs["metadata"]["payment_method"] == "mastercard ending 5555"
+    assert kwargs["metadata"]["charge_id"] == "ch_2"
+    assert kwargs["metadata"]["payment_intent"] == "pi_2"
+
+
+def test_stripe_finalize_invoice_no_charge_logs_without_method() -> None:
+    # No charge on the invoice (unpaid / send-invoice): the row logs
+    # with the invoice facts and no payment_method key.
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/invoices/in_1/finalize", FakeResponse(200, {
+        "id": "in_1", "amount_due": 2500, "currency": "usd",
+        "customer": "cus_1", "status": "open"}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.finalize_invoice("in_1", confirmed=True)
+    assert out["status"] == "open"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert "payment_method" not in kwargs["metadata"]
+    assert "charge_id" not in kwargs["metadata"]
+
+
+def test_stripe_payout_uses_result_destination() -> None:
+    # Caller passed no destination: the payout response names the
+    # actual bank account Stripe used — that is what the row records,
+    # not "default".
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/payouts", FakeResponse(200, {
+        "id": "po_1", "destination": "ba_9", "type": "bank_account",
+        "method": "standard"}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.create_payout(5000, "usd", confirmed=True)
+    assert out["id"] == "po_1"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert "ba_9" in args[1]
+    assert kwargs["metadata"]["destination"] == "ba_9"
+    assert kwargs["metadata"]["destination_type"] == "bank_account"
+    assert kwargs["metadata"]["method"] == "standard"
+
+
+def test_stripe_payout_expanded_destination_names_bank() -> None:
+    # If Stripe ever expands the destination object, the bank name +
+    # last4 come straight from the response — no extra lookup.
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/payouts", FakeResponse(200, {
+        "id": "po_1",
+        "destination": {"id": "ba_9", "object": "bank_account",
+                        "bank_name": "Chase", "last4": "6789"},
+        "type": "bank_account", "method": "standard"}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.create_payout(5000, "usd", destination="ba_9",
+                                 confirmed=True)
+    assert out["id"] == "po_1"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert kwargs["metadata"]["destination"] == "ba_9"
+    assert kwargs["metadata"]["payment_method"] == "Chase ending 6789"
+
+
+def test_stripe_transfer_logs_destination_payment() -> None:
+    conn, http = _stripe_connected()
+    http.route("POST", "/v1/transfers", FakeResponse(200, {
+        "id": "tr_1", "destination_payment": "py_1"}))
+    calls, patch = _calls()
+    with patch:
+        out = conn.create_transfer(10000, "usd", "acct_dest",
+                                   confirmed=True)
+    assert out["id"] == "tr_1"
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert kwargs["metadata"]["destination_payment"] == "py_1"
+
+
+def test_stripe_payment_method_label_never_keeps_full_number() -> None:
+    # Structural guarantee: even a hostile payload carrying a full
+    # number can only ever yield the last four digits in the label.
+    from nomorals.connectors.stripe import _payment_method_label
+
+    hostile = {"type": "card", "card": {
+        "brand": "visa", "last4": "4242424242424242",
+        "number": "4242424242424242"}}
+    label = _payment_method_label(hostile)
+    assert label == "visa ending 4242"
+    assert "4242424242424242" not in label
+    assert _payment_method_label({"type": "card", "card": {}}) == ""
+    assert _payment_method_label(None) == ""
+    assert _payment_method_label({"type": "us_bank_account",
+                                  "us_bank_account": {"last4": "6789"}}) == \
+        "bank account ending 6789"
+    assert _payment_method_label({"type": "sepa_debit",
+                                  "sepa_debit": {"last4": "3000"}}) == \
+        "sepa_debit ending 3000"
