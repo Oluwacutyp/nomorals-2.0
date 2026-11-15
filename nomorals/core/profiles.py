@@ -27,7 +27,7 @@ from .profile import detect_profile
 
 __all__ = ["PROFILES", "get_profile", "get_profile_kind", "profile_value",
            "describe_profile", "format_profile", "KNOWN_PROFILE_NAMES",
-           "gpu_info", "gpu_up", "antivirus_info"]
+           "gpu_info", "gpu_up", "gpu_up_reason", "antivirus_info"]
 
 #: profile name → tuning values. ``threads: 0`` means auto-detect all cores.
 PROFILES: dict[str, dict[str, Any]] = {
@@ -194,12 +194,26 @@ def gpu_up(family: str) -> bool:
     """True when ``family`` should run on the GPU on this box.
 
     ``seeing`` / ``speaking`` / ``generating`` / ``training`` are GPU
-    work when a GPU path exists (local or forwarded); ``text`` never
-    is. The activation seam — organs route through here.
+    work when a GPU path exists (local or attested-forwarded) *and*
+    its VRAM meets the family's floor (``core.gpu.GPU_FAMILY_FLOORS``);
+    ``text`` never is. A GPU whose VRAM is unknown — an unattested
+    forwarded endpoint — clears no floor. The activation seam — organs
+    route through here. See :func:`gpu_up_reason` for the refusal.
     """
     from .gpu import gpu_up as _gpu_up
 
     return _gpu_up(family)
+
+
+def gpu_up_reason(family: str) -> str:
+    """Why ``family`` is (not) GPU-up on this box — "" when up, else
+    the refusal reason naming the floor and the measured VRAM (see
+    :func:`nomorals.core.gpu.gpu_up_reason`). The profile layer's
+    passthrough for the activation seam's reason.
+    """
+    from .gpu import gpu_up_reason as _gpu_up_reason
+
+    return _gpu_up_reason(family)
 
 
 def antivirus_info() -> dict[str, Any]:

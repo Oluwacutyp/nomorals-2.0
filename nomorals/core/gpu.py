@@ -20,10 +20,15 @@ carries the answer:
   pin with no endpoint fails closed (``has_gpu`` False — nothing routes
   to a GPU with no address).
 * ``gpu_up(family)`` — the activation seam: ``seeing`` / ``speaking`` /
-  ``generating`` / ``training`` run on the GPU when one is present;
-  ``text`` never does. Per-organ VRAM floors (LatentSync 18 GB, …)
-  stay with the organs — this module answers "is there a GPU path",
-  not "does this model fit".
+  ``generating`` / ``training`` run on the GPU when one is present
+  *and* its VRAM meets the family's floor (``GPU_FAMILY_FLOORS`` —
+  seeing/speaking 4 GB, generating 16 GB, training 24 GB, each traced
+  to a real organ floor in the code); ``text`` never does. A GPU whose
+  VRAM is unknown — an unattested forwarded endpoint — clears no
+  floor. ``gpu_up_reason(family)`` names a refusal; ``gpu_up`` keeps
+  its bool shape. Per-organ VRAM floors (LatentSync 18 GB, TRELLIS
+  24 GB, …) stay with the organs — the seam answers "is this family's
+  GPU work viable here", the organs still gate their own models.
 
 Attestation (forwarded path): a bare ``NM_GPU_URL`` string is a claim,
 not proof — an endpoint that only says "I have 24 GB" is not believed.
@@ -69,6 +74,7 @@ from typing import Any
 __all__ = [
     "GPU_PATHS",
     "GPU_FAMILIES",
+    "GPU_FAMILY_FLOORS",
     "GPU_PIN_ENV",
     "GPU_URL_ENV",
     "ATTEST_PROOF_BYTES",
@@ -80,6 +86,7 @@ __all__ = [
     "GpuInfo",
     "detect_gpu",
     "gpu_up",
+    "gpu_up_reason",
     "attest_forwarded",
     "probe_attestation",
 ]
@@ -91,6 +98,34 @@ GPU_PATHS: tuple[str, ...] = ("local", "forwarded", "cpu")
 #: Text is deliberately absent — text-only work never needs a GPU.
 GPU_FAMILIES: frozenset[str] = frozenset(
     {"seeing", "speaking", "generating", "training"})
+
+#: Per-family minimum VRAM (GB) for ``gpu_up`` — each floor traces to
+#: a real organ requirement in the repo, not an invented number:
+#: * seeing 4.0 — the owner's vision model, Qwen3-VL-4B-Instruct-GGUF
+#:   Q4_K_M, ~3.3 GB weights + mmproj, "under the 4GB phone target"
+#:   (llm/model_catalog.py:66-80).
+#: * speaking 4.0 — four speaking organs pin 4.0 GB: XTTS, Fish-S2
+#:   and Bark (voice/efficiency.py RESOURCE_BUDGETS) and SadTalker
+#:   (media/directed/lipsync.py SADTALKER_MIN_VRAM_GB). The quantized
+#:   phone variants (chatterbox-nano / kokoro 0.5 GB, piper 0.0) are
+#:   the exception, not the family bar; LatentSync 18 GB stays
+#:   organ-gated.
+#: * generating 16.0 — Wan 2.2 TI2V-5B, the default video-gen floor
+#:   (media/videogen/capabilities.py WAN_MIN_VRAM_GB, the floor when
+#:   min_vram_gb is None). Corroborated by Kimodo text-to-motion,
+#:   which enforces vram >= 15.0 and states ~17 GB
+#:   (media/directed/motion_score.py). LTX 8 GB is the distilled
+#:   fallback; TRELLIS 24 GB stays organ-gated.
+#: * training 24.0 — TRELLIS.2 (4B), the repo's heaviest GPU floor
+#:   (media/trellis.py TRELLIS_MIN_VRAM_GB), corroborated by the LoRA
+#:   side-step "rank 64 @ 24GB VRAM, rank 16 @ 8GB"
+#:   (media/afrobeats.py:315).
+GPU_FAMILY_FLOORS: dict[str, float] = {
+    "seeing": 4.0,
+    "speaking": 4.0,
+    "generating": 16.0,
+    "training": 24.0,
+}
 
 #: Env vars: NM_GPU pins the path (auto|local|forwarded|cpu);
 #: NM_GPU_URL names the forwarded endpoint (implies forwarded).
@@ -539,16 +574,54 @@ def detect_gpu(*, pin: str | None = None,
     return info
 
 
+def _gpu_up_check(family: str, gpu: GpuInfo | None = None
+                  ) -> tuple[bool, str]:
+    """``(up, reason)`` for ``family`` — the shared gate behind
+    :func:`gpu_up` and :func:`gpu_up_reason`. ``reason`` is "" when
+    up, and always names the measured numbers when down."""
+    fam = (family or "").strip().lower()
+    if fam == "text":
+        return False, "text never runs on the GPU"
+    if fam not in GPU_FAMILIES:
+        return False, f"unknown GPU family {family!r}"
+    info = gpu if gpu is not None else detect_gpu()
+    if not info.has_gpu:
+        return False, "no GPU path on this box"
+    floor = GPU_FAMILY_FLOORS[fam]
+    vram = float(info.vram_gb or 0.0)
+    if vram <= 0:
+        if info.path == "forwarded":
+            return (False,
+                    f"{fam} needs {floor:g} GB VRAM, but this GPU's "
+                    "VRAM is unknown — the forwarded GPU at "
+                    f"{info.forward_url or 'the configured endpoint'} "
+                    "was never attested")
+        return (False,
+                f"{fam} needs {floor:g} GB VRAM, but this GPU's VRAM "
+                "is unknown")
+    if vram < floor:
+        return (False,
+                f"{fam} needs {floor:g} GB VRAM, this GPU has "
+                f"{vram:g} GB")
+    return True, ""
+
+
 def gpu_up(family: str, gpu: GpuInfo | None = None) -> bool:
     """True when ``family`` should run on the GPU on this box.
 
     ``seeing`` / ``speaking`` / ``generating`` / ``training`` are GPU
-    work when a GPU path exists (local or forwarded); ``text`` is
-    never GPU work; anything else is not a known family. ``gpu``
-    overrides the detected box (tests and embedders).
+    work when a GPU path exists (local or attested-forwarded) *and*
+    its VRAM meets the family's floor (``GPU_FAMILY_FLOORS``);
+    ``text`` is never GPU work; anything else is not a known family.
+    A GPU whose VRAM is unknown — an unattested forwarded endpoint —
+    clears no floor. ``gpu`` overrides the detected box (tests and
+    embedders). See :func:`gpu_up_reason` for the refusal reason.
     """
-    fam = (family or "").strip().lower()
-    if fam == "text" or fam not in GPU_FAMILIES:
-        return False
-    info = gpu if gpu is not None else detect_gpu()
-    return bool(info.has_gpu)
+    return _gpu_up_check(family, gpu)[0]
+
+
+def gpu_up_reason(family: str, gpu: GpuInfo | None = None) -> str:
+    """Why ``family`` is (not) GPU-up on this box: "" when up, else a
+    human-readable reason naming the floor and the measured VRAM.
+    Same gate as :func:`gpu_up`, same arguments."""
+    return _gpu_up_check(family, gpu)[1]
