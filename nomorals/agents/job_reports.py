@@ -608,10 +608,67 @@ def _value_doc(tool: str, value: Any, *, title: str) -> Doc:
                summary=_plain(value) or "No output.")
 
 
+# ── trendops — the daily unprompted proposal ─────────────────────
+
+def _trendops_doc(tool: str, value: Mapping[str, Any], *,
+                  title: str) -> Doc:
+    """``trendops(action="propose")`` → ``{"proposals": [...]}``.
+
+    Each proposal carries its own ``why`` ("Roadster GTA peaks now —
+    2d left, used 0x") and its ready apply command; the summary names
+    the most urgent one so the owner can act from the notification
+    alone, and every proposal renders as one line: why, then the
+    command to run.  An empty proposals list never reaches here (the
+    run is silent by the scheduled-silence rule), but the builder
+    still renders an honest empty summary if it does — never a
+    success claim over nothing.
+    """
+    proposals = [p for p in (value.get("proposals") or [])
+                 if isinstance(p, Mapping)]
+    if not proposals:
+        return Doc(title=title, icon="✅", tone="ok",
+                   summary="No live trend formats.")
+    top = proposals[0]
+    top_name = _plain(top.get("name")) or _plain(top.get("slug")) \
+        or "a trend format"
+    days = top.get("days_left")
+    if isinstance(days, (int, float)):
+        summary = (f"{_n(len(proposals), 'format')} peaking — "
+                   f"{top_name}, {days:g}d left.")
+    else:
+        summary = (f"{_n(len(proposals), 'format')} peaking — "
+                   f"{top_name}.")
+    lines: list[str] = []
+    for p in proposals:
+        why = _plain(p.get("why"))
+        if not why:
+            name = _plain(p.get("name")) or _plain(p.get("slug")) \
+                or "a trend format"
+            why = f"{name} is live"
+            days_p = p.get("days_left")
+            if isinstance(days_p, (int, float)):
+                why += f" — {days_p:g}d left"
+            uses = p.get("uses")
+            if isinstance(uses, int):
+                why += f", used {uses}x"
+        apply_cmd = _plain(p.get("apply"))
+        line = f"{why} — {apply_cmd}" if apply_cmd else why
+        if line.strip():
+            lines.append(line)
+    shown = lines[:_PROSE_LINE_LIMIT]
+    if len(lines) > _PROSE_LINE_LIMIT:
+        shown = shown + [f"… (+{len(lines) - _PROSE_LINE_LIMIT} more)"]
+    sections = (Section("Proposals", quote=tuple(shown),
+                        expandable=True),) if shown else ()
+    return Doc(title=title, icon="✅", tone="ok", summary=summary,
+               sections=sections)
+
+
 _BUILDERS = {
     "finance_alert": _finance_alert_doc,
     "finance_digest": _finance_digest_doc,
     "__agency_shift__": _agency_shift_doc,
+    "trendops": _trendops_doc,
 }
 
 

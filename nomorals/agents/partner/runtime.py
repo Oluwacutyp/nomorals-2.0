@@ -3262,6 +3262,21 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("exploration jobs not registered: %s",
                                  exc)
+                # TrendOps proposals (owner vision 2026-10-21: the
+                # class PROPOSES applications unprompted) — one
+                # durable daily job (09:00) that calls
+                # TrendOps.propose() and publishes the ranked
+                # proposals.  NOT routine: the proposal IS the
+                # delivery, so a successful run pages through the
+                # scheduler's alert path; when no formats are live
+                # the run is silent by the scheduled-silence rule.
+                # Idempotent by name.
+                try:
+                    from ...media.trendops.jobs import ensure_trendops_jobs
+                    ensure_trendops_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("trendops jobs not registered: %s",
+                                 exc)
                 # Outcome stewardship (doc 15 P4): every 6h the
                 # steward sweeps missions + background jobs for work
                 # whose outcome is overdue, stalled, orphaned or
