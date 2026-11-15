@@ -2423,6 +2423,14 @@ class GameEngine:
             _log.debug("last fair reveal failed", exc_info=True)
             return None
 
+    def last_game_name(self, chat_key: str) -> str:
+        """The name of the last finished game in this chat (the
+        rematch memory), or "" when none finished here yet.  Lets a
+        caller decide BEFORE rematching — a slots rematch rides the
+        live session, so its turn mutes the table card."""
+        last = self._last_game.get(chat_key)
+        return str(last[0]) if last else ""
+
     def rematch(self, chat_key: str, difficulty: str = "normal",
                 ) -> tuple[Room | None, list[str]]:
         """Start the last finished game again with the same humans.

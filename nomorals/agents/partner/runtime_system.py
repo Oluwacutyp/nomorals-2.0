@@ -3259,8 +3259,8 @@ class RuntimeSystemMixin:
             if row["family"] != "run":
                 return (f"{row['label']} is a healing ticket — "
                         "incidents and cases aren't stoppable work; "
-                        "they close through the immune loop "
-                        "(/immune). Nothing was cancelled.")
+                        "they close through the immune loop. "
+                        "Nothing was cancelled.")
             reason = sub[1].strip() if len(sub) > 1 else ""
             browser_manager = None
             jobs_fn = getattr(self, "_browser_run_jobs", None)

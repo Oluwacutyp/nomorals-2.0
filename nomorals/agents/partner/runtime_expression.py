@@ -364,7 +364,13 @@ class RuntimeExpressionMixin:
                            emoji, big=True)
                         return
                     except TypeError:
-                        pass
+                        # The adapter's react() takes no big form
+                        # (older signature): the plain call below
+                        # is the fallback, so log and fall through
+                        # instead of swallowing it silently.
+                        _log.debug(
+                            "celebration big reaction unsupported; "
+                            "using plain", exc_info=True)
                 fn(message.chat, str(message.message_id), emoji)
         except Exception:  # noqa: BLE001 - garnish only
             _log.debug("celebration reaction failed", exc_info=True)
@@ -1407,7 +1413,7 @@ class RuntimeExpressionMixin:
             last = self._emojiart_last_for(message)
             if not last:
                 return ("nothing to remix yet — make a piece "
-                        "first (/emojiart draw or dot).")
+                        "first.")
             out = None
             if verb == "invert":
                 out = emoji_art.invert_piece(last)
@@ -2296,9 +2302,8 @@ class RuntimeExpressionMixin:
                     "to, so no watch was started.")
         rec = svc.manager.resolve(session_id)
         if rec is None:
-            return ("no desktop session exists yet — /computer "
-                    "open starts one, then /computer watch "
-                    "streams it here.")
+            return ("no desktop session exists yet — open one "
+                    "first, then start the watch here.")
         if rec.state != "open":
             return (f"session {rec.id} is {rec.state}"
                     + (f" — {rec.note}" if rec.note else "")
@@ -2333,7 +2338,7 @@ class RuntimeExpressionMixin:
                 watch = mgr.active_for(chat_key, session_id)
         if watch is None:
             return ("no watch is running for this chat — "
-                    "/computer watch starts one.")
+                    "nothing to stop.")
         from ...core.cancellation import cancel_with_receipt
 
         db = getattr(getattr(self, "context", None), "db", None)

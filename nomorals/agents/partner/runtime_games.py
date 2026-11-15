@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
+from contextlib import contextmanager, nullcontext
 from typing import Any
 
 from ...core.logging_setup import get_logger
@@ -292,7 +293,21 @@ class RuntimeGamesMixin:
                 (w for w in (p.lower() for p in parts[1:])
                  if w in ("easy", "normal", "hard", "expert")),
                 "normal")
-            room, msgs = engine.rematch(chat_key, difficulty=difficulty)
+            # A slots rematch re-opens the table whose settled
+            # result is the session message: the card must not post
+            # beside the rematch render (see _muted_table_card).
+            # The game is read BEFORE rematching — the fresh room
+            # has not started yet. A minimal engine without the
+            # accessor simply never mutes (the old behaviour).
+            last_game = getattr(engine, "last_game_name", None)
+            is_slots = (callable(last_game)
+                        and last_game(chat_key) == "slots")
+            mute = getattr(self, "_muted_table_card", None)
+            ctx = (mute(when=is_slots) if callable(mute)
+                   else nullcontext())
+            with ctx:
+                room, msgs = engine.rematch(
+                    chat_key, difficulty=difficulty)
             if room is not None and room.game == "slots":
                 # The rematch render belongs to the slots session:
                 # declared as one, a tap on the settled result EDITS
@@ -654,6 +669,21 @@ class RuntimeGamesMixin:
         printing both was the twice-told fairness block in the
         owner's screenshot.
         """
+        # The turn settles in the same command, so the card must
+        # not post beside the session render (see
+        # _muted_table_card) — the whole drive runs muted. A
+        # minimal runtime without the helper simply never mutes
+        # (the old behaviour).
+        mute = getattr(self, "_muted_table_card", None)
+        with (mute() if callable(mute) else nullcontext()):
+            return self._slots_quickstart_turn(
+                engine, chat_key, player, kind=kind, amount=amount)
+
+    def _slots_quickstart_turn(self, engine: Any, chat_key: str,
+                               player: Any, *, kind: str,
+                               amount: int) -> Any:
+        """The bet-and-spin drive itself, run muted by
+        :meth:`_slots_quickstart`."""
         live = engine.live(chat_key)
         if live is not None and live.game != "slots":
             # another table is live: today's start refusal, verbatim —
@@ -2393,15 +2423,64 @@ class RuntimeGamesMixin:
         expired invites and every platform shares the same relay table."""
         return self._game_engine().relay
 
+    @contextmanager
+    def _muted_table_card(self, *, when: bool = True):  # type: ignore[no-untyped-def]
+        """Mute the living table card for one turn.
+
+        A turn that owns its one message — a slots quickstart or a
+        slots rematch ends in a live-session render — must not let
+        the table card post or revise mid-turn: the card would be a
+        second send beside the session message, and the table never
+        survives the turn (a slots spin always settles), so the card
+        is pure noise there.  The flag restores on exit, exceptions
+        included; a turn that never mutes (``when=False``) is a
+        no-op.  The sink still retires a pre-existing card when the
+        room finishes (see :meth:`_game_table_sink`), so a table
+        opened by hand before this turn never lingers as "active".
+        """
+        if not when:
+            yield
+            return
+        old = getattr(self, "_table_card_muted", False)
+        self._table_card_muted = True
+        try:
+            yield
+        finally:
+            self._table_card_muted = old
+
     def _game_table_sink(self, room: Any, event: str) -> None:
         """Engine table sink (doc 8 P4): publish/revise the room's
         live-table living card through the runtime's card host.
         Relay virtual rooms have no single chat to hold a card —
         their fan-out stays the relay's own sends. Best-effort by
         the engine's contract: a card failure never breaks a game.
+
+        Muted turns (a slots quickstart / rematch — see
+        :meth:`_muted_table_card`) post nothing: the turn's one
+        message is the live-session render.  The one exception is
+        the room's finish: a card that already exists — a table
+        opened by hand before this turn — still gets its terminal
+        revise, so it never lingers as "active"; a table this turn
+        opened never publishes a card at all.
         """
         if str(getattr(room, "chat_key", "")).startswith("relay:"):
             return
+        if getattr(self, "_table_card_muted", False):
+            if event != "finished":
+                return
+            from ...games.table import build_table_card
+
+            try:
+                card = build_table_card(self._game_engine(), room)
+            except Exception:
+                # The retire is best-effort (the sink's contract:
+                # a card failure never breaks a game) — log and
+                # leave the stale card to the next hand event.
+                _log.debug("muted table-card retire skipped",
+                           exc_info=True)
+                return
+            if self._living_card_host().store.get(card.card_id) is None:
+                return
         from ...games.table import sync_table_card
         from ...social.chat.base import ChatRef
 

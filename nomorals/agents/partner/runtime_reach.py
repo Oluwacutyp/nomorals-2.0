@@ -1049,9 +1049,7 @@ class RuntimeReachMixin:
                 for req in broker.pending():
                     lines.append(
                         f"  ⏸ waiting on you: {req['request_id']} — "
-                        f"{req['kind']} on {req['url']} "
-                        f"(/browser approve {req['request_id']} · "
-                        f"/browser deny {req['request_id']})")
+                        f"{req['kind']} on {req['url']}")
             lines.append("detail: /browser run status <job>")
             return "\n".join(lines)
         return self._browser_run_jobs().status_text(arg)

@@ -764,7 +764,7 @@ class RuntimeSearchMixin:
                 if not getattr(result, "ok", False):
                     return ("⚠️ the file send failed — the gateway "
                             "rejected it; the output itself is "
-                            "still in the reader (/read)")
+                            "still in the reader")
                 return f"📄 sent above — {name}"
             if verb == "open":
                 # /read open <n> — reopen a routed output from the

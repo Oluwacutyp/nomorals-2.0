@@ -735,7 +735,7 @@ class RuntimeProvisionMixin:
                 note="bridge not connected — no live send path")
             return ("🔘 the WhatsApp bridge isn't connected, so "
                     "there's no live send path to probe. /pair "
-                    "shows the pool state; run /pair buttons again "
+                    "shows the pool state; probe the buttons again "
                     "once the account is attached.")
         from ...social.chat.base import ChatKind, ChatRef
 
@@ -777,8 +777,8 @@ class RuntimeProvisionMixin:
                     "degraded to TEXT lines: the "
                     f"{form_word} form did not render as buttons. "
                     "This account's sends now use the LIST form "
-                    "on that evidence — run /pair buttons again "
-                    "to probe the list form, then tap a button "
+                    "on that evidence — probe the buttons again "
+                    "to test the list form, then tap a button "
                     "there to close the loop.")
         return (f"🔘 probe sent to your WhatsApp self-chat — the "
                 f"bridge reports form: {form or 'unknown'} "

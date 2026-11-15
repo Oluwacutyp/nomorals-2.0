@@ -225,6 +225,55 @@ HINT_EXCEPTIONS: list[tuple[str, str, str]] = [
      "rides the wisdom ASK path's own checked long-send seam "
      "(_send_long_checked), which takes text only — the reply "
      "never crosses the control-reply funnel"),
+    # ── batch E (2026-11-15): each entry names ONE hint and the
+    # reason no button can carry it — cross-surface, room-scoped,
+    # argument-carrying, provenance, or alert-seam notice. No
+    # entry covers a hint a button could carry; those were
+    # reworded at the source instead.
+    ("runtime.py", "run /update again when ready",
+     "update-recovery owner NOTICE on the alert seam (title/body "
+     "tuple, same family as the 'will not retry' exception), not "
+     "a control reply; re-running /update after a crash is the "
+     "owner's deliberate manual step"),
+    ("runtime.py", "a reason is required (/proposals deny",
+     "deny takes the owner's own reason text — no button can "
+     "invent it; the id + reason travel as typed text"),
+    ("runtime_chatops.py", "/poststatus posts to it",
+     "pointer to the two status commands, each taking the user's "
+     "own content (the status text / the audience) — no single "
+     "button can carry them"),
+    ("runtime_chatops.py", "run /sendonce from your WhatsApp surface",
+     "action belongs to another surface: Telegram has no "
+     "view-once media; /sendonce must run from the WhatsApp "
+     "surface"),
+    ("runtime_chatops.py", "run /find in the chat there",
+     "action belongs to another surface: the Bot API has no "
+     "message-search endpoint; /find runs on the personal "
+     "surfaces"),
+    ("runtime_chatops.py", "run /vcf inside a group to export its people",
+     "argument-carrying: the group name / person name + number is "
+     "the user's own data — no button can invent it"),
+    ("runtime_group.py", "run /flag again for a fresh one",
+     "argument-carrying: a fresh flag needs the user's own "
+     "question — no button can invent it"),
+    ("runtime_group.py", "run /mute again for a fresh one",
+     "argument-carrying: a fresh mute needs the target member — "
+     "the user's own data; a button on a settled card cannot "
+     "name one"),
+    ("runtime_live.py", "send /map mark <label>",
+     "argument-carrying: the label is the user's own data and "
+     "the mark needs their location attached — covers both /map "
+     "mark sites in this module"),
+    ("runtime_media.py", "run /dj desk from a chat",
+     "room-scoped: the desk must run from a chat and this "
+     "invocation has no chat to drop the set into — a button "
+     "here would fail the same way"),
+    ("runtime_provision.py", "/pair journal button_probe",
+     "provenance: the journal entry is the record; the command "
+     "names where the record lives, like the group-log exception"),
+    ("runtime_provision.py", "/pair whatsapp <number>",
+     "argument-carrying: the number is the user's own phone "
+     "number — no button can invent it"),
 ]
 
 

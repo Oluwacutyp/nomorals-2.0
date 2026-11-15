@@ -1172,8 +1172,7 @@ class RuntimeLiveMixin:
             f"{precision} precision · until {until} "
             f"({minutes:g} min).",
             "updates you send Devon as a location share are "
-            "forwarded as pins; every decision is recorded "
-            "(/map share status).",
+            "forwarded as pins; every decision is recorded.",
         ]
         if not card_ok:
             lines.append(
