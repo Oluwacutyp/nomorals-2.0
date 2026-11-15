@@ -281,6 +281,10 @@
 # NM_LOCALE=
 # workstation | laptop | termux. EC2 RDP: workstation.
 # NM_PROFILE=
+# GPU path pin: auto | local | forwarded | cpu. Default: auto (local probe). cpu = no GPU; forwarded needs NM_GPU_URL.
+# NM_GPU=
+# Forwarded GPU endpoint URL, e.g. http://192.168.1.50:8787. A set URL implies forwarded; the endpoint must attest its VRAM (GET /gpu/attest) before VRAM floors trust it.
+# NM_GPU_URL=
 # Config key read by Devon code.
 # NM_DEBUG=
 # 0 = online-first (default). 1 = offline mode.
@@ -331,6 +335,8 @@
 # NM_API_PORT=
 # REQUIRED if API is exposed beyond localhost. API auth token.
 # NM_API_TOKEN=
+# Allowed CORS origins for the API server, comma-separated. Default: *.
+# NM_API_CORS_ORIGINS=
 # Hub URL (if using hub).
 # NM_HUB_URL=
 # Hub token.
@@ -545,6 +551,10 @@
 # NM_AUTONOMY_DAILY_MODEL_CALLS=
 # 0 = autonomy off (nm autonomy off). Default: on.
 # NM_AUTONOMY_ENABLED=
+# Antivirus engine pin: auto | defender | clamav | builtin | none. Default: auto (Defender, then ClamAV, then the builtin EICAR-only floor).
+# NM_AV=
+# Quarantine directory for infected files. Default: the settings home's quarantine/ dir.
+# NM_AV_QUARANTINE=
 # Placeholder-example key used in config.py docs; no setting reads it.
 # NM_FLOAT=
 # Config key read by Devon code.
@@ -770,6 +780,8 @@
 # NM_MOTION_PORT=
 # NASA API key (astronomy picture of the day).
 # NM_NASA_API_KEY=
+# Narration learner journal dir override. Default: ~/.nomorals/narration_learn.
+# NM_NARRATION_LEARN_DIR=
 # News translation on/off. Defaults OFF - news is never silently translated.
 # NM_NEWS_TRANSLATION_ENABLED=
 # News translation target language code. Empty = the translation organ's owner language.
