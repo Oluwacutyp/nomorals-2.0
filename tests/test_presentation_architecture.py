@@ -274,6 +274,41 @@ HINT_EXCEPTIONS: list[tuple[str, str, str]] = [
     ("runtime_provision.py", "/pair whatsapp <number>",
      "argument-carrying: the number is the user's own phone "
      "number — no button can invent it"),
+    # ── batch H6 (2026-11-15): the group-build tail's 14 — the
+    # DM-redirects are surface-scoped like the existing console
+    # exception (the board is DM-only; the reply is read in a
+    # group, so a button here would run it in the wrong room);
+    # the link/sync sites are argument-carrying (the group handle
+    # and community id are the user's own data); the backup-board
+    # note rides a reply whose group buttons sit beside it (the
+    # typed form is the degraded-surface equivalent, like the
+    # Claim / console entries above).
+    ("runtime_group.py", "the groups board lives in my DM",
+     "surface-scoped: /groups is DM-only; the reply is read in a "
+     "group (or a no-chat invocation) — a button here would run "
+     "the board in the group, the wrong room by construction"),
+    ("runtime_group.py", "group backups live in my DM",
+     "surface-scoped: /gbackup is DM-only (a backup file carries "
+     "the whole group state); the reply is read in a group — a "
+     "button here would run it in the group"),
+    ("runtime_group.py", "/community link <g1> <id>",
+     "argument-carrying: the group handle and the community id "
+     "are the user's own data — no button can invent either"),
+    ("runtime_group.py", "the community board lives in my DM",
+     "surface-scoped: the /community board is DM-first; the "
+     "reply is read outside a DM — a button here would run it "
+     "in the wrong room"),
+    ("runtime_group.py", "community management lives in my DM",
+     "surface-scoped: community management is DM-only; the reply "
+     "is read in a group with words attached — a button here "
+     "would manage it in the group"),
+    ("runtime_group.py", "tap a group to list its backups",
+     "buttons ride this same reply (the per-group buttons are in "
+     "the _card call beside the note); the note is the typed "
+     "equivalent for button-degraded surfaces"),
+    ("runtime_group.py", "/community sync <g1>",
+     "argument-carrying: the group handle is the user's own "
+     "choice — no button can name it"),
 ]
 
 

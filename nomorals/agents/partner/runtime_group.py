@@ -6763,10 +6763,11 @@ class RuntimeGroupMixin:
                 elif len(matches) > 1:
                     return None, (
                         f"more than one group matches “{token}” — "
-                        "run /gbackup and use its handle (g1, g2…).")
+                        "use the handle from the backup board "
+                        "(g1, g2…).")
         if key is None:
-            return None, ("that group handle expired — run /gbackup "
-                          "and pick again.")
+            return None, ("that group handle expired — pick the "
+                          "group again from the backup board.")
         if surface.is_channel(key):
             return None, ("channels have no roster or economy to "
                           "back up — their queue and settings live "
@@ -6844,10 +6845,11 @@ class RuntimeGroupMixin:
                 elif len(matches) > 1:
                     return None, (
                         f"more than one group matches “{token}” — "
-                        "run /community and use its handle (g1, g2…).")
+                        "use the handle from the community board "
+                        "(g1, g2…).")
         if key is None:
-            return None, ("that group handle expired — run /community "
-                          "and pick again.")
+            return None, ("that group handle expired — pick the "
+                          "group again from the community board.")
         if not (self._operator_or_false(message)
                 or self._console_is_admin(key, sender)):
             return None, ("you don't admin that group — communities "
@@ -13736,8 +13738,7 @@ class RuntimeGroupMixin:
             f"mass report run {run['id']}: {submitted} submitted, "
             f"{failed} failed"
             + (f", {skipped} skipped (cap "
-               f"{self.MASS_REPORT_MAX_PER_RUN} per run — run "
-               f"/massreport run again for the rest)"
+               f"{self.MASS_REPORT_MAX_PER_RUN} per run)"
                if skipped else ""),
         ]
         for result in results:
