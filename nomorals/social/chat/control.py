@@ -209,7 +209,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "help", "ping", "search", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
-    "rules", "member", "glog", "gsettings", "strikes",
+    "rules", "member", "lookup", "glog", "gsettings", "strikes",
     "recheck", "joinq", "console", "groups", "gbackup", "undonotice",
     "flag", "rep", "repclear", "repdismiss",
     "steal", "sticker", "convert", "gif", "emoji", "customemoji",
@@ -748,6 +748,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "chfollow": (0, None),    # /chfollow <channel link> [| live] — every paired account follows (§14; owner only, arm-gated)
     "rules": (0, 0),          # /rules — this group's rules, rendered from the settings the enforcer reads (P1)
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
+    "lookup": (0, 1),         # /lookup <id|@username> — the account dossier: ID, account-age estimate, phone when visible, groups, username/name history, economy + moderation record (DM + group)
     "glog": (0, 1),           # /glog [n] — the group's held audit log (admins; P1)
     "strikes": (0, 1),        # /strikes [@member] — the defense strike ledger: who's on the ladder (admins; §17)
     "recheck": (0, 0),        # /recheck — a restricted member's “check me again”: re-runs the join criteria live (§28)
@@ -3695,6 +3696,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/member [@name]",
             "example": "/member @ada",
             "related": "/rules /glog"},
+    "lookup": {"what": "the account dossier, by Telegram ID or @username: who the account is, which of Devon's groups it is in, its username and display-name history with dates, its economy standing and moderation record, an account-age estimate from its ID range (labelled an estimate, never a made-up exact date), and its phone number only when the userbot can legitimately see it (mutual contact) — otherwise the line says not visible. In a group anyone gets the public card; the phone line and the full economy/moderation detail show only to the operator, a group admin, or the account itself. In my DM a lookup is for group admins, the operator, or yourself.",
+            "usage": "/lookup <id|@username>",
+            "example": "/lookup 123456789",
+            "related": "/member /rep /groups"},
     "glog": {"what": "the group's audit log — moderation actions, joins, identity changes — held by Devon and shown on demand to group admins. Never posted on its own.",
             "usage": "/glog [n]",
             "example": "/glog 10",
@@ -4658,7 +4663,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("platform control", ["start", "stop", "profile", "chatmode", "style",
                           "doctor",
                           "update", "pull", "deploy", "restart"]),
-    ("groups & communities", ["rules", "member", "glog", "gsettings",
+    ("groups & communities", ["rules", "member", "lookup", "glog", "gsettings",
                             "strikes", "recheck", "joinq", "console",
                             "groups", "gbackup",
                             "undonotice", "flag", "rep", "repclear",
@@ -4986,7 +4991,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("platform control — updates & restarts",
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
-     ["rules", "member", "glog", "gsettings", "strikes",
+     ["rules", "member", "lookup", "glog", "gsettings", "strikes",
       "recheck", "joinq", "console", "groups", "gbackup",
       "undonotice",
       "flag", "rep", "repclear", "repdismiss",

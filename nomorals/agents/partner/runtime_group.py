@@ -2985,6 +2985,341 @@ class RuntimeGroupMixin:
             return "I don't have a card for you in this group yet."
         return _member_card(surface, key, target)
 
+    def _control_lookup(self, tail, message) -> str:  # type: ignore[no-untyped-def]
+        """The account dossier (/lookup): who an account is, by
+        ID or @handle — Telegram ID, account-age ESTIMATE
+        (labelled, from the ID range — never a made-up exact
+        date), phone only when the userbot can legitimately see
+        it (mutual contact), groups the account is in, username
+        and display-name history with dates, economy standing
+        and moderation record.
+
+        Every field is a verified fact with its source, an
+        honestly-labelled estimate, or "not visible" — the
+        outclassing over the info bots is the depth AND the
+        honesty.  In a group the public card answers anyone
+        (like /member); the phone line and the full economy /
+        moderation / reputation detail show only to the
+        operator, a group admin, or the account itself.  In DM
+        anyone else is refused plainly.
+        """
+        from ...social.chat.account_age import render_account_age
+        from ...social.chat.base import ChatKind
+        from ...social.chat.typography import Card, render_card
+
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        wanted = str(tail or "").strip()
+        in_group = (message.chat.kind == ChatKind.GROUP)
+        group_key = (self._group_key_or_none(message)
+                     if in_group else None)
+        target_id = ""
+        live: dict = {}
+        if not wanted:
+            target_id = sender
+        else:
+            token = wanted.lstrip("@")
+            if in_group and group_key:
+                res = self._resolver(surface).resolve_token(
+                    group_key, message, wanted)
+                if res.found:
+                    target_id = str(res.member.user_id)
+            if not target_id:
+                target_id, _groups = self._lookup_scan_ledger(
+                    surface, token)
+            if not target_id:
+                adapter = self._group_adapter("telegram")
+                if adapter is not None:
+                    if not token.isdigit():
+                        try:
+                            found = adapter.member_by_username(
+                                message.chat, token)
+                        except Exception:  # noqa: BLE001 - no proof
+                            found = None
+                        if found:
+                            target_id = str(found.get("id") or "")
+                            live = {"username": found.get(
+                                "username") or "",
+                                "name": found.get("name") or ""}
+                    if not target_id and token.isdigit():
+                        live = self._lookup_user_full(target_id
+                                                      or token) or {}
+                        if live.get("id"):
+                            target_id = str(live["id"])
+        if not target_id:
+            return (f"no record of {wanted or 'that account'} in "
+                    "Devon's groups, and the userbot couldn't see "
+                    "it either.")
+        groups = surface.groups_for_member(target_id)
+        member = None
+        primary_key = group_key
+        if groups:
+            def _activity(entry):  # noqa: ANN001,ANN202 - sort key
+                rec = surface.member(entry["key"], target_id) or {}
+                return int(rec.get("message_count") or 0)
+
+            primary_key = max(groups, key=_activity)["key"]
+            member = surface.member(primary_key, target_id)
+        if member is None:
+            member = {"user_id": target_id,
+                      "username": live.get("username") or "",
+                      "name": live.get("name") or "",
+                      "first_seen": None, "joined_ts": None,
+                      "message_count": 0, "last_seen": None}
+        # Live identity refresh: what the userbot sees NOW
+        # outranks a stale ledger snapshot for the header.
+        if not live:
+            live = self._lookup_user_full(target_id) or {}
+        username = (live.get("username")
+                    or member.get("username") or "")
+        name = live.get("name") or member.get("name") or ""
+        # The full dossier (phone + economy/moderation/reputation
+        # detail) is for the operator, the account itself, or an
+        # admin of a group the target is in.  Anyone else gets
+        # the public card in a group, and a plain refusal in DM.
+        full = False
+        try:
+            if self._is_operator(message):
+                full = True
+        except Exception:  # noqa: BLE001 - fall to the other gates
+            pass
+        if sender and sender == target_id:
+            full = True
+        if not full and in_group:
+            try:
+                full = bool(self._group_admin_ok(message))
+            except Exception:  # noqa: BLE001 - no proof, no detail
+                full = False
+        if not full and not in_group and groups:
+            full = self._lookup_dm_admin_ok(
+                sender, [entry["key"] for entry in groups])
+        if not full and not in_group:
+            return ("lookups are for group admins — ask an admin "
+                    "of a group that account is in, or look the "
+                    "account up from inside the group.")
+        if not full:
+            return _member_card(surface, primary_key or group_key
+                                or "", member)
+        title = name or (f"@{username}" if username
+                         else f"Telegram {target_id}")
+        card = Card("moderation", title=title, icon="🔍")
+        first_seen = member.get("first_seen")
+        total_messages = 0
+        for entry in groups:
+            rec = surface.member(entry["key"], target_id) or {}
+            total_messages += int(rec.get("message_count") or 0)
+        rows = [("Telegram ID", target_id),
+                ("Handle", f"@{username}" if username
+                 else "no username"),
+                ("First seen by Devon", _fmt_ts(first_seen)),
+                ("Joined", _fmt_ts(member.get("joined_ts")
+                                   or first_seen)),
+                ("Messages", total_messages),
+                ("Last seen", _fmt_ts(member.get("last_seen"))),
+                ("Account age", render_account_age(target_id))]
+        phone = live.get("phone")
+        rows.append(("Phone",
+                     f"{phone} (mutual contact — visible to the "
+                     "userbot)" if phone else "not visible"))
+        flags = []
+        if live.get("bot"):
+            flags.append("bot account")
+        if live.get("premium"):
+            flags.append("Telegram Premium")
+        if flags:
+            rows.append(("Flags", ", ".join(flags)))
+        card.stats(rows)
+        if groups:
+            card.board("\n".join(
+                f"{entry['title']} ({entry['key']})"
+                for entry in groups),
+                title=f"Groups — in {len(groups)} of Devon's "
+                      "groups")
+        else:
+            card.board("no record in Devon's groups",
+                       title="Groups")
+        common = self._lookup_common_chats(target_id)
+        if common:
+            card.board("\n".join(
+                f"{chat.get('title') or chat.get('id')}"
+                for chat in common),
+                title="Shared with the userbot account")
+        history: list[dict] = []
+        seen: set = set()
+        for entry in groups:
+            rec = surface.member(entry["key"], target_id) or {}
+            for change in rec.get("identity_history") or []:
+                stamp = (change.get("kind"), change.get("old"),
+                         change.get("new"), change.get("ts"))
+                if stamp in seen:
+                    continue
+                seen.add(stamp)
+                history.append(change)
+        history.sort(key=lambda c: float(c.get("ts") or 0))
+        if history:
+            card.board("\n".join(
+                f"{change.get('kind', 'changed')}: "
+                f"{change.get('old') or '—'} → "
+                f"{change.get('new') or '—'} "
+                f"({_fmt_ts(change.get('ts'))})"
+                for change in history[-5:]),
+                title=f"Identity history ({len(history)} total)")
+        if primary_key:
+            try:
+                wallet = surface.economy.balance(primary_key,
+                                                 target_id)
+                banked = surface.economy.bank_balance(primary_key,
+                                                      target_id)
+                card.stats([("Wallet", f"{wallet}"),
+                            ("Banked", f"{banked}")],
+                           title=f"Economy — {primary_key}")
+            except Exception:  # noqa: BLE001 - dossier survives
+                pass
+            warns = (member.get("warns") or [])
+            try:
+                strikes = surface.strikes_for(
+                    primary_key, target_id).get("count", 0)
+            except Exception:  # noqa: BLE001 - dossier survives
+                strikes = 0
+            bans = []
+            try:
+                bans = surface.bans.bans_for(target_id)
+            except Exception:  # noqa: BLE001 - dossier survives
+                bans = []
+            appeals = []
+            try:
+                appeals = [a for a in surface.bans.appeals()
+                           if str(a.user_id) == target_id]
+            except Exception:  # noqa: BLE001 - dossier survives
+                appeals = []
+            mod_rows = [("Warnings", f"{len(warns)}"),
+                        ("Strikes", f"{strikes}"),
+                        ("Bans", f"{len(bans)}"),
+                        ("Appeals", f"{len(appeals)}")]
+            card.stats(mod_rows, title="Moderation")
+            for ban in bans:
+                scope = (ban.group_id or "global")
+                state = ("lifted" if ban.lifted_at else "active")
+                card.board(f"{state} ban in {scope}: "
+                           f"{ban.reason or 'no reason given'}",
+                           title="Ban")
+            for appeal in appeals:
+                card.board(f"{appeal.status}: "
+                           f"{appeal.reason or 'no reason given'}",
+                           title="Appeal")
+            try:
+                records = surface.reputation_view(
+                    primary_key, target_id, username=username,
+                    name=name).get("records") or []
+                if records:
+                    card.stats([("Records", f"{len(records)}")],
+                               title="Reputation")
+            except Exception:  # noqa: BLE001 - dossier survives
+                pass
+        return render_card(
+            card,
+            platform=str(primary_key or group_key or "telegram"
+                         ).split(":", 1)[0],
+            settings=(surface.store.settings(primary_key)
+                      if primary_key
+                      else surface.store.peek_settings(
+                          group_key or ""))).text
+
+    def _lookup_scan_ledger(self, surface, token: str
+                            ) -> tuple[str, list[dict]]:
+        """The ledger scan behind /lookup: an exact ID, or a
+        case-insensitive @handle, anywhere in Devon's groups."""
+        wanted = str(token or "").strip().lstrip("@")
+        if not wanted:
+            return "", []
+        lowered = wanted.lower()
+        target_id = ""
+        for key in sorted(surface.store.data.keys()):
+            for uid, member in (
+                    surface.store.group(key).get("members")
+                    or {}).items():
+                if uid == wanted:
+                    target_id = uid
+                    break
+                handle = str(member.get("username") or "").lower()
+                if handle and handle == lowered:
+                    target_id = uid
+                    break
+            if target_id:
+                break
+        if not target_id:
+            return "", []
+        return target_id, surface.groups_for_member(target_id)
+
+    def _lookup_user_full(self, target_id: str) -> dict | None:
+        """The live user read behind the dossier (userbot
+        MTProto user_full): current username/name, bot/premium
+        flags, phone only when mutual.  None when the userbot
+        is absent or cannot read the account."""
+        adapter = self._group_adapter("telegram")
+        if adapter is None:
+            return None
+        fn = getattr(adapter, "user_full", None)
+        if fn is None:
+            return None
+        try:
+            return fn(str(target_id))
+        except Exception:  # noqa: BLE001 - no proof, no detail
+            return None
+
+    def _lookup_common_chats(self, target_id: str) -> list[dict]:
+        """Common groups through the userbot (MTProto
+        getCommonChats) — the userbot account's shared groups,
+        labelled as such in the dossier.  [] when unavailable."""
+        adapter = self._group_adapter("telegram")
+        if adapter is None:
+            return []
+        fn = getattr(adapter, "common_chats", None)
+        if fn is None:
+            return []
+        try:
+            return fn(str(target_id)) or []
+        except Exception:  # noqa: BLE001 - no proof, no detail
+            return []
+
+    def _lookup_dm_admin_ok(self, sender: str, group_keys: list
+                            ) -> bool:
+        """DM gate: is this sender an admin of ANY group the
+        target is in (proved per group through the platform's
+        own admin surface, never assumed from the DM)?"""
+        if not sender or not group_keys:
+            return False
+        from ...social.chat.base import ChatKind, ChatRef
+
+        for key in group_keys:
+            platform, _, chat_id = str(key).partition(":")
+            if not platform or not chat_id:
+                continue
+            adapter = self._group_adapter(platform)
+            if adapter is None:
+                continue
+            fn = (getattr(adapter, "admin_member", None)
+                  or getattr(adapter, "admin_member_mtproto",
+                             None))
+            if fn is None:
+                continue
+            try:
+                info = fn(ChatRef(platform=platform,
+                                  chat_id=chat_id,
+                                  kind=ChatKind.GROUP),
+                          str(sender))
+            except Exception:  # noqa: BLE001 - no proof, no admin
+                continue
+            if not isinstance(info, dict):
+                continue
+            status = info.get("status") or info.get("role") or ""
+            if not status and isinstance(info.get("result"), dict):
+                status = info["result"].get("status") or ""
+            if str(status).lower() in ("creator", "administrator",
+                                      "admin", "owner"):
+                return True
+        return False
+
     def _control_glog(self, arg, message) -> str:  # type: ignore[no-untyped-def]
         key = self._group_key_or_none(message)
         if key is None:
@@ -6550,6 +6885,16 @@ class RuntimeGroupMixin:
 
         esc = surface.escalation_config(key)
         s = surface.store.settings(key)
+        _changes = surface.changes(key, limit=200)
+        _latest_change = _changes[-1] if _changes else None
+        _identity_line = (
+            f"members {len(surface.members(key))} · identity "
+            f"changes {len(_changes)}"
+            + (f" (latest: "
+               f"{_latest_change.get('kind', 'changed')} "
+               f"{_latest_change.get('old') or '—'} → "
+               f"{_latest_change.get('new') or '—'})"
+               if _latest_change else ""))
         card = Card("settings", title=f"Console — {key}",
                     icon="🛠️")
         card.block_lines([
@@ -6594,6 +6939,7 @@ class RuntimeGroupMixin:
             f" · inactive window "
             f"{int((s.get('cleanup') or {}).get('inactive_days') or 90)}d"
             f" (Telegram groups)",
+            _identity_line,
         ])
         from ...social.chat.expression import buttons_from_spec
 
@@ -17000,6 +17346,56 @@ def _member_card(surface, key: str, member: dict) -> str:
              f"{_sparks(estate['property_value'])}"),
             ("Gems", f"{estate['gems']} 💎"),
         ], title="Estate")
+    # Economy standing: wallet + banked vaults.  A zero balance
+    # is a fact too, but a member who never touched the economy
+    # gets no empty section — the dossier (/lookup) carries the
+    # full line either way.
+    uid = str(member.get("user_id") or "")
+    try:
+        wallet = surface.economy.balance(key, uid)
+        banked = surface.economy.bank_balance(key, uid)
+    except Exception:  # noqa: BLE001 - the card must not die on economy
+        wallet = banked = 0
+    if wallet or banked:
+        card.stats([("Wallet", f"{wallet}"),
+                    ("Banked", f"{banked}")], title="Economy")
+    # Moderation record: warnings on the member + live strikes
+    # from the ladder's read model.
+    warns = member.get("warns") or []
+    try:
+        strikes = surface.strikes_for(key, uid).get("count", 0)
+    except Exception:  # noqa: BLE001 - the card must not die on strikes
+        strikes = 0
+    if warns or strikes:
+        card.stats([("Warnings", f"{len(warns)}"),
+                    ("Strikes", f"{strikes}")],
+                   title="Moderation")
+    # Reputation: the live file, counted — /rep carries the
+    # records themselves.
+    try:
+        records = surface.reputation_view(
+            key, uid, username=str(member.get("username") or ""),
+            name=str(member.get("name") or "")).get("records") or []
+    except Exception:  # noqa: BLE001 - the card must not die on rep
+        records = []
+    if records:
+        card.stats([("Records", f"{len(records)}")],
+                   title="Reputation")
+    # Identity history: the durable per-member list (last 5 +
+    # total count) — the per-group ring is the fallback for a
+    # member whose list was never backfilled.
+    history = member.get("identity_history") or []
+    if history:
+        card.board("\n".join(
+            f"{change.get('kind', 'changed')}: "
+            f"{change.get('old') or '—'} → "
+            f"{change.get('new') or '—'} "
+            f"({_fmt_ts(change.get('ts'))})"
+            for change in history[-5:]),
+            title=f"Identity history ({len(history)} total)")
+        return render_card(
+            card, platform=str(key).split(":", 1)[0],
+            settings=surface.store.settings(key)).text
     changes = [c for c in surface.changes(key, limit=200)
                if c.get("user_id") == member.get("user_id")]
     if changes:

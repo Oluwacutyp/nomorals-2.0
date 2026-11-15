@@ -133,6 +133,7 @@ from .group_defense import (
 AUDIT_RING = 500
 NOTICE_RING = 100
 CHANGE_RING = 200
+IDENTITY_HISTORY_CAP = 50
 MSG_CACHE_RING = 200
 
 #: Platforms that ARE Devon-the-bot — her own bot identities
@@ -947,9 +948,28 @@ class GroupSurface:
                 events.append(event)
                 member[field_name] = new
         member["last_seen"] = ts
+        if "identity_history" not in member:
+            # Backfill once, from the per-group changes ring: a
+            # member whose changes predate the durable list keeps
+            # them instead of starting empty.  Runs even when this
+            # observation changed nothing — the next change must
+            # not be the first thing on the record.
+            member["identity_history"] = [
+                {"kind": event.get("kind", ""),
+                 "old": event.get("old", ""),
+                 "new": event.get("new", ""),
+                 "ts": event.get("ts", ts)}
+                for event in entry.get("changes") or []
+                if event.get("user_id") == user_id][-IDENTITY_HISTORY_CAP:]
         if events:
             entry["changes"].extend(events)
             del entry["changes"][:-CHANGE_RING]
+            history = member.setdefault("identity_history", [])
+            history.extend({
+                "kind": event["kind"], "old": event["old"],
+                "new": event["new"], "ts": event["ts"]}
+                for event in events)
+            del history[:-IDENTITY_HISTORY_CAP]
             for event in events:
                 self._audit(group_key, "identity_change",
                             change_kind=event["kind"],
@@ -7165,6 +7185,69 @@ class GroupSurface:
 
     def members(self, group_key: str) -> dict[str, Any]:
         return dict(self.store.group(group_key)["members"])
+
+    def groups_for_member(self, user_id: str
+                          ) -> list[dict[str, Any]]:
+        """Every group/channel Devon serves where this account
+        is on the ledger — the exact half of "which groups are
+        they in".  A channel entry is labelled channel; the
+        coverage is Devon's own groups only, never a guess."""
+        wanted = str(user_id or "")
+        found: list[dict[str, Any]] = []
+        for key in sorted(self.store.data.keys()):
+            entry = self.store.group(key)
+            member = (entry.get("members") or {}).get(wanted)
+            if member is None:
+                continue
+            channel = (entry.get("extras") or {}).get("channel")
+            found.append({
+                "key": key,
+                "kind": "channel" if channel else "group",
+                "title": ((channel or {}).get("title")
+                          if channel else None)
+                         or entry.get("title") or key,
+                "username": member.get("username") or "",
+                "name": member.get("name") or "",
+            })
+        return found
+
+    def note_user_update(self, platform: str, user_id: str, *,
+                         username: str = "", name: str = "",
+                         ts: float | None = None
+                         ) -> list[str]:
+        """Fan a live identity change out to every group on
+        this platform whose ledger knows the member (the
+        UserUpdate event path — a change caught while the
+        member sent no message).  Returns the group keys
+        touched.  A stranger creates no phantom member, and
+        another platform's groups are never touched."""
+        now = ts if ts is not None else time.time()
+        wanted = str(user_id or "")
+        if not wanted:
+            return []
+        # Telegram's two surfaces share one ledger family: the
+        # bot's groups are keyed "telegram-bot:…" and the userbot
+        # observes the same rooms as "telegram:…".  A change the
+        # userbot sees belongs to both spellings; any other
+        # platform matches exactly.
+        telegram_family = {"telegram", "telegram-bot"}
+        touched: list[str] = []
+        for key in sorted(self.store.data.keys()):
+            key_platform = key.partition(":")[0]
+            if platform in telegram_family:
+                if key_platform not in telegram_family:
+                    continue
+            elif key_platform != platform:
+                continue
+            if self.member(key, wanted) is None:
+                continue
+            self._observe_identity(key, wanted,
+                                   username=username, name=name,
+                                   ts=now)
+            touched.append(key)
+        if touched:
+            self.store.save()
+        return touched
 
     def member_by_message_id(self, group_key: str, message_id: str
                              ) -> dict[str, Any] | None:

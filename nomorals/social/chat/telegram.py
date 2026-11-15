@@ -1888,6 +1888,41 @@ class TelegramAdapter(ChatAdapter):
                                  "buttons on this surface are "
                                  "send-only")
 
+                # Identity-change feed (member intel): a username
+                # or display-name change arrives here the moment
+                # Telegram broadcasts it — no message from the
+                # member needed, so a silent rename is caught
+                # while the member says nothing.  Guarded like
+                # CallbackQuery: an old Telethon without the event
+                # class logs once instead of taking the surface
+                # down.  The runtime fans it out to every group
+                # whose ledger knows the member; nothing replies.
+                _uu_event_cls = getattr(events, "UserUpdate", None)
+                if _uu_event_cls is not None:
+                    @client.on(_uu_event_cls())
+                    async def on_user_update(event: Any) -> None:
+                        facts = self._user_update_facts(event)
+                        if facts is None:
+                            return
+                        handler(ChatMessage(
+                            chat=ChatRef(platform=self.name,
+                                         chat_id=facts["user_id"],
+                                         kind=ChatKind.DM,
+                                         title="",
+                                         peer=facts["user_id"]),
+                            incoming=True, text="", sender="",
+                            sender_id=facts["user_id"],
+                            meta={"service": "user_update",
+                                  "user_id": facts["user_id"],
+                                  "username": facts["username"],
+                                  "name": facts["name"],
+                                  "envelope": None}))
+                else:
+                    _log.warning("telegram: Telethon has no "
+                                 "UserUpdate event — identity "
+                                 "changes are caught only when the "
+                                 "member next messages")
+
                 await client.run_until_disconnected()
             finally:
                 try:
@@ -5201,6 +5236,116 @@ class TelegramAdapter(ChatAdapter):
         except Exception as exc:  # noqa: BLE001 - a path, not a dependency
             _log.debug("telegram member_by_username failed: %s", exc)
             return None
+
+    def user_full(self, user_id: str) -> dict[str, Any] | None:
+        """One Telegram user, full (member-intel dossier): the
+        entity behind an ID — username, display name, bot and
+        premium flags, and the phone number ONLY when Telegram
+        itself hands it over, which is only for mutual
+        contacts.  ``phone`` is None otherwise — never a guess,
+        never borrowed from another account.  Read-only; None
+        when the userbot is down or the user cannot be read."""
+        if self._client is None:
+            return None
+
+        async def _do() -> dict[str, Any] | None:
+            from telethon.tl.functions.users import (
+                GetFullUserRequest,
+            )
+
+            try:
+                peer: Any = int(str(user_id))
+            except (TypeError, ValueError):
+                peer = str(user_id)
+            full = await self._client(GetFullUserRequest(peer))
+            full_user = getattr(full, "full_user", None)
+            user = getattr(full_user, "user", None)
+            if user is None:
+                users = getattr(full, "users", None) or []
+                user = users[0] if users else None
+            if user is None:
+                return None
+            first = str(getattr(user, "first_name", "") or "")
+            last = str(getattr(user, "last_name", "") or "")
+            return {
+                "id": str(getattr(user, "id", "") or ""),
+                "username": str(getattr(user, "username", "") or ""),
+                "name": " ".join(p for p in (first, last) if p),
+                "phone": getattr(user, "phone", None) or None,
+                "bot": bool(getattr(user, "bot", False)),
+                "premium": bool(getattr(user, "premium", False)),
+            }
+
+        try:
+            return self._run_on_loop(_do(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 - a path, not a dependency
+            _log.debug("telegram user_full failed: %s", exc)
+            return None
+
+    def common_chats(self, user_id: str
+                     ) -> list[dict[str, Any]] | None:
+        """Groups/chats shared between the userbot account and a
+        user (MTProto messages.getCommonChats) — the exact half
+        of "which groups are they in" that Devon's own ledger
+        cannot see.  These are the userbot account's shared
+        groups, which may differ from the bot's groups; the
+        dossier labels them as such.  None when unavailable."""
+        if self._client is None:
+            return None
+
+        async def _do() -> list[dict[str, Any]]:
+            from telethon.tl.functions.messages import (
+                GetCommonChatsRequest,
+            )
+
+            try:
+                peer: Any = int(str(user_id))
+            except (TypeError, ValueError):
+                peer = str(user_id)
+            res = await self._client(
+                GetCommonChatsRequest(peer, 0, 100))
+            out: list[dict[str, Any]] = []
+            for chat in getattr(res, "chats", None) or []:
+                out.append({
+                    "id": str(getattr(chat, "id", "") or ""),
+                    "title": str(getattr(chat, "title", "") or ""),
+                    "username": str(
+                        getattr(chat, "username", "") or ""),
+                })
+            return out
+
+        try:
+            return self._run_on_loop(_do(), timeout=30.0)
+        except Exception as exc:  # noqa: BLE001 - a path, not a dependency
+            _log.debug("telegram common_chats failed: %s", exc)
+            return None
+
+    @staticmethod
+    def _user_update_facts(event: Any) -> dict[str, str] | None:
+        """The identity facts out of a Telethon UserUpdate event:
+        user id, username, display name.  None when the event
+        carries no attributable user — an unattributable update
+        journals against nothing, never a guess."""
+        user = getattr(event, "user", None)
+        if user is not None:
+            uid = getattr(user, "id", None)
+            username = str(getattr(user, "username", "") or "")
+            first = str(getattr(user, "first_name", "") or "")
+            last = str(getattr(user, "last_name", "") or "")
+            name = " ".join(p for p in (first, last) if p)
+        else:
+            uid = (getattr(event, "user_id", None)
+                   or getattr(event, "sender_id", None))
+            username = str(getattr(event, "username", "") or "")
+            name = str(getattr(event, "name", "") or "")
+            if not name:
+                first = str(getattr(event, "first_name", "") or "")
+                last = str(getattr(event, "last_name", "") or "")
+                name = " ".join(p for p in (first, last) if p)
+        if not uid:
+            return None
+        return {"user_id": str(uid), "username": username,
+                "name": name}
 
     def message_sender(self, chat: ChatRef, message_id: str
                        ) -> dict[str, Any] | None:

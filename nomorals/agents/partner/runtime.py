@@ -1006,6 +1006,23 @@ class PartnerRuntime(
             with self._queue_guard:
                 self._draining[key] = False
 
+    def _handle_user_update(self, message: ChatMessage) -> None:
+        """Fan a live identity change out to the group surface
+        (member intel): the userbot saw a username or display
+        name change while the member sent no message.  Silent —
+        no reply, no narration; the surface journals the change
+        per group it touches."""
+        meta = message.meta or {}
+        user_id = str(meta.get("user_id") or message.sender_id or "")
+        if not user_id:
+            return
+        surface = self._group_surface()
+        platform = str(getattr(message.chat, "platform", "") or "")
+        surface.note_user_update(
+            platform, user_id,
+            username=str(meta.get("username") or ""),
+            name=str(meta.get("name") or ""))
+
     def _passes_games_only(self, message: ChatMessage) -> bool:
         """Does this message pass a games-only chat? Game moves were
         already handled by the game router above; this decides the rest.
@@ -1273,6 +1290,20 @@ class PartnerRuntime(
             message.meta["process_at"] = time.time()
         except Exception as e:  # noqa: BLE001 - a stamp must never break intake
             record_failure("runtime.PartnerRuntime._process_inner:stamp", e)
+        # Identity-change feed (member intel): a UserUpdate the
+        # userbot caught while the member sent no message.
+        # Silent fan-out to every group whose ledger knows the
+        # member — no reply, no narration; the surface journals
+        # it per group.  Handled before any claim or personal
+        # hook: the message names no chat of its own.
+        if (message.meta or {}).get("service") == "user_update":
+            try:
+                self._handle_user_update(message)
+            except Exception as e:  # noqa: BLE001 - intake must not die
+                record_failure(
+                    "runtime.PartnerRuntime._process_inner:"
+                    "user_update", e)
+            return
         self._bump("messages")
         # Chat-title index (register #30): record this chat's title
         # so owner commands can target chats BY NAME later. Writes
@@ -7614,6 +7645,8 @@ class PartnerRuntime(
             return self._control_groups(command.tail, message)
         if kind == "gbackup":
             return self._control_gbackup(command.tail, message)
+        if kind == "lookup":
+            return self._control_lookup(command.tail, message)
         if kind == "undonotice":
             return self._control_undonotice(command.tail, message)
         if kind == "flag":
