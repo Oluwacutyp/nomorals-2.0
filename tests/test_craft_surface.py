@@ -406,9 +406,14 @@ class GatingTests(unittest.TestCase):
         # owner-only: never on the public list, and the public
         # count is exactly what it was before this surface.
         # (This is the canonical home of the PUBLIC_COMMANDS size pin —
-        # the one place the catalog's exact count is asserted.)
+        # the one place the catalog's exact count is asserted.
+        # 255 = 248 at the pin's writing + 6 sibling grants
+        # (party, ajo, cgroup, room, challenge, match) + 1 groups
+        # (§8 dashboard). The pin went stale at the sibling grants
+        # — it failed on base before this change; update it with
+        # the arithmetic whenever a public command is added.)
         self.assertNotIn("craft", PUBLIC_COMMANDS)
-        self.assertEqual(len(PUBLIC_COMMANDS), 248)
+        self.assertEqual(len(PUBLIC_COMMANDS), 255)
         self.assertFalse(caller_may_run("craft", False))
         self.assertTrue(caller_may_run("craft", True))
         cmd = parse_control("/craft coverage")

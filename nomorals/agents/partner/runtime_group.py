@@ -5900,6 +5900,150 @@ class RuntimeGroupMixin:
         return self._console_section(surface, key, message, token,
                                      section, lead=f"✓ {reply}")
 
+    def _control_groups(self, tail, message):  # type: ignore[no-untyped-def]
+        """The §8 dashboard (/groups): every group/channel Devon
+        serves — status, member count, economy health, pending
+        actions — one board in DM, deep-links into /console per
+        group. Same gate as the console: the operator sees all;
+        anyone else sees only groups they actually admin (proved
+        per group through the platform's own admin surface, never
+        assumed from the DM)."""
+        from ...social.chat.base import ChatKind
+
+        if message is None or getattr(message, "chat", None) is None:
+            return ("the groups board lives in my DM — open a chat "
+                    "with me there and send /groups.")
+        if message.chat.kind != ChatKind.DM:
+            return ("the groups board lives in my DM — open a chat "
+                    "with me there and send /groups.")
+        surface = self._group_surface()
+        sender = str(message.sender_id or message.sender or "")
+        skey = f"{message.chat.platform}:{sender}"
+        session = self._console_session_map().get(skey) or {}
+        if time.time() - float(session.get("at") or 0) \
+                > self._CONSOLE_TTL_S:
+            session = {}
+        return self._groups_board(surface, message, sender, skey)
+
+    def _groups_board(self, surface, message, sender, skey):  # type: ignore[no-untyped-def]
+        """Render the /groups board over the console's own data:
+        the same group list the console home shows, plus the
+        economy health line and the pending-action counts §8 names.
+        The deep-link buttons write the SAME session map the
+        console reads, so tapping one opens that group's console."""
+        from ...social.chat.typography import Card
+
+        all_keys = [k for k in sorted(surface.store.data.keys())
+                    if self._operator_or_false(message)
+                    or self._console_is_admin(k, sender)]
+        keys = [k for k in all_keys if not surface.is_channel(k)]
+        channel_keys = [k for k in all_keys
+                        if surface.is_channel(k)]
+        if not keys and not channel_keys:
+            return ("you don't admin any group I serve — the board "
+                    "opens for group admins.")
+        groups: dict = {}
+        rows: list = []
+        buttons: list = []
+        for i, key in enumerate(keys, 1):
+            token = f"g{i}"
+            groups[token] = key
+            rows.extend(self._groups_group_lines(surface, key, token))
+            buttons.append([(f"⚙️ {token} · {key}",
+                             f"console {token}")])
+        channels: dict = {}
+        channel_rows: list = []
+        for i, key in enumerate(channel_keys, 1):
+            token = f"c{i}"
+            channels[token] = key
+            claim = surface.claim_state(key)
+            title = surface.channel_title(key) or key
+            channel_rows.append(
+                f"{token} — {title} · "
+                f"{'claimed' if claim['claimed'] else 'unclaimed'}"
+                f" · {len(surface.channel_queue(key))} queued"
+                f" · {surface.channel_analytics(key)['posts']} "
+                "posted")
+            buttons.append([(f"📣 {token} · {title}",
+                             f"console {token}")])
+        self._console_session_map()[skey] = {
+            "groups": groups, "channels": channels,
+            "at": time.time()}
+        # The pick-list packs two per row (the grid — the house
+        # standard for buttons, tgbot_buttons.grid_layout), not
+        # one tall single-button column.
+        flat_buttons = [row[0] for row in buttons if row]
+        buttons = [flat_buttons[i:i + 2]
+                   for i in range(0, len(flat_buttons), 2)]
+        card = Card("settings", title="Your groups", icon="🗂️")
+        status = self._console_status_lines()
+        if status:
+            card.block_lines(status, title="Status")
+        if rows:
+            card.block_lines(rows, title="Your groups")
+        if channel_rows:
+            card.block_lines(channel_rows, title="Your channels")
+        card.note("tap a group to open its console, "
+                  "or type /console g1")
+        return self._card(message, card, buttons,
+                          session="groups", session_edit=True)
+
+    def _groups_group_lines(self, surface, key, token):  # type: ignore[no-untyped-def]
+        """One group's board rows: identity + claim, the economy
+        health line, and the pending-action counts."""
+        members = surface.store.group(key).get("members") or {}
+        claim = surface.claim_state(key)
+        claim_txt = (f"system output on ({claim['source']})"
+                     if claim["claimed"] else "system output off")
+        lines = [f"{token} — {key} ({len(members)} in the ledger) · "
+                 f"{claim_txt}"]
+        frozen = surface.economy_frozen(key)
+        if frozen is not None:
+            lines.append(f"economy frozen: {frozen}")
+        elif not surface.economy_on(key):
+            lines.append("economy off")
+        else:
+            health = surface.economy_health(key)
+            econ = (f"treasury {health['treasury']} · "
+                    f"holders {health['holders']} · "
+                    f"active 7d {health['active_7d']}")
+            if health["policy"].get("throttled"):
+                econ += " · faucets halved"
+            lines.append(econ)
+        waiting = self._groups_waiting(surface, key)
+        lines.append(f"waiting: {waiting}" if waiting
+                     else "nothing waiting")
+        return lines
+
+    def _groups_waiting(self, surface, key) -> str:  # type: ignore[no-untyped-def]
+        """Pending actions for one group, §8's list: join requests
+        held for a human, restricted (captcha/acceptance) holds,
+        flag proposals, governance proposals, open appeals. Only
+        nonzero counts are named; "" means nothing waits."""
+        parts: list = []
+        joins = len(surface.acceptance_queue(key))
+        if joins:
+            parts.append(f"join {joins}")
+        entry = surface.store.group(key)
+        restricted = sum(
+            1 for m in (entry.get("members") or {}).values()
+            if isinstance(m, dict)
+            and isinstance(m.get("acceptance"), dict)
+            and m["acceptance"].get("state") == "restricted")
+        if restricted:
+            parts.append(f"restricted {restricted}")
+        flags = len(surface.flag_proposals(key))
+        if flags:
+            parts.append(f"flags {flags}")
+        proposals = len(surface.open_proposals(key))
+        if proposals:
+            parts.append(f"proposals {proposals}")
+        appeals = len([a for a in surface.bans.appeals(status="open")
+                       if a.group_id == key])
+        if appeals:
+            parts.append(f"appeals {appeals}")
+        return " · ".join(parts)
+
     def _console_home(self, surface, message, sender, skey,  # type: ignore[no-untyped-def]
                       note: str = ""):
         from ...social.chat.typography import Card

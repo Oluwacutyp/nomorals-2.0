@@ -209,7 +209,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "rules", "member", "glog", "gsettings", "strikes",
-    "recheck", "joinq", "console", "undonotice",
+    "recheck", "joinq", "console", "groups", "undonotice",
     "flag", "rep", "repclear", "repdismiss",
     "steal", "sticker", "convert", "gif", "emoji", "customemoji",
     "emojiart", "react",
@@ -752,6 +752,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "recheck": (0, 0),        # /recheck — a restricted member's “check me again”: re-runs the join criteria live (§28)
     "joinq": (0, None),       # /joinq [approve|decline <id>|all] — the admin join queue: requests + raid holds (§28)
     "console": (0, None),     # /console [gN [section [grammar]]] — the DM admin console: groups the sender admins, configured in tappable sections (§30)
+    "groups": (0, None),      # /groups — the §8 dashboard: every group/channel you admin — status, member count, economy health, pending actions — deep-links into /console
     "undonotice": (0, None),  # /undonotice <id> — undo one automated action from its notice: strike removed, platform action reversed (§31)
     "flag": (0, None),        # /flag [@member <category> [note]|ok|no <id>|queue|retract @member] — cross-group reputation flags: staged, admin-confirmed (§32)
     "rep": (0, None),         # /rep [@member] — the reputation book: one person's file, or the book's shape (§32)
@@ -3709,6 +3710,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/console | /console g1 | /console g1 defense escalation limit 5",
             "example": "/console",
             "related": "/gsettings /glog /strikes"},
+    "groups": {"what": "the §8 dashboard: message Devon privately and she lists every group and channel where YOU hold admin — status, member count, economy health (treasury, holders, active members, faucet throttle), and pending actions (join requests, restricted holds, flag proposals, governance proposals, open appeals) — with deep-links into /console per group. The operator sees all; anyone else sees only groups they actually admin.",
+            "usage": "/groups",
+            "example": "/groups",
+            "related": "/console /glog /treasury"},
     "undonotice": {"what": "undo one automated action from its notice (§31): the strike it recorded is removed, a fine is refunded, and the platform action is reversed as far as the platform allows (mute lifted, ban lifted, restriction released; a removal needs nothing — the member can rejoin; a deleted message can't be restored and the undo says so). The notice edits in place where the platform supports it. Admins only; the undo is journaled in /glog like the action.",
             "usage": "/undonotice <notice id> (or tap the notice's Undo button)",
             "example": "/undonotice n1730…-0",
@@ -4635,6 +4640,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                           "update", "pull", "deploy", "restart"]),
     ("groups & communities", ["rules", "member", "glog", "gsettings",
                             "strikes", "recheck", "joinq", "console",
+                            "groups",
                             "undonotice", "flag", "rep", "repclear",
                             "repdismiss",
                             "balance", "mine", "work", "pay", "gshop",
@@ -4960,7 +4966,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
      ["rules", "member", "glog", "gsettings", "strikes",
-      "recheck", "joinq", "console", "undonotice",
+      "recheck", "joinq", "console", "groups", "undonotice",
       "flag", "rep", "repclear", "repdismiss",
       "balance", "mine", "work", "pay", "gshop", "quests",
       "treasury", "deposit", "withdraw", "rob", "bail", "coinflip",
