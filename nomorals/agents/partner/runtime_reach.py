@@ -1704,6 +1704,224 @@ class RuntimeReachMixin:
                 "[| cost | odometer_km | vendor | YYYY-MM-DD] | due [days] | "
                 "costs [id] | show <id>")
 
+    def _legacy_store(self) -> Any:
+        """WillStore on the durable home path (E-6 legacy wiring)."""
+        from ...legacy.will import WillStore
+
+        path = self.context.settings.home_path / "data" / "legacy.json"
+        return WillStore(str(path))
+
+    def _legacy_vault(self) -> Any:
+        """Open the accounts vault for will sealing (actor "legacy").
+
+        Lazy import, same shape as runtime_system/runtime_media: the
+        vault opens with whatever owner credential is at hand; a locked
+        vault raises VaultLockedError naming every source checked, so
+        seal/reveal fail closed instead of storing anything unsealed.
+        """
+        from ...accounts.vault import open_vault
+
+        return open_vault(getattr(self.context, "db", None),
+                          context=self.context, actor="legacy")
+
+    def _legacy_show(self, will: Any) -> str:
+        """Metadata-only rendering — the sealed body surfaces as the marker, never content."""
+        from ...legacy.will import SEALED_MARKER
+
+        summary = will.summary(is_owner=True)
+        lines = [
+            f"will for {will.owner_name} — {will.id} "
+            f"(created {summary['created']})",
+            "  executor: " + will.executor.name
+            + (f" (backup: {will.executor.backup_name})"
+               if will.executor.backup_name else ""),
+            "  beneficiaries (" + str(summary["beneficiaries"]) + "): "
+            + (", ".join(b.name for b in will.beneficiaries) or "none"),
+            "  digital assets (" + str(summary["digital_assets"]) + "): "
+            + (", ".join(a.label for a in will.digital_assets) or "none"),
+            "  instructions (" + str(summary["instructions"]) + "):",
+        ]
+        for text in will.instructions:
+            lines.append(f"    - {text}")
+        lines.append(
+            "  witnesses (" + str(summary["witnesses"]) + "): "
+            + (", ".join(will.witnesses) or "none"))
+        if summary["has_sealed_content"]:
+            lines.append("  sealed body: " + SEALED_MARKER)
+        else:
+            lines.append(
+                "  no sealed body yet — /legacy seal <text> seals one.")
+        return "\n".join(lines)
+
+    def _control_legacy(self, tail: str, *, chat_key: str = "") -> str:
+        """Digital will: /legacy show|create|executor|beneficiary|asset|instruction|witness|seal|reveal|reset.
+
+        The MORE_TO_ADD gap 8 organ (nomorals/legacy/will.py) had no
+        production importer at all — this is its surface. Owner-only:
+        the kind is absent from PUBLIC_COMMANDS, so caller_may_run
+        denies non-owners before this runs (is_owner=True below means
+        the dispatch layer already established the owner). The sealed
+        body is written ONLY through the accounts vault (encrypt_blob,
+        purpose "legacy-will") and read back ONLY through it; this
+        handler never sees a key, and a locked vault fails closed. A
+        corrupt will file refuses to load instead of silently becoming
+        an empty will.
+        """
+        from ...legacy.will import (
+            Beneficiary,
+            DigitalAsset,
+            Executor,
+            Will,
+        )
+
+        usage = ("usage: /legacy show | create <owner> | <executor> "
+                 "[| contact | backup] | executor <name> [| contact | backup] "
+                 "| beneficiary <name> [| relationship | share note] "
+                 "| asset <label> [| kind | location hint | instruction] "
+                 "| instruction <text> | witness <name> "
+                 "| seal <text> | reveal | reset yes")
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else "show"
+        rest = parts[1] if len(parts) > 1 else ""
+        try:
+            store = self._legacy_store()
+        except ValueError as exc:
+            return str(exc)
+        will = store.get()
+        if verb == "show":
+            if will is None:
+                return ("no will yet — /legacy create <owner> | <executor> "
+                        "[| contact | backup] records one.")
+            return self._legacy_show(will)
+        if verb == "create":
+            if will is not None:
+                return ("a will already exists (" + will.id + ") — edit it "
+                        "with /legacy executor | beneficiary | asset | "
+                        "instruction | witness, or /legacy reset yes to "
+                        "start over.")
+            fields = [f.strip() for f in rest.split("|")]
+            owner = fields[0] if fields else ""
+            executor_name = fields[1] if len(fields) > 1 else ""
+            if not owner or not executor_name:
+                return ("usage: /legacy create <owner> | <executor> "
+                        "[| contact | backup]")
+            executor = Executor(
+                name=executor_name,
+                contact=fields[2] if len(fields) > 2 else "",
+                backup_name=fields[3] if len(fields) > 3 else "")
+            new_will = Will(owner_name=owner, executor=executor)
+            store.put(new_will)
+            return ("recorded: " + new_will.id + ": will for " + owner
+                    + " — executor " + executor_name + ". Add beneficiaries "
+                    "with /legacy beneficiary <name>, assets with /legacy "
+                    "asset <label>, and seal the body with "
+                    "/legacy seal <text>.")
+        if will is None:
+            return ("no will yet — /legacy create <owner> | <executor> "
+                    "[| contact | backup] records one.")
+        if verb == "executor":
+            fields = [f.strip() for f in rest.split("|")]
+            name = fields[0] if fields else ""
+            if not name:
+                return "usage: /legacy executor <name> [| contact | backup]"
+            will.executor = Executor(
+                name=name,
+                contact=fields[1] if len(fields) > 1 else "",
+                backup_name=fields[2] if len(fields) > 2 else "")
+            store.put(will)
+            return "executor set: " + name
+        if verb == "beneficiary":
+            fields = [f.strip() for f in rest.split("|")]
+            name = fields[0] if fields else ""
+            if not name:
+                return ("usage: /legacy beneficiary <name> "
+                        "[| relationship | share note]")
+            will.beneficiaries.append(Beneficiary(
+                name=name,
+                relationship=fields[1] if len(fields) > 1 else "",
+                share_note=fields[2] if len(fields) > 2 else ""))
+            store.put(will)
+            return "recorded beneficiary: " + name
+        if verb == "asset":
+            fields = [f.strip() for f in rest.split("|")]
+            label = fields[0] if fields else ""
+            if not label:
+                return ("usage: /legacy asset <label> "
+                        "[| kind | location hint | instruction]")
+            kind = fields[1] if len(fields) > 1 and fields[1] else "account"
+            will.digital_assets.append(DigitalAsset(
+                label=label, kind=kind,
+                location_hint=fields[2] if len(fields) > 2 else "",
+                instruction=fields[3] if len(fields) > 3 else ""))
+            store.put(will)
+            return "recorded asset: " + label + " (" + kind + ")"
+        if verb == "instruction":
+            text = rest.strip()
+            if not text:
+                return "usage: /legacy instruction <text>"
+            will.instructions.append(text)
+            store.put(will)
+            return "recorded instruction."
+        if verb == "witness":
+            name = rest.strip()
+            if not name:
+                return "usage: /legacy witness <name>"
+            will.witnesses.append(name)
+            store.put(will)
+            return "recorded witness: " + name
+        if verb == "seal":
+            text = rest.strip()
+            if not text:
+                return "usage: /legacy seal <text>"
+            from ...accounts.vault import VaultLockedError
+
+            try:
+                vault = self._legacy_vault()
+            except VaultLockedError as exc:
+                return "cannot seal — vault locked: " + str(exc)
+            already = will.summary(is_owner=True)["has_sealed_content"]
+
+            def seal_fn(plaintext: str) -> str:
+                return vault.encrypt_blob(plaintext, purpose="legacy-will")
+
+            will.seal_content(text, seal_fn, is_owner=True)
+            store.put(will)
+            note = "sealed — the body is stored only as a vault blob"
+            if already:
+                note += " (replaces the previous sealed body)"
+            return (note + "; /legacy show never shows it, /legacy reveal "
+                    "unlocks it with the vault.")
+        if verb == "reveal":
+            if not will.summary(is_owner=True)["has_sealed_content"]:
+                return ("no sealed body on this will — "
+                        "/legacy seal <text> seals one.")
+            from ...accounts.vault import VaultLockedError
+            from ...core.cipher import CipherError
+            from ...legacy.will import SealedError
+
+            try:
+                vault = self._legacy_vault()
+            except VaultLockedError as exc:
+                return "cannot reveal — vault locked: " + str(exc)
+
+            def unlock_fn(blob: str) -> str:
+                return vault.decrypt_blob(blob, purpose="legacy-will")
+
+            try:
+                return will.reveal(unlock_fn, is_owner=True)
+            except SealedError as exc:
+                return "reveal failed: " + str(exc)
+            except CipherError as exc:
+                return ("reveal failed — the vault could not unlock this: "
+                        + str(exc))
+        if verb == "reset":
+            if rest.strip() != "yes":
+                return ("reset needs confirmation — /legacy reset yes "
+                        "deletes the will. This cannot be undone.")
+            store.clear()
+            return "will deleted."
+        return usage
+
     def _control_decisions(self, tail: str, *, chat_key: str = "") -> str:
         """The decision journal: /decisions list|add|resolve|review|calibration.
 

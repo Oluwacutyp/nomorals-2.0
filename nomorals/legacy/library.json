@@ -1,5 +1,1 @@
-{
-  "library": true,
-  "reason": "Digital will \u2014 pure sealed domain classes (Will, Beneficiary, Executor, DigitalAsset). Genuine import-only library.",
-  "owner_decision_needed": "Wire into CLI/chat (owner-only will commands) or keep as import-only library. Owner decision needed: sealed/owner-only surface design."
-}
+{"library":true,"owner_decision_needed":"Live proof owed after pull: a real will created and sealed on his box (/legacy create + /legacy seal), then /legacy show + /legacy reveal. No further surface decision — the owner-only /legacy surface is the design.","reason":"Digital will — sealed, owner-only (MORE_TO_ADD gap 8). Wired 2026-11-15: durable WillStore (<home>/data/legacy.json, strict load — a corrupt file refuses instead of silently becoming an empty will) + owner-only /legacy chat surface (show/create/executor/beneficiary/asset/instruction/witness/seal/reveal/reset); sealing goes through the accounts vault (encrypt_blob, purpose legacy-will), never plaintext, never a fake seal."}

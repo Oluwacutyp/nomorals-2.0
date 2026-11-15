@@ -25,9 +25,12 @@ Security model (read this before touching the code):
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import uuid
 from dataclasses import dataclass, field
 from datetime import date
+from pathlib import Path
 from typing import Any, Callable
 
 __all__ = [
@@ -37,6 +40,7 @@ __all__ = [
     "Beneficiary",
     "Executor",
     "Will",
+    "WillStore",
 ]
 
 #: What any non-reveal accessor returns in place of sealed content.
@@ -61,6 +65,31 @@ class DigitalAsset:
     location_hint: str = ""  # where to find it — NEVER a secret itself
     instruction: str = ""  # e.g. "transfer to X", "delete", "memorialise"
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "label": self.label,
+            "kind": self.kind,
+            "location_hint": self.location_hint,
+            "instruction": self.instruction,
+        }
+
+    @classmethod
+    def from_dict(cls, row: Any) -> DigitalAsset:
+        if not isinstance(row, dict):
+            raise ValueError("digital asset row must be an object")
+        label = row.get("label")
+        kind = row.get("kind")
+        if not isinstance(label, str) or not label:
+            raise ValueError("digital asset row needs a string label")
+        if not isinstance(kind, str) or not kind:
+            raise ValueError("digital asset row needs a string kind")
+        hint = row.get("location_hint", "")
+        instruction = row.get("instruction", "")
+        if not isinstance(hint, str) or not isinstance(instruction, str):
+            raise ValueError("digital asset hint/instruction must be strings")
+        return cls(label=label, kind=kind, location_hint=hint,
+                   instruction=instruction)
+
 
 @dataclass(frozen=True)
 class Beneficiary:
@@ -68,12 +97,52 @@ class Beneficiary:
     relationship: str = ""
     share_note: str = ""
 
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "relationship": self.relationship,
+            "share_note": self.share_note,
+        }
+
+    @classmethod
+    def from_dict(cls, row: Any) -> Beneficiary:
+        if not isinstance(row, dict):
+            raise ValueError("beneficiary row must be an object")
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("beneficiary row needs a string name")
+        relationship = row.get("relationship", "")
+        share_note = row.get("share_note", "")
+        if not isinstance(relationship, str) or not isinstance(share_note, str):
+            raise ValueError("beneficiary relationship/share_note must be strings")
+        return cls(name=name, relationship=relationship, share_note=share_note)
+
 
 @dataclass(frozen=True)
 class Executor:
     name: str
     contact: str = ""  # contact handle — never a secret
     backup_name: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "name": self.name,
+            "contact": self.contact,
+            "backup_name": self.backup_name,
+        }
+
+    @classmethod
+    def from_dict(cls, row: Any) -> Executor:
+        if not isinstance(row, dict):
+            raise ValueError("executor row must be an object")
+        name = row.get("name")
+        if not isinstance(name, str) or not name:
+            raise ValueError("executor row needs a string name")
+        contact = row.get("contact", "")
+        backup_name = row.get("backup_name", "")
+        if not isinstance(contact, str) or not isinstance(backup_name, str):
+            raise ValueError("executor contact/backup_name must be strings")
+        return cls(name=name, contact=contact, backup_name=backup_name)
 
 
 @dataclass
@@ -157,3 +226,141 @@ class Will:
         """Digital-asset roster (labels/hints/instructions — never secrets)."""
         _require_owner(is_owner)
         return list(self.digital_assets)
+
+    # -- durability -------------------------------------------------------
+    def to_dict(self) -> dict[str, Any]:
+        """Plain-data form for the durable store.
+
+        The sealed body travels as the vault-produced blob + SHA-256
+        hash only. There is no plaintext field on this class, so no
+        serialisation of it can ever write one.
+        """
+        return {
+            "owner_name": self.owner_name,
+            "executor": self.executor.to_dict(),
+            "beneficiaries": [b.to_dict() for b in self.beneficiaries],
+            "digital_assets": [a.to_dict() for a in self.digital_assets],
+            "instructions": list(self.instructions),
+            "witnesses": list(self.witnesses),
+            "created": self.created.isoformat(),
+            "id": self.id,
+            "sealed_blob": self._sealed_blob,
+            "plaintext_hash": self._plaintext_hash,
+        }
+
+    @classmethod
+    def from_dict(cls, row: Any) -> Will:
+        """Strict read-back: any bad row raises instead of half-loading.
+
+        A row smuggling a "plaintext"/"content" key is refused outright
+        — the store never holds will plaintext, by construction.
+        """
+        if not isinstance(row, dict):
+            raise ValueError("will row must be an object")
+        if "plaintext" in row or "content" in row:
+            raise ValueError(
+                "will rows never carry plaintext — sealed blob only")
+        owner = row.get("owner_name")
+        if not isinstance(owner, str) or not owner:
+            raise ValueError("will row needs a string owner_name")
+        executor = Executor.from_dict(row.get("executor"))
+        beneficiaries = row.get("beneficiaries", [])
+        assets = row.get("digital_assets", [])
+        instructions = row.get("instructions", [])
+        witnesses = row.get("witnesses", [])
+        if not isinstance(beneficiaries, list):
+            raise ValueError("will beneficiaries must be a list")
+        if not isinstance(assets, list):
+            raise ValueError("will digital_assets must be a list")
+        if not isinstance(instructions, list) or not all(
+                isinstance(i, str) for i in instructions):
+            raise ValueError("will instructions must be a list of strings")
+        if not isinstance(witnesses, list) or not all(
+                isinstance(w, str) for w in witnesses):
+            raise ValueError("will witnesses must be a list of strings")
+        created_raw = row.get("created")
+        if not isinstance(created_raw, str):
+            raise ValueError("will created must be a YYYY-MM-DD date")
+        try:
+            created = date.fromisoformat(created_raw)
+        except ValueError as exc:
+            raise ValueError("will created must be a YYYY-MM-DD date") from exc
+        will_id = row.get("id")
+        if will_id is not None and not isinstance(will_id, str):
+            raise ValueError("will id must be a string")
+        blob = row.get("sealed_blob")
+        digest = row.get("plaintext_hash")
+        if blob is not None and not isinstance(blob, str):
+            raise ValueError("will sealed_blob must be a string or null")
+        if digest is not None and not isinstance(digest, str):
+            raise ValueError("will plaintext_hash must be a string or null")
+        return cls(
+            owner_name=owner, executor=executor,
+            beneficiaries=[Beneficiary.from_dict(b) for b in beneficiaries],
+            digital_assets=[DigitalAsset.from_dict(a) for a in assets],
+            instructions=list(instructions), witnesses=list(witnesses),
+            created=created,
+            id=will_id or uuid.uuid4().hex[:12],
+            _sealed_blob=blob, _plaintext_hash=digest)
+
+
+class WillStore:
+    """Durable store for the owner's single will (<home>/data/legacy.json).
+
+    One will, not many: a person has one current will. The sealed body
+    is stored ONLY as the vault-produced blob + SHA-256 hash — plaintext
+    is never written here, by construction (Will has no plaintext field,
+    and from_dict refuses any row smuggling one).
+
+    Load is STRICT where AssetLedger is tolerant: a corrupt will file
+    raises instead of silently becoming an empty will — silently losing
+    the owner's will would be worse than refusing to load it. A missing
+    file simply means no will yet.
+    """
+
+    def __init__(self, path: str | None = None) -> None:
+        self.path = path
+        self.will: Will | None = None
+        if path is not None:
+            self._load()
+
+    def _load(self) -> None:
+        assert self.path is not None
+        if not os.path.exists(self.path):
+            return
+        try:
+            raw = json.loads(Path(self.path).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ValueError(
+                f"legacy will file is unreadable ({self.path}): {exc}"
+            ) from exc
+        if not isinstance(raw, dict) or "will" not in raw:
+            raise ValueError(
+                f"legacy will file is unreadable ({self.path}): "
+                "expected an object with a 'will' key")
+        if raw["will"] is None:
+            return
+        self.will = Will.from_dict(raw["will"])
+
+    def _save(self) -> None:
+        assert self.path is not None
+        parent = Path(self.path).parent
+        parent.mkdir(parents=True, exist_ok=True)
+        payload = {"will": self.will.to_dict() if self.will else None}
+        tmp = self.path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            fh.write(json.dumps(payload, indent=2))
+        os.replace(tmp, self.path)
+
+    def get(self) -> Will | None:
+        return self.will
+
+    def put(self, will: Will) -> None:
+        self.will = will
+        if self.path is not None:
+            self._save()
+
+    def clear(self) -> None:
+        self.will = None
+        if self.path is not None:
+            self._save()
