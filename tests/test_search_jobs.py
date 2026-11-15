@@ -35,8 +35,8 @@ def _report(query: str) -> dict[str, Any]:
 
 def _wait_state(ctx: Any, job_id: str, states: tuple[str, ...],
                 timeout: float = 10.0) -> dict[str, Any]:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         st = jobs.status(ctx, job_id)
         if st["state"] in states:
             return st
@@ -66,9 +66,9 @@ class JobLifecycleTests(unittest.TestCase):
         return {"ok": True}
 
     def test_start_returns_immediately(self) -> None:
-        started = time.time()
+        started = time.monotonic()
         job_id = jobs.start(self.ctx, "bitcoin price")
-        self.assertLess(time.time() - started, 5.0)
+        self.assertLess(time.monotonic() - started, 5.0)
         self.assertTrue(job_id)
 
     def test_status_while_running_then_done(self) -> None:
@@ -109,8 +109,8 @@ class JobLifecycleTests(unittest.TestCase):
         # notifies) — asserting on self.delivered the instant the
         # state flips races the delivery. Wait for the delivery
         # itself, on the same deadline idiom as _wait_state.
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             if self.delivered:
                 return
             time.sleep(0.05)

@@ -606,8 +606,8 @@ class ReconnectTests(unittest.TestCase):
                                   args=(lambda m: None,), daemon=True)
         try:
             runner.start()
-            deadline = time.time() + 8
-            while time.time() < deadline and len(connections) < 2:
+            deadline = time.monotonic() + 8
+            while time.monotonic() < deadline and len(connections) < 2:
                 time.sleep(0.1)
             self.assertGreaterEqual(
                 len(connections), 2,
@@ -707,8 +707,8 @@ class ReaderTimeoutTests(unittest.TestCase):
                                   args=(lambda m: None,), daemon=True)
         reader.start()
         try:
-            deadline = time.time() + 5
-            while sock.recv_calls < 5 and time.time() < deadline:
+            deadline = time.monotonic() + 5
+            while sock.recv_calls < 5 and time.monotonic() < deadline:
                 time.sleep(0.02)
             self.assertGreaterEqual(sock.recv_calls, 5)
             self.assertTrue(reader.is_alive(),
@@ -798,6 +798,12 @@ class FlapBridge:
             self.received.append(obj)
         if cmd == "send":
             with self._lock:
+                # The delivered ts stays real: the adapter's history
+                # reconcile (_history_find_own) compares it against
+                # the real dispatch time with a 5s floor, so a frozen
+                # ts would read as "sent too long ago" and the flap
+                # tests' reconciliation would never find the message
+                # (see the baseline comment in test_no_direct_clock.py).
                 self.delivered.append({
                     "incoming": False, "text": obj.get("text") or "",
                     "sender": "", "media": [], "reply_to": "",
@@ -851,8 +857,8 @@ def _wire(adapter, bridge):
     reader = threading.Thread(target=adapter._reader_loop,
                               args=(lambda m: None,), daemon=True)
     reader.start()
-    deadline = time.time() + 5
-    while not adapter.connected.is_set() and time.time() < deadline:
+    deadline = time.monotonic() + 5
+    while not adapter.connected.is_set() and time.monotonic() < deadline:
         time.sleep(0.05)
     return reader
 
@@ -883,10 +889,10 @@ class SendOnceTests(unittest.TestCase):
             _wire(adapter, bridge)
             # The reconnect flush (async, on the status event) makes
             # the one dispatch and loses its ack; wait for its stamp.
-            deadline = time.time() + 8
+            deadline = time.monotonic() + 8
             rows = adapter.outbox.pending()
             while not rows[0].get("dispatched_at") \
-                    and time.time() < deadline:
+                    and time.monotonic() < deadline:
                 time.sleep(0.05)
                 rows = adapter.outbox.pending()
             self.assertTrue(rows[0].get("dispatched_at"),
@@ -911,10 +917,10 @@ class SendOnceTests(unittest.TestCase):
         try:
             adapter, _chat = self._queued_adapter(bridge, tmp)
             _wire(adapter, bridge)
-            deadline = time.time() + 8
+            deadline = time.monotonic() + 8
             rows = adapter.outbox.pending()
             while not rows[0].get("dispatched_at") \
-                    and time.time() < deadline:
+                    and time.monotonic() < deadline:
                 time.sleep(0.05)
                 rows = adapter.outbox.pending()
             self.assertTrue(rows[0].get("dispatched_at"))
@@ -984,8 +990,8 @@ class SendOnceTests(unittest.TestCase):
             self.assertNotIn("dispatched_at", rows[0])
             _wire(adapter, bridge)
             # The reconnect flush delivers it, exactly once.
-            deadline = time.time() + 8
-            while adapter.outbox.pending() and time.time() < deadline:
+            deadline = time.monotonic() + 8
+            while adapter.outbox.pending() and time.monotonic() < deadline:
                 time.sleep(0.05)
             self.assertEqual(adapter.outbox.pending(), [])
             self.assertEqual(bridge.send_count("queued while down"), 1)

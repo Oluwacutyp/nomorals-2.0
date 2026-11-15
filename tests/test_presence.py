@@ -19,12 +19,6 @@ from pathlib import Path
 from typing import Any
 from unittest import mock
 
-# Context homes here carry a fully migrated database; keep them
-# off a small shared /tmp when the runner sets NM_TEST_TMPDIR
-# (SQLITE_FULL half-applies migrations — see
-# test_partner_brain_gate). Unset = tempfile's default.
-_TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
-
 from nomorals.agents.context import build_context
 from nomorals.agents.partner_runtime import PartnerBrain, PresenceOutcome, PartnerRuntime
 from nomorals.core.config import load_settings
@@ -45,6 +39,15 @@ from nomorals.social.chat.base import (
     SendResult,
 )
 from nomorals.social.chat.gateway import ChatGateway
+from tests.frozen_clock import MIDDAY_TS
+
+# Context homes here carry a fully migrated database; keep them
+# off a small shared /tmp when the runner sets NM_TEST_TMPDIR
+# (SQLITE_FULL half-applies migrations — see
+# test_partner_brain_gate). Unset = tempfile's default.
+# (Sits below the imports: a module-level statement inside the
+# import block tripped E402 on every import after it.)
+_TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
 
 
 def _mood(label: str, **overrides: float) -> Any:
@@ -300,8 +303,8 @@ class _RecordingAdapter(ChatAdapter):
         return SendResult(ok=True, platform=self.name, message_id=f"m{len(self.sent)}")
 
     def wait_started(self, timeout: float = 5.0) -> bool:
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             if self.started_flag:
                 return True
             time.sleep(0.01)
@@ -309,8 +312,8 @@ class _RecordingAdapter(ChatAdapter):
 
 
 def _wait(predicate, timeout: float = 8.0) -> bool:
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if predicate():
             return True
         time.sleep(0.02)
@@ -342,6 +345,11 @@ class RuntimePresenceE2E(unittest.TestCase):
         # no deliveries) into the adapter and every "first send is the
         # reply" wait becomes a race. Same pattern as the briefings-table
         # seed below.
+        # The marker ts stays real: check_pulse_catchup suppresses the
+        # catch-up only when last_ts >= today's real-clock due time, so
+        # a frozen ts would read as "not delivered today" and the
+        # briefing would fire anyway (see the baseline comment in
+        # test_no_direct_clock.py).
         _ws = Path(self.context.settings.workspace_dir)
         for _marker in ("pulse_last_run.json", "pulse_last_run_afternoon.json",
                         "pulse_last_run_evening.json", "pulse_last_run_midnight.json"):
@@ -356,11 +364,14 @@ class RuntimePresenceE2E(unittest.TestCase):
         self.gateway = ChatGateway({"local": self.adapter}, db=self.context.db)
         self.runtime = PartnerRuntime(self.context, gateway=self.gateway)
         self.chat = ChatRef(platform="local", chat_id="owner", kind=ChatKind.DM, peer="you")
+        # generated_at is frozen: check_catchup keys on the date, not the
+        # timestamp (latest_briefing picks the row by date, ORDER BY
+        # generated_at), so the frozen value can never change the outcome.
         from nomorals.agents.morning_briefing import _today_str
         self.context.db.execute(
             "INSERT OR REPLACE INTO briefings (id, date, sections_json, generated_at)"
             " VALUES (?, ?, '[]', ?)",
-            ("test-seed", _today_str(self.context), time.time()),
+            ("test-seed", _today_str(self.context), MIDDAY_TS),
         )
 
     def tearDown(self) -> None:

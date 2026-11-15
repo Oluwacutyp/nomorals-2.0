@@ -150,7 +150,17 @@ BASELINE: dict[str, int] = {
     "tests/test_orchestration_p9.py": 2,
     "tests/test_os_sweep.py": 9,
     "tests/test_os_timeline.py": 2,
-    "tests/test_partner_runtime.py": 5,
+    # Grandfathered (batch H10): the pulse-marker ts must be stamped
+    # on the real clock — check_pulse_catchup suppresses the catch-up
+    # only when last_ts >= today's real-clock due time, so a frozen
+    # ts reads as "not delivered today" and the briefing fires anyway;
+    # and the AutonomyTest last_active seed must sit 8h before the
+    # real now — the brain compares it to the real clock and the
+    # mood's silence scale saturates at 24h, so a frozen stamp reads
+    # as a month of silence and changes the headspace the seed builds.
+    # The file's other reads (wait loops, briefing generated_at) are
+    # converted: monotonic deadlines, frozen generated_at.
+    "tests/test_partner_runtime.py": 2,
     "tests/test_partner_social_f2.py": 3,
     "tests/test_partner_sweep.py": 3,
     "tests/test_persona.py": 2,
@@ -159,7 +169,13 @@ BASELINE: dict[str, int] = {
     "tests/test_planning_sweep.py": 8,
     "tests/test_portfolio.py": 9,
     "tests/test_power_sweep.py": 7,
-    "tests/test_presence.py": 5,
+    # Grandfathered (batch H10): the pulse-marker ts must be stamped
+    # on the real clock — check_pulse_catchup suppresses the catch-up
+    # only when last_ts >= today's real-clock due time, so a frozen
+    # ts reads as "not delivered today" and the briefing fires anyway.
+    # The file's other reads (wait loops, briefing generated_at) are
+    # converted: monotonic deadlines, frozen generated_at.
+    "tests/test_presence.py": 1,
     "tests/test_proactive_delivery.py": 3,
     "tests/test_property_sweep.py": 2,
     "tests/test_proxylab_stream1.py": 9,
@@ -178,7 +194,6 @@ BASELINE: dict[str, int] = {
     "tests/test_scheduler_section_b.py": 36,
     "tests/test_scheduler_sweep.py": 27,
     "tests/test_scheduler_upgrades.py": 9,
-    "tests/test_search_jobs.py": 4,
     "tests/test_self_improvement_v2.py": 7,
     "tests/test_shutdown_drain.py": 5,
     "tests/test_skills_sweep.py": 3,
@@ -191,7 +206,6 @@ BASELINE: dict[str, int] = {
     "tests/test_storage_sweep.py": 5,
     "tests/test_stream.py": 2,
     "tests/test_stream_sweep.py": 10,
-    "tests/test_subagents_coremind_lifecycle.py": 6,
     "tests/test_swarm_specialists.py": 3,
     "tests/test_sync.py": 3,
     "tests/test_sync_sweep.py": 11,
@@ -217,7 +231,14 @@ BASELINE: dict[str, int] = {
     "tests/test_wave_d_stream_e.py": 3,
     "tests/test_wave_e_gaps.py": 7,
     "tests/test_wave_f1_honesty.py": 1,
-    "tests/test_whatsapp.py": 2,
+    # Grandfathered (batch H10): the FlapBridge's delivered ts must
+    # be stamped on the real clock — the adapter's history reconcile
+    # (_history_find_own) compares it against the real dispatch time
+    # with a 5s floor, so a frozen ts reads as "sent too long ago"
+    # and the flap tests' reconciliation never finds the message.
+    # The file's other reads (wait loops) are converted to monotonic
+    # deadlines.
+    "tests/test_whatsapp.py": 1,
     # Grandfathered (batch H9): the economy-page awards must be
     # stamped on the real clock — economy_health/issuance_state
     # read the real clock over a 7-day window, so frozen awards

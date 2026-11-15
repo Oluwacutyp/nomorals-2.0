@@ -22,6 +22,7 @@ from nomorals.core.config import load_settings
 from nomorals.llm.base import LLMResponse, Message, SamplingParams
 from nomorals.social.chat.base import ChatAdapter, ChatKind, ChatMessage, ChatRef, SendResult
 from nomorals.social.chat.gateway import ChatGateway
+from tests.frozen_clock import MIDDAY_TS
 
 
 class FakeRouter:
@@ -75,8 +76,8 @@ class FakeAdapter(ChatAdapter):
         return SendResult(ok=True, platform=self.name, message_id=f"m{len(self.sent)}")
 
     def wait_started(self, timeout: float = 5.0) -> bool:
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             if getattr(self, "started_flag", False):
                 return True
             time.sleep(0.01)
@@ -104,6 +105,11 @@ def _make_context() -> tuple[Any, "tempfile.TemporaryDirectory"]:
     # today, or runtime.start() fires catch-up briefings (fresh DB, no
     # deliveries) into the adapter and every "first send is the reply"
     # wait becomes a race.
+    # The marker ts stays real: check_pulse_catchup suppresses the
+    # catch-up only when last_ts >= today's real-clock due time, so a
+    # frozen ts would read as "not delivered today" and the briefing
+    # would fire anyway (see the baseline comment in
+    # test_no_direct_clock.py).
     _ws = Path(context.settings.workspace_dir)
     for _marker in ("pulse_last_run.json", "pulse_last_run_afternoon.json",
                     "pulse_last_run_evening.json", "pulse_last_run_midnight.json"):
@@ -116,18 +122,21 @@ def _make_context() -> tuple[Any, "tempfile.TemporaryDirectory"]:
     # after briefing time, so it passed in overnight runs and failed
     # in daytime runs (the briefing landing first broke the reply-path
     # waits). Same seed as test_presence.py.
+    # generated_at is frozen: check_catchup keys on the date, not the
+    # timestamp (latest_briefing picks the row by date, ORDER BY
+    # generated_at), so the frozen value can never change the outcome.
     from nomorals.agents.morning_briefing import _today_str
     context.db.execute(
         "INSERT OR REPLACE INTO briefings (id, date, sections_json, generated_at)"
         " VALUES (?, ?, '[]', ?)",
-        ("test-seed", _today_str(context), time.time()),
+        ("test-seed", _today_str(context), MIDDAY_TS),
     )
     return context, tmp
 
 
 def _wait(predicate, timeout: float = 8.0) -> bool:
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if predicate():
             return True
         time.sleep(0.02)
@@ -298,6 +307,10 @@ class AutonomyTest(unittest.TestCase):
         self.gateway.register_chat(self.chat)
         self.brain = PartnerBrain(self.context)
         # Put her in a warm, a-little-needy headspace with a long quiet gap.
+        # last_active stays 8h before the real now: the brain compares it
+        # to the real clock (hours_idle = (now - last) / 3600) and the
+        # mood's silence scale saturates at 24h, so a frozen stamp would
+        # read as a month of silence and change the headspace this seeds.
         self.brain.mood.note_event("affectionate", 1.0)
         self.brain.mood.note_event("affectionate", 1.0)
         self.brain.mood.note_event("affectionate", 1.0)

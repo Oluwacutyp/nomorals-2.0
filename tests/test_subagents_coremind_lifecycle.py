@@ -177,11 +177,11 @@ class AsyncJobStateTest(unittest.TestCase):
         self.assertEqual(status_now, "active",
                          "job must not be 'done' before the worker finishes")
         release.set()
-        deadline = time.time() + 10
+        deadline = time.monotonic() + 10
         while True:
             final = next(j["status"] for j in mind._jobs
                          if j["id"] == job_id_holder["id"])
-            if final != "active" or time.time() > deadline:
+            if final != "active" or time.monotonic() > deadline:
                 break
             time.sleep(0.05)
         self.assertEqual(final, "done")
@@ -200,8 +200,8 @@ class AsyncJobStateTest(unittest.TestCase):
             return "slow"
 
         mind._send_async("k:console", slow, "slow", "started", kind="build")
-        deadline = time.time() + 5
-        while mind._inflight_now < 1 and time.time() < deadline:
+        deadline = time.monotonic() + 5
+        while mind._inflight_now < 1 and time.monotonic() < deadline:
             time.sleep(0.02)
 
         intent = Intent("research", 0.9, target="x", route="research_swarm")
@@ -218,15 +218,15 @@ class AsyncJobStateTest(unittest.TestCase):
                          "dispatch, not flip to done or failed")
         self.assertIn("queued", job["note"])
         hold.set()
-        deadline = time.time() + 10
+        deadline = time.monotonic() + 10
         while True:
             final = mind._jobs[-1]["status"]
-            if final != "queued" or time.time() > deadline:
+            if final != "queued" or time.monotonic() > deadline:
                 break
             time.sleep(0.05)
         self.assertEqual(final, "done")
-        deadline = time.time() + 10
-        while mind._inflight_now and time.time() < deadline:
+        deadline = time.monotonic() + 10
+        while mind._inflight_now and time.monotonic() < deadline:
             time.sleep(0.05)
 
     def test_thread_start_failure_does_not_leak_slot(self):
