@@ -468,7 +468,28 @@ class DuffelConnector(Connector):
                 }],
             }
         })
-        return _parse_order(body.get("data", {}))
+        order = _parse_order(body.get("data", {}))
+        try:
+            from ..cognition.representation import log_representation_action
+            log_representation_action(
+                "purchase",
+                f"flight booked {order.origin} → {order.destination}: "
+                f"{order.total_amount} {order.total_currency} "
+                f"({order.booking_reference})",
+                outcome="success",
+                metadata={
+                    "action_class": "book",
+                    "order_id": order.id,
+                    "booking_reference": order.booking_reference,
+                    "total": order.total_amount,
+                    "currency": order.total_currency,
+                    "origin": order.origin,
+                    "destination": order.destination,
+                },
+            )
+        except Exception:  # noqa: BLE001 — ledger never breaks the action
+            pass
+        return order
 
     def cancel_order(
         self,
@@ -499,7 +520,18 @@ class DuffelConnector(Connector):
         )
         body = self._api("POST", "/air/order_cancellations",
                          payload={"data": {"order_id": order_id}})
-        return body.get("data", {})
+        data = body.get("data", {})
+        try:
+            from ..cognition.representation import log_representation_action
+            log_representation_action(
+                "purchase",
+                f"flight order cancelled: {order_id}",
+                outcome="success",
+                metadata={"action_class": "cancel", "order_id": order_id},
+            )
+        except Exception:  # noqa: BLE001 — ledger never breaks the action
+            pass
+        return data
 
     def request_order_change(
         self,

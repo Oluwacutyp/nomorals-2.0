@@ -379,6 +379,23 @@ class GmailConnector(Connector, GoogleOAuth):
             "gmail sent message %s to %s",
             data.get("id", "?"), payload.get("to", "?"),
         )
+        try:
+            from ..cognition.representation import log_representation_action
+            log_representation_action(
+                "message",
+                f"email sent to {payload.get('to', '?')}: "
+                f"{payload.get('subject', '')}",
+                outcome="success",
+                metadata={
+                    "action_class": "send",
+                    "to": payload.get("to", ""),
+                    "subject": payload.get("subject", ""),
+                    "message_id": data.get("id", ""),
+                    "thread_id": data.get("threadId", ""),
+                },
+            )
+        except Exception:  # noqa: BLE001 — ledger never breaks the action
+            pass
         return {
             "id": data.get("id", ""),
             "thread_id": data.get("threadId", ""),
