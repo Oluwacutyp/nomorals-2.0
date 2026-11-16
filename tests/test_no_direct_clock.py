@@ -403,6 +403,23 @@ BASELINE: dict[str, int] = {
     "tests/test_triggers.py": 5,
     "tests/test_triggers_sweep.py": 10,
     "tests/test_universal_storage_backup_offsite.py": 1,
+    # Grandfathered (batch H33): 2 reads stay on the real clock.
+    # They are the `started` duration anchor handed to
+    # UpdateManager._rollback (os/update.py:2114), which records
+    # report.seconds = time.time() - started (os/update.py:2175)
+    # with no now seam — freezing started to MIDDAY_TS would record
+    # a ~32-day duration in the report. The test's claim is the
+    # quarantine guard (never quarantine the pre-update sha), not
+    # timing; threading a now seam through _rollback/_run would be
+    # a production API change in a hygiene lane for a non-regression
+    # (H21 precedent). The file's other 4 reads are frozen to
+    # MIDDAY_TS: the journaled "ts" seeds are carried data —
+    # _quarantine_is_stale reads only the journal's sha fields,
+    # _journal_runs groups by run_id in file order, and the only ts
+    # consumer in the organ (_pending_restore_superseded_by)
+    # compares ts only on "complete" events, while these seeds are
+    # "step" / "rolled_back".
+    "tests/test_updater_hardening.py": 2,
     "tests/test_vision_seer.py": 2,
     "tests/test_wave85_games.py": 1,
     "tests/test_wave_d_stream_e.py": 3,

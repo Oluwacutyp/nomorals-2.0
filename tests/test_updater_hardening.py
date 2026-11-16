@@ -36,6 +36,21 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from tests.frozen_clock import MIDDAY_TS
+
+#: Clock reads in this file (batch H33, no-direct-clock): the 4
+#: journaled "ts" seeds are frozen to MIDDAY_TS — _quarantine_is_stale
+#: (os/update.py:1668) reads only the journal's sha fields (event /
+#: step / to_sha / from_sha), never ts; _journal_runs groups by run_id
+#: in file order, never ts; the only ts consumer in the organ,
+#: _pending_restore_superseded_by, compares ts only on "complete"
+#: events, and these seeds are "step" / "rolled_back". The 2 remaining
+#: reads are grandfathered (see the _rollback guard test): they are
+#: the duration anchor _rollback(report, started, ...) measures
+#: report.seconds = time.time() - started against, and production
+#: has no now seam there — freezing started would record a ~32-day
+#: duration in the report.
+
 SHA_A = "a" * 40
 SHA_B = "b" * 40
 SHA_X = "c" * 40
@@ -147,9 +162,9 @@ class TestNoOpShortCircuit(unittest.TestCase):
             # version it quarantined (from_sha == to_sha == SHA_A).
             mgr._journal({"run_id": "incident", "event": "step",
                           "step": "git_pull", "from_sha": SHA_A,
-                          "to_sha": SHA_A, "ts": time.time()})
+                          "to_sha": SHA_A, "ts": MIDDAY_TS})
             mgr._journal({"run_id": "incident", "event": "rolled_back",
-                          "quarantined": SHA_A, "ts": time.time()})
+                          "quarantined": SHA_A, "ts": MIDDAY_TS})
             report = mgr.run()
             self.assertTrue(report.ok, report.error)
             self.assertEqual(calls, [])
@@ -197,9 +212,9 @@ class TestQuarantineOnlyNew(unittest.TestCase):
             mgr._quarantine_add(SHA_B, "failed a previous update")
             mgr._journal({"run_id": "old", "event": "step",
                           "step": "git_pull", "from_sha": SHA_X,
-                          "to_sha": SHA_B, "ts": time.time()})
+                          "to_sha": SHA_B, "ts": MIDDAY_TS})
             mgr._journal({"run_id": "old", "event": "rolled_back",
-                          "quarantined": SHA_B, "ts": time.time()})
+                          "quarantined": SHA_B, "ts": MIDDAY_TS})
             report = mgr.run()
             # The pre-existing behaviour stands: landing (or sitting)
             # on a legitimately quarantined version refuses, naming
@@ -229,6 +244,15 @@ class TestQuarantineOnlyNew(unittest.TestCase):
             mgr, _ = _manager(tmp)
             mgr._tx_from_sha = SHA_A
             mgr._restore_tree = lambda sha: (True, "tree restored")
+            # Grandfathered (batch H33): `started` is the duration
+            # anchor _rollback measures report.seconds =
+            # time.time() - started against (os/update.py:2175), and
+            # production has no now seam there — freezing it to
+            # MIDDAY_TS would record a ~32-day duration in the report.
+            # The test's claim is the quarantine guard, not timing;
+            # threading a now seam through _rollback/_run would be a
+            # production API change in a hygiene lane for a
+            # non-regression (H21 precedent).
             report = UpdateReport(pre_update_snapshot="snap-1")
             out = mgr._rollback(report, time.time(), "boom",
                                 quarantine_sha=SHA_A)
