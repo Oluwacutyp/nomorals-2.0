@@ -13,7 +13,6 @@ Failing-first tests for verified bugs:
 import hashlib
 import os
 import tempfile
-import time
 
 from nomorals.agency.checker import Checker
 from nomorals.agency.deliberation import DeliberationLoop
@@ -21,6 +20,40 @@ from nomorals.agency.initiatives import Initiative, InitiativeStore
 from nomorals.agency.knowledge import KnowledgeStore
 from nomorals.agency.systems import ActiveSystems
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
+
+# Clock reads in this file are frozen to MIDDAY_TS (tests.frozen_clock).
+# Trace: every read is a seed passed to an explicit-`now` seam and every
+# production comparison on the driven path is delta-only against that
+# same `now`, so freezing changes no verdict (H27 agency_rotation
+# precedent, same organ family):
+# - run_cycle/seed_initiatives/choose take `now` explicitly
+#   (systems.py:232/:1216, deliberation.py:58; `now = time.time() if
+#   now is None else now`) and compare only deltas: urgency
+#   `now - next_review_at > 3600` (hot lead: now-7200 -> 7200 on any
+#   clock), RotationScheduler.next_system `cooldown_until <= now` with
+#   the pick itself min(virtual_time) (rotation.py:96), record_result
+#   `cooldown_until = now + cooldown_s` (H27: a frozen now keeps the
+#   cooldown leg identical), claim_work `now - ts < claim_ttl_s` with
+#   ts stamped from the same passed now, score() `overdue = max(0.0,
+#   now - next_review_at)` (deliberation.py:35), choose() lease/future-
+#   wait filters against the same passed now. SystemSlot.cooldown_until
+#   defaults to 0.0, so every slot is a candidate on the first pick
+#   under a frozen now exactly as under the real clock.
+# - _check_wisdom reads only url/status from the queue
+#   (checker.py:311) — queued_at/done_at are never read, so the two
+#   queue-row seeds are inert values.
+# - InitiativeStore.create stamps created_at from the real clock when
+#   no `now` is passed (initiatives.py:194/:212), but created_at is
+#   only ever ORDERED BY / sorted on this path, never compared
+#   against `now`.
+# - One frozen/real mix exists and is inert for the assertions:
+#   has_work() calls _trigger_initiatives() with no `now`, so it reads
+#   the real clock; a trigger worked by a tick is advanced to
+#   `now + 3600` (frozen), which the real-now re-check would re-offer
+#   — but the system cannot re-run in the same cycle (claim_work
+#   dedupes by the `cycle:{n}:{system}` key against the frozen now),
+#   and the preemption fires on the FIRST pick, before any tick runs.
 
 
 def _systems():
@@ -42,7 +75,7 @@ def _standing(store, name, now, priority=0.5):
 
 def test_blocked_overdue_critical_does_not_starve_cycle():
     systems, store, _ = _systems()
-    now = time.time()
+    now = MIDDAY_TS
     # Production state: every system has its standing initiative, so the
     # planner is runnable and urgency preemption actually bites.
     systems.seed_initiatives(now=now)
@@ -60,7 +93,7 @@ def test_blocked_overdue_critical_does_not_starve_cycle():
 
 def test_unblocked_overdue_critical_still_triggers_urgency():
     systems, store, _ = _systems()
-    now = time.time()
+    now = MIDDAY_TS
     systems.seed_initiatives(now=now)
     store.create(Initiative(
         outcome="leads: hot lead", kind="evidence_opportunity",
@@ -93,7 +126,7 @@ def test_checker_wisdom_rejects_unrecorded_queue_ingest():
     url = "https://example.com/text"
     db.execute(
         "INSERT INTO wisdom_ingest_queue (url, title, queued_at, status)"
-        " VALUES (?, ?, ?, 'queued')", (url, "T", time.time()))
+        " VALUES (?, ?, ?, 'queued')", (url, "T", MIDDAY_TS))
     check = Checker().verify(
         "wisdom", {"ingested": [_qslug(url)]}, adapters={}, db=db)
     assert not check.passed, \
@@ -107,7 +140,7 @@ def test_checker_wisdom_accepts_recorded_queue_ingest():
     db.execute(
         "INSERT INTO wisdom_ingest_queue (url, title, queued_at, status,"
         " done_at) VALUES (?, ?, ?, 'done', ?)",
-        (url, "T", time.time(), time.time()))
+        (url, "T", MIDDAY_TS, MIDDAY_TS))
     check = Checker().verify(
         "wisdom", {"ingested": [_qslug(url)]}, adapters={}, db=db)
     assert check.passed, f"checker rejected a recorded ingest: {check.reason}"
@@ -228,7 +261,7 @@ def test_checker_research_accepts_closed_gap_via_organ():
 
 def test_deliberation_records_selected_events():
     _, store, db = _systems()
-    now = time.time()
+    now = MIDDAY_TS
     it = store.create(Initiative(
         outcome="critical overdue", kind="standing", objective="digestion",
         evidence="e", next_action="fix it", priority=1.0,
