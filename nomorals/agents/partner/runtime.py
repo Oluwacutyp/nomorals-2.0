@@ -9100,7 +9100,9 @@ class PartnerRuntime(
         if kind == "aio":
             return self._control_aio(command.tail or arg, chat_key=chat_key)
         if kind == "video":
-            return self._control_video(command.tail or arg)
+            return self._control_video(command.tail or arg,
+                                       chat_key=chat_key,
+                                       message=message)
         if kind == "director":
             return self._control_director(command.tail or arg)
         if kind == "caption":

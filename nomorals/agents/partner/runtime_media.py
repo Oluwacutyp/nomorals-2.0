@@ -4791,7 +4791,8 @@ class RuntimeMediaMixin:
             _log.exception("produce hook failed")
             return f"produce error: {exc}"
 
-    def _control_video(self, tail: str) -> str:
+    def _control_video(self, tail: str, chat_key: str = "",
+                       message: Any = None) -> str:
         """/video <query> [platform] | /video download <url> [audio] | platforms.
 
         Devon Studio generation lives here too (additive — the search
@@ -4802,6 +4803,8 @@ class RuntimeMediaMixin:
         /video motion slideshow <img1,img2> [audio]
         /video motion trailer <clip1,clip2> [--title T]
         /video capability | /video list
+        Watching lives here too: /video watch <url|path> [question]
+        (owner-only — it spends vision-model calls per frame).
         """
         from ...media.video import _PLATFORM_SITES, VideoFinder
 
@@ -4810,9 +4813,14 @@ class RuntimeMediaMixin:
             return ("usage: /video <query> [platform]  |  "
                     "/video download <url> [audio]  |  /video platforms\n"
                     "studio: /video gen \"<prompt>\" | /video motion … | "
-                    "/video capability | /video list")
+                    "/video capability | /video list\n"
+                    "watch: /video watch <url|path> [question]")
         words = tail.split()
         first = words[0].lower()
+        if first == "watch":
+            return self._control_video_watch(
+                tail[len(words[0]):].strip(),
+                chat_key=chat_key, message=message)
         # studio subcommands — "motion" only triggers on a known product
         # kind so searches like "/video motion graphics" still search
         _motion_kinds = ("lyric", "visual", "slideshow", "trailer")
@@ -4859,6 +4867,113 @@ class RuntimeMediaMixin:
             lines.append(f"  {i}. {title}{dur}{extra}\n     {r['url']}")
         lines.append("download: /video download <url>")
         return "\n".join(lines)
+
+    def _control_video_watch(self, tail: str, chat_key: str = "",
+                             message: Any = None) -> str:
+        """`/video watch <url|path> [question]` — Devon truly watches a video.
+
+        Attached video wins over any path argument (same shape as
+        /vision's attached image); a URL is downloaded through the
+        same VideoFinder route /video download uses; a path is watched
+        as-is. The organ samples frames (vision) and transcribes the
+        audio (STT) and answers from both — or names the rung that is
+        down, never inventing what it could not see or hear.
+
+        Owner-only: every watch spends vision-model calls (one per
+        sampled frame) and sends frames to the model provider — the
+        same cost/privacy profile as /vision, so the same gate. The
+        public /video grant admits everyone, so this subverb gates
+        itself. Never raises.
+        """
+        import shlex
+
+        from ...media.video_watch import (
+            render_watch,
+            watch_capabilities,
+            watch_video,
+        )
+        from ...partner.gating import is_owner_chat
+
+        def _send(text: str) -> str:
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is not None:
+                return self._send_long_checked(chat.platform, chat,
+                                               text[:6000])
+            return text[:6000]
+
+        if message is not None:
+            if not self._is_operator(message):
+                return "that one's just for the owner."
+        elif chat_key:
+            chat = self._ref_from_key(chat_key)
+            if not is_owner_chat(chat, owner_chats=getattr(
+                    self, "_owner_chats", ())):
+                return "that one's just for the owner."
+        else:
+            return "that one's just for the owner."
+
+        tail = (tail or "").strip()
+        try:
+            tokens = shlex.split(tail)
+        except ValueError:
+            tokens = tail.split()
+        if tokens and tokens[0].lower() == "info":
+            caps = watch_capabilities(self.context)
+            lines = ["🎬 video watch on this machine:"]
+            lines.append("  ffmpeg: "
+                         + ("yes (" + caps["ffmpeg_path"] + ")"
+                            if caps["ffmpeg"] else "NO"))
+            lines.append("  vision model: "
+                         + ("yes" if caps["vision"] else "NO"))
+            lines.append("  speech-to-text: "
+                         + str(caps["stt"] or "NO"))
+            for note in caps["notes"]:
+                lines.append(f"  ⚠️ {note}")
+            return _send("\n".join(lines))
+
+        # attached video wins over any path argument
+        attached = ""
+        if message is not None:
+            for media in getattr(message, "media", None) or []:
+                if getattr(media, "kind", "") in ("video", "video_note"):
+                    attached = getattr(media, "path", "") or ""
+                    break
+
+        def _looks_like_target(s: str) -> bool:
+            s = (s or "").strip()
+            if not s:
+                return False
+            if s.startswith(("http://", "https://", "/", "./", "~/")):
+                return True
+            if len(s) > 3 and "." in s:
+                low = s.lower()
+                if any(low.endswith(ext) for ext in
+                       (".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v")):
+                    return True
+            return False
+
+        targets = [t for t in tokens if _looks_like_target(t)]
+        if attached:
+            targets = [attached] + [t for t in targets if t != attached]
+        if not targets:
+            return _send("usage: /video watch <url|path> [question] — "
+                         "attach a video, or pass its link or path")
+        target = targets[0]
+        question = " ".join(t for t in tokens if t != target).strip()
+        try:
+            if target.startswith(("http://", "https://")):
+                from ...media.video import VideoFinder
+
+                out = VideoFinder(self.context).download(
+                    target, audio_only=False)
+                path = str(out.get("path") or out)
+            else:
+                path = target
+            result = watch_video(path, context=self.context,
+                                 question=question)
+            return _send(render_watch(result))
+        except Exception as exc:  # noqa: BLE001 - chat surfaces as text
+            return _send(f"video watch error: {exc}")
 
     def _control_video_studio(self, action: str, tail: str) -> str:
         """Devon Studio generation subcommands for /video. Never raises."""

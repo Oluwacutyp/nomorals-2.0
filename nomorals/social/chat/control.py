@@ -1207,6 +1207,7 @@ _HELP_TEXT = "\n".join(
         "  /play seek <s> | volume <n> | remove <n> | clear",
         "  /video <query> [platform]               find videos across the web (ranked)",
         "  /video download <url> [audio]           download it (yt-dlp)",
+        "  /video watch <url|path> [question]      watch it: what it shows + what it says (owner)",
         "  /director cover <script>                professional coverage (verdict: pass/consider/recommend)",
         "  /director plan <script> [--style noir]  breakdown + lighting/camera design per shot",
         "  /director shoot <production-id>         generate the shots (videogen) + frame/Seer QA",
@@ -4511,8 +4512,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "video": {"what": "VideoFinder: finds videos across the open web — "
                       "multi-engine search, ranked by video-URL confidence + "
                       "relevance, enriched with oEmbed (author/thumbnail) and "
-                      "yt-dlp metadata (duration). Downloads real files.",
-              "usage": "/video <query> [platform] | /video download <url> [audio] | /video platforms",
+                      "yt-dlp metadata (duration). Downloads real files. "
+                      "The watch subverb truly watches one: sampled frames "
+                      "described by the vision model + the audio track "
+                      "transcribed, answered from both (owner-only).",
+              "usage": "/video <query> [platform] | /video download <url> [audio] | /video platforms | /video watch <url|path> [question]",
               "example": "/video lofi beats for studying youtube",
               "related": "/searchdeep · nm video on the console"},
     "director": {"what": "Devon directs: professional script coverage, "
