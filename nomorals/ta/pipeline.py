@@ -151,15 +151,45 @@ def _meta_approval(vote: _pd.Series, agreement: _pd.Series,
 
 
 def analyze(df: _pd.DataFrame, profile: str = "default",
-            strategies: list[str] | None = None) -> dict:
+            strategies: list[str] | None = None, adaptive: bool = True,
+            equity=None, rate_tuner=None, macro=None) -> dict:
     """Full committee analysis of OHLCV bars.
 
     ``profile`` is default|aggressive|conservative (risk sizing + gates).
     Returns a dict with: regime_label, regime (snapshot), bias, agreement,
     position_now, approved, approval_method, size_fraction, stop_distance_pct,
     stops, entry, atr, ranked (DataFrame), n_strategies, bars, atr_pct,
-    enter_threshold.
+    enter_threshold, plus an ``adaptive`` record of every adaptive
+    adjustment applied (see below).
+
+    Adaptive wiring (gapfix R2-30 — the dormant ``ta/adaptive.py`` +
+    ``ta/macro.py`` modules, now consumed here):
+    - ``adaptive=True`` (default): the ATR lookback breathes with
+      realized volatility — ``VolatilityBreath().dynamic_period(close,
+      14)`` — high vol stretches it (smoother), low vol shrinks it
+      (more responsive). Bounded to ATR periods 7–28. ``adaptive=False``
+      reproduces the old fixed-14 behavior exactly.
+    - ``equity``: an equity curve (list/Series). ``DrawdownThrottle``
+      multiplies the sized fraction by its factor (1.0 at new highs,
+      0.0 at 15% drawdown). None → no throttling.
+    - ``rate_tuner``: a caller-held ``SignalRateTuner``. It is updated
+      from this run's committee vote signs; its multiplier tightens
+      (or loosens) the approval threshold. None → no gating.
+    - ``macro``: a trinity-bias dict (see ``ta.macro.trinity_bias``)
+      or a ``TrinityBias`` provider. A macro bias that opposes the
+      committee bias halves the bias and position (tie-breaker, not
+      veto — mirrors the ``analyze_mtf`` discount idiom). Agreement
+      or neutral leaves the read unchanged. None → no macro read.
+    Every adjustment is recorded in the ``adaptive`` dict
+    (``adjustments`` list, human-readable) and printed by
+    ``render_report`` — never silent.
     """
+    # Function-local imports: the adaptive / macro modules stay lazy,
+    # like the rest of this file's seams (and top-level imports here
+    # would add E402 findings — this file's imports follow code).
+    from .adaptive import DrawdownThrottle, VolatilityBreath
+    from .macro import resolve_macro
+
     profile = (profile or "default").strip().lower()
     if profile not in PROFILES:
         raise ValueError(
@@ -189,7 +219,42 @@ def analyze(df: _pd.DataFrame, profile: str = "default",
     frames = regime_vote_alignment(frames, regime_label,
                                    float(last["p_trend"]))
     close = df["close"].astype(float)
-    a = atr(df, 14)
+
+    # ── adaptive record (built up as each layer applies) ──
+    adjustments: list[str] = []
+    adaptive_on = bool(adaptive)
+    vol_scale = 1.0
+    atr_period = 14
+    if adaptive_on:
+        try:
+            breath = VolatilityBreath()
+            vol_scale = float(breath.scale(close).iloc[-1])
+            atr_period = int(breath.dynamic_period(close, 14).iloc[-1])
+            adjustments.append(
+                f"ATR period {atr_period} (base 14, vol scale {vol_scale:.2f})")
+        except Exception as exc:
+            _log.debug("adaptive ATR failed, using base 14: %s", exc,
+                       exc_info=True)
+            adaptive_on = False
+            vol_scale = 1.0
+            atr_period = 14
+            adjustments.append("adaptive ATR unavailable — base 14 kept")
+    adaptive_record: dict = {
+        "enabled": adaptive_on,
+        "vol_scale": round(vol_scale, 4),
+        "atr_period": atr_period,
+        "base_atr_period": 14,
+        "throttle_factor": 1.0,
+        "drawdown": 0.0,
+        "rate_gate_mult": 1.0,
+        "enter_threshold_raw": 0.0,
+        "enter_threshold": 0.0,
+        "macro": resolve_macro(macro),
+        "macro_discounted": False,
+        "adjustments": adjustments,
+    }
+
+    a = atr(df, atr_period)
     atr_last = float(a.iloc[-1])
     entry = float(close.iloc[-1])
     atr_pct = atr_last / (entry + 1e-12)
@@ -206,6 +271,7 @@ def analyze(df: _pd.DataFrame, profile: str = "default",
             "ranked": rank_strategies({}, close), "n_strategies": 0,
             "bars": len(df), "enter_threshold": 0.0,
             "strategies": [],
+            "adaptive": adaptive_record,
         }
 
     fused = fuse_all(frames, cost_bps=float(cfg["cost_bps"]),
@@ -220,7 +286,45 @@ def analyze(df: _pd.DataFrame, profile: str = "default",
     bias = float(vote.iloc[-1])
     agr = float(agreement.iloc[-1])
     position_now = float(position.iloc[-1])
-    enter_thr = float(fused["enter_threshold"])
+    enter_thr_raw = float(fused["enter_threshold"])
+    enter_thr = enter_thr_raw
+
+    # ── signal-rate gate: the caller-held tuner tightens approval ──
+    rate_gate_mult = 1.0
+    if rate_tuner is not None:
+        try:
+            signs = _np.nan_to_num(
+                _np.sign(vote.to_numpy(dtype=float)), nan=0.0)
+            rate_gate_mult = float(rate_tuner.update(signs))
+            enter_thr = enter_thr_raw * rate_gate_mult
+            if rate_gate_mult != 1.0:
+                adjustments.append(
+                    f"signal-rate gate ×{rate_gate_mult:.2f} "
+                    f"(enter ≥ {enter_thr:.3f})")
+        except Exception as exc:
+            _log.debug("rate tuner failed, gate unchanged: %s", exc,
+                       exc_info=True)
+    adaptive_record["rate_gate_mult"] = round(rate_gate_mult, 4)
+    adaptive_record["enter_threshold_raw"] = enter_thr_raw
+    adaptive_record["enter_threshold"] = enter_thr
+
+    # ── macro trinity: opposing wind halves the committee bias ──
+    macro_bias = adaptive_record["macro"]
+    macro_discounted = False
+    if macro_bias is not None:
+        m = str(macro_bias.get("bias") or "neutral").lower()
+        if m in ("bullish", "bearish"):
+            mvote = 1 if m == "bullish" else -1
+            if bias != 0 and _np.sign(bias) != mvote:
+                bias = bias * 0.5
+                position_now = position_now * 0.5
+                macro_discounted = True
+                adjustments.append(
+                    f"macro trinity {m} opposes committee — bias halved")
+            elif bias != 0:
+                adjustments.append(
+                    f"macro trinity {m} agrees with committee")
+    adaptive_record["macro_discounted"] = macro_discounted
 
     ranked = rank_strategies(frames, close)
     approved, method = _meta_approval(vote, agreement, regime_frame, close,
@@ -233,12 +337,34 @@ def analyze(df: _pd.DataFrame, profile: str = "default",
     sizing = rm.size_position(100_000.0, entry, atr_last)
     stop_distance_pct = abs(entry - stops["stop"]) / (entry + 1e-12) * 100.0
 
+    # ── drawdown throttle: exposure follows the equity curve ──
+    size_fraction = float(sizing["fraction"])
+    throttle_factor = 1.0
+    drawdown = 0.0
+    if equity is not None:
+        try:
+            eq = _np.asarray(equity, dtype=float)
+            if len(eq) >= 2:
+                peak = float(_np.max(eq))
+                drawdown = abs(min(
+                    0.0, float((eq[-1] - peak) / (peak + 1e-12))))
+            throttle_factor = float(DrawdownThrottle().factor(equity))
+            if throttle_factor < 1.0:
+                adjustments.append(
+                    f"drawdown throttle {throttle_factor:.2f} "
+                    f"(depth {drawdown:.1%})")
+        except Exception as exc:
+            _log.debug("drawdown throttle failed: %s", exc, exc_info=True)
+    size_fraction = size_fraction * throttle_factor
+    adaptive_record["throttle_factor"] = round(throttle_factor, 4)
+    adaptive_record["drawdown"] = round(drawdown, 4)
+
     return {
         "regime_label": regime_label, "regime": regime,
         "bias": round(bias, 4), "agreement": round(agr, 4),
         "position_now": position_now,
         "approved": approved, "approval_method": method,
-        "size_fraction": float(sizing["fraction"]),
+        "size_fraction": float(size_fraction),
         "stop_distance_pct": float(stop_distance_pct),
         "stops": {k: float(v) for k, v in stops.items()},
         "entry": entry, "atr": atr_last, "atr_pct": atr_pct,
@@ -250,6 +376,7 @@ def analyze(df: _pd.DataFrame, profile: str = "default",
         "_frames": frames,
         "_blend": blend,
         "_kind_weights": regime_kind_weights(regime),
+        "adaptive": adaptive_record,
     }
 
 
@@ -269,18 +396,31 @@ def explain_committee(result: dict, top: int = 8) -> _pd.DataFrame:
 
 def trade_plan(df: _pd.DataFrame, profile: str = "default",
                equity: float = 100_000.0,
-               strategies: list[str] | None = None) -> dict:
+               strategies: list[str] | None = None,
+               adaptive: bool = True, equity_curve=None,
+               rate_tuner=None, macro=None) -> dict:
     """One dict with everything needed to place the trade.
 
     Entry, side, size (shares + fraction), ATR stop ladder, dollar risk,
     invalidation (regime flip level), and the committee's reasoning.
+    The adaptive kwargs thread through to ``analyze``; the drawdown
+    throttle (when an ``equity_curve`` is given) also scales this
+    plan's own sizing, and the ``adaptive`` record rides along.
     """
-    res = analyze(df, profile=profile, strategies=strategies)
+    res = analyze(df, profile=profile, strategies=strategies,
+                  adaptive=adaptive, equity=equity_curve,
+                  rate_tuner=rate_tuner, macro=macro)
     side = int(_np.sign(res["position_now"])) or int(_np.sign(
         res["bias"])) or 0
     entry = res["entry"]
     atr_v = res["atr"]
     sizing = position_size(equity, entry, atr_v, profile=profile, side=side)
+    thr = float((res.get("adaptive") or {}).get("throttle_factor", 1.0))
+    if thr < 1.0:
+        sizing = dict(sizing)
+        sizing["fraction"] = sizing["fraction"] * thr
+        sizing["shares"] = sizing["shares"] * thr
+        sizing["notional"] = sizing["notional"] * thr
     risk_dollars = (sizing["fraction"] * equity
                     * res["stop_distance_pct"] / 100.0)
     playbook = regime_playbook().get(res["regime_label"], {})
@@ -302,12 +442,15 @@ def trade_plan(df: _pd.DataFrame, profile: str = "default",
         "agreement": res["agreement"],
         "playbook": playbook,
         "profile": sizing["profile"],
+        "adaptive": res.get("adaptive"),
     }
 
 
 def analyze_mtf(df: _pd.DataFrame, rules: tuple = ("4h", "1D"),
                 profile: str = "default",
-                strategies: list[str] | None = None) -> dict:
+                strategies: list[str] | None = None,
+                adaptive: bool = True, equity=None,
+                rate_tuner=None, macro=None) -> dict:
     """Multi-timeframe analysis: higher TF gives permission, base gives timing.
 
     Elder's Triple Screen, natively: the base timeframe is analyzed as
@@ -317,7 +460,9 @@ def analyze_mtf(df: _pd.DataFrame, rules: tuple = ("4h", "1D"),
     """
     from .data import multi_timeframe
 
-    base = analyze(df, profile=profile, strategies=strategies)
+    base = analyze(df, profile=profile, strategies=strategies,
+                   adaptive=adaptive, equity=equity,
+                   rate_tuner=rate_tuner, macro=macro)
     mtf = multi_timeframe(df, rules=rules)
     detector = RegimeDetector()
     tf_regimes = {}
@@ -427,6 +572,16 @@ def render_report(result: dict, theme: str = "rich",
         L.append(row("MTF bias",
                      f"{result['bias_mtf']:+.3f} "
                      f"{'(aligned)' if result.get('mtf_aligned') else '(discounted: ' + ','.join(result.get('tf_discounts', [])) + ')'}"))
+    # ── adaptive adjustments (never silent) ──
+    adaptive = result.get("adaptive") or {}
+    if adaptive.get("enabled") or adaptive.get("adjustments"):
+        L.append(mid)
+        L.append(row("ADAPTIVE",
+                     f"ATR {adaptive.get('atr_period')} "
+                     f"(base {adaptive.get('base_atr_period')})  "
+                     f"vol ×{adaptive.get('vol_scale', 1.0):.2f}"))
+        for adj in adaptive.get("adjustments", []):
+            L.append(f"{V}  · {str(adj)[:60]:<60} {V}")
     L.append(mid)
 
     # ── committee table ──

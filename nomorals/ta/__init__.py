@@ -24,16 +24,25 @@ keyless Kraken/Bybit feeds with disk cache, and a chat-native briefing
 renderer.
 """
 
-from . import (analyst, backtest, data, feeds, indicators, math, meta,
-               patterns, pipeline, regime, risk, sessions, signals, smc,
-               strategies, structure)
+from . import (adaptive, analyst, backtest, data, feeds, indicators, macro,
+               math, meta, patterns, pipeline, regime, risk, sessions,
+               signals, smc, strategies, structure)
+from .adaptive import (
+    DrawdownThrottle,
+    QuantileGate,
+    SignalRateTuner,
+    VolatilityBreath,
+)
+from .macro import TrinityBias, resolve_macro, trinity_bias
 
 __all__ = [
+    "adaptive",
     "analyst",
     "backtest",
     "data",
     "feeds",
     "indicators",
+    "macro",
     "math",
     "meta",
     "patterns",
@@ -56,6 +65,16 @@ from .evidence import (
     is_stale,
     monitor,
 )
+
+__all__ += [
+    "DrawdownThrottle",
+    "QuantileGate",
+    "SignalRateTuner",
+    "VolatilityBreath",
+    "TrinityBias",
+    "resolve_macro",
+    "trinity_bias",
+]
 
 __all__ += [
     "EvidenceRecord",

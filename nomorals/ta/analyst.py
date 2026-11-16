@@ -66,6 +66,10 @@ class TradeIdea:
     mtf_alignment: dict = field(default_factory=dict)
     smc_score: float = 0.0
     structure_bias: int = 0
+    # The macro trinity read that fed this idea ({} when none was
+    # supplied). Recorded so the executor — and the owner — can see
+    # whether the wind was with or against the read.
+    macro: dict = field(default_factory=dict)
     # The analyst signs its work. The executor checks this field exists
     # and refuses ideas that lack it (unsigned = untrusted).
     analyst_signature: str = "ta.analyst.v1"
@@ -87,6 +91,9 @@ class Analyst:
             "indicators": float(c.get("w_indicators", 0.25)),
             "regime": float(c.get("w_regime", 0.15)),
             "mtf": float(c.get("w_mtf", 0.10)),
+            # Macro trinity (XAU/DXY/US10Y) — the wind, not the sail:
+            # a tie-breaker vote, never the read itself.
+            "macro": float(c.get("w_macro", 0.10)),
         }
         self.min_confidence = float(c.get("min_confidence", 55.0))
         self.stop_atr = float(c.get("stop_atr", 2.0))
@@ -95,9 +102,16 @@ class Analyst:
     # ── public ────────────────────────────────────────────────────────
 
     def analyze(self, df, symbol: str = "XAUUSD",
-                higher_tf: dict | None = None) -> TradeIdea:
+                higher_tf: dict | None = None,
+                macro=None) -> TradeIdea:
         """Full independent read. Never raises on bad data — returns a
-        no-trade idea with the reason in ``warnings``."""
+        no-trade idea with the reason in ``warnings``.
+
+        ``macro`` is a trinity-bias dict (see ``ta.macro.trinity_bias``)
+        or a ``TrinityBias`` provider — the XAU/DXY/US10Y wind as a
+        10% tie-breaker vote. None → no macro vote, and the math is
+        byte-identical to the pre-macro read.
+        """
         _require()
         try:
             df = ensure_ohlcv(df)
@@ -143,20 +157,46 @@ class Analyst:
             from .math import ema, rsi
             e20 = float(ema(df["close"], 20).iloc[-1])
             e50 = float(ema(df["close"], 50).iloc[-1])
-            r = float(rsi(df["close"]).iloc[-1])
+            rseries = rsi(df["close"])
+            r = float(rseries.iloc[-1])
             ind = 0
             if e20 > e50 and close > e20:
                 ind = 1
             elif e20 < e50 and close < e20:
                 ind = -1
-            if r > 70 and ind > 0:
-                warnings.append(f"RSI {r:.0f} overbought — longs fade")
-                ind = 0
-            elif r < 30 and ind < 0:
-                warnings.append(f"RSI {r:.0f} oversold — shorts fade")
-                ind = 0
+            # RSI extremes are judged against the symbol's OWN history
+            # (QuantileGate) instead of fixed 70/30: a reading of 71
+            # means little after a month pinned at 85. Any failure of
+            # the gate falls back to the fixed thresholds.
+            gate_used = False
+            try:
+                from .adaptive import QuantileGate
+                pos = float(QuantileGate().position(rseries).iloc[-1])
+                gate_used = True
+                if pos > 0.5 and ind > 0:
+                    warnings.append(
+                        f"RSI {r:.0f} at own top (quantile {pos:+.2f}) — "
+                        "longs fade")
+                    ind = 0
+                elif pos < -0.5 and ind < 0:
+                    warnings.append(
+                        f"RSI {r:.0f} at own bottom (quantile {pos:+.2f}) — "
+                        "shorts fade")
+                    ind = 0
+            except Exception as exc:
+                _log.debug("quantile RSI gate failed, fixed 70/30: %s",
+                           exc, exc_info=True)
+            if not gate_used:
+                if r > 70 and ind > 0:
+                    warnings.append(f"RSI {r:.0f} overbought — longs fade")
+                    ind = 0
+                elif r < 30 and ind < 0:
+                    warnings.append(f"RSI {r:.0f} oversold — shorts fade")
+                    ind = 0
             votes["indicators"] = ind
-            reasons.append(f"EMA20/50 {'bullish' if ind > 0 else 'bearish' if ind < 0 else 'flat'}, RSI {r:.0f}")
+            reasons.append(
+                f"EMA20/50 {'bullish' if ind > 0 else 'bearish' if ind < 0 else 'flat'}, RSI {r:.0f}"
+                + (" (quantile gate)" if gate_used else ""))
         except Exception as exc:
             warnings.append(f"indicators failed: {exc}")
             votes["indicators"] = 0
@@ -195,7 +235,26 @@ class Analyst:
             votes["mtf"] = 0
 
         # ── fuse with disagreement penalty ──
-        wsum = sum(self.weights.values())
+        # 6. macro trinity (10%) — the wind, not the sail. Resolved
+        # here (never raises); absent when no macro input was given.
+        macro_bias: dict = {}
+        try:
+            from .macro import resolve_macro
+            resolved = resolve_macro(macro)
+            if resolved is not None:
+                macro_bias = resolved
+                m = str(resolved.get("bias") or "neutral").lower()
+                votes["macro"] = 1 if m == "bullish" else \
+                    -1 if m == "bearish" else 0
+                detail = "; ".join(resolved.get("reasons") or [])
+                reasons.append(f"macro trinity: {m}"
+                               + (f" ({detail[:80]})" if detail else ""))
+                if resolved.get("decoupled"):
+                    warnings.append(
+                        "XAU/DXY decoupling — macro bias is suspect")
+        except Exception as exc:
+            warnings.append(f"macro failed: {exc}")
+        wsum = sum(self.weights[k] for k in votes)
         raw = sum(votes[k] * self.weights[k] for k in votes) / wsum
         # disagreement penalty: spread across votes shrinks conviction
         vals = list(votes.values())
@@ -256,6 +315,7 @@ class Analyst:
             session_gate=gate, regime=regime,
             mtf_alignment=mtf, smc_score=round(float(smc_score), 1),
             structure_bias=int(votes.get("structure", 0)),
+            macro=macro_bias,
         )
 
     # ── helpers ─────────────────────────────────────────────────────

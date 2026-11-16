@@ -44,7 +44,7 @@ def _require_deps() -> None:
         raise TAError("numpy and pandas required: pip install nomorals[ta]")
 
 
-__all__ = ["trinity_bias", "TrinityBias"]
+__all__ = ["trinity_bias", "TrinityBias", "resolve_macro"]
 
 
 def trinity_bias(xau_closes, dxy_closes, tny_closes) -> dict[str, Any] | None:
@@ -110,6 +110,31 @@ def trinity_bias(xau_closes, dxy_closes, tny_closes) -> dict[str, Any] | None:
         "bias": bias,
         "reasons": reasons,
     }
+
+
+def resolve_macro(macro) -> dict[str, Any] | None:
+    """Resolve a macro input to a bias dict. Never raises.
+
+    Accepts a bias dict (as returned by :func:`trinity_bias`), a
+    :class:`TrinityBias` provider (consulted via its cached ``get()``),
+    or None. Anything else — including a dict with an unknown bias
+    word — resolves to None (no macro read).
+    """
+    if macro is None:
+        return None
+    if isinstance(macro, dict):
+        bias = str(macro.get("bias") or "neutral").lower()
+        if bias not in ("bullish", "bearish", "neutral"):
+            return None
+        return macro
+    get = getattr(macro, "get", None)
+    if callable(get):
+        try:
+            return resolve_macro(get())
+        except Exception as exc:
+            _log.debug("macro provider get() failed: %s", exc, exc_info=True)
+            return None
+    return None
 
 
 class TrinityBias:
