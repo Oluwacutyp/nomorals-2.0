@@ -108,6 +108,51 @@ def _looks_like_path_or_url(ref: str) -> bool:
     return False
 
 
+def _resolve_3d_input(ref: str, *, settings: Any, tag: str) -> str:
+    """A path-or-URL -> a local file path (audit gap R2-25).
+
+    A URL is fetched (``core.http.HttpClient`` — the same route vision
+    uses) into the generated-media dir; a path is used as-is.
+    """
+    import time
+    from pathlib import Path
+
+    s = (ref or "").strip()
+    if s.startswith(("http://", "https://")):
+        from ...core.http import HttpClient
+
+        body = HttpClient(timeout=60.0).get(s).body
+        out_dir = Path(settings.resolve("data/media/generated"))
+        out_dir.mkdir(parents=True, exist_ok=True)
+        suffix = Path(s.split("?", 1)[0]).suffix.lower()
+        if suffix not in (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp",
+                          ".glb", ".obj", ".fbx", ".vrm", ".gltf", ".dae"):
+            suffix = ".jpg"
+        dest = out_dir / f"{tag}_in_{time.time_ns()}{suffix}"
+        dest.write_bytes(body)
+        return str(dest)
+    return str(Path(os.path.expanduser(s)))
+
+
+def _tool_result_dict(outcome: Any) -> tuple[dict[str, Any] | None, str | None]:
+    """Unwrap a registry.call Outcome into the tool's dict.
+
+    Unlike ``_tool_data`` (which reports "unknown" when a failing dict
+    carries no "error" key), this keeps the organ's own "detail" — the
+    3D wrappers report failures in "detail", the Blender tool in
+    "error". Returns (data, error_text); exactly one is None.
+    """
+    if not getattr(outcome, "ok", False):
+        err = getattr(outcome, "error", None)
+        return None, str(getattr(err, "message", err) or "unknown")
+    data = getattr(outcome, "value", None)
+    if not isinstance(data, dict):
+        return None, "tool returned no result"
+    if not data.get("ok"):
+        return None, str(data.get("detail") or data.get("error") or "failed")
+    return data, None
+
+
 #: Sentinel for ``_edit_chat_message``'s ``buttons``: the caller said
 #: nothing about the keyboard — the settled-render clear
 #: (``buttons=[]``) every existing caller relies on.
@@ -5859,6 +5904,241 @@ class RuntimeMediaMixin:
             return f"🖼️ poster: {prompt}\nsaved: {result['path']}"
         except Exception as exc:  # noqa: BLE001 - chat never raises
             return f"poster failed: {exc}"
+
+    # ── 3D run/steer (audit gap R2-25) ─────────────────────────────────
+    def _control_trellis(self, tail: str, *, chat_key: str = "",
+                         message: Any = None) -> str:
+        """`/trellis <image path-or-url> [out] [--seed N] [--resolution ...]`
+        — one photo -> a textured GLB, via TRELLIS.2.
+
+        Attached photo wins over any path argument (the /video watch
+        shape); a URL is fetched; a path is used as-is. The organ's own
+        GPU gate (Linux + NVIDIA 24 GB+) fires inside the tool before
+        any run — a refusal names the measured numbers. Owner-only: a
+        run spends a 24 GB GPU for up to 30 minutes. Never raises.
+        """
+        if message is not None:
+            if not self._is_operator(message):
+                return "that one's just for the owner."
+        elif chat_key:
+            from ...partner.gating import is_owner_chat
+
+            chat = self._ref_from_key(chat_key)
+            if not is_owner_chat(chat, owner_chats=getattr(
+                    self, "_owner_chats", ())):
+                return "that one's just for the owner."
+        else:
+            return "that one's just for the owner."
+        usage = ("trellis — one photo -> a textured GLB (TRELLIS.2):\n"
+                 "/trellis <image path-or-url> [out] [--seed N] "
+                 "[--resolution 512|1024|1024_cascade|1536_cascade]\n"
+                 "attach a photo, or pass its link or path")
+        try:
+            import shlex
+            import time
+            from pathlib import Path
+
+            attached = ""
+            if message is not None:
+                for media in getattr(message, "media", None) or []:
+                    if getattr(media, "kind", "") == "image":
+                        attached = getattr(media, "path", "") or ""
+                        break
+            try:
+                tokens = shlex.split(tail or "")
+            except ValueError:
+                tokens = (tail or "").split()
+            seed = 42
+            resolution = ""
+            positional: list[str] = []
+            i = 0
+            while i < len(tokens):
+                t = tokens[i]
+                if t == "--seed" and i + 1 < len(tokens):
+                    try:
+                        seed = int(tokens[i + 1])
+                    except ValueError:
+                        return usage
+                    i += 2
+                elif t == "--resolution" and i + 1 < len(tokens):
+                    resolution = tokens[i + 1]
+                    i += 2
+                else:
+                    positional.append(t)
+                    i += 1
+            image_ref = attached or (positional[0] if positional else "")
+            if not image_ref:
+                return usage
+            out = positional[1] if len(positional) > 1 else ""
+            image_path = _resolve_3d_input(
+                image_ref, settings=self.context.settings, tag="trellis")
+            if not out:
+                out_dir = Path(self.context.settings.resolve(
+                    "data/media/generated"))
+                out_dir.mkdir(parents=True, exist_ok=True)
+                stem = Path(image_path).stem
+                out = str(out_dir / f"{stem}_{time.time_ns()}.glb")
+            kwargs: dict[str, Any] = {"image": image_path, "out": out,
+                                      "seed": seed}
+            if resolution:
+                kwargs["resolution"] = resolution
+            outcome = self.context.tools.call("trellis_image_to_3d",
+                                              **kwargs)
+            data, error = _tool_result_dict(outcome)
+            if data is None:
+                return str(error)
+            lines = [f"🧊 {data.get('detail') or 'GLB written'}"]
+            if data.get("glb"):
+                lines.append(f"saved: {data['glb']}")
+                lines.append(f"import it live: /blender import {data['glb']}")
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 - chat never raises
+            return f"trellis failed: {exc}"
+
+    def _control_unirig(self, tail: str, *, chat_key: str = "",
+                        message: Any = None) -> str:
+        """`/unirig <mesh path-or-url> [out] [--seed N]` — any mesh -> a
+        rigged, animatable character, via UniRig.
+
+        A URL is fetched; a path is used as-is. The organ's own GPU gate
+        (Linux + CUDA 8 GB+) fires inside the tool before any run — a
+        refusal names the measured numbers. Owner-only: a run spends a
+        GPU for up to 30 minutes. Never raises.
+        """
+        if message is not None:
+            if not self._is_operator(message):
+                return "that one's just for the owner."
+        elif chat_key:
+            from ...partner.gating import is_owner_chat
+
+            chat = self._ref_from_key(chat_key)
+            if not is_owner_chat(chat, owner_chats=getattr(
+                    self, "_owner_chats", ())):
+                return "that one's just for the owner."
+        else:
+            return "that one's just for the owner."
+        usage = ("unirig — any mesh -> a rigged character (UniRig):\n"
+                 "/unirig <mesh path-or-url> [out] [--seed N]\n"
+                 "pass a mesh file (.glb/.obj/.fbx/.vrm/.gltf/.dae), "
+                 "its link or path")
+        try:
+            import shlex
+            import time
+            from pathlib import Path
+
+            try:
+                tokens = shlex.split(tail or "")
+            except ValueError:
+                tokens = (tail or "").split()
+            seed = 12345
+            positional: list[str] = []
+            i = 0
+            while i < len(tokens):
+                t = tokens[i]
+                if t == "--seed" and i + 1 < len(tokens):
+                    try:
+                        seed = int(tokens[i + 1])
+                    except ValueError:
+                        return usage
+                    i += 2
+                else:
+                    positional.append(t)
+                    i += 1
+            if not positional:
+                return usage
+            mesh_ref = positional[0]
+            out = positional[1] if len(positional) > 1 else ""
+            mesh_path = _resolve_3d_input(
+                mesh_ref, settings=self.context.settings, tag="unirig")
+            if not out:
+                out_dir = Path(self.context.settings.resolve(
+                    "data/media/generated"))
+                out_dir.mkdir(parents=True, exist_ok=True)
+                stem = Path(mesh_path).stem
+                out = str(out_dir / f"{stem}_{time.time_ns()}.fbx")
+            outcome = self.context.tools.call(
+                "unirig_rig_mesh", mesh=mesh_path, out=out, seed=seed)
+            data, error = _tool_result_dict(outcome)
+            if data is None:
+                return str(error)
+            lines = [f"🦴 {data.get('detail') or 'rigged'}"]
+            if data.get("rigged"):
+                lines.append(f"saved: {data['rigged']}")
+                lines.append(
+                    f"import it live: /blender import {data['rigged']}")
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 - chat never raises
+            return f"unirig failed: {exc}"
+
+    def _control_blender(self, tail: str, *, chat_key: str = "",
+                         message: Any = None) -> str:
+        """`/blender status | scene [query] | look [mode] | code <bpy> |
+        import <glb|fbx>` — steer the operator's live Blender session.
+
+        Every verb connects first; when no live Blender is reachable
+        the tool's own refusal names the setup step. Devon never starts
+        Blender herself. Owner-only. Never raises.
+        """
+        if message is not None:
+            if not self._is_operator(message):
+                return "that one's just for the owner."
+        elif chat_key:
+            from ...partner.gating import is_owner_chat
+
+            chat = self._ref_from_key(chat_key)
+            if not is_owner_chat(chat, owner_chats=getattr(
+                    self, "_owner_chats", ())):
+                return "that one's just for the owner."
+        else:
+            return "that one's just for the owner."
+        usage = ("blender — steer the operator's live Blender:\n"
+                 "/blender status | scene [query] | look [mode] | "
+                 "code <bpy> | import <glb|fbx>\n"
+                 "start Blender with the MCP for Blender add-on running, "
+                 "then try again")
+        try:
+            import shlex
+
+            try:
+                tokens = shlex.split(tail or "")
+            except ValueError:
+                tokens = (tail or "").split()
+            if not tokens:
+                return usage
+            action = tokens[0].lower()
+            rest = tokens[1:]
+            if action == "status":
+                call_kwargs: dict[str, Any] = {"action": "status"}
+            elif action == "scene":
+                call_kwargs = {"action": "scene",
+                               "query": " ".join(rest)}
+            elif action == "look":
+                call_kwargs = {"action": "look",
+                               "mode": rest[0] if rest else "angles"}
+            elif action == "code":
+                if not rest:
+                    return usage
+                call_kwargs = {"action": "code", "code": " ".join(rest)}
+            elif action == "import":
+                if not rest:
+                    return usage
+                call_kwargs = {"action": "import", "path": rest[0]}
+            else:
+                return usage
+            outcome = self.context.tools.call("blender_live",
+                                              **call_kwargs)
+            data, error = _tool_result_dict(outcome)
+            if data is None:
+                return str(error)
+            text = str(data.get("text") or data.get("detail") or
+                       "blender: ok")
+            if action == "look" and data.get("image_b64"):
+                text += ("\n(screenshot captured — the image rides the "
+                         "tool result; the caption above is what Blender "
+                         "showed)")
+            return text
+        except Exception as exc:  # noqa: BLE001 - chat never raises
+            return f"blender failed: {exc}"
 
     def _control_shorts(self, tail: str) -> str:
         """Devon's short-form content empire in chat.

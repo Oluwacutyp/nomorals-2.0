@@ -892,6 +892,9 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "image": (1, None),      # /image <path-or-url> — lookup; <prompt> — generate
     "imggen": (0, None),     # /imggen <prompt> — Devon's own diffusion studio
     "poster": (0, None),     # /poster <art prompt> :: <title> [:: <line> ...] — generated art + exact typography
+    "trellis": (0, None),    # /trellis <image path-or-url> [out] [--seed N] [--resolution ...] — one photo -> textured GLB via TRELLIS.2 (GPU-gated, owner-only)
+    "unirig": (0, None),     # /unirig <mesh path-or-url> [out] [--seed N] — mesh -> rigged character via UniRig (GPU-gated, owner-only)
+    "blender": (0, None),    # /blender status|scene|look|code <bpy>|import <glb|fbx> — steer the operator's live Blender (owner-only)
     "shorts": (0, None),     # /shorts make|status|resume|niches|calendar|ledger|estimate
     "trendops": (0, None),   # /trendops formats|apply|capture|propose|remove
     "lens": (1, 3),          # /lens <path-or-url> — reverse image search
@@ -4299,6 +4302,18 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/poster <art prompt> :: <title> [:: <line> ...] [--ar 9:16] [--seed N] [--steps N]",
               "example": "/poster a Lagos owambe at night :: OWAMBE :: Saturday 8 PM",
               "related": "/imggen /image"},
+    "trellis": {"what": "One photo -> a textured 3D asset (GLB with PBR materials) via TRELLIS.2 — attach a photo, or pass its link or path. GPU-gated: Linux + NVIDIA GPU with 24 GB+ VRAM; refuses honestly with the measured numbers when the floor does not clear, and says when TRELLIS.2 is not installed (/models trellis). Owner only.",
+              "usage": "/trellis <image path-or-url> [out] [--seed N] [--resolution 512|1024|1024_cascade|1536_cascade]",
+              "example": "/trellis photo.jpg",
+              "related": "/unirig /blender /models /imggen"},
+    "unirig": {"what": "Any mesh -> a rigged, animatable character (skeleton + skinning) via UniRig — pass a mesh file (.glb/.obj/.fbx/.vrm/.gltf/.dae). GPU-gated: Linux + CUDA GPU with 8 GB+ VRAM; refuses honestly with the measured numbers when the floor does not clear, and says when UniRig is not installed (/models unirig). Owner only.",
+              "usage": "/unirig <mesh path-or-url> [out] [--seed N]",
+              "example": "/unirig chair.glb",
+              "related": "/trellis /blender /models"},
+    "blender": {"what": "Steer the operator's live Blender session through the MCP for Blender server: status, scene summary, viewport screenshots, run Blender Python, import a GLB/FBX. Devon never starts Blender herself — start it with the MCP add-on running, then try again. Owner only.",
+              "usage": "/blender status | scene [query] | look [mode] | code <bpy> | import <glb|fbx>",
+              "example": "/blender status",
+              "related": "/trellis /unirig /mcp"},
     "shorts": {"what": "Devon's short-form content empire: niche → script → voiceover → AI visuals → beat-synced edit → captions → publish.",
               "usage": "/shorts make <niche> \"<topic>\" [--now] | /shorts niches | /shorts status | /shorts calendar | /shorts ledger",
               "example": "/shorts make motivation \"discipline beats motivation\" --now",
@@ -4728,7 +4743,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
     ("media system", ["music", "distribute", "play", "video", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
-                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "sham", "musicnote",
+                      "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
@@ -4995,7 +5010,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
-      "shorts", "trendops", "caption", "imggen", "poster", "sham", "musicnote",
+      "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
       "emojiart", "react", "create",
       "awoo", "baka", "bite", "blush", "bonk", "bored",
@@ -5438,6 +5453,9 @@ LIST_ONELINERS: dict[str, str] = {
     "look": "screen-reader analysis of a screenshot (sees pixels)",
     "imggen": "Devon's own image studio: native diffusion, upscale, training",
     "poster": "finished poster in one call: generated art + exact typography — /poster <art prompt> :: <title> [:: <line>]",
+    "trellis": "one photo -> a textured GLB (TRELLIS.2) — /trellis <image path-or-url> [out]",
+    "unirig": "any mesh -> a rigged character (UniRig) — /unirig <mesh path-or-url> [out]",
+    "blender": "steer the live Blender session — /blender status | scene | look | code <bpy> | import <glb|fbx>",
     "image": "look up an image (format, dims, seen-before) — or generate one from a prompt",
     "lens": "reverse image search",
     "schedule": "cron-style in-process jobs",

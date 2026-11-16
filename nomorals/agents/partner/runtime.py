@@ -9959,6 +9959,18 @@ class PartnerRuntime(
             return self._control_imggen(command.tail or arg)
         if kind == "poster":
             return self._control_poster(command.tail or arg)
+        if kind == "trellis":
+            return self._control_trellis(command.tail or arg,
+                                         chat_key=chat_key,
+                                         message=message)
+        if kind == "unirig":
+            return self._control_unirig(command.tail or arg,
+                                        chat_key=chat_key,
+                                        message=message)
+        if kind == "blender":
+            return self._control_blender(command.tail or arg,
+                                         chat_key=chat_key,
+                                         message=message)
         if kind == "shorts":
             return self._control_shorts(command.tail or arg)
         if kind == "trendops":

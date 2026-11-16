@@ -33,6 +33,7 @@ from __future__ import annotations
 import base64
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from ..tools.mcp_client import (
@@ -386,3 +387,76 @@ class BlenderLiveSession:
             "screenshot": last_shot,
             "scene_summary": last_summary,
         }
+
+
+# ── tool registration ────────────────────────────────────────────────
+
+def register(registry: Any) -> None:
+    """Register the live-Blender steering tool on the spine (audit gap R2-25).
+
+    One session per call: connect (honest refusal when no live Blender is
+    reachable — Devon never starts Blender herself), run the action, close.
+    The ``iterate`` loop is NOT a tool action: its ``code_fn`` comes from
+    the brain, so the brain calls :meth:`BlenderLiveSession.iterate`
+    directly instead of through this tool.
+    """
+    from ..core.policy import Capability
+
+    @registry.register(
+        "blender_live",
+        description=(
+            "Steer the operator's live Blender session through the MCP for "
+            "Blender server (action, code, path, query, mode). Actions: "
+            "connect (handshake with the running Blender), status (versions "
+            "+ add-on state), scene (compact scene summary, optional query), "
+            "look (viewport screenshot), code (run Blender Python in the "
+            "live session), import (pull a GLB/FBX into the live scene). "
+            "Devon never starts Blender herself — when no live session is "
+            "reachable the tool says so and names the setup step."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "action": ("str (optional) — connect | status | scene | look | "
+                       "code | import"),
+            "code": "str (optional) — Blender Python for the code action",
+            "path": "str (optional) — .glb/.fbx path for the import action",
+            "query": "str (optional) — scene filter for the scene action",
+            "mode": "str (optional) — look mode: viewport | camera | angles | frames",
+        },
+    )
+    def blender_live(action: str = "status", code: str = "",
+                     path: str = "", query: str = "",
+                     mode: str = "angles") -> dict[str, Any]:
+        session = BlenderLiveSession()
+        try:
+            connected = session.connect()
+            if not connected.get("ok"):
+                return {"ok": False,
+                        "error": str(connected.get("error")
+                                     or "no live Blender")}
+            if action == "connect":
+                return connected
+            if action == "status":
+                return session.status()
+            if action == "scene":
+                return session.scene_summary(query=query or None)
+            if action == "look":
+                return session.screenshot(mode=mode)
+            if action == "code":
+                return session.run_code(code)
+            if action == "import":
+                suffix = Path(path).suffix.lower()
+                if suffix == ".glb":
+                    from .trellis import blender_import_snippet
+                elif suffix == ".fbx":
+                    from .unirig import blender_import_snippet
+                else:
+                    return {"ok": False,
+                            "error": (f"cannot import {suffix!r} into "
+                                      "Blender — use a .glb or .fbx")}
+                return session.run_code(blender_import_snippet(path))
+            return {"ok": False,
+                    "error": (f"unknown blender_live action {action!r} — "
+                              "use connect|status|scene|look|code|import")}
+        finally:
+            session.close()

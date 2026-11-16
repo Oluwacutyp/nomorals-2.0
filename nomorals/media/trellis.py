@@ -393,3 +393,53 @@ def image_to_3d(image: str | Path, out: str | Path, *,
                        f"({resolution}, seed {seed})"),
             "glb": str(out_path),
             "blender_snippet": blender_import_snippet(out_path)}
+
+
+# ── tool registration ────────────────────────────────────────────────
+
+def register(registry: Any) -> None:
+    """Register the TRELLIS.2 run tool on the spine (audit gap R2-25).
+
+    The tool is a thin gate-then-call: the organ's own ``gpu_gate()``
+    (Linux + NVIDIA GPU 24 GB+) fires first and refuses with the measured
+    numbers; only then does :func:`image_to_3d` run. The wrapper's dict
+    is returned verbatim — never re-shaped, never faked.
+    """
+    from ..core.policy import Capability
+
+    @registry.register(
+        "trellis_image_to_3d",
+        description=(
+            "Turn one photo into a textured 3D asset (GLB with PBR "
+            "materials) with TRELLIS.2 (image, out, resolution, seed, "
+            "texture_size, decimation_target, timeout). GPU-gated: Linux "
+            "+ NVIDIA GPU with 24 GB+ VRAM — refuses honestly with the "
+            "measured numbers when the floor does not clear, and says "
+            "when TRELLIS.2 is not installed (/models trellis). Returns "
+            "the GLB path plus the Blender import snippet."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "image": "str — local path to the photo",
+            "out": "str — local path for the GLB to write",
+            "resolution": ("str (optional) — 512 | 1024 | 1024_cascade | "
+                           "1536_cascade"),
+            "seed": "int (optional) — generation seed",
+            "texture_size": "int (optional)",
+            "decimation_target": "int (optional)",
+            "timeout": "int (optional) — seconds",
+        },
+    )
+    def trellis_image_to_3d(
+        image: str, out: str, resolution: str = TRELLIS_DEFAULT_PIPELINE,
+        seed: int = 42, texture_size: int = 4096,
+        decimation_target: int = 1000000, timeout: int = 1800,
+    ) -> dict[str, Any]:
+        ok, reason = gpu_gate()
+        if not ok:
+            return {"ok": False, "status": "gpu-refused", "detail": reason,
+                    "glb": None, "blender_snippet": ""}
+        return image_to_3d(image, out, resolution=resolution, seed=seed,
+                           texture_size=texture_size,
+                           decimation_target=decimation_target,
+                           timeout=timeout)

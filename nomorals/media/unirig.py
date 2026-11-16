@@ -402,3 +402,43 @@ def rig_mesh(mesh: str | Path, out: str | Path, *,
                        f"(seed {seed})"),
             "rigged": str(out_path),
             "blender_snippet": blender_import_snippet(out_path)}
+
+
+# ── tool registration ────────────────────────────────────────────────
+
+def register(registry: Any) -> None:
+    """Register the UniRig run tool on the spine (audit gap R2-25).
+
+    The tool is a thin gate-then-call: the organ's own ``gpu_gate()``
+    (Linux + CUDA GPU 8 GB+) fires first and refuses with the measured
+    numbers; only then does :func:`rig_mesh` run. The wrapper's dict is
+    returned verbatim — never re-shaped, never faked.
+    """
+    from ..core.policy import Capability
+
+    @registry.register(
+        "unirig_rig_mesh",
+        description=(
+            "Rig any mesh into an animatable character (skeleton + "
+            "skinning) with UniRig (mesh, out, seed, timeout). GPU-gated: "
+            "Linux + CUDA GPU with 8 GB+ VRAM — refuses honestly with the "
+            "measured numbers when the floor does not clear, and says "
+            "when UniRig is not installed (/models unirig). Returns the "
+            "rigged asset path plus the Blender import snippet."
+        ),
+        capability=Capability.FS_WRITE,
+        parameters={
+            "mesh": "str — local path to the mesh (.glb/.obj/.fbx/.vrm/.gltf/.dae)",
+            "out": "str — local path for the rigged asset (.fbx default)",
+            "seed": "int (optional) — rig seed",
+            "timeout": "int (optional) — seconds",
+        },
+    )
+    def unirig_rig_mesh(mesh: str, out: str,
+                        seed: int = UNIRIG_DEFAULT_SEED,
+                        timeout: int = 1800) -> dict[str, Any]:
+        ok, reason = gpu_gate()
+        if not ok:
+            return {"ok": False, "status": "gpu-refused", "detail": reason,
+                    "rigged": None, "blender_snippet": ""}
+        return rig_mesh(mesh, out, seed=seed, timeout=timeout)
