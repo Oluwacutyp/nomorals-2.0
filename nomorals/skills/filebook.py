@@ -1,7 +1,9 @@
 """Flat-file skillbook — Devon's ``.md`` skill library (L4).
 
-One topic per Markdown file, with a small frontmatter header the brain
-routes by.  Two roots:
+One topic per Markdown file — or per directory bundle
+(``<name>/SKILL.md`` with ``scripts/``, ``examples/`` and
+``resources/`` beside it, the Antigravity convention) — with a
+small frontmatter header the brain routes by.  Two roots:
 
 * the **seed library** shipped in the repo (``nomorals/skills/library/``)
   — distilled organ knowledge, versioned with the code;
@@ -30,6 +32,7 @@ import json
 import logging
 import os
 import re
+import shutil
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -99,10 +102,32 @@ class SkillDoc:
     kind: str = ""                # "" = plain skill | "pack"
     domain: str = ""              # packs: the domain the pack serves
     fixtures: tuple[str, ...] = ()  # packs: executable fixture paths
+    # Directory bundles (Antigravity convention): the folder holding
+    # this skill's ``SKILL.md`` — "" for flat ``<id>.md`` skills.
+    # Companion files (scripts/, examples/, resources/, references/,
+    # loose engine files) live under it; see ``bundle_files``.
+    bundle_dir: str = ""
 
     @property
     def is_draft(self) -> bool:
         return self.origin == "draft"
+
+    def bundle_files(self, *, limit: int = 200) -> tuple[str, ...]:
+        """Companion files in this skill's bundle directory, as
+        paths relative to the bundle root, sorted.  Every file
+        counts — ``scripts/``, ``examples/``, ``resources/``,
+        ``references/``, and loose engine files at the root —
+        except ``SKILL.md`` itself.  Flat skills have none."""
+        if not self.bundle_dir:
+            return ()
+        root = Path(self.bundle_dir)
+        if not root.is_dir():
+            return ()
+        out = []
+        for path in sorted(root.rglob("*")):
+            if path.is_file() and path.name != "SKILL.md":
+                out.append(path.relative_to(root).as_posix())
+        return tuple(out[:limit])
 
     def header(self) -> str:
         label = " (draft skill — unproven)" if self.is_draft else ""
@@ -116,7 +141,15 @@ def _split_list(raw: str) -> tuple[str, ...]:
 def parse_skill_text(text: str, *, path: str = "",
                      origin: str = "seed") -> SkillDoc | None:
     """Parse one ``.md`` skill file.  ``None`` when it has no usable
-    frontmatter (an id is mandatory — the router keys on it)."""
+    frontmatter (an id is mandatory — the router keys on it).
+
+    Accepts the open Agent Skills frontmatter too: ``name`` falls
+    back to ``id`` and ``description`` falls back to ``summary``,
+    so a vendored ``SKILL.md`` written to that standard parses.
+    Devon fields win when both are present.  The naive line parser
+    also picks up indented keys from a nested ``metadata:`` block
+    (e.g. its ``triggers:``), because keys are stripped before
+    matching."""
     lines = str(text or "").splitlines()
     if not lines or lines[0].strip() != "---":
         return None
@@ -129,7 +162,10 @@ def parse_skill_text(text: str, *, path: str = "",
         if ":" in lines[i]:
             key, _, value = lines[i].partition(":")
             meta[key.strip().lower()] = value.strip()
-    if end is None or not meta.get("id"):
+    if end is None:
+        return None
+    skill_id = (meta.get("id") or meta.get("name") or "").strip()
+    if not skill_id:
         return None
     body = "\n".join(lines[end + 1:]).strip()
     try:
@@ -137,9 +173,9 @@ def parse_skill_text(text: str, *, path: str = "",
     except ValueError:
         version = 1
     return SkillDoc(
-        id=meta["id"].strip(),
-        title=meta.get("title") or meta["id"].strip(),
-        summary=meta.get("summary") or "",
+        id=skill_id,
+        title=meta.get("title") or skill_id,
+        summary=meta.get("summary") or meta.get("description") or "",
         topics=_split_list(meta.get("topics", "")),
         triggers=_split_list(meta.get("triggers", "")),
         layer=meta.get("layer") or "",
@@ -214,24 +250,52 @@ class FileSkillLibrary:
 
     # -- scanning -----------------------------------------------------
 
+    def _scan_root(self, root: Path, origin: str) -> list[SkillDoc]:
+        """One root's docs: flat ``*.md`` files plus directory
+        bundles (``<dir>/SKILL.md``), one level only — a nested
+        skill pack (``<pack>/skills/<name>/SKILL.md``) stays
+        unrouted, one skill, as its flat twin already says.
+
+        At most one doc per id: a flat file wins the doc when
+        both carry the same id (the flat text is the routed,
+        Devon-adapted copy), and the bundle directory then
+        attaches to it as its companion store."""
+        flat: dict[str, SkillDoc] = {}
+        bundles: dict[str, SkillDoc] = {}
+        for path in sorted(root.glob("*.md")):
+            if path.name.upper() == "INDEX.MD":
+                continue
+            doc = self._read(path, origin)
+            if doc is not None:
+                flat[doc.id] = doc
+        for sub in sorted(p for p in root.iterdir() if p.is_dir()):
+            skill_path = sub / "SKILL.md"
+            if not skill_path.is_file():
+                continue
+            doc = self._read(skill_path, origin)
+            if doc is None:
+                continue
+            bundles[doc.id] = SkillDoc(
+                **{**doc.__dict__, "bundle_dir": str(sub)})
+        for doc_id, bundle in bundles.items():
+            if doc_id in flat:
+                flat[doc_id] = SkillDoc(
+                    **{**flat[doc_id].__dict__,
+                       "bundle_dir": bundle.bundle_dir})
+            else:
+                flat[doc_id] = bundle
+        return list(flat.values())
+
     def _scan(self) -> list[SkillDoc]:
         if self._cache is not None:
             return self._cache
         docs: list[SkillDoc] = []
         for root, origin in ((self.seed_dir, "seed"), (self.user_dir, "user")):
             if root.is_dir():
-                for path in sorted(root.glob("*.md")):
-                    if path.name.upper() == "INDEX.MD":
-                        continue
-                    doc = self._read(path, origin)
-                    if doc is not None:
-                        docs.append(doc)
+                docs.extend(self._scan_root(root, origin))
         drafts = self.user_dir / "drafts"
         if drafts.is_dir():
-            for path in sorted(drafts.glob("*.md")):
-                doc = self._read(path, "draft")
-                if doc is not None:
-                    docs.append(doc)
+            docs.extend(self._scan_root(drafts, "draft"))
         self._cache = docs
         return docs
 
@@ -287,7 +351,10 @@ class FileSkillLibrary:
         for topic in doc.topics:
             score += 3.0 * len(qset & set(_tokens(topic)))
         score += 2.0 * len(qset & set(_tokens(doc.title)))
-        score += 1.0 * len(qset & set(_tokens(doc.summary)))
+        # Description-as-trigger: the summary IS the description,
+        # so its words score at trigger-token weight, not below
+        # the topics that merely list a subject.
+        score += 2.0 * len(qset & set(_tokens(doc.summary)))
         score += 0.25 * min(8, len(qset & set(_tokens(doc.body))))
         if doc.is_draft:
             score *= 0.8
@@ -412,14 +479,27 @@ class FileSkillLibrary:
 
     # -- writes ---------------------------------------------------------
 
-    def write_draft(self, doc: SkillDoc) -> Path:
+    def write_draft(self, doc: SkillDoc, *, bundle: bool = False) -> Path:
         """Write a distilled draft into the drafts area (journaled by
-        the usage log as a ``distill`` entry)."""
+        the usage log as a ``distill`` entry).  ``bundle=True`` lands
+        it as a directory bundle — ``drafts/<id>/SKILL.md`` with
+        ``scripts/``, ``examples/`` and ``resources/`` beside it —
+        instead of a flat file.  The bundle ``SKILL.md`` carries
+        Devon frontmatter, so it round-trips through the parser."""
         drafts = self.user_dir / "drafts"
         drafts.mkdir(parents=True, exist_ok=True)
-        path = drafts / f"{doc.id}.md"
-        draft = SkillDoc(**{**doc.__dict__, "origin": "draft",
-                            "path": str(path)})
+        if bundle:
+            bundle_dir = drafts / doc.id
+            for sub in ("scripts", "examples", "resources"):
+                (bundle_dir / sub).mkdir(parents=True, exist_ok=True)
+            path = bundle_dir / "SKILL.md"
+            draft = SkillDoc(**{**doc.__dict__, "origin": "draft",
+                                "path": str(path),
+                                "bundle_dir": str(bundle_dir)})
+        else:
+            path = drafts / f"{doc.id}.md"
+            draft = SkillDoc(**{**doc.__dict__, "origin": "draft",
+                                "path": str(path)})
         path.write_text(render_skill_text(draft), encoding="utf-8")
         self._append_usage({"kind": "distill", "skill_id": doc.id,
                             "origin": "draft", "mission_id": "",
@@ -449,11 +529,37 @@ class FileSkillLibrary:
             origin="user", kind=draft.kind, domain=draft.domain,
             fixtures=draft.fixtures)
         self.user_dir.mkdir(parents=True, exist_ok=True)
-        path = self.user_dir / f"{target_id}.md"
-        promoted = SkillDoc(**{**promoted.__dict__, "path": str(path)})
-        path.write_text(render_skill_text(promoted), encoding="utf-8")
-        with contextlib.suppress(OSError):
-            Path(draft.path).unlink()
+        if draft.bundle_dir:
+            # A bundle draft promotes as a bundle: its companions
+            # move with it.  A flat user file of the same id would
+            # shadow the bundle as the doc, so it goes — one doc
+            # per (origin, id).  The seed tree is never touched.
+            target_dir = self.user_dir / target_id
+            target_dir.mkdir(parents=True, exist_ok=True)
+            source_dir = Path(draft.bundle_dir)
+            if source_dir.is_dir():
+                for item in sorted(source_dir.iterdir()):
+                    if item.name == "SKILL.md":
+                        continue
+                    dest = target_dir / item.name
+                    if item.is_dir():
+                        shutil.copytree(item, dest, dirs_exist_ok=True)
+                    else:
+                        shutil.copy2(item, dest)
+            path = target_dir / "SKILL.md"
+            promoted = SkillDoc(**{**promoted.__dict__, "path": str(path),
+                                   "bundle_dir": str(target_dir)})
+            path.write_text(render_skill_text(promoted), encoding="utf-8")
+            with contextlib.suppress(OSError):
+                (self.user_dir / f"{target_id}.md").unlink()
+            with contextlib.suppress(OSError):
+                shutil.rmtree(source_dir)
+        else:
+            path = self.user_dir / f"{target_id}.md"
+            promoted = SkillDoc(**{**promoted.__dict__, "path": str(path)})
+            path.write_text(render_skill_text(promoted), encoding="utf-8")
+            with contextlib.suppress(OSError):
+                Path(draft.path).unlink()
         self._append_usage({"kind": "promote", "skill_id": target_id,
                             "origin": "user", "mission_id": "",
                             "success": True, "ts": time.time()})
