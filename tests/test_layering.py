@@ -342,6 +342,12 @@ MODULE_PINS: dict[str, int] = {
     # stays L4; the full foundation-vs-composition split is T1.6.
     "nomorals.tools.autonomy": 5,
     "nomorals.tools.finance": 5,
+    # tools/backup is the same shape: it composes the L5 backup organ
+    # (coordinator/report) + agents (L5, notifier) + connectors (L5,
+    # GitHub) into the two scheduler-internal tick tools. Pinned L5
+    # with the modules it composes; the registry loads it dynamically
+    # by dotted name, never by static import.
+    "nomorals.tools.backup": 5,
     # The prompt-compiler tool surface composes the L5 organs that own
     # the graded journals (games.npc_learn, characters.learn) into a
     # compile/status surface — it IS the L5 composition layer, not an

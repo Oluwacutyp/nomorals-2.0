@@ -3285,6 +3285,18 @@ class PartnerRuntime(
                     ensure_finance_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("finance jobs not registered: %s", exc)
+                # Scheduled backups (gapfix 2): the encrypted offsite
+                # 3-2-1 pipeline — daily generation at 02:00 + monthly
+                # restore drill on the 1st at 03:00. Idempotent by name;
+                # a run with no GitHub credential queues in the outbox
+                # instead of failing. Installed on the live scheduler
+                # whose tick actually fires (see backup/jobs.py — the
+                # unified-scheduler store has no firing driver).
+                try:
+                    from ...backup.jobs import ensure_backup_jobs
+                    ensure_backup_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("backup jobs not registered: %s", exc)
                 # Social: the weekly content pipeline (Mondays 08:00 —
                 # research -> drafts queued for review at the best
                 # windows; never auto-posts). Idempotent by name.
