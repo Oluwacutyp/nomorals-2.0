@@ -66,6 +66,29 @@ from nomorals.social.chat.base import (
 )
 from nomorals.social.chat.gateway import ChatGateway
 from nomorals.social.chat.whatsapp import WhatsAppAdapter
+from tests.frozen_clock import MIDDAY_TS
+
+#: Clock hygiene (no-direct-clock, batch H23): every wall-clock read
+#: in this file is frozen except the pulse-marker seed below.
+#: - Bridge payload ts-ms (:236/:257) -> MIDDAY_TS: _dispatch
+#:   (whatsapp.py) only stamps meta["stale_replay"] when
+#:   time.time() - ts > 180s and delivers regardless; these tests
+#:   assert media stamping only, never the stamp.
+#: - Wait-loop deadlines (wait_started, _wait) -> time.monotonic().
+#: - Briefing generated_at (:376) -> MIDDAY_TS: check_catchup
+#:   (morning_briefing.py:2081) suppresses on latest_briefing
+#:   presence by date; generated_at only orders within the date.
+#: - _group_msg ts (:412) -> MIDDAY_TS: directly-constructed
+#:   messages carry no stale_replay stamp (only the adapter
+#:   stamps it); the runtime's only message.ts read is the
+#:   stale_replay log line (runtime.py:1380), and reply-claim
+#:   arbitration keys on message identity, not ts.
+#: - Pulse-marker ts (:370) stays real (grandfathered, baseline):
+#:   start() runs check_all_catchup on boot (runtime.py:3259),
+#:   and check_slot_catchup suppresses only when last_ts >= due
+#:   on the real clock with pulse_enabled defaulting True — a
+#:   frozen marker would fire the catch-up pulse into the
+#:   adapter (same shape as H10/H18).
 
 #: See test_partner_brain_gate for why context homes honour
 #: NM_TEST_TMPDIR (the /tmp tmpfs + swallowed-COMMIT trap).
@@ -233,7 +256,7 @@ class WhatsAppMissedMediaTests(unittest.TestCase):
             "from": {"id": "2348012345678@c.us", "name": "Faheem"},
             "text": "bro check this",
             "media": [{"mime": "image/jpeg", "kind": "photo"}],
-            "ts": int(time.time() * 1000),
+            "ts": int(MIDDAY_TS * 1000),
         }, msgs.append)
         self.assertEqual(len(msgs), 1)
         msg = msgs[0]
@@ -254,7 +277,7 @@ class WhatsAppMissedMediaTests(unittest.TestCase):
             "text": "bro check this",
             "media": [{"path": "/media/a.jpg", "mime": "image/jpeg",
                        "kind": "photo"}],
-            "ts": int(time.time() * 1000),
+            "ts": int(MIDDAY_TS * 1000),
         }, msgs.append)
         self.assertEqual(len(msgs), 1)
         self.assertEqual(len(msgs[0].media), 1)
@@ -301,9 +324,19 @@ class ReplyClaimLedgerTests(unittest.TestCase):
         self.assertTrue(ledger.claim(""))
         self.assertTrue(ledger.claim(""))
 
-    def test_edits_are_not_redeliveries(self) -> None:
+    def test_edits_key_like_the_original(self) -> None:
+        # 2c8eebe1 (groupdup) deliberately changed reply_claim_key
+        # so an edit keys EXACTLY like the original message it
+        # edits — it is the same event, not a new one (the antiedit
+        # layer above the seam still observes it). The old pin
+        # ("" for edits) predates that change and was never
+        # updated; test_groupdup_fix pins the new behaviour too.
         self.assertEqual(
-            reply_claim_key(self._msg(edited=True)), "")
+            reply_claim_key(self._msg(edited=True)),
+            reply_claim_key(self._msg()))
+        self.assertEqual(
+            reply_claim_key(self._msg(edited=True)),
+            "telegram:42:100")
 
 
 # ── the runtime seam: full turns ────────────────────────────────────
@@ -331,8 +364,8 @@ class FakeAdapter(ChatAdapter):
                           message_id=f"m{len(self.sent)}")
 
     def wait_started(self, timeout: float = 5.0) -> bool:
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             if self.started_flag:
                 return True
             time.sleep(0.01)
@@ -340,8 +373,8 @@ class FakeAdapter(ChatAdapter):
 
 
 def _wait(predicate, timeout: float = 8.0) -> bool:
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if predicate():
             return True
         time.sleep(0.02)
@@ -366,6 +399,12 @@ def _make_runtime_context() -> tuple[Any, tempfile.TemporaryDirectory]:
                    "pulse_last_run_afternoon.json",
                    "pulse_last_run_evening.json",
                    "pulse_last_run_midnight.json"):
+        # Grandfathered (batch H23): real clock on purpose. start()
+        # runs check_all_catchup on boot and each slot suppresses
+        # only when last_ts >= due on the real clock, so a frozen
+        # marker would fire the catch-up pulse into the adapter.
+        # See the import-block note; baseline entry in
+        # tests/test_no_direct_clock.py.
         (ws / marker).write_text(
             json.dumps({"ts": time.time(), "delivered_text": True}),
             encoding="utf-8")
@@ -373,7 +412,7 @@ def _make_runtime_context() -> tuple[Any, tempfile.TemporaryDirectory]:
     context.db.execute(
         "INSERT OR REPLACE INTO briefings (id, date, sections_json,"
         " generated_at) VALUES (?, ?, '[]', ?)",
-        ("test-seed", _today_str(context), time.time()),
+        ("test-seed", _today_str(context), MIDDAY_TS),
     )
     return context, tmp
 
@@ -409,7 +448,7 @@ class RuntimeSeamTests(unittest.TestCase):
                        peer="grp-1")
         return ChatMessage(chat=chat, incoming=True, text=text,
                            sender="faheem", message_id=message_id,
-                           media=media or [], ts=time.time())
+                           media=media or [], ts=MIDDAY_TS)
 
     def test_redelivered_message_gets_exactly_one_reply(self) -> None:
         _stub_bundle(self.runtime.brain,

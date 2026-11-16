@@ -266,6 +266,17 @@ BASELINE: dict[str, int] = {
     # as a month of silence and changes the headspace the seed builds.
     # The file's other reads (wait loops, briefing generated_at) are
     # converted: monotonic deadlines, frozen generated_at.
+    # Grandfathered (batch H23): the pulse-marker seed in
+    # _make_runtime_context — start() runs check_all_catchup on
+    # boot (runtime.py:3259) and check_slot_catchup suppresses
+    # only when last_ts >= due on the real clock, with the pulse
+    # enabled by default, so a frozen marker would fire the
+    # catch-up pulse into the adapter. The file's other 8 reads
+    # are frozen: bridge payload ts (stale_replay stamp only,
+    # never asserted), wait-loop deadlines (monotonic), briefing
+    # generated_at (presence by date), _group_msg ts (no driven
+    # handler reads message.ts).
+    "tests/test_partner_photo_receipt.py": 1,
     "tests/test_partner_runtime.py": 2,
     "tests/test_partner_social_f2.py": 3,
     "tests/test_partner_sweep.py": 3,
