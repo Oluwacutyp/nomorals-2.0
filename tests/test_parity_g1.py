@@ -41,6 +41,7 @@ status_react) field for field.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import socketserver
 import threading
@@ -50,12 +51,20 @@ from pathlib import Path
 import pytest
 
 from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef, SendResult
+from tests.frozen_clock import MIDDAY_TS
 
 PORT = 19431
 OWNER = "2348012345678"
 PN_POSTER = "2347099999999@s.whatsapp.net"
 GROUP = "12345@g.us"
 TG_OWNER = "777"
+
+# Fake-message identity: ids must stay unique — _process scopes
+# effects by chat + message id, so two messages sharing one id
+# replay the first one's recorded result instead of executing.
+# The ts is frozen (MIDDAY_TS): no handler these suites drive
+# reads a message ts against the real clock.
+_MSG_SEQ = itertools.count(1)
 
 
 # ── recording fake bridge (the bridges' wire protocol) ─────────
@@ -117,8 +126,8 @@ class FakeBridge(socketserver.ThreadingTCPServer):
 
 
 def wait_for(pred, timeout=25.0, step=0.1):
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if pred():
             return True
         time.sleep(step)
@@ -198,7 +207,7 @@ def rig(tmp_path_factory):
                          peer="owner"),
             incoming=True, text="hello", sender="owner",
             sender_id="owner",
-            message_id=f"beat-{time.time()}", ts=time.time()))
+            message_id=f"beat-{next(_MSG_SEQ)}", ts=MIDDAY_TS))
 
     beat()
     assert wait_for(
@@ -225,8 +234,8 @@ def _op(rig, text, *, platform="whatsapp", chat_id=PN_POSTER,
     msg = ChatMessage(
         chat=chat, incoming=True, text=text, sender="Owner",
         sender_id=sender_id,
-        message_id=mid or f"op-{time.time()}",
-        reply_to=reply_to, ts=time.time(),
+        message_id=mid or f"op-{next(_MSG_SEQ)}",
+        reply_to=reply_to, ts=MIDDAY_TS,
         meta={"owner_command": True})
     return rig["runtime"].handle_control(
         text, chat.key, message=msg)

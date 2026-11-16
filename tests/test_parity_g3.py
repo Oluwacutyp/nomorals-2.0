@@ -49,6 +49,7 @@ binaries carry the new verbs' refusal strings.
 """
 from __future__ import annotations
 
+import itertools
 import json
 import socketserver
 import threading
@@ -58,12 +59,20 @@ from pathlib import Path
 import pytest
 
 from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef
+from tests.frozen_clock import MIDDAY_TS
 
 PORT = 19442
 OWNER = "2348012345678"
 PN_POSTER = "2347099999999@s.whatsapp.net"
 GROUP = "120363001234567890@g.us"
 ROOT = Path(__file__).resolve().parents[1]
+
+# Fake-message identity: ids must stay unique — _process scopes
+# effects by chat + message id, so two messages sharing one id
+# replay the first one's recorded result instead of executing.
+# The ts is frozen (MIDDAY_TS): no handler these suites drive
+# reads a message ts against the real clock.
+_MSG_SEQ = itertools.count(1)
 
 PROFILE_READ = {
     "name": "Bridge Owner",
@@ -206,8 +215,8 @@ class FakeBridge(socketserver.ThreadingTCPServer):
 
 
 def wait_for(pred, timeout=25.0, step=0.1):
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if pred():
             return True
         time.sleep(step)
@@ -252,7 +261,7 @@ def rig(tmp_path_factory):
                          peer="owner"),
             incoming=True, text="hello", sender="owner",
             sender_id="owner",
-            message_id=f"beat-{time.time()}", ts=time.time()))
+            message_id=f"beat-{next(_MSG_SEQ)}", ts=MIDDAY_TS))
 
     beat()
     assert wait_for(
@@ -286,8 +295,8 @@ def _op(rig, text, *, platform="whatsapp", chat_id=PN_POSTER,
     msg = ChatMessage(
         chat=chat, incoming=True, text=text, sender="Owner",
         sender_id=sender_id,
-        message_id=mid or f"op-{time.time()}",
-        ts=time.time(), meta=meta, reply_to=reply_to,
+        message_id=mid or f"op-{next(_MSG_SEQ)}",
+        ts=MIDDAY_TS, meta=meta, reply_to=reply_to,
         media=list(media or []))
     return rig["runtime"].handle_control(
         text, chat.key, message=msg)
