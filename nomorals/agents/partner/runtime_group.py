@@ -7227,7 +7227,12 @@ class RuntimeGroupMixin:
                 "/community unlink <g1|key> — clear a group's tag\n"
                 "/community sync [g1|key] — re-read the platform "
                 "community (bare sync = every claimed group, "
-                "operator only)")
+                "operator only)\n"
+                "/community post <id|name> | <text> [| live] — "
+                "preview a cross-post to every linked WhatsApp "
+                "subgroup, then send it live once armed\n"
+                "/community arm | disarm | status — arm live "
+                "cross-posts, disarm them, or see the arm state")
 
     def _community_visible_keys(self, surface, message,
                                 sender):  # type: ignore[no-untyped-def]
@@ -7316,6 +7321,29 @@ class RuntimeGroupMixin:
                     "a community (/community sync <g1>).")
         return "communities:\n" + "\n".join(rows)
 
+    def _community_resolve_id(self, surface, query):  # type: ignore[no-untyped-def]
+        """Resolve a community id or unique name to (cid, row, None),
+        or (None, None, error) — the shared resolver for `show` and
+        `post`, so both name the same community the same way."""
+        from ...social.chat import group_community as _gc
+
+        index = _gc.communities_index(surface)
+        query = str(query or "").strip()
+        if query in index:
+            return query, index[query], None
+        matches = [(cid, row) for cid, row in index.items()
+                   if str(row.get("name") or "").lower()
+                   == query.lower()]
+        if len(matches) == 1:
+            return matches[0][0], matches[0][1], None
+        if len(matches) > 1:
+            return None, None, (
+                f"more than one community is named “{query}” — "
+                "use its id instead.")
+        return None, None, (
+            f"no community “{query}” carries a group I serve — "
+            "/community lists the ones that do.")
+
     def _community_show(self, surface, message, sender,
                         query):  # type: ignore[no-untyped-def]
         """One community's member groups, with claim state."""
@@ -7323,24 +7351,9 @@ class RuntimeGroupMixin:
 
         visible = set(self._community_visible_keys(surface, message,
                                                    sender))
-        index = _gc.communities_index(surface)
-        query = str(query or "").strip()
-        found = None
-        if query in index:
-            found = (query, index[query])
-        else:
-            matches = [(cid, row) for cid, row in index.items()
-                       if str(row.get("name") or "").lower()
-                       == query.lower()]
-            if len(matches) == 1:
-                found = matches[0]
-            elif len(matches) > 1:
-                return (f"more than one community is named "
-                        f"“{query}” — use its id instead.")
-        if found is None:
-            return (f"no community “{query}” carries a group I "
-                    "serve — /community lists the ones that do.")
-        cid, row = found
+        cid, row, error = self._community_resolve_id(surface, query)
+        if error:
+            return error
         groups = [k for k in row["groups"] if k in visible]
         if not groups:
             return (f"community {row['name'] or cid} carries no "
@@ -7353,6 +7366,156 @@ class RuntimeGroupMixin:
                 f"· {key} — "
                 f"{'claimed' if claim['claimed'] else 'unclaimed'}"
                 f" · tag: {tag.get('source') or '?'}")
+        return "\n".join(lines)
+
+    def _community_service(self):  # type: ignore[no-untyped-def]
+        """The /community post arms + journal, built once, lazily —
+        the SAME store files the §14 mass tools, /relay and
+        /obroadcast use (one arms store, one journal, keyed by tool
+        name), but the community post's own pacing floor (3s between
+        groups)."""
+        svc = getattr(self, "_community_svc", None)
+        if svc is not None:
+            return svc
+        from pathlib import Path
+
+        from ...social.mass_actions import MassArms, MassJournal, default_mass_root
+
+        ws = Path(getattr(self.context.settings, "workspace_dir", "."))
+        root = default_mass_root(ws)
+        svc = {"arms": MassArms(root / "arms.json"),
+               "journal": MassJournal(root / "journal.jsonl")}
+        self._community_svc = svc
+        return svc
+
+    def _community_rate_limiter(self):  # type: ignore[no-untyped-def]
+        """The process-persistent cross-post rate limiter (1/min):
+        one instance per runtime, built once. Tests may set
+        ``_community_limiter`` directly with a fake-clock limiter."""
+        limiter = getattr(self, "_community_limiter", None)
+        if limiter is None:
+            from ...social.chat.whatsapp_communities import CommunityRateLimiter
+
+            limiter = CommunityRateLimiter()
+            self._community_limiter = limiter
+        return limiter
+
+    def _community_post(self, surface, message, sender,
+                        tail):  # type: ignore[no-untyped-def]
+        """`/community post <id|name> | <text> [| live]` — preview-first,
+        arm-gated, rate-limited cross-post to a community's linked
+        WhatsApp subgroups (audit gap R2-21).
+
+        Dry (no `| live`): the exact per-group preview, nothing sent,
+        planned WITHOUT the limiter — the preview must not burn the
+        1/min token or preview-then-live could never send. Live:
+        re-planned WITH the limiter, refused unless armed, sent one
+        group at a time through the WhatsApp adapter's send.
+        """
+        import time as _time
+
+        from ...social.chat.base import ChatKind, ChatRef
+        from ...social.chat.whatsapp_communities import CommunityPost, plan_crosspost, run_crosspost
+
+        tool = "community-post"
+        segments = [s.strip() for s in str(tail or "").split("|")]
+        head = segments[0].split()
+        query = " ".join(head[1:])
+        text = segments[1] if len(segments) > 1 else ""
+        live = len(segments) > 2 and segments[2].lower() == "live"
+        if not query:
+            return self._community_usage()
+        cid, row, error = self._community_resolve_id(surface, query)
+        if error:
+            return error
+        name = str(row.get("name") or cid)
+        visible = set(self._community_visible_keys(surface, message,
+                                                   sender))
+        targets: list[str] = []
+        held: list[tuple[str, str]] = []
+        for key in row["groups"]:
+            platform = str(key).split(":", 1)[0]
+            if platform != "whatsapp":
+                held.append((key, "not a WhatsApp group"))
+                continue
+            if surface.is_channel(key):
+                held.append((key, "a channel, not a group"))
+                continue
+            if key not in visible:
+                held.append((key, "you don't admin it"))
+                continue
+            if not surface.system_output_allowed(key):
+                held.append((key, "system output not allowed there"))
+                continue
+            targets.append(key)
+        limiter = self._community_rate_limiter()
+        if not (text or "").strip():
+            return "empty announcement text — nothing to post"
+        if not targets:
+            held_note = "; ".join(f"{key} — {reason}"
+                                  for key, reason in held)
+            return (f"no WhatsApp groups to post to in community "
+                    f"{name}"
+                    + (f" — held: {held_note}" if held_note else "")
+                    + ".")
+        if not live:
+            plan = plan_crosspost(CommunityPost(
+                community=name, text=text, groups=targets))
+            if not plan.ok:
+                return plan.reason
+            lines = [plan.preview,
+                     f"rate: {limiter.limit} post/min, "
+                     f"{limiter.remaining()} remaining"]
+            for key, reason in held:
+                lines.append(f"  – {key} — held: {reason}")
+            lines.append("say “| live” to send it — arm first: "
+                         "/community arm")
+            return "\n".join(lines)
+        svc = self._community_service()
+        arms, journal = svc["arms"], svc["journal"]
+
+        def _journal_row(**extra):  # type: ignore[no-untyped-def]
+            row = {"tool": tool,
+                   "run_id": f"cp-{int(_time.time())}",
+                   "ts": _time.time()}
+            row.update(extra)
+            return journal.append(row)
+
+        plan = plan_crosspost(CommunityPost(
+            community=name, text=text, groups=targets), limiter=limiter)
+        if not plan.ok:
+            _journal_row(community=cid, targets=len(targets),
+                         sent=0, failed=0, refused=plan.reason,
+                         results=[])
+            return plan.reason
+        if not arms.armed(tool):
+            _journal_row(community=cid, targets=len(targets),
+                         sent=0, failed=0, refused="disarmed",
+                         results=[])
+            return ("⚠️ /community post is disarmed — a live post "
+                    "needs an explicit arm first.\n"
+                    "Arm it with: /community arm")
+        adapter = self._adapter_for("whatsapp")
+        if adapter is None:
+            return ("no live whatsapp surface here — nothing sent.")
+        record = run_crosspost(
+            plan,
+            send=lambda group, txt: adapter.send(
+                ChatRef.parse(group, kind=ChatKind.GROUP), txt),
+            pace_seconds=arms.pacing(tool, floor=3.0, default=3.0))
+        arms.note_live_run(tool)
+        _journal_row(community=cid, targets=len(targets),
+                     sent=record["sent"], failed=record["failed"],
+                     results=record["results"])
+        lines = [f"📣 community post live: sent {record['sent']} of "
+                 f"{len(plan.deliveries)} group(s)."]
+        for item in record["results"]:
+            mark = "✓" if item.get("ok") else "✗"
+            lines.append(f"  {mark} {item.get('group')}"
+                         + ("" if item.get("ok")
+                            else f": {item.get('error') or 'failed'}"))
+        for key, reason in held:
+            lines.append(f"  – {key} — held: {reason}")
         return "\n".join(lines)
 
     def _control_community(self, tail, message):  # type: ignore[no-untyped-def]
@@ -7393,6 +7556,29 @@ class RuntimeGroupMixin:
                 return self._community_usage()
             return self._community_show(surface, message, sender,
                                         " ".join(words[1:]))
+        if verb == "post":
+            return self._community_post(surface, message, sender, tail)
+        if verb == "arm":
+            svc = self._community_service()
+            svc["arms"].arm("community-post")
+            return ("✅ /community post is ARMED. Live posts are "
+                    "possible now; a post still previews unless you "
+                    "say “| live”. Disarm any time: /community disarm")
+        if verb == "disarm":
+            svc = self._community_service()
+            svc["arms"].disarm("community-post")
+            return ("⏸️ /community post disarmed — live posts refuse "
+                    "until you arm it again.")
+        if verb == "status":
+            svc = self._community_service()
+            arms = svc["arms"]
+            limiter = self._community_rate_limiter()
+            state = "armed" if arms.armed("community-post") \
+                else "disarmed"
+            return (f"/community post: {state} · live runs: "
+                    f"{arms.live_runs('community-post')} · rate: "
+                    f"{limiter.limit} post/min, "
+                    f"{limiter.remaining()} remaining")
         if verb == "link":
             if len(words) < 3:
                 return self._community_usage()

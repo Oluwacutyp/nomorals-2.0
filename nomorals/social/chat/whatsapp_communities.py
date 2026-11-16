@@ -33,6 +33,7 @@ __all__ = [
     "CommunityRateLimiter",
     "plan_crosspost",
     "preview_crosspost",
+    "run_crosspost",
 ]
 
 #: Max community posts per minute (a broadcast is expensive attention).
@@ -120,3 +121,58 @@ def plan_crosspost(post: CommunityPost, *,
                             else post.text)} for g in post.groups]
     preview = preview_crosspost(post)
     return CrosspostPlan(ok=True, deliveries=deliveries, preview=preview)
+
+
+def _verdict_ok(verdict: Any) -> bool:
+    if isinstance(verdict, dict):
+        return bool(verdict.get("ok"))
+    return bool(getattr(verdict, "ok", False))
+
+
+def _verdict_error(verdict: Any) -> str:
+    if isinstance(verdict, dict):
+        return str(verdict.get("error") or "")
+    return str(getattr(verdict, "error", "") or "")
+
+
+def _verdict_message_id(verdict: Any) -> str:
+    if isinstance(verdict, dict):
+        return str(verdict.get("message_id") or "")
+    return str(getattr(verdict, "message_id", "") or "")
+
+
+def run_crosspost(plan: CrosspostPlan, *,
+                  send: Callable[[str, str], Any],
+                  sleep: Callable[[float], None] = time.sleep,
+                  pace_seconds: float = 3.0) -> dict[str, Any]:
+    """Fan one planned cross-post out, one delivery per group, paced.
+
+    ``send(group, text)`` is the caller's sender (the adapter's
+    ``send`` over a ``ChatRef``) — the organ plans, the caller sends.
+    One dead group never kills the rest: every group is its own
+    result row. Returns ``{sent, failed, results}``.
+    """
+    results: list[dict[str, Any]] = []
+    sent = failed = 0
+    for index, delivery in enumerate(plan.deliveries or []):
+        if index:
+            sleep(float(pace_seconds))
+        group = str(delivery.get("group") or "")
+        text = str(delivery.get("text") or "")
+        row: dict[str, Any] = {"group": group, "ok": False,
+                               "error": "", "message_id": ""}
+        try:
+            verdict = send(group, text)
+            row["ok"] = _verdict_ok(verdict)
+            row["error"] = _verdict_error(verdict)
+            row["message_id"] = _verdict_message_id(verdict)
+        except Exception as exc:  # noqa: BLE001 - one group's failure is a row
+            row["error"] = str(exc)
+        if row["ok"]:
+            sent += 1
+        else:
+            failed += 1
+            if not row["error"]:
+                row["error"] = "the surface refused the send"
+        results.append(row)
+    return {"sent": sent, "failed": failed, "results": results}
