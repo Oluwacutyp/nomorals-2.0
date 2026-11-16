@@ -747,6 +747,29 @@ def register(registry: Any) -> None:
                     "error": f"health drift tick failed: {exc}"}
 
     @registry.register(
+        "__workflow_tick__",
+        description="Run one workflow tick: start every queued "
+        "workflow script on a background thread, reap finished "
+        "threads, deliver finished summaries into the origin chat, "
+        "and mark runs whose thread died with the process "
+        "interrupted (record + journal survive; the owner re-runs "
+        "the saved script). Scheduler-internal; runs every ~5m. "
+        "Routine and silent — nothing queued means nothing happens.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _workflow_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..agents.workflow.runner import run_workflow_tick_once
+
+        try:
+            return run_workflow_tick_once(
+                _context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"workflow tick failed: {exc}"}
+
+    @registry.register(
         "__show_schedule_tick__",
         description="Run one show-schedule tick: compose a DRAFT "
         "episode for every show whose schedule is due, from the "

@@ -55,6 +55,7 @@ from .runtime_chatops import RuntimeChatOpsMixin
 from .runtime_makers import RuntimeMakersMixin
 from .runtime_mock_screens import RuntimeMockScreensMixin
 from .runtime_fonts import RuntimeFontsMixin
+from .runtime_workflow import RuntimeWorkflowMixin
 from .failures import failure_count, recent_failures, record_failure
 from .reply_guard import (
     deliberation_reason,
@@ -420,6 +421,7 @@ class PartnerRuntime(
     RuntimeMockScreensMixin,
     RuntimeFontsMixin,
     RuntimeChatOpsMixin,
+    RuntimeWorkflowMixin,
 ):
     """Runs the partner across all configured platforms, at the same time."""
 
@@ -3905,6 +3907,19 @@ class PartnerRuntime(
                     _log.warning(
                         "delegation manager tick job not registered: %s",
                         exc)
+                # Dynamic workflows: one durable "workflow tick" job
+                # (every 5m) starting queued workflow scripts on
+                # background threads, reaping finished threads,
+                # delivering finished summaries into the origin chat,
+                # and marking runs whose thread died with the process
+                # interrupted. Idempotent; best-effort.
+                try:
+                    from ...agents.workflow.runner import ensure_workflow_job
+
+                    ensure_workflow_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "workflow tick job not registered: %s", exc)
                 # Community orchestration (AA-18): one durable
                 # "community orchestration tick" job (every 1m)
                 # heartbeating this device into the fleet session
@@ -8530,6 +8545,9 @@ class PartnerRuntime(
 
         if kind == "delegate":
             return self._control_delegate(command.tail or "", message)
+
+        if kind == "workflow":
+            return self._control_workflow(command.tail or "", message)
 
         if kind == "computer":
             return self._control_computer(command.tail or "", message)
