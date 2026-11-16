@@ -31,7 +31,6 @@ Pins, end to end:
 from __future__ import annotations
 
 import json
-import time
 import unittest
 from datetime import datetime
 from types import SimpleNamespace
@@ -65,6 +64,23 @@ from nomorals.media.explore.jobs import (
 from nomorals.media.explore.trends import current_claims, evaluate_trends
 from nomorals.storage.db import Database
 from nomorals.tools.registry import ToolRegistry
+
+# Frozen clock (no-direct-clock H22): every seed below is MIDDAY_TS
+# (tests.frozen_clock, 2026-10-14 noon) or a MIDDAY-relative offset.
+# Safe because the production engine stamps observation/candidate
+# times at the REAL clock by design (engine.py:143 ``at =
+# time.time()``; store.note_candidate/finish_sweep default to
+# time.time()), so claim evidence stays real-stamped and fresh
+# under the board/provider's real-clock reads; the frozen values
+# only place sweep started_at/finished_at (rendered, never
+# compared) and the provider's ``since`` window (test-controlled).
+# The two silence tests keep their verdicts on the frozen deltas
+# (predates-window: evidence before the window; stale: the
+# freshness leg still fires — real-now age ~43d > 3d). The
+# provider itself reads the real clock internally
+# (morning_briefing.py:1493, no now seam) — that is correct
+# production behaviour, not a seam to add.
+from tests.frozen_clock import MIDDAY_TS
 
 
 def _text(reply):
@@ -370,7 +386,7 @@ def _swept_store() -> tuple[ExploreStore, float]:
         raise RuntimeError("provider down")
 
     dead.search = _boom  # type: ignore[method-assign]
-    t1 = time.time() - 3600
+    t1 = MIDDAY_TS - 3600
     engine.run_sweep(_beats(), trigger="scheduled", now=t1)
     engine.run_sweep(_beats(), trigger="scheduled", now=t1 + 600)
     evaluate_trends(store, now=t1 + 600)
@@ -419,7 +435,7 @@ class BoardTests(unittest.TestCase):
 
     def test_board_names_a_failed_sweep_failed(self) -> None:
         store = ExploreStore()
-        at = time.time() - 60
+        at = MIDDAY_TS - 60
         sid = store.begin_sweep(trigger="scheduled",
                                 beats=["gold trading"], at=at)
         store.finish_sweep(sid, status="failed", at=at + 5)
@@ -563,9 +579,9 @@ class BriefingProviderTests(unittest.TestCase):
         self.assertIsNone(self.provider.collect(self.ctx, 0.0))
 
     def test_renders_a_fresh_trend_with_its_basis(self) -> None:
-        store = _swept_store_at(time.time() - 600)
+        store = _swept_store_at(MIDDAY_TS - 600)
         engine_mod._DEFAULT_STORE = store
-        section = self.provider.collect(self.ctx, time.time() - 3600)
+        section = self.provider.collect(self.ctx, MIDDAY_TS - 3600)
         self.assertIsNotNone(section)
         self.assertEqual(section.title, "🔭 Moving in your field")
         self.assertTrue(any("basis:" in ln for ln in section.lines))
@@ -578,28 +594,28 @@ class BriefingProviderTests(unittest.TestCase):
             self.assertNotIn("sweep-", ln)
 
     def test_silent_when_the_trend_predates_the_window(self) -> None:
-        store = _seeded_trend_store(time.time() - 7200)
+        store = _seeded_trend_store(MIDDAY_TS - 7200)
         engine_mod._DEFAULT_STORE = store
         self.assertIsNone(
-            self.provider.collect(self.ctx, time.time() - 60))
+            self.provider.collect(self.ctx, MIDDAY_TS - 60))
 
     def test_silent_when_the_trend_is_stale(self) -> None:
-        store = _seeded_trend_store(time.time() - 10 * 86400)
+        store = _seeded_trend_store(MIDDAY_TS - 10 * 86400)
         engine_mod._DEFAULT_STORE = store
         # Window wide open (since = the evidence era): only the
         # freshness leg can silence it — a 10-day-old trend claim
         # is stale (3-day freshness) and never briefs.
         self.assertIsNone(
-            self.provider.collect(self.ctx, time.time() - 11 * 86400))
+            self.provider.collect(self.ctx, MIDDAY_TS - 11 * 86400))
 
     def test_a_failed_sweep_is_news(self) -> None:
         store = ExploreStore()
-        at = time.time() - 120
+        at = MIDDAY_TS - 120
         sid = store.begin_sweep(trigger="scheduled",
                                 beats=["gold trading"], at=at)
         store.finish_sweep(sid, status="failed", at=at + 5)
         engine_mod._DEFAULT_STORE = store
-        section = self.provider.collect(self.ctx, time.time() - 3600)
+        section = self.provider.collect(self.ctx, MIDDAY_TS - 3600)
         self.assertIsNotNone(section)
         self.assertTrue(any("failed" in ln for ln in section.lines))
 
