@@ -43,12 +43,38 @@ from nomorals.computer.watch import (
 )
 from nomorals.storage.db import Database
 
+from tests.frozen_clock import MIDDAY_TS
+
+# Clock discipline (H24): every direct clock read in this file is
+# a test-side seed, frozen to MIDDAY_TS — no production code is
+# touched. The trace, per read:
+# * _frame() ts — production carries it into last_seen_at
+#   (watch.py:716, `last_seen = frame.ts or time.time()`) and
+#   last_frame_at (:900), but the stall leg only runs when the
+#   producer raises (frame is None), every delivering test ends
+#   via SessionError or cancel while frames keep flowing, and
+#   the ticket/board assertions read only status, counts and
+#   reasons — never last_seen_at / last_frame_at / age_s
+#   (board `live` is status-based, ticket_board.py:130).
+# * _wait_for deadline + the gate_fn t0/elapsed pair — pure
+#   durations, so time.monotonic() (strictly correct, and not
+#   counted by the meta-test).
+# * The orphan-record seed — reconcile_stale copies finished_at
+#   = updated_at or created_at (watch.py:516-519) with no clock
+#   comparison, so the approx(now - 500) assertion holds with
+#   the same frozen value.
+# * The session record's created/last_activity — resolve()
+#   orders by last_activity or created only (sessions.py:193),
+#   _computer_watch_start checks state == "open" only, and
+#   start() reads session.id / mission only; no staleness
+#   comparison exists on the driven path.
+
 # ── fakes ─────────────────────────────────────────────────────────
 
 
 def _frame(hash_: str, title: str = "Editor") -> StreamFrame:
     return StreamFrame(
-        session_id="desk-test", ts=time.time(),
+        session_id="desk-test", ts=MIDDAY_TS,
         frame_path=f"/frames/{hash_}.png", frame_hash=hash_,
         width=1280, height=1024,
         windows=[{"id": 1, "title": title, "focused": True}],
@@ -150,8 +176,8 @@ class _BlockingSurface(_Surface):
 
 
 def _wait_for(pred, timeout: float = 8.0) -> bool:
-    deadline = time.time() + timeout
-    while time.time() < deadline:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if pred():
             return True
         time.sleep(0.01)
@@ -412,7 +438,7 @@ class TestRestart:
         from nomorals.agents.ticket_board import board_rows
 
         store = WatchRecordStore(db)
-        now = time.time()
+        now = MIDDAY_TS
         store.record({
             "watch_id": "cw-orphan", "session_id": "desk-test",
             "label": "", "platform": "telegram",
@@ -466,10 +492,10 @@ class TestBudgetAndGate:
         assert "budget" in record["reason"]
 
     def test_takeover_flips_noted_stream_keeps_flowing(self, db):
-        t0 = time.time()
+        t0 = time.monotonic()
 
         def gate(session_id):
-            elapsed = time.time() - t0
+            elapsed = time.monotonic() - t0
             return {"takeover": 0.2 < elapsed < 0.9,
                     "owner_stop": False, "state": "open"}
 
@@ -518,8 +544,8 @@ class TestChatSurface:
         root.mkdir(parents=True)
         record = {
             "id": "desk-test", "mode": "virtual", "display": ":99",
-            "state": "open", "created": time.time(),
-            "last_activity": time.time(), "mission": "watch me",
+            "state": "open", "created": MIDDAY_TS,
+            "last_activity": MIDDAY_TS, "mission": "watch me",
             "width": 1280, "height": 1024, "xvfb_pid": 0,
             "auth_path": "", "owner_stop": False,
             "takeover": False, "takeover_by": "", "note": "",
