@@ -1,5 +1,1 @@
-{
-  "library": true,
-  "reason": "Cross-domain taste descriptors + representation-feedback learning. New in NEW_MODULES_17; CLI/chat wiring is follow-up.",
-  "owner_decision_needed": "Wire into CLI/chat (preferences commands) or keep as import-only library."
-}
+{"library":true,"owner_decision_needed":"Automatic consumers: music ranking once resolver results carry descriptor axes (genre/energy/tempo), and representation learning once /review records owner feedback with metadata.domain — or keep the owner-driven like/dislike/rank loop. Mongo cutover: inject the sidecar port, or keep the native SQLite path.","reason":"Cross-domain taste descriptors + representation-feedback learning. Wired 2026-11-16 (audit gap R1-18): /prefs list|show|like|dislike|rank|signals|learn over PreferenceStore at <home>/data/preferences.sqlite; like/dislike record signals and rank re-orders supplied candidates by learned weights."}

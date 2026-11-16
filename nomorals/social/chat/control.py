@@ -461,6 +461,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "legacy": (0, None),     # /legacy show|create <owner> | <executor> [| contact | backup]|executor <name> [| contact | backup]|beneficiary <name> [| relationship | share note]|asset <label> [| kind | location hint | instruction]|instruction <text>|witness <name>|seal <text>|reveal|reset yes (owner-only, sealed)
     "family": (0, None),     # /family list|add <person_id> <name> [| role | locale]|revoke <person_id> [reason]|role <person_id> <role>|item <person_id> <kind> <title> [| body | shared|private]|items <person_id>|show <person_id> <item_id>|share <person_id> <item_id>|delete <person_id> <item_id>|audit [n]|check <role> <text>|policy (owner-only, private household)
     "show": (0, None),       # /show list|create <title> [| schedule | voices,comma | bed_track]|show <id>|episode <show_id> <title> [| kind:text | ...]|episodes <show_id>|rss <episode_id>|publish <episode_id>|delete <show_id>|remove <episode_id> (owner-only, podcast/radio shows — audit gap R1-4)
+    "life": (0, None),       # /life list [kind] [n]|add <kind> | <text> [| source | provenance | YYYY-MM-DD]|show <id>|search <query> (owner-only, private life archive — audit gap R1-17)
+    "prefs": (0, None),      # /prefs list|show <domain>|like <domain> | axis:value ...|dislike <domain> | axis:value ...|rank <domain> | <label>=axis:value,... | ...|signals [domain] [n]|learn (owner-only, learned taste — audit gap R1-18)
     "presence": (0, None),   # /presence watch <contact> [status|online|join ...] | unwatch <contact> [status|online|join ...] | list | status (owner-only, presence watch — census §6 #4)
     "publicface": (0, None),  # /publicface list|draft <pack> | <title> | <content>|approve <id>|unpublish <id>|remove <id>|show <id> (owner-only, publishing gate)
     "backup": (0, 1),        # /backup status | verify — read-only backup health (runs need the vault, stay scheduled)
@@ -4669,6 +4671,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/show list | create <title> [| schedule | voices,comma | bed_track] | show <id> | episode <show_id> <title> [| kind:text | ...] | episodes <show_id> | rss <episode_id> | publish <episode_id> | delete <show_id> | remove <episode_id>",
              "example": "/show create Evening Pulse | daily 23:00 | devon,ada",
              "related": "/publicface · /wisdom · /family"},
+    "life": {"what": "Life archive — the private, append-only life log: record events with their source and provenance, recall the timeline or search it. State lives in the home's data/life.sqlite, owner-gated at the organ. Append-only — no delete verb exists by design. Owner-only.",
+             "usage": "/life list [kind] [n] | add <kind> | <text> [| source | provenance | YYYY-MM-DD] | show <id> | search <query>",
+             "example": "/life add milestone | shipped the first Devon build | chat",
+             "related": "/memories · /decisions · /family"},
+    "prefs": {"what": "Learned taste — per-domain descriptor weights learned from explicit approve/disapprove signals, starting at zero. Teach it with like/dislike, rank candidates against what it learned, and pull owner feedback from the representation ledger with learn. State lives in the home's data/preferences.sqlite. Owner-only.",
+              "usage": "/prefs list | show <domain> | like <domain> | axis:value ... | dislike <domain> | axis:value ... | rank <domain> | <label>=axis:value,... | ... | signals [domain] [n] | learn",
+              "example": "/prefs like music | genre:afrobeats | energy:high",
+              "related": "/review · /play · /dj"},
     "presence": {"what": "Presence watch (census §6 #4) — alert when a named contact posts a status, comes online, or joins a channel she follows, across WhatsApp and Telegram. One alert per episode, delivered to your DM. WhatsApp status and joins fire live; Telegram online fires live off UserUpdate events; Telegram story watches fire when status saving is on. WhatsApp online can't be watched — neither bridge forwards contact presence. Owner-only.",
                 "usage": "/presence watch <contact> [status|online|join ...] | unwatch <contact> [status|online|join ...] | list | status",
                 "example": "/presence watch @zoey online join",
@@ -4692,7 +4702,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "checkpoint", "checkpoints", "rewind", "novel"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
                            "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible",
-                           "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "presence", "publicface"]),
+                           "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
                           "balances", "goal", "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
     ("games — 41, DM + group, start them directly",
@@ -5029,7 +5039,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
-      "immune", "impossible", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "presence", "publicface"]),
+      "immune", "impossible", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -5542,6 +5552,8 @@ LIST_ONELINERS: dict[str, str] = {
     "legacy": "digital will (owner-only, sealed): /legacy create <owner> | <executor> [| contact | backup] | beneficiary <name> | asset <label> | instruction <text> | witness <name> | seal <text> | reveal | show | reset yes",
     "family": "family mode — the private household: /family list | add <person_id> <name> [| role | locale] | revoke <person_id> | role <person_id> <role> | item <person_id> <kind> <title> [| body | shared|private] | items <person_id> | show <person_id> <item_id> | share <person_id> <item_id> | delete <person_id> <item_id> | audit [n] | check <role> <text> | policy (owner-only)",
     "show": "shows — podcast/radio programmes: /show list | create <title> [| schedule | voices,comma | bed_track] | show <id> | episode <show_id> <title> [| kind:text | ...] | episodes <show_id> | rss <episode_id> | publish <episode_id> | delete <show_id> | remove <episode_id> (owner-only)",
+    "life": "life archive — the private, append-only life log (owner-only): /life list [kind] [n] | add <kind> | <text> [| source | provenance | YYYY-MM-DD] | show <id> | search <query>",
+    "prefs": "learned taste (owner-only): /prefs list | show <domain> | like <domain> | axis:value ... | dislike <domain> | axis:value ... | rank <domain> | <label>=axis:value,... | ... | signals [domain] [n] | learn",
     "presence": "presence watch (owner-only): /presence watch <contact> [status|online|join ...] | unwatch <contact> [status|online|join ...] | list | status — alert when a named contact posts a status, comes online, or joins a channel",
     "ghealth": "WhatsApp group health (admins): /ghealth [name] [refresh] — churn, activity rhythm and silent members from the records already kept",
     "publicface": "public face — owner-approved publishing gate: /publicface list | draft <pack> | <title> | <content> | approve <id> | unpublish <id> | remove <id> | show <id>",

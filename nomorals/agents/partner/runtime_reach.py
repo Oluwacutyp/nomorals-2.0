@@ -2407,6 +2407,356 @@ class RuntimeReachMixin:
         except (ValueError, KeyError) as exc:
             return str(exc)
 
+    def _life_archive(self) -> Any:
+        """LifeArchive on the durable home path (life-archive wiring)."""
+        from ...life.archive import LifeArchive
+
+        data = self.context.settings.home_path / "data"
+        data.mkdir(parents=True, exist_ok=True)
+        return LifeArchive(str(data / "life.sqlite"))
+
+    def _resolve_life_event(self, archive: Any, ref: str) -> Any:
+        """Exact event id, else unique id-prefix, else None."""
+        ref = (ref or "").strip()
+        hit = archive.get(ref, owner=True)
+        if hit is not None:
+            return hit
+        matches = [e for e in archive.timeline(limit=500, owner=True)
+                   if str(e.get("id", "")).startswith(ref)]
+        return matches[0] if len(matches) == 1 else None
+
+    @staticmethod
+    def _life_lines(events: list) -> list[str]:
+        """One line per event: date, kind, text, source, id."""
+        import datetime as _dt
+
+        wat = _dt.timezone(_dt.timedelta(hours=1))
+        lines = []
+        for event in events:
+            when = _dt.datetime.fromtimestamp(
+                float(event.get("ts") or 0), tz=wat).strftime("%Y-%m-%d %H:%M")
+            line = (f"  {when} — {event.get('kind', '')} — "
+                    f"{event.get('text', '')}")
+            if event.get("source"):
+                line += f" (source: {event['source']}"
+                if event.get("provenance"):
+                    line += f", provenance: {event['provenance']}"
+                line += ")"
+            line += f" [{event.get('id', '')}]"
+            lines.append(line)
+        return lines
+
+    def _control_life(self, tail: str, *, chat_key: str = "") -> str:
+        """Life archive: /life list|add|show|search.
+
+        The audit gap R1-17 organ (nomorals/life/archive.py) had no
+        production importer at all — no way to log or recall a life
+        event. This is its surface. Events live in
+        <home>/data/life.sqlite (the organ's own durable store;
+        the Mongo sidecar port is a cutover concern, not this
+        wiring — the native SQLite path serves the default).
+        Owner-only: the kind is absent from PUBLIC_COMMANDS, so
+        caller_may_run denies non-owners before this runs, and
+        every organ call passes owner=True. Append-only by design:
+        the organ has no delete method and neither does this
+        surface.
+        """
+        import datetime as _dt
+
+        usage = ("usage: /life list [kind] [n] | add <kind> | <text> "
+                 "[| source | provenance | YYYY-MM-DD] | show <id> "
+                 "| search <query>")
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1] if len(parts) > 1 else ""
+        try:
+            archive = self._life_archive()
+        except Exception as exc:  # noqa: BLE001 - archive never breaks chat
+            return f"life archive unavailable: {exc}"
+        try:
+            if verb in ("list", ""):
+                kind = None
+                limit = 10
+                for token in rest.split():
+                    if token.isdigit():
+                        limit = max(1, int(token))
+                    elif kind is None:
+                        kind = token
+                rows = archive.timeline(limit=limit, kind=kind, owner=True)
+                if not rows:
+                    return ("no events yet — /life add <kind> <text> "
+                            "records one.")
+                lines = [f"life events ({len(rows)}"
+                         + (f" — {kind}" if kind else "") + "):"]
+                lines.extend(self._life_lines(rows))
+                return "\n".join(lines)
+            if verb == "add":
+                fields = [f.strip() for f in rest.split("|")]
+                kind = fields[0] if fields else ""
+                text = fields[1] if len(fields) > 1 else ""
+                if not kind or not text:
+                    return ("usage: /life add <kind> | <text> [| source | "
+                            "provenance | YYYY-MM-DD]")
+                source = fields[2] if len(fields) > 2 and fields[2] else "chat"
+                provenance = fields[3] if len(fields) > 3 else ""
+                ts: float | None = None
+                if len(fields) > 4 and fields[4]:
+                    try:
+                        day = _dt.datetime.strptime(
+                            fields[4], "%Y-%m-%d")
+                    except ValueError:
+                        return ("bad date — use YYYY-MM-DD, e.g. "
+                                "/life add milestone | won the case | "
+                                "journal | court:2026-11-13 | 2026-11-13")
+                    wat = _dt.timezone(_dt.timedelta(hours=1))
+                    ts = day.replace(tzinfo=wat).timestamp()
+                event_id = archive.record_event(
+                    source, kind, text, ts=ts, provenance=provenance,
+                    owner=True)
+                return f"recorded: {event_id} — {kind}"
+            if verb == "show":
+                event = self._resolve_life_event(archive, rest)
+                if event is None:
+                    return (f"no event matching {rest.strip()!r} — "
+                            "/life list shows ids.")
+                return "\n".join(self._life_lines([event]))
+            if verb == "search":
+                if not rest.strip():
+                    return "usage: /life search <query>"
+                rows = archive.search(rest.strip(), owner=True)
+                if not rows:
+                    return (f"no events matching {rest.strip()!r}.")
+                lines = [f"matches ({len(rows)}):"]
+                lines.extend(self._life_lines(rows[:10]))
+                return "\n".join(lines)
+            return usage
+        except (ValueError, KeyError, PermissionError) as exc:
+            return str(exc)
+
+    def _prefs_store(self) -> Any:
+        """PreferenceStore on the durable home path (preferences wiring)."""
+        from ...preferences.store import PreferenceStore
+
+        data = self.context.settings.home_path / "data"
+        data.mkdir(parents=True, exist_ok=True)
+        return PreferenceStore(str(data / "preferences.sqlite"))
+
+    @staticmethod
+    def _prefs_parse_pairs(fields: list[str]) -> dict[str, Any] | None:
+        """``axis:value`` fields → item dict (repeat axis → list)."""
+        item: dict[str, Any] = {}
+        for field in fields:
+            if ":" not in field:
+                return None
+            axis, _, value = field.partition(":")
+            axis = axis.strip().lower()
+            value = value.strip()
+            if not axis or not value:
+                return None
+            if axis in item:
+                if isinstance(item[axis], list):
+                    item[axis].append(value)
+                else:
+                    item[axis] = [item[axis], value]
+            else:
+                item[axis] = value
+        return item
+
+    def _control_prefs(self, tail: str, *, chat_key: str = "") -> str:
+        """Preferences: /prefs list|show|like|dislike|rank|signals|learn.
+
+        The audit gap R1-18 organ (nomorals/preferences/) had zero
+        consumers — Devon never learned what the owner likes. This
+        is its surface, and its first consumer: ``like``/``dislike``
+        record explicit approve/disapprove signals through
+        ``record_signal`` (approve +1.0, disapprove -1.5), and
+        ``rank`` re-orders owner-supplied candidates with
+        ``suggest`` — the feedback module's own contract (rank
+        supplied candidates, never invent them). Weights start at
+        zero and only move on real signals. ``learn`` pulls owner
+        feedback out of the representation ledger through
+        ``learn_from_representation``. State lives in
+        <home>/data/preferences.sqlite (the organ's own durable
+        store; the Mongo sidecar port is a cutover concern).
+        Owner-only: the kind is absent from PUBLIC_COMMANDS, so
+        caller_may_run denies non-owners before this runs.
+        """
+        from ...preferences.feedback import (
+            learn_from_representation,
+            record_signal,
+            suggest,
+        )
+        from ...preferences.store import DOMAIN_DESCRIPTORS
+
+        usage = ("usage: /prefs list | show <domain> | like <domain> "
+                 "| axis:value ... | dislike <domain> | axis:value ... "
+                 "| rank <domain> | <label>=axis:value,... | ... "
+                 "| signals [domain] [n] | learn")
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1] if len(parts) > 1 else ""
+        try:
+            store = self._prefs_store()
+        except Exception as exc:  # noqa: BLE001 - prefs never break chat
+            return f"preferences unavailable: {exc}"
+        try:
+            if verb in ("list", ""):
+                lines = ["preferences (learned weights):"]
+                any_learned = False
+                for domain in store.domains():
+                    weights = store.get_weights(domain)
+                    learned = sum(
+                        1 for bucket in weights.values()
+                        for w in bucket.values() if w != 0.0)
+                    count = len(store.signals(domain))
+                    if learned:
+                        any_learned = True
+                    lines.append(f"  {domain}: {learned} learned "
+                                 f"weight(s), {count} signal(s)")
+                if not any_learned:
+                    lines.append("no learned weights yet — /prefs like "
+                                 "<domain> | axis:value ... teaches it.")
+                return "\n".join(lines)
+            if verb == "show":
+                domain = rest.strip().split()[0] if rest.strip() else ""
+                if domain not in DOMAIN_DESCRIPTORS:
+                    return ("unknown domain "
+                            f"{domain!r} — known: "
+                            + ", ".join(store.domains()))
+                descriptor = store.describe(domain) or {}
+                weights = store.get_weights(domain)
+                lines = [f"{domain} — "
+                         + ", ".join(descriptor.get("axes", []))]
+                shown = False
+                for axis in descriptor.get("axes", []):
+                    for value, weight in sorted(
+                            weights.get(axis, {}).items()):
+                        if weight != 0.0:
+                            lines.append(f"  {axis}:{value} "
+                                         f"{weight:+.1f}")
+                            shown = True
+                if not shown:
+                    lines.append("no learned weights yet — /prefs like "
+                                 f"{domain} | axis:value ... teaches it.")
+                return "\n".join(lines)
+            if verb in ("like", "dislike"):
+                fields = [f.strip() for f in rest.split("|")]
+                domain = fields[0] if fields else ""
+                if domain not in DOMAIN_DESCRIPTORS:
+                    return ("unknown domain "
+                            f"{domain!r} — known: "
+                            + ", ".join(store.domains())
+                            + "\n" + usage)
+                item = self._prefs_parse_pairs(fields[1:])
+                if not item:
+                    return ("usage: /prefs " + verb + " <domain> "
+                            "| axis:value [| axis:value ...]")
+                descriptor = store.describe(domain) or {}
+                unknown = [a for a in item
+                           if a not in descriptor.get("axes", [])]
+                if unknown:
+                    return ("unknown axis for " + domain + ": "
+                            + ", ".join(unknown) + " — known axes: "
+                            + ", ".join(descriptor.get("axes", [])))
+                result = record_signal(
+                    store, domain, item, verb == "like", source="chat")
+                lines = [f"recorded: {domain} — "
+                         + ("approve (+1.0)" if verb == "like"
+                            else "disapprove (-1.5)")]
+                for axis, values in sorted(
+                        result.get("updates", {}).items()):
+                    for value, weight in sorted(values.items()):
+                        lines.append(f"  {axis}:{value} now {weight:+.1f}")
+                if not result.get("updates"):
+                    lines.append("no known axes in the item — nothing "
+                                 "learned (signal logged).")
+                return "\n".join(lines)
+            if verb == "rank":
+                fields = [f.strip() for f in rest.split("|")]
+                domain = fields[0] if fields else ""
+                if domain not in DOMAIN_DESCRIPTORS:
+                    return ("unknown domain "
+                            f"{domain!r} — known: "
+                            + ", ".join(store.domains())
+                            + "\n" + usage)
+                if len(fields) < 2:
+                    return ("usage: /prefs rank <domain> "
+                            "| <label>=axis:value,... | ...")
+                candidates: list[dict[str, Any]] = []
+                for index, field in enumerate(fields[1:], 1):
+                    label, sep, axes_text = field.partition("=")
+                    if not sep:
+                        axes_text = label
+                        label = f"candidate {index}"
+                    pairs = [p.strip() for p in axes_text.split(",")
+                             if p.strip()]
+                    item = self._prefs_parse_pairs(pairs)
+                    if item is None:
+                        return ("bad candidate "
+                                f"{field!r} — use "
+                                "axis:value,axis:value")
+                    item["title"] = label.strip()
+                    candidates.append(item)
+                ranked = suggest(store, domain, candidates)
+                lines = [f"ranked ({domain}):"]
+                for position, row in enumerate(ranked, 1):
+                    item = row["item"]
+                    lines.append(f"  {position}. {item.get('title', '?')} "
+                                 f"— {row['score']:+.1f}")
+                return "\n".join(lines)
+            if verb == "signals":
+                domain = None
+                limit = 5
+                for token in rest.split():
+                    if token.isdigit():
+                        limit = max(1, int(token))
+                    elif domain is None:
+                        domain = token
+                if domain is not None and domain not in DOMAIN_DESCRIPTORS:
+                    return ("unknown domain "
+                            f"{domain!r} — known: "
+                            + ", ".join(store.domains()))
+                rows = store.signals(domain)
+                if not rows:
+                    return "no signals yet — /prefs like teaches it."
+                import datetime as _dt
+                import json as _json
+
+                wat = _dt.timezone(_dt.timedelta(hours=1))
+                lines = [f"signals ({len(rows)}"
+                         + (f" — {domain}" if domain else "") + "):"]
+                for row in rows[-limit:][::-1]:
+                    when = _dt.datetime.fromtimestamp(
+                        float(row.get("created_at") or 0),
+                        tz=wat).strftime("%Y-%m-%d %H:%M")
+                    verdict = ("approve" if row.get("approve")
+                               else "disapprove")
+                    item_text = _json.dumps(
+                        row.get("item") or {}, ensure_ascii=False)[:120]
+                    lines.append(f"  {when} {row.get('domain', '')} "
+                                 f"{verdict} {row.get('delta', 0.0):+.1f} "
+                                 f"[{row.get('source', '')}] {item_text}")
+                return "\n".join(lines)
+            if verb == "learn":
+                from ...cognition.representation import _ledger_for
+
+                settings = getattr(self.context, "settings", None)
+                ledger = _ledger_for(settings)
+                result = learn_from_representation(
+                    store, ledger.recent(limit=200))
+                out = (f"learned from the representation ledger: "
+                       f"recorded {result.get('recorded', 0)}, "
+                       f"skipped {result.get('skipped', 0)}.")
+                if not result.get("recorded"):
+                    out += ("\n  nothing carried a preference domain + "
+                            "owner feedback yet — the ledger only learns "
+                            "once actions carry metadata.domain and "
+                            "feedback is recorded on them.")
+                return out
+            return usage
+        except (ValueError, KeyError) as exc:
+            return str(exc)
+
     def _presence_watch_store(self) -> Any:
         """PresenceWatchStore on the durable home path."""
         from ...social.presence_watch import PresenceWatchStore

@@ -1,5 +1,1 @@
-{
-  "library": true,
-  "reason": "Owner-only personal archive timeline. New in NEW_MODULES_17; CLI/chat wiring is follow-up.",
-  "owner_decision_needed": "Wire into CLI/chat (life archive commands) or keep as import-only library."
-}
+{"library":true,"owner_decision_needed":"Mongo cutover: inject the sidecar port (life-archive__life_events) at cutover, or keep the native SQLite path as the store.","reason":"Owner-only personal archive timeline. Wired 2026-11-16 (audit gap R1-17): /life list|add|show|search over LifeArchive at <home>/data/life.sqlite."}

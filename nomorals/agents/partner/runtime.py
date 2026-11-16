@@ -9296,6 +9296,10 @@ class PartnerRuntime(
             return self._control_family(command.tail or arg, chat_key=chat_key)
         if kind == "show":
             return self._control_show(command.tail or arg, chat_key=chat_key)
+        if kind == "life":
+            return self._control_life(command.tail or arg, chat_key=chat_key)
+        if kind == "prefs":
+            return self._control_prefs(command.tail or arg, chat_key=chat_key)
         if kind == "presence":
             return self._control_presence(command.tail or arg, chat_key=chat_key)
         if kind == "publicface":
