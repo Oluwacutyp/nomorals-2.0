@@ -32,11 +32,38 @@ import json
 import stat
 import subprocess
 import sys
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+from tests.frozen_clock import MIDDAY_TS
+
+# All clock reads in this file are frozen (MIDDAY_TS, 2026-10-14 noon) —
+# every one was traced through production before freezing, and each
+# frozen value preserves the exact comparison outcome:
+# - _doomed seeds (MIDDAY - 90d): MemoryCurator forgets by
+#   recency(half_life) * importance < 0.08, and recency only shrinks
+#   with age, so a 122-day-old record is at least as doomed as a
+#   90-day-old one.
+# - Core scheduler seeds + now args: _fire_cron compares only the
+#   DELTA (lateness = now - next_run) against stale_after_s (24h) and
+#   the skip policy (lateness > 0) — freezing both sides keeps the
+#   delta exact (90000s > 86400s missed; 120s > 0 skipped). The
+#   overlap test never reaches the clock (in-flight decision first);
+#   the real-run test fires because a negative lateness falls through
+#   to fire_now. _record_run only records the timestamp (the AA-67
+#   guard forces ok off for non-run statuses from the status arg,
+#   never from the clock).
+# - Agents scheduler seeds + now args: _apply_missed_fire compares
+#   only lateness against the skip policy; _skip_blackout /
+#   _skip_overlap record unconditionally (no clock comparison).
+# - Chat-profile seeds: _stale_markers compares the failure's
+#   real-clock failed_at against the seeded updated_at (a real-now
+#   failure is always later than a MIDDAY seed, so markers still
+#   land), and profile_age_s is only asserted as >= 3500 (a MIDDAY
+#   seed reads ~2.8M seconds old on the real clock). first_seen feeds
+#   only the unasserted msgs_per_day / activity_label garnish.
 
 _TREE_ROOT = Path(__file__).resolve().parents[1]
 
@@ -262,7 +289,7 @@ def _doomed(memory, content):
                           importance=0.01, source="test")
     memory.db.execute(
         "UPDATE memories SET created_at = ? WHERE id = ?",
-        (time.time() - 90 * 86400, rid))
+        (MIDDAY_TS - 90 * 86400, rid))
     return rid
 
 
@@ -388,9 +415,9 @@ class TestCoreSchedulerRunTruth:
         sched, db, _calls = _core_scheduler()
         job = asyncio.run(sched.schedule_cron(None, "* * * * *", "ok"))
         db.execute("UPDATE cron_jobs SET next_run = ? WHERE task_id = ?",
-                   (time.time() - 90000, job.task_id))
+                   (MIDDAY_TS - 90000, job.task_id))
         ran = asyncio.run(
-            sched._fire_cron(_core_cron_row(db, job.task_id), time.time()))
+            sched._fire_cron(_core_cron_row(db, job.task_id), MIDDAY_TS))
         assert ran is False
         runs = sched.recent_runs(job.task_id)
         assert runs[0]["status"] == "missed"
@@ -401,9 +428,9 @@ class TestCoreSchedulerRunTruth:
         job = asyncio.run(sched.schedule_cron(
             None, "* * * * *", "ok", missed_fire_policy="skip"))
         db.execute("UPDATE cron_jobs SET next_run = ? WHERE task_id = ?",
-                   (time.time() - 120, job.task_id))
+                   (MIDDAY_TS - 120, job.task_id))
         ran = asyncio.run(
-            sched._fire_cron(_core_cron_row(db, job.task_id), time.time()))
+            sched._fire_cron(_core_cron_row(db, job.task_id), MIDDAY_TS))
         assert ran is False
         runs = sched.recent_runs(job.task_id)
         assert runs[0]["status"] == "skipped"
@@ -414,7 +441,7 @@ class TestCoreSchedulerRunTruth:
         job = asyncio.run(sched.schedule_cron(None, "* * * * *", "ok"))
         sched._mark_flight(job.task_id, True)
         ran = asyncio.run(
-            sched._fire_cron(_core_cron_row(db, job.task_id), time.time()))
+            sched._fire_cron(_core_cron_row(db, job.task_id), MIDDAY_TS))
         assert ran is False
         runs = sched.recent_runs(job.task_id)
         assert runs[0]["status"] == "skipped"
@@ -424,7 +451,7 @@ class TestCoreSchedulerRunTruth:
         sched, db, calls = _core_scheduler()
         job = asyncio.run(sched.schedule_cron(None, "* * * * *", "ok"))
         ran = asyncio.run(
-            sched._fire_cron(_core_cron_row(db, job.task_id), time.time()))
+            sched._fire_cron(_core_cron_row(db, job.task_id), MIDDAY_TS))
         assert ran is True and len(calls) == 1
         runs = sched.recent_runs(job.task_id)
         assert runs[0]["status"] == "ran"
@@ -432,7 +459,7 @@ class TestCoreSchedulerRunTruth:
 
     def test_record_run_guard_never_journals_a_non_run_as_ok(self):
         sched, db, _calls = _core_scheduler()
-        sched._record_run("t1", time.time(), 0.0, True,
+        sched._record_run("t1", MIDDAY_TS, 0.0, True,
                           "skipped: forced", "tick", status="skipped")
         row = db.query_one("SELECT ok, status FROM task_runs "
                            "WHERE task_id = 't1'")
@@ -473,9 +500,9 @@ class TestAgentsSchedulerRunTruth:
         with sched.db.transaction():
             sched.db.execute(
                 "UPDATE schedule_jobs SET next_run = ? WHERE id = ?",
-                (time.time() - 7200, job["id"]))
+                (MIDDAY_TS - 7200, job["id"]))
         out = sched._apply_missed_fire(
-            _agents_row(sched, job["id"]), time.time())
+            _agents_row(sched, job["id"]), MIDDAY_TS)
         assert out is None  # nothing executed
         runs = sched.recent_runs(job["id"])
         assert runs[0]["status"] == "skipped"
@@ -485,8 +512,8 @@ class TestAgentsSchedulerRunTruth:
         sched = _agents_scheduler()
         job = sched.add("skip job", "every 1h", "tool", {"tool": "echo"})
         row = _agents_row(sched, job["id"])
-        sched._skip_blackout(row, time.time())
-        sched._skip_overlap(row, time.time())
+        sched._skip_blackout(row, MIDDAY_TS)
+        sched._skip_overlap(row, MIDDAY_TS)
         runs = sched.recent_runs(job["id"])
         assert [r["status"] for r in runs] == ["skipped", "skipped"]
         assert all(r["ok"] is False for r in runs)
@@ -503,7 +530,7 @@ class TestAgentsSchedulerRunTruth:
     def test_record_run_guard(self):
         sched = _agents_scheduler()
         job = sched.add("guard job", "every 1h", "tool", {"tool": "echo"})
-        sched._record_run(job["id"], time.time(), 0.0, True,
+        sched._record_run(job["id"], MIDDAY_TS, 0.0, True,
                           "skipped: forced", 0, "tick", status="skipped")
         runs = sched.recent_runs(job["id"])
         assert runs[0]["status"] == "skipped"
@@ -551,7 +578,7 @@ def _seed_profile(db, updated_at):
     db.row = {
         "profile_json": json.dumps(
             {"participants": {"amy": 5}, "topics": ["gold"],
-             "first_seen": time.time() - 86400}),
+             "first_seen": MIDDAY_TS - 86400}),
         "message_count": 5,
         "updated_at": updated_at,
     }
@@ -561,7 +588,7 @@ class TestChatProfileStaleness:
     def test_failed_refresh_marks_the_stored_profile_stale(self):
         from nomorals.partner import chat_profile as cp
         db = _ProfileDB(messages=[{"name": "amy", "content": "gold"}])
-        _seed_profile(db, time.time() - 3600)
+        _seed_profile(db, MIDDAY_TS - 3600)
         db.fail_aggregate = True
         out = cp.refresh_profile(db, "chat-1")
         # the fallback copy itself carries the truth
@@ -579,7 +606,7 @@ class TestChatProfileStaleness:
         from nomorals.partner import chat_profile as cp
         msgs = [{"name": "amy", "content": "gold gold rally"}] * 3
         db = _ProfileDB(messages=msgs)
-        _seed_profile(db, time.time() - 3600)
+        _seed_profile(db, MIDDAY_TS - 3600)
         db.fail_aggregate = True
         assert cp.refresh_profile(db, "chat-2")["stale"] is True
         db.fail_aggregate = False
