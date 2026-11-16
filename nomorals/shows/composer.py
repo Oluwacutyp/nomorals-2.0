@@ -54,6 +54,14 @@ class Show:
     voices: list[str] = field(default_factory=list)
     bed_track: str = ""
     rss_url: str = ""
+    # Scheduling state (shows/scheduling.py): the ISO timestamp of
+    # the last slot an episode was composed for (the durable
+    # watermark — a restart never double-creates a slot), and the
+    # last skip reason (an unparseable schedule, or a due slot with
+    # no material to read). Empty until the tick first touches the
+    # show; old rows load with both blank.
+    sched_last_slot: str = ""
+    sched_note: str = ""
 
     def __post_init__(self) -> None:
         if not self.title.strip():
@@ -64,6 +72,8 @@ class Show:
             "id": self.id, "title": self.title, "schedule": self.schedule,
             "voices": list(self.voices), "bed_track": self.bed_track,
             "rss_url": self.rss_url,
+            "sched_last_slot": self.sched_last_slot,
+            "sched_note": self.sched_note,
         }
 
 

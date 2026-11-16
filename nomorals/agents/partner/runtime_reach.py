@@ -2282,6 +2282,12 @@ class RuntimeReachMixin:
                                  + ", ".join(show["voices"]))
                 if show.get("bed_track"):
                     lines.append(f"  bed track: {show['bed_track']}")
+                if show.get("sched_last_slot"):
+                    lines.append("  last scheduled: "
+                                 + str(show["sched_last_slot"]))
+                if show.get("sched_note"):
+                    lines.append("  schedule note: "
+                                 + str(show["sched_note"]))
                 if not episodes:
                     lines.append("  no episodes yet — /show episode "
                                  f"{show['id']} <title> | <script text> "

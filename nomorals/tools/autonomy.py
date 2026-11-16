@@ -137,6 +137,75 @@ def interests(context: Any, limit: int = 10) -> dict[str, Any]:
     }
 
 
+def _show_pulse_sections(context: Any) -> list[dict[str, Any]]:
+    """The morning pulse as show segments: the latest STORED briefing's
+    sections (read-only — the tick never re-renders or re-sends a
+    briefing). The explore-trends section is skipped here because the
+    research reader covers the same claims fresher. Empty when no
+    briefing has ever been stored. Never raises.
+    """
+    try:
+        from ..agents.morning_briefing import latest_briefing
+    except Exception:  # noqa: BLE001 - no briefing module, no pulse
+        return []
+    try:
+        briefing = latest_briefing(context)
+    except Exception:  # noqa: BLE001 - unreadable briefing, no pulse
+        return []
+    if not briefing:
+        return []
+    out: list[dict[str, Any]] = []
+    for section in (briefing.get("sections") or []):
+        if not isinstance(section, dict):
+            continue
+        if str(section.get("name") or "") == "explore_trends":
+            continue
+        lines = [str(line) for line in (section.get("lines") or [])
+                 if str(line).strip()]
+        if not lines:
+            continue
+        title = str(section.get("title") or section.get("name")
+                    or "Briefing")
+        out.append({"title": title,
+                    "text": f"{title}: " + " ".join(lines)})
+        if len(out) >= 8:
+            break
+    return out
+
+
+def _show_research_sections(context: Any) -> list[dict[str, Any]]:
+    """Fresh exploration claims as show segments — the same read the
+    briefing's ExploreTrendsProvider performs (shared explore store,
+    CLAIM_TREND, standing fresh, observed in the last 24h). Empty
+    when the field is quiet. Never raises.
+    """
+    try:
+        from ..agents.morning_briefing import _explore_claim_line
+        from ..media.explore import default_explore_store
+        from ..media.explore.trends import CLAIM_TREND, current_claims
+    except Exception:  # noqa: BLE001 - no explore store, no research
+        return []
+    try:
+        import time as _time
+
+        store = default_explore_store()
+        db = getattr(context, "db", None)
+        if db is not None:
+            from ..storage.kv import KVStore
+
+            store.bind_store(KVStore(db))
+        now = _time.time()
+        fresh = [c for c in current_claims(store, now=now)
+                 if c.get("kind") == CLAIM_TREND
+                 and c.get("standing") == "fresh"
+                 and float(c.get("observed_at") or 0) >= now - 86400.0]
+        return [{"title": "Research",
+                 "text": _explore_claim_line(claim)}
+                for claim in fresh[:3]]
+    except Exception:  # noqa: BLE001 - unreadable claims, no research
+        return []
+
+
 TOOLS = {
     "weakness_list": {
         "fn": weakness_list,
@@ -538,6 +607,30 @@ def register(registry: Any) -> None:
         except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
             return {"ok": False,
                     "error": f"group rhythm tick failed: {exc}"}
+
+    @registry.register(
+        "__show_schedule_tick__",
+        description="Run one show-schedule tick: compose a DRAFT "
+        "episode for every show whose schedule is due, from the "
+        "latest stored morning briefing (the pulse) and fresh "
+        "exploration claims (the research). Scheduler-internal; "
+        "runs every ~15m. Routine and silent — it never publishes "
+        "and never posts anywhere; publishing stays the owner's "
+        "tap on /show publish.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _show_schedule_tick_tool() -> dict[str, Any]:
+        from ..shows.scheduling import run_show_schedule_tick_once
+
+        try:
+            return run_show_schedule_tick_once(
+                context=_context,
+                pulse=lambda: _show_pulse_sections(_context),
+                research=lambda: _show_research_sections(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"show schedule tick failed: {exc}"}
 
     @registry.register(
         "__delegation_manager_tick__",

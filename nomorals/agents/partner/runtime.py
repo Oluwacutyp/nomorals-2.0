@@ -3810,6 +3810,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "orchestration job not registered: %s", exc)
+                # Show scheduling: one durable "show schedule tick"
+                # job (every 15m) composing a DRAFT episode for every
+                # show whose schedule is due, from the morning pulse
+                # + research. The tick never publishes — publishing
+                # stays the owner's tap on /show publish. Idempotent;
+                # best-effort.
+                try:
+                    from ...shows.scheduling import ensure_show_schedule_job
+
+                    ensure_show_schedule_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "show schedule tick job not registered: %s", exc)
             except Exception as exc:  # noqa: BLE001 - scheduler is optional
                 _log.warning("scheduler failed to start: %s", exc)
                 self._scheduler = None
