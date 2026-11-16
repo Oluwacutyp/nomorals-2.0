@@ -170,7 +170,21 @@ class RuntimeLiveMixin:
         renders them, route accepts them as endpoints, and
         re-marking a label moves the mark.  Capture is armed
         intent only — a location share never creates a mark
-        unarmed."""
+        unarmed.
+
+        /map fence (audit gap R1-45) is arrival / departure
+        alerts over the location geofence organ: /map fence add
+        circle|polygon saves a fence, /map fence list shows it
+        with its live state, /map fence remind saves a fire-once
+        reminder that speaks when the fence is entered or left.
+        The add command IS the opt-in grant (scope "geofence",
+        reminders "reminders") — the same shape as /map share.
+        Every location the owner sends in chat is evaluated
+        against his fences by :meth:`_maybe_fence_update`, which
+        runs on the same inbound seam as the mark + share hooks;
+        consent is re-checked at evaluation time, a stranger's
+        location never touches his fences, and events go out
+        through the notifier (never a reply in the room)."""
         from ...maps.settings import map_settings
 
         tail = (tail or "").strip()
@@ -185,7 +199,13 @@ class RuntimeLiveMixin:
                     "/map overlay add <name> <lat,lon> [label]  |  "
                     "/map overlay drop <name>  |  "
                     "/map mark <label>  |  /map marks  |  "
-                    "/map unmark <label>")
+                    "/map unmark <label>  |  "
+                    "/map fence add circle <lat,lon> <radius_m> <label>  |  "
+                    "/map fence add polygon <lat,lon>;<lat,lon>;... <label>  |  "
+                    "/map fence list  |  /map fence remove <id|label>  |  "
+                    "/map fence remind <fence> <enter|exit> <message>  |  "
+                    "/map fence reminders  |  /map fence unremind <id>  |  "
+                    "/map fence rearm <id>")
         is_owner = True if message is None else self._is_operator(message)
         if not is_owner:
             return ("owner-only: Atlas renders the owner's installed "
@@ -217,6 +237,8 @@ class RuntimeLiveMixin:
             return self._map_marks()
         if verb == "unmark":
             return self._map_unmark(rest.strip())
+        if verb == "fence":
+            return self._map_fence(rest.strip())
         return (f"unknown /map verb {verb!r} — /map packs | "
                 "/map view <lat,lon> [zoom] | /map find <place name> | "
                 "/map near <lat,lon> | "
@@ -226,7 +248,254 @@ class RuntimeLiveMixin:
                 "/map overlay list | /map overlay show <name> | "
                 "/map overlay add <name> <lat,lon> [label] | "
                 "/map overlay drop <name> | /map mark <label> | "
-                "/map marks | /map unmark <label>")
+                "/map marks | /map unmark <label> | "
+                "/map fence add circle <lat,lon> <radius_m> <label> | "
+                "/map fence add polygon <lat,lon>;<lat,lon>;... <label> | "
+                "/map fence list | /map fence remove <id|label> | "
+                "/map fence remind <fence> <enter|exit> <message> | "
+                "/map fence reminders | /map fence unremind <id> | "
+                "/map fence rearm <id>")
+
+    def _fence_store(self):
+        """The FenceStore over the location root — the same root
+        the broker and ConsentStore use, so fences, consent and
+        live shares agree on where state lives."""
+        from pathlib import Path
+
+        from ...location.fences import FenceStore
+        from ...location.privacy import default_location_root
+
+        settings = getattr(self.context, "settings", None)
+        home = getattr(settings, "home_path", None)
+        root = (Path(home) / "location") if home \
+            else default_location_root()
+        return FenceStore(root)
+
+    def _map_fence(self, spec: str) -> str:
+        """`/map fence ...` — geofence + reminder verbs (R1-45).
+
+        add circle|polygon saves a fence (and IS the opt-in
+        grant, scope "geofence", mirroring /map share); list
+        shows fences with their live inside/outside state;
+        remove drops a fence and its reminders; remind saves a
+        fire-once reminder (and grants scope "reminders");
+        reminders lists them; unremind drops one; rearm makes a
+        fired one fireable again. Bad geometry is refused with
+        the reason named; resolve is by exact id, unique id
+        prefix, or exact label."""
+        import time as _time
+
+        from ...location.fences import (
+            SCOPE_GEOFENCE,
+            SCOPE_REMINDERS,
+            new_fence_id,
+            new_reminder_id,
+        )
+        from ...location.geofence import circle_fence, polygon_fence
+        from ...location.primitives import LatLon
+        from ...location.privacy import ConsentStore
+        from ...location.reminders import LocationReminder
+        from ...maps.coords import validate_lat, validate_lon
+
+        usage = ("usage: /map fence add circle <lat,lon> <radius_m> "
+                 "<label>  |  /map fence add polygon "
+                 "<lat,lon>;<lat,lon>;... <label>  |  /map fence list  |  "
+                 "/map fence remove <id|label>  |  /map fence remind "
+                 "<fence> <enter|exit> <message>  |  /map fence "
+                 "reminders  |  /map fence unremind <id>  |  /map fence "
+                 "rearm <id>")
+        toks = (spec or "").split()
+        if not toks:
+            return usage
+        sub = toks[0].lower()
+        store = self._fence_store()
+        if sub == "list":
+            fences = store.fences()
+            if not fences:
+                return ("no fences yet — /map fence add circle "
+                        "<lat,lon> <radius_m> <label> saves one.")
+            _, states, _ = store.load_all()
+            lines = [f"📍 {len(fences)} fence(s):"]
+            for fence in fences:
+                state = states.get(fence.id)
+                where = ("inside" if state and state.inside else
+                         "outside" if state and state.inside is False
+                         else "unknown")
+                if fence.kind == "circle":
+                    shape = (f"circle, {fence.radius_m:g} m around "
+                             f"{fence.center.lat:.4f},"
+                             f"{fence.center.lon:.4f}")
+                else:
+                    shape = f"polygon, {len(fence.vertices)} vertices"
+                lines.append(f"  • {fence.name} — {shape} · {where} "
+                             f"(id {fence.id})")
+            return "\n".join(lines)
+        if sub == "add":
+            if len(toks) < 2:
+                return usage
+            kind = toks[1].lower()
+            if kind == "circle":
+                if len(toks) < 4:
+                    return ("usage: /map fence add circle <lat,lon> "
+                            "<radius_m> <label>")
+                try:
+                    nums = [float(v) for v in toks[2].split(",")]
+                except ValueError:
+                    nums = []
+                if len(nums) != 2:
+                    return (f"couldn't parse coordinates {toks[2]!r} — "
+                            "/map fence add circle <lat,lon> <radius_m> "
+                            "<label>")
+                lat, lon = nums
+                try:
+                    validate_lat(lat)
+                    validate_lon(lon)
+                except ValueError as exc:
+                    return f"bad fence point: {exc}"
+                try:
+                    radius = float(toks[3])
+                except ValueError:
+                    return (f"radius must be a number, got {toks[3]!r} "
+                            "— /map fence add circle <lat,lon> "
+                            "<radius_m> <label>")
+                if radius <= 0:
+                    return (f"radius must be > 0, got {radius:g} — a "
+                            "circle fence needs a positive radius in "
+                            "metres.")
+                label = " ".join(toks[4:]).strip()
+                if not label:
+                    return ("a fence needs a label — /map fence add "
+                            "circle <lat,lon> <radius_m> <label>")
+                try:
+                    fence = circle_fence(new_fence_id(), label,
+                                         LatLon(lat, lon), radius)
+                except ValueError as exc:
+                    return f"couldn't save fence {label!r}: {exc}"
+                store.add_fence(fence)
+                ConsentStore(store.root).grant("owner", SCOPE_GEOFENCE)
+                return (f"📍 fence {label!r} saved — circle, "
+                        f"{radius:g} m around {lat:.4f},{lon:.4f} "
+                        f"(id {fence.id}). I'll tell you when you "
+                        "arrive or leave.")
+            if kind == "polygon":
+                if len(toks) < 3:
+                    return ("usage: /map fence add polygon "
+                            "<lat,lon>;<lat,lon>;... <label>")
+                verts = []
+                for part in toks[2].split(";"):
+                    try:
+                        nums = [float(v) for v in part.split(",")]
+                    except ValueError:
+                        nums = []
+                    if len(nums) != 2:
+                        return (f"couldn't parse coordinates {part!r} "
+                                "— /map fence add polygon "
+                                "<lat,lon>;<lat,lon>;... <label>")
+                    try:
+                        validate_lat(nums[0])
+                        validate_lon(nums[1])
+                    except ValueError as exc:
+                        return f"bad fence point: {exc}"
+                    verts.append(LatLon(nums[0], nums[1]))
+                label = " ".join(toks[3:]).strip()
+                if not label:
+                    return ("a fence needs a label — /map fence add "
+                            "polygon <lat,lon>;<lat,lon>;... <label>")
+                try:
+                    fence = polygon_fence(new_fence_id(), label, verts)
+                except ValueError as exc:
+                    return f"couldn't save fence {label!r}: {exc}"
+                store.add_fence(fence)
+                ConsentStore(store.root).grant("owner", SCOPE_GEOFENCE)
+                return (f"📍 fence {label!r} saved — polygon, "
+                        f"{len(verts)} vertices (id {fence.id}). I'll "
+                        "tell you when you arrive or leave.")
+            return ("unknown fence shape — /map fence add circle "
+                    "<lat,lon> <radius_m> <label>  |  /map fence add "
+                    "polygon <lat,lon>;<lat,lon>;... <label>")
+        if sub == "remove":
+            ref = " ".join(toks[1:]).strip()
+            if not ref:
+                return "usage: /map fence remove <id|label>"
+            fence = store.resolve_fence(ref)
+            if fence is None:
+                return f"no fence {ref!r}."
+            dropped = len([r for r in store.reminders()
+                           if r.fence_id == fence.id])
+            store.remove_fence(fence.id)
+            note = (f" ({dropped} reminder(s) removed too)"
+                    if dropped else "")
+            return f"fence {fence.name!r} removed{note}."
+        if sub == "remind":
+            if len(toks) < 4:
+                return ("usage: /map fence remind <fence> <enter|exit> "
+                        "<message>")
+            fence = store.resolve_fence(toks[1])
+            if fence is None:
+                return f"no fence {toks[1]!r}."
+            fire_on = toks[2].lower()
+            if fire_on not in ("enter", "exit"):
+                return (f"fire_on must be 'enter' or 'exit', got "
+                        f"{toks[2]!r} — /map fence remind <fence> "
+                        "<enter|exit> <message>")
+            message = " ".join(toks[3:]).strip()
+            if not message:
+                return ("a reminder needs a message — /map fence "
+                        "remind <fence> <enter|exit> <message>")
+            rem = LocationReminder(id=new_reminder_id(),
+                                   person_id="owner",
+                                   fence_id=fence.id, message=message,
+                                   fire_on=fire_on)
+            store.add_reminder(rem)
+            ConsentStore(store.root).grant("owner", SCOPE_REMINDERS)
+            return (f"⏰ reminder saved — when you {fire_on} "
+                    f"{fence.name!r} I'll say: {message}")
+        if sub == "reminders":
+            rems = store.reminders()
+            if not rems:
+                return ("no reminders yet — /map fence remind <fence> "
+                        "<enter|exit> <message> saves one.")
+            fences, _, _ = store.load_all()
+            lines = [f"⏰ {len(rems)} reminder(s):"]
+            for rem in rems:
+                fence = fences.get(rem.fence_id)
+                where = fence.name if fence else rem.fence_id
+                if rem.fired:
+                    when = _time.strftime(
+                        "%H:%M", _time.localtime(rem.fired_ts))
+                    state = f"fired {when}"
+                elif not rem.active:
+                    state = "paused"
+                else:
+                    state = "active"
+                lines.append(f"  • {rem.message} — when you "
+                             f"{rem.fire_on} {where} · {state} "
+                             f"(id {rem.id})")
+            return "\n".join(lines)
+        if sub == "unremind":
+            ref = " ".join(toks[1:]).strip()
+            if not ref:
+                return "usage: /map fence unremind <id>"
+            rem = store.resolve_reminder(ref)
+            if rem is None:
+                return f"no reminder {ref!r}."
+            store.remove_reminder(rem.id)
+            return f"reminder {rem.message!r} removed."
+        if sub == "rearm":
+            ref = " ".join(toks[1:]).strip()
+            if not ref:
+                return "usage: /map fence rearm <id>"
+            rem = store.resolve_reminder(ref)
+            if rem is None:
+                return f"no reminder {ref!r}."
+            store.rearm_reminder(rem.id)
+            return (f"reminder {rem.message!r} re-armed — it will "
+                    "fire again.")
+        return (f"unknown /map fence verb {sub!r} — /map fence add "
+                "circle|polygon ... | /map fence list | /map fence "
+                "remove <id|label> | /map fence remind <fence> "
+                "<enter|exit> <message> | /map fence reminders | "
+                "/map fence unremind <id> | /map fence rearm <id>")
 
     def _map_packs_text(self) -> str:
         from ...maps.packs import verify_pack_dir
@@ -1332,6 +1601,62 @@ class RuntimeLiveMixin:
                                exc)
         except Exception as exc:  # noqa: BLE001 - never eat chat
             record_failure("runtime_live.pending_mark_hook", exc)
+
+    def _maybe_fence_update(self, message) -> None:
+        """Geofence intake for one inbound location (R1-45).
+
+        The third hook on the inbound-location seam (after the
+        pending-mark hook, before the live-share hook): an
+        owner location pin is evaluated against his fences and
+        any enter/exit events + fired reminders go out through
+        the notifier — never a reply in the room, never a raise.
+        Consent is re-checked at evaluation time
+        (:func:`location.fences.evaluate_fence_update`); a
+        stranger's location never touches his fences — the
+        hook is owner-only, and the evaluation needs his live
+        ``"geofence"`` grant. Atlas off (``NM_MAPS_ENABLED``)
+        means the whole surface is dark, same as /map."""
+        import time as _time
+
+        from ...location.fences import evaluate_fence_update
+        from ...location.primitives import LatLon
+        from ...location.privacy import ConsentStore
+        from ...maps.settings import map_settings
+
+        try:
+            if not map_settings().enabled:
+                return
+            if not self._is_operator(message):
+                return
+            supplied = self._message_location(message)
+            if supplied is None:
+                return
+            lat, lon, _accuracy = supplied
+            store = self._fence_store()
+            consent = ConsentStore(store.root)
+            ts = float(getattr(message, "ts", 0.0) or 0.0) or None
+            result = evaluate_fence_update(
+                store, consent, person_id="owner",
+                loc=LatLon(lat=lat, lon=lon), ts=ts)
+            if not result["events"] and not result["fired"]:
+                return
+            try:
+                from ..notifier import notify
+            except Exception:  # noqa: BLE001 - alerts are best-effort
+                return
+            for ev in result["events"]:
+                verb = ("entered" if ev.get("event") == "entered"
+                        else "exited")
+                when = _time.strftime(
+                    "%H:%M", _time.localtime(float(ev.get("ts", 0) or 0)))
+                notify(self.context, "geofence",
+                       f"📍 {verb} {ev.get('fence_name')}",
+                       f"you {verb} {ev.get('fence_name')} at {when}.")
+            for rem in result["fired"]:
+                notify(self.context, "geofence", "⏰ Reminder",
+                       rem.message)
+        except Exception as exc:  # noqa: BLE001 - never eat chat
+            record_failure("runtime_live.fence_hook", exc)
 
     @staticmethod
     def _map_zoom_for(bbox) -> int:
