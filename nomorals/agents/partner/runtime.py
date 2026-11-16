@@ -3129,6 +3129,10 @@ class PartnerRuntime(
         # Scheduler: durable at/every/daily jobs (message/tool/command payloads),
         # outcomes published through the notifier.
         self._scheduler: Any = None
+        #: The boot-built autonomy stack (UnifiedScheduler + its real
+        #: satellites) — ONE shared instance, so the unified-scheduler
+        #: tick tool runs due work on the same stack boot registered.
+        self._autonomy_stack: Any = None
         sched_settings = getattr(self.settings, "scheduler", None)
         # The job table is durable regardless of the tick-loop switch: we
         # build the scheduler whenever we're live, but only spin its thread
@@ -3741,6 +3745,33 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "calibration loop job not registered: %s", exc)
+                # Unified scheduler (audit gap R1-11): one durable
+                # "unified scheduler tick" job (every 5m) driving
+                # run_due() on the boot-built autonomy stack — before
+                # this wiring the unified scheduler had no live driver
+                # and only `nm why run` ever fired it, so a scheduled
+                # mission would only run if someone happened to run
+                # `nm why`. The stack is built ONCE here and shared
+                # (context.extras["autonomy_stack"]) so organ ticks
+                # and mission handlers registered on it survive
+                # across ticks; the tick tool falls back to building
+                # a fresh stack from the same home when boot never
+                # ran (the mission queue + why log are files, so a
+                # fresh stack sees the same durable state).
+                # Idempotent; best-effort.
+                try:
+                    from ...autonomy.unified import (
+                        ensure_unified_scheduler_job,
+                    )
+                    from ...autonomy.wiring import build_stack
+
+                    self._autonomy_stack = build_stack(self.settings.home)
+                    self.context.extras["autonomy_stack"] = (
+                        self._autonomy_stack)
+                    ensure_unified_scheduler_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "unified scheduler job not registered: %s", exc)
                 # Games seasons (AA-16): one durable "season tick"
                 # job (every 1h) rolling each group's quarterly
                 # season over at the boundary and paying closed

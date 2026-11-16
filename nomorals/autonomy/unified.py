@@ -54,6 +54,7 @@ of the due list still runs.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -67,7 +68,18 @@ from .preemption import PriorityLadder
 
 _log = get_logger(__name__)
 
-__all__ = ["UnifiedScheduler", "atomic_write_json", "normalize_mission"]
+__all__ = ["UnifiedScheduler", "atomic_write_json", "normalize_mission",
+           "UNIFIED_SCHEDULER_JOB", "UNIFIED_SCHEDULER_TOOL",
+           "UNIFIED_SCHEDULER_SPEC", "ensure_unified_scheduler_job",
+           "run_unified_scheduler_tick_once"]
+
+#: Durable unified-scheduler driver job: name, tool payload, default
+#: cadence. The live scheduler fires ``run_due()`` on the boot-built
+#: stack every 5m (the live scheduler's own wall cadence) — before
+#: this driver existed only ``nm why run`` ever called ``run_due()``.
+UNIFIED_SCHEDULER_JOB = "unified scheduler tick"
+UNIFIED_SCHEDULER_TOOL = "__unified_scheduler_tick__"
+UNIFIED_SCHEDULER_SPEC = "every 5m"
 
 
 def _priority_rank(priority: str) -> int:
@@ -439,3 +451,55 @@ class UnifiedScheduler:
                 continue
             results.append(self._run_tick(name, tick, now_ts))
         return results
+
+
+def run_unified_scheduler_tick_once(
+        scheduler: UnifiedScheduler) -> dict[str, Any]:
+    """Run one unified-scheduler pass: every due mission and organ
+    tick, under the rhythm + budget gates. Returns a summary dict
+    (``ok`` / ``fired`` / ``deferred`` / ``failed`` / ``results``).
+    Never raises — a broken pass is a failed result, not a dead
+    scheduler job."""
+    try:
+        results = scheduler.run_due()
+    except Exception as exc:  # noqa: BLE001 - one bad pass never kills the job
+        _log.warning("unified scheduler tick failed: %s", exc)
+        return {"ok": False, "fired": 0, "deferred": 0, "failed": 0,
+                "results": [], "error": f"run_due failed: {exc}"}
+    fired = sum(1 for r in results
+                if r.get("status") in ("ok", "done"))
+    deferred = sum(1 for r in results
+                   if r.get("status") == "deferred")
+    failed = sum(1 for r in results if r.get("status") == "failed")
+    return {"ok": True, "fired": fired, "deferred": deferred,
+            "failed": failed, "results": results}
+
+
+def ensure_unified_scheduler_job(
+        scheduler: Any, *,
+        spec: str = UNIFIED_SCHEDULER_SPEC) -> Any:
+    """Register the durable unified-scheduler driver job. Idempotent
+    — mirrors ``ensure_group_rhythm_job``: an existing job at the
+    requested cadence is returned as-is, a stale one is replaced.
+    Best-effort: never raises."""
+    if scheduler is None:
+        return None
+    try:
+        for job in (scheduler.list_jobs() or []):
+            name = (job.get("name") if isinstance(job, dict)
+                    else getattr(job, "name", None))
+            if name == UNIFIED_SCHEDULER_JOB:
+                job_spec = (job.get("spec") if isinstance(job, dict)
+                            else getattr(job, "spec", None))
+                if job_spec == spec:
+                    return job
+                with contextlib.suppress(Exception):
+                    job_id = (job.get("id") if isinstance(job, dict)
+                              else getattr(job, "id", None))
+                    scheduler.remove(job_id)
+                break
+        return scheduler.add(UNIFIED_SCHEDULER_JOB, spec, "tool",
+                             {"tool": UNIFIED_SCHEDULER_TOOL, "args": {}},
+                             routine=True)
+    except Exception:  # noqa: BLE001 - scheduling is best-effort
+        return None

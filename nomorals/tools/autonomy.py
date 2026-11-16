@@ -685,6 +685,46 @@ def register(registry: Any) -> None:
                     "error": f"show schedule tick failed: {exc}"}
 
     @registry.register(
+        "__unified_scheduler_tick__",
+        description="Run one unified-scheduler pass: every due mission "
+        "and organ tick on the boot-built autonomy stack, under the "
+        "rhythm + budget gates, each firing explained into the why "
+        "store. Scheduler-internal; runs every ~5m. Routine and "
+        "silent — the driver the unified scheduler never had: before "
+        "this wiring only `nm why run` ever called run_due(), so a "
+        "scheduled mission fired only if someone happened to run it.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _unified_scheduler_tick_tool() -> dict[str, Any]:
+        from ..autonomy.unified import run_unified_scheduler_tick_once
+
+        try:
+            # The ONE stack boot built (context.extras): organ ticks
+            # and mission handlers registered on it survive across
+            # ticks. When boot never ran (a bare tool call, a test),
+            # build a fresh stack from the same home — the mission
+            # queue and the why log are files, so a fresh stack sees
+            # the same durable state.
+            stack = (getattr(_context, "extras", None) or {}).get(
+                "autonomy_stack")
+            if stack is None:
+                home = getattr(
+                    getattr(_context, "settings", None), "home", None)
+                if not home:
+                    return {"ok": False,
+                            "error": "unified scheduler tick: no "
+                            "autonomy stack on this runtime and no "
+                            "nomorals home to build one from"}
+                from ..autonomy.wiring import build_stack
+
+                stack = build_stack(home)
+            return run_unified_scheduler_tick_once(stack.scheduler)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"unified scheduler tick failed: {exc}"}
+
+    @registry.register(
         "__delegation_manager_tick__",
         description="Run one delegation-manager tick: recover "
         "delegated runs orphaned by a restart, resume what the "
