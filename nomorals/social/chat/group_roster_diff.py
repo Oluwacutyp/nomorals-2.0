@@ -303,6 +303,51 @@ def fetch_live_roster(adapters: list, group_key: str, *,
                 source = "the member list (first 500)"
                 truncated = len(rows) >= 500
                 break
+    if rows is None:
+        # WhatsApp: neither bridge speaks the Telegram-shaped
+        # admin_members verbs, but both answer group_participants
+        # (Go gobridge/groups.go, Node whatsapp-groups.mjs) — the
+        # member roster with admin roles.  Without this branch
+        # every WhatsApp group failed the diff with "no
+        # member-list route", so churn was traffic-only.
+        for _plat, adapter in adapters:
+            fn = getattr(adapter, "group_participants", None)
+            if fn is None:
+                continue
+            try:
+                parts = fn(_chat_ref(_plat, chat_id))
+            except Exception:  # noqa: BLE001 - degrade a path
+                parts = None
+            if not parts:
+                continue
+            rows = []
+            if admin_ids is None:
+                admin_ids = set()
+            for entry in parts:
+                if not isinstance(entry, dict):
+                    continue
+                jid = str(entry.get("jid")
+                          or entry.get("id") or "")
+                if not jid:
+                    continue
+                rows.append(_normalise_row({
+                    "id": jid,
+                    "name": entry.get("name") or "",
+                    "username": "",
+                    "bot": False,
+                    "deleted": False,
+                    "status_kind": "",
+                    "was_online": None,
+                    "last_name": "",
+                }))
+                if str(entry.get("role") or "").lower() in (
+                        "admin", "superadmin"):
+                    admin_ids.add(jid)
+            if rows:
+                source = "the bridge's group roster"
+                truncated = False
+                break
+            rows = None
     if rows is None and surface is not None \
             and platform.startswith("telegram"):
         probe = None

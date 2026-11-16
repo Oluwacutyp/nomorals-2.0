@@ -6515,6 +6515,159 @@ class RuntimeGroupMixin:
             session = {}
         return self._groups_board(surface, message, sender, skey)
 
+    def _ghealth_refresh(self, surface, key):  # type: ignore[no-untyped-def]
+        """One live roster diff for /ghealth refresh — the same
+        candidate collection the roster grammar's `now` uses, so
+        the bridge's group roster is tried on WhatsApp."""
+        from ...social.chat import group_health as _gh
+
+        if not surface.claim_state(key)["claimed"]:
+            return {"ok": False,
+                    "error": "this room isn't switched on for my "
+                             "group systems yet — the roster diff "
+                             "runs where I'm claimed (my bot "
+                             "operating here, or the owner's "
+                             "designation: /gsettings system "
+                             "output on)."}
+        platform = str(key).split(":", 1)[0]
+        candidates: list = []
+        seen_ids: set = set()
+        for plat in (platform, "telegram", "telegram-bot",
+                     "telegram-personal"):
+            adapter = self._group_adapter(plat)
+            if adapter is not None \
+                    and id(adapter) not in seen_ids:
+                seen_ids.add(id(adapter))
+                candidates.append((plat, adapter))
+        return _gh.refresh_live_roster(surface, key, candidates)
+
+    def _control_ghealth(self, tail, message):  # type: ignore[no-untyped-def]
+        """WhatsApp group health analytics (census §6 #6): churn,
+        rhythm shape and silent members, from the records Devon
+        already keeps — no new polling, nothing invented.
+
+        In a group: that group's report (admins only, WhatsApp
+        only).  In DM: the board over every WhatsApp group the
+        sender admins — the operator sees all, anyone else only
+        groups they actually admin (the /groups board's gate).
+        `/ghealth <name>` picks one group by name/key substring;
+        `refresh` (alone in-group, or after the name in DM) runs
+        one live roster diff first, then reports."""
+        from ...social.chat import group_health as _gh
+        from ...social.chat.base import ChatKind
+
+        surface = self._group_surface()
+        key = self._group_key_or_none(message)
+        text = str(tail or "").strip()
+        if key is not None:
+            if key.partition(":")[0].strip().lower() \
+                    not in _gh.HEALTH_PLATFORMS:
+                return ("group health here covers WhatsApp groups "
+                        "— this room is on another platform.")
+            if not self._group_admin_ok(message):
+                return "group health is for admins."
+            words = text.split()
+            if words and words[0].lower() == "refresh":
+                result = self._ghealth_refresh(surface, key)
+                if not result.get("ok"):
+                    return ("the roster refresh couldn't run: "
+                            + str(result.get("error")
+                                  or "no member-list route") + ".")
+                parts = []
+                if result["joined"]:
+                    parts.append(f"+{len(result['joined'])} joined")
+                if result["left"]:
+                    parts.append(f"−{len(result['left'])} left")
+                if result["changed"]:
+                    parts.append(
+                        f"~{len(result['changed'])} changed")
+                if result["deleted"]:
+                    parts.append(
+                        f"{len(result['deleted'])} deleted")
+                if result["roles"]:
+                    parts.append(
+                        f"{len(result['roles'])} role changes")
+                head = ("roster refreshed: "
+                        + (", ".join(parts) if parts else "no changes")
+                        + f" · {result['total_live']} members live"
+                        + (f" ({result['source']})"
+                           if result.get("source") else ""))
+                if result.get("seeded"):
+                    head += (" · first run — snapshot seeded, "
+                             "joins are reported from the next run")
+                if result.get("truncated"):
+                    head += (" · list truncated — leaves were not "
+                             "asserted this run")
+                health = _gh.build_group_health(surface, key)
+                if health is None:
+                    return head
+                return head + "\n\n" + _gh.render_group_health(health)
+            health = _gh.build_group_health(surface, key)
+            if health is None:
+                return "I have no record of this group yet."
+            return _gh.render_group_health(health)
+        if message is None or getattr(message, "chat", None) is None:
+            return ("the health board lives in my DM — open a chat "
+                    "with me there and send /ghealth.")
+        if message.chat.kind != ChatKind.DM:
+            return ("the health board lives in my DM — open a chat "
+                    "with me there and send /ghealth.")
+        sender = str(message.sender_id or message.sender or "")
+        operator = self._operator_or_false(message)
+        overview = _gh.build_overview(surface)
+        visible = [health for health in overview["groups"]
+                   if operator
+                   or self._console_is_admin(health["group_key"],
+                                             sender)]
+        if not visible:
+            return ("you don't admin any WhatsApp group I serve — "
+                    "the health board opens for group admins.")
+        words = text.split()
+        refresh = bool(words) and words[-1].lower() == "refresh"
+        if refresh:
+            words = words[:-1]
+        selector = " ".join(words).strip()
+        if not selector:
+            if refresh:
+                return ("refresh names one group — "
+                        "/ghealth <group> refresh.")
+            totals = {
+                "groups": len(visible),
+                "members": sum(h["members_total"] for h in visible),
+                "active_7d": sum(h["active_7d"] for h in visible),
+                "silent": sum(h["silent_count"] for h in visible),
+                "msgs_7d": sum(h["msgs_7d"] for h in visible),
+                "joins_7d": sum(h["joins_7d"] for h in visible),
+                "leaves_7d": sum(h["leaves_7d"] for h in visible),
+            }
+            return _gh.render_overview(
+                {"platform": "whatsapp", "groups": visible,
+                 "totals": totals})
+        needle = selector.lower()
+        matches = [health for health in visible
+                   if needle in (health["title"] or "").lower()
+                   or needle in health["group_key"].lower()]
+        if not matches:
+            return f"no WhatsApp group matching {selector!r}."
+        if len(matches) > 1:
+            names = ", ".join(health["title"]
+                              or health["group_key"]
+                              for health in matches)
+            return (f"more than one group matches {selector!r}: "
+                    f"{names} — name one.")
+        health = matches[0]
+        group_key = health["group_key"]
+        if refresh:
+            result = self._ghealth_refresh(surface, group_key)
+            if not result.get("ok"):
+                return ("the roster refresh couldn't run: "
+                        + str(result.get("error")
+                              or "no member-list route") + ".")
+            health = _gh.build_group_health(surface, group_key)
+            if health is None:
+                return "I have no record of that group yet."
+        return _gh.render_group_health(health)
+
     def _groups_board(self, surface, message, sender, skey):  # type: ignore[no-untyped-def]
         """Render the /groups board over the console's own data:
         the same group list the console home shows, plus the
@@ -6608,6 +6761,18 @@ class RuntimeGroupMixin:
         lines.append(
             "roster diff "
             f"{_rd.describe_roster_diff(_rd.roster_diff_settings(surface, key))}")
+        if key.partition(":")[0].strip().lower() in ("whatsapp", "wa"):
+            # WhatsApp group health (census §6 #6): the board's
+            # one-liner per WA group.  Best-effort — a board
+            # never dies on one group's health.
+            from ...social.chat import group_health as _gh
+
+            try:
+                _wa_health = _gh.build_group_health(surface, key)
+            except Exception:  # noqa: BLE001 - board survives
+                _wa_health = None
+            if _wa_health is not None:
+                lines.append(f"health {_gh.one_line(_wa_health)}")
         from ...social.chat import group_defense as _gd
 
         lines.append(

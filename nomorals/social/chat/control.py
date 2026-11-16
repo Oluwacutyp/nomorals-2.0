@@ -210,7 +210,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "rules", "member", "lookup", "glog", "gsettings", "strikes",
-    "recheck", "joinq", "console", "groups", "community", "gbackup",
+    "recheck", "joinq", "console", "groups", "ghealth", "community", "gbackup",
     "undonotice",
     "flag", "rep", "repclear", "repdismiss",
     "steal", "sticker", "convert", "gif", "emoji", "customemoji",
@@ -763,6 +763,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "joinq": (0, None),       # /joinq [approve|decline <id>|all] — the admin join queue: requests + raid holds (§28)
     "console": (0, None),     # /console [gN [section [grammar]]] — the DM admin console: groups the sender admins, configured in tappable sections (§30)
     "groups": (0, None),      # /groups — the §8 dashboard: every group/channel you admin — status, member count, economy health, pending actions — deep-links into /console
+    "ghealth": (0, None),     # /ghealth [name] [refresh] — WhatsApp group health analytics: churn, rhythm, silent members (census §6 #6; admins)
     "community": (0, None),   # /community — the §16 community board: Telegram Communities + WhatsApp communities over one surface — list, show, link, unlink, sync (DM-first, admins)
     "gbackup": (0, None),     # /gbackup — the §9.8 group backup/export: one group's full state (settings, roster, economy ledger, audit log) as a file, restorable, on a schedule (DM-only, admins)
     "undonotice": (0, None),  # /undonotice <id> — undo one automated action from its notice: strike removed, platform action reversed (§31)
@@ -1113,6 +1114,7 @@ _HELP_TEXT = "\n".join(
         "  /legacy show | create <owner> | <executor> | beneficiary <name> | asset <label> | instruction <text> | witness <name> | seal <text> | reveal | reset yes",
         "  /family list | add <person_id> <name> [| role | locale] | revoke <person_id> | role <person_id> <role> | item <person_id> <kind> <title> [| body | shared|private] | items <person_id> | show <person_id> <item_id> | share <person_id> <item_id> | delete <person_id> <item_id> | audit | check <role> <text> | policy",
         "  /presence watch <contact> [status|online|join ...] | unwatch <contact> [status|online|join ...] | list | status — alert when a named contact posts a status, comes online, or joins a channel",
+        "  /ghealth [name] [refresh] — WhatsApp group health: churn, rhythm, silent members (admins)",
         "  /publicface list | draft <pack> | <title> | <content> | approve <id> | unpublish <id> | remove <id> | show <id>",
         "  /subscriptions [list | upcoming [days] | used <merchant> [YYYY-MM-DD] | cancel <merchant>]   detected subscriptions, renewals, unused flags, draft cancel notes",
         "  /backup status | verify                backup health (read-only; runs need the vault, stay scheduled)",
@@ -3758,6 +3760,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "groups": {"what": "the §8 dashboard: message Devon privately and she lists every group and channel where YOU hold admin — status, member count, economy health (treasury, holders, active members, faucet throttle), and pending actions (join requests, restricted holds, flag proposals, governance proposals, open appeals) — with deep-links into /console per group. The operator sees all; anyone else sees only groups they actually admin.",
             "usage": "/groups",
             "example": "/groups"},
+    "ghealth": {"what": "WhatsApp group health analytics (census §6 #6): churn, activity rhythm and silent members from the records Devon already keeps — the member ledger, the audit ring, the 10-day rhythm counters and the roster-diff state. In a group it reports that group; in DM it boards every WhatsApp group you admin. /ghealth refresh runs one live roster diff first, then reports. Group admins only — Devon checks your platform admin status. Nothing is invented: a count is only claimed for the window the records cover.",
+            "usage": "/ghealth | /ghealth <name> | /ghealth refresh | /ghealth <name> refresh",
+            "example": "/ghealth",
+            "related": "/groups /console /gsettings"},
     "community": {"what": "the §16 community board: Telegram Communities (several supergroups, channels and bots linked around one audience) and WhatsApp communities, one board over both — list every community carrying a group you admin, show one community's groups, link a group to a community by hand, unlink it, or re-read the platform community (Telegram getChat, WhatsApp linked parent). The operator sees all; anyone else sees only groups they actually admin. A platform sync never overwrites a manual link.",
             "usage": "/community | /community show <id|name> | /community link <g1|key> <id> [name] | /community unlink <g1|key> | /community sync [g1|key]",
             "example": "/community sync g1",
@@ -4715,7 +4721,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                           "update", "pull", "deploy", "restart"]),
     ("groups & communities", ["rules", "member", "lookup", "glog", "gsettings",
                             "strikes", "recheck", "joinq", "console",
-                            "groups", "community", "gbackup",
+                            "groups", "ghealth", "community", "gbackup",
                             "undonotice", "flag", "rep", "repclear",
                             "repdismiss",
                             "balance", "mine", "work", "pay", "gshop",
@@ -5042,7 +5048,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
      ["rules", "member", "lookup", "glog", "gsettings", "strikes",
-      "recheck", "joinq", "console", "groups", "community", "gbackup",
+      "recheck", "joinq", "console", "groups", "ghealth", "community", "gbackup",
       "undonotice",
       "flag", "rep", "repclear", "repdismiss",
       "balance", "mine", "work", "pay", "gshop", "quests",
@@ -5528,6 +5534,7 @@ LIST_ONELINERS: dict[str, str] = {
     "legacy": "digital will (owner-only, sealed): /legacy create <owner> | <executor> [| contact | backup] | beneficiary <name> | asset <label> | instruction <text> | witness <name> | seal <text> | reveal | show | reset yes",
     "family": "family mode — the private household: /family list | add <person_id> <name> [| role | locale] | revoke <person_id> | role <person_id> <role> | item <person_id> <kind> <title> [| body | shared|private] | items <person_id> | show <person_id> <item_id> | share <person_id> <item_id> | delete <person_id> <item_id> | audit [n] | check <role> <text> | policy (owner-only)",
     "presence": "presence watch (owner-only): /presence watch <contact> [status|online|join ...] | unwatch <contact> [status|online|join ...] | list | status — alert when a named contact posts a status, comes online, or joins a channel",
+    "ghealth": "WhatsApp group health (admins): /ghealth [name] [refresh] — churn, activity rhythm and silent members from the records already kept",
     "publicface": "public face — owner-approved publishing gate: /publicface list | draft <pack> | <title> | <content> | approve <id> | unpublish <id> | remove <id> | show <id>",
     "backup": "backup health (read-only): /backup status | verify — generations, manifest, DB integrity",
     "alert": "price/money alerts: /alert add|list|remove|check|snooze|sync-bills",

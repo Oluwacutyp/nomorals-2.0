@@ -413,12 +413,13 @@ class GatingTests(unittest.TestCase):
         # (§9.8 backup/export) + 1 appeal + 1 massreport
         # (§32 mass-report + appeal system) + 1 lookup
         # (member-intel dossier) + 1 community (§16 community
-        # board). The pin went stale at the
+        # board) + 1 ghealth (census §6 #6 WhatsApp group health).
+        # The pin went stale at the
         # sibling grants — it failed on base before this change;
         # update it with the arithmetic whenever a public command
         # is added.)
         self.assertNotIn("craft", PUBLIC_COMMANDS)
-        self.assertEqual(len(PUBLIC_COMMANDS), 261)
+        self.assertEqual(len(PUBLIC_COMMANDS), 262)
         self.assertFalse(caller_may_run("craft", False))
         self.assertTrue(caller_may_run("craft", True))
         cmd = parse_control("/craft coverage")
