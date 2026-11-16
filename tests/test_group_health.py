@@ -503,7 +503,8 @@ class RegistryTests(unittest.TestCase):
         self.assertIn("/ghealth", list_catalog())
 
     def test_public_count_pin(self):
-        self.assertEqual(len(PUBLIC_COMMANDS), 262)
+        # 262 pre-digest; /digest adds one public command.
+        self.assertEqual(len(PUBLIC_COMMANDS), 263)
 
 
 if __name__ == "__main__":

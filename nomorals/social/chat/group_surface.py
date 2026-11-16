@@ -228,6 +228,10 @@ def _default_settings() -> dict[str, Any]:
                                         # expiry window — defaults
                                         # ARE the shipped 3/5/7
         "games_enabled": True,
+        "digest_policy": "only-when-mentioned",
+                                        # group digests (audit gap
+                                        # R2-20): always |
+                                        # only-when-mentioned | never
         "cleanup": copy.deepcopy(CLEANUP_DEFAULTS),
                                         # member cleanup: the
                                         # deleted-account scan +

@@ -661,6 +661,28 @@ def register(registry: Any) -> None:
                     "error": f"group rhythm tick failed: {exc}"}
 
     @registry.register(
+        "__group_digest_tick__",
+        description="Run one group digest tick (audit gap R2-20): "
+        "every claimed WhatsApp group with new messages since its "
+        "watermark gets its digest — mentions, decisions, resolved "
+        "threads — published to the owner via the Notifier. "
+        "Scheduler-internal; runs every ~6h. Routine and silent — "
+        "a second run with no new messages publishes nothing.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _group_digest_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..social.chat.whatsapp_digest import run_group_digest_tick_once
+
+        try:
+            return run_group_digest_tick_once(
+                context=_context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"group digest tick failed: {exc}"}
+
+    @registry.register(
         "__show_schedule_tick__",
         description="Run one show-schedule tick: compose a DRAFT "
         "episode for every show whose schedule is due, from the "

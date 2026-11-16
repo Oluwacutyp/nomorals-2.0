@@ -3837,6 +3837,19 @@ class PartnerRuntime(
                     _log.warning(
                         "group rhythm tick job not registered: %s",
                         exc)
+                # Group digests (audit gap R2-20): one durable
+                # "group digest tick" job (every 6h) publishing
+                # digests for busy WhatsApp groups — mentions,
+                # decisions, resolved threads — to the owner via
+                # the Notifier. Idempotent; best-effort.
+                try:
+                    from ...social.chat.whatsapp_digest import ensure_group_digest_job
+
+                    ensure_group_digest_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "group digest tick job not registered: %s",
+                        exc)
                 # Delegation manager: one durable "delegation manager
                 # tick" job (every 5m) recovering delegated runs
                 # orphaned by a restart, resuming what the restart
@@ -7831,6 +7844,8 @@ class PartnerRuntime(
             return self._control_groups(command.tail, message)
         if kind == "ghealth":
             return self._control_ghealth(command.tail, message)
+        if kind == "digest":
+            return self._control_digest(command.tail, message)
         if kind == "community":
             return self._control_community(command.tail, message)
         if kind == "gbackup":

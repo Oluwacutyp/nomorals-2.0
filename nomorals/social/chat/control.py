@@ -210,7 +210,7 @@ PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "rules", "member", "lookup", "glog", "gsettings", "strikes",
-    "recheck", "joinq", "console", "groups", "ghealth", "community", "gbackup",
+    "recheck", "joinq", "console", "groups", "ghealth", "digest", "community", "gbackup",
     "undonotice",
     "flag", "rep", "repclear", "repdismiss",
     "steal", "sticker", "convert", "gif", "emoji", "customemoji",
@@ -767,6 +767,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "console": (0, None),     # /console [gN [section [grammar]]] — the DM admin console: groups the sender admins, configured in tappable sections (§30)
     "groups": (0, None),      # /groups — the §8 dashboard: every group/channel you admin — status, member count, economy health, pending actions — deep-links into /console
     "ghealth": (0, None),     # /ghealth [name] [refresh] — WhatsApp group health analytics: churn, rhythm, silent members (census §6 #6; admins)
+    "digest": (0, None),      # /digest [group] [policy <always|only-when-mentioned|never>] — WhatsApp group digests: what needs you (mentions, decisions, resolved threads) from the recorded log (audit gap R2-20; admins)
     "community": (0, None),   # /community — the §16 community board: Telegram Communities + WhatsApp communities over one surface — list, show, link, unlink, sync (DM-first, admins)
     "gbackup": (0, None),     # /gbackup — the §9.8 group backup/export: one group's full state (settings, roster, economy ledger, audit log) as a file, restorable, on a schedule (DM-only, admins)
     "undonotice": (0, None),  # /undonotice <id> — undo one automated action from its notice: strike removed, platform action reversed (§31)
@@ -3770,6 +3771,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/ghealth | /ghealth <name> | /ghealth refresh | /ghealth <name> refresh",
             "example": "/ghealth",
             "related": "/groups /console /gsettings"},
+    "digest": {"what": "WhatsApp group digests (audit gap R2-20): what needs you in a busy group — messages that mention you, decisions waiting on you, threads that got resolved — from the recorded message log (the brain persists every inbound message it reads). In a group it digests that group; in DM it boards every WhatsApp group you admin. /digest <group> policy <always|only-when-mentioned|never> sets one group's policy. A scheduled job also publishes digests for busy groups every 6h. Group admins only — a digest quotes other members' text. Nothing is invented: a digest only claims what the log holds.",
+            "usage": "/digest | /digest <name> | /digest <name> policy <always|only-when-mentioned|never>",
+            "example": "/digest",
+            "related": "/groups /ghealth /console"},
     "community": {"what": "the §16 community board: Telegram Communities (several supergroups, channels and bots linked around one audience) and WhatsApp communities, one board over both — list every community carrying a group you admin, show one community's groups, link a group to a community by hand, unlink it, or re-read the platform community (Telegram getChat, WhatsApp linked parent). The operator sees all; anyone else sees only groups they actually admin. A platform sync never overwrites a manual link.",
             "usage": "/community | /community show <id|name> | /community link <g1|key> <id> [name] | /community unlink <g1|key> | /community sync [g1|key]",
             "example": "/community sync g1",
@@ -4739,7 +4744,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                           "update", "pull", "deploy", "restart"]),
     ("groups & communities", ["rules", "member", "lookup", "glog", "gsettings",
                             "strikes", "recheck", "joinq", "console",
-                            "groups", "ghealth", "community", "gbackup",
+                            "groups", "ghealth", "digest", "community", "gbackup",
                             "undonotice", "flag", "rep", "repclear",
                             "repdismiss",
                             "balance", "mine", "work", "pay", "gshop",
@@ -5066,7 +5071,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["update", "pull", "deploy", "restart"]),
     ("groups & communities",
      ["rules", "member", "lookup", "glog", "gsettings", "strikes",
-      "recheck", "joinq", "console", "groups", "ghealth", "community", "gbackup",
+      "recheck", "joinq", "console", "groups", "ghealth", "digest", "community", "gbackup",
       "undonotice",
       "flag", "rep", "repclear", "repdismiss",
       "balance", "mine", "work", "pay", "gshop", "quests",
@@ -5556,6 +5561,7 @@ LIST_ONELINERS: dict[str, str] = {
     "prefs": "learned taste (owner-only): /prefs list | show <domain> | like <domain> | axis:value ... | dislike <domain> | axis:value ... | rank <domain> | <label>=axis:value,... | ... | signals [domain] [n] | learn",
     "presence": "presence watch (owner-only): /presence watch <contact> [status|online|join ...] | unwatch <contact> [status|online|join ...] | list | status — alert when a named contact posts a status, comes online, or joins a channel",
     "ghealth": "WhatsApp group health (admins): /ghealth [name] [refresh] — churn, activity rhythm and silent members from the records already kept",
+    "digest": "WhatsApp group digests (admins): /digest [group] [policy <always|only-when-mentioned|never>] — what needs you: mentions, decisions, resolved threads from the recorded log",
     "publicface": "public face — owner-approved publishing gate: /publicface list | draft <pack> | <title> | <content> | approve <id> | unpublish <id> | remove <id> | show <id>",
     "backup": "backup health (read-only): /backup status | verify — generations, manifest, DB integrity",
     "alert": "price/money alerts: /alert add|list|remove|check|snooze|sync-bills",

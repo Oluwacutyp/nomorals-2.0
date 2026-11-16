@@ -6758,6 +6758,153 @@ class RuntimeGroupMixin:
                 return "I have no record of that group yet."
         return _gh.render_group_health(health)
 
+    def _control_digest(self, tail, message):  # type: ignore[no-untyped-def]
+        """WhatsApp group digests (audit gap R2-20): what needs you —
+        messages that mention you, decisions waiting on you, threads
+        that got resolved — from the recorded message log (the brain
+        persists every inbound message it reads).
+
+        In a group: that group's digest (admins only, WhatsApp
+        only). In DM: the board over every WhatsApp group the sender
+        admins — the operator sees all, anyone else only groups they
+        actually admin (the /groups board's gate). `/digest <name>`
+        picks one group by name/key substring; `/digest <name> policy
+        <always|only-when-mentioned|never>` sets one group's policy.
+        A scheduled job also publishes digests for busy groups every
+        6h. Nothing is invented: a digest only claims what the log
+        holds for the last 24h."""
+        from ...social.chat import whatsapp_digest as _wd
+        from ...social.chat.base import ChatKind
+
+        surface = self._group_surface()
+        key = self._group_key_or_none(message)
+        text = str(tail or "").strip()
+        if key is not None:
+            if key.partition(":")[0].strip().lower() != "whatsapp":
+                return ("group digests here cover WhatsApp groups "
+                        "— this room is on another platform.")
+            if not self._group_admin_ok(message):
+                return "group digests are for admins."
+            words = text.split()
+            if words and words[0].lower() == "policy":
+                value = words[1].lower() if len(words) > 1 else ""
+                if value not in _wd.GROUP_POLICIES:
+                    return ("digest policy is one of always, "
+                            "only-when-mentioned, never — "
+                            "/digest policy <value>.")
+                surface.update_settings(key, digest_policy=value)
+                return (f"digest policy for this group is now "
+                        f"{value}.")
+            return self._digest_reply(surface, key)
+        if message is None or getattr(message, "chat", None) is None:
+            return ("the digest board lives in my DM — open a chat "
+                    "with me there and send /digest.")
+        if message.chat.kind != ChatKind.DM:
+            return ("the digest board lives in my DM — open a chat "
+                    "with me there and send /digest.")
+        sender = str(message.sender_id or message.sender or "")
+        operator = self._operator_or_false(message)
+        words = text.split()
+        # /digest <name> policy <value> — the policy verb is last.
+        if len(words) >= 3 and words[-2].lower() == "policy":
+            value = words[-1].lower()
+            if value not in _wd.GROUP_POLICIES:
+                return ("digest policy is one of always, "
+                        "only-when-mentioned, never — "
+                        "/digest <group> policy <value>.")
+            selector = " ".join(words[:-2]).strip()
+            group_key = self._digest_pick(surface, selector, sender,
+                                          operator)
+            if isinstance(group_key, str) and group_key.startswith(
+                    "whatsapp:"):
+                surface.update_settings(group_key, digest_policy=value)
+                return (f"digest policy for "
+                        f"{_wd._group_title(surface, group_key)} "
+                        f"is now {value}.")
+            return group_key  # the pick's refusal, verbatim
+        if words and words[0].lower() == "policy":
+            return ("policy names one group — "
+                    "/digest <group> policy <value>.")
+        selector = " ".join(words).strip()
+        if selector:
+            group_key = self._digest_pick(surface, selector, sender,
+                                          operator)
+            if not (isinstance(group_key, str)
+                    and group_key.startswith("whatsapp:")):
+                return group_key  # the pick's refusal, verbatim
+            return self._digest_reply(surface, group_key)
+        visible = self._digest_visible(surface, sender, operator)
+        if not visible:
+            return ("you don't admin any WhatsApp group I serve — "
+                    "the digest board opens for group admins.")
+        parts = []
+        for group_key in visible:
+            digest = self._digest_build(surface, group_key)
+            if digest is not None and digest.get("included"):
+                parts.append(str(digest.get("text") or ""))
+        if not parts:
+            return "no group needs you right now."
+        return "\n\n".join(parts)
+
+    def _digest_visible(self, surface, sender, operator):  # type: ignore[no-untyped-def]
+        """WhatsApp group keys the sender may see digests for."""
+        visible = []
+        for group_key in sorted(surface.store.data.keys()):
+            if str(group_key).split(":", 1)[0] != "whatsapp":
+                continue
+            if surface.is_channel(group_key):
+                continue
+            if operator or self._console_is_admin(group_key, sender):
+                visible.append(group_key)
+        return visible
+
+    def _digest_pick(self, surface, selector, sender, operator):  # type: ignore[no-untyped-def]
+        """One WhatsApp group by name/key substring, or a refusal."""
+        from ...social.chat import whatsapp_digest as _wd
+
+        needle = selector.lower()
+        matches = []
+        for group_key in self._digest_visible(surface, sender, operator):
+            title = _wd._group_title(surface, group_key)
+            if needle in title.lower() or needle in group_key.lower():
+                matches.append(group_key)
+        if not matches:
+            return f"no WhatsApp group matching {selector!r}."
+        if len(matches) > 1:
+            names = ", ".join(
+                _wd._group_title(surface, group_key)
+                for group_key in matches)
+            return (f"more than one group matches {selector!r}: "
+                    f"{names} — name one.")
+        return matches[0]
+
+    def _digest_build(self, surface, group_key):  # type: ignore[no-untyped-def]
+        """This group's digest dict, or None when the group is unknown."""
+        from ...social.chat import whatsapp_digest as _wd
+        from ...storage.conversations import ConversationLog
+
+        if group_key not in (surface.store.data or {}):
+            return None
+        db = getattr(getattr(self, "context", None), "db", None)
+        if db is None:
+            return None
+        log = ConversationLog(db)
+        return _wd.build_group_digest_text(surface, log, group_key)
+
+    def _digest_reply(self, surface, group_key):  # type: ignore[no-untyped-def]
+        """This group's digest as a reply, with honest no-digest lines."""
+        digest = self._digest_build(surface, group_key)
+        if digest is None:
+            return "I have no record of this group yet."
+        if digest.get("included"):
+            return str(digest.get("text") or "")
+        if digest.get("policy") == "never":
+            return ("digests are off for this group (policy never) "
+                    "— /digest policy only-when-mentioned to turn "
+                    "them back on.")
+        return (f"nothing needs you in {digest.get('title') or group_key} "
+                "in the last 24h.")
+
     def _groups_board(self, surface, message, sender, skey):  # type: ignore[no-untyped-def]
         """Render the /groups board over the console's own data:
         the same group list the console home shows, plus the
