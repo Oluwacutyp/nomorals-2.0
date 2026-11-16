@@ -585,7 +585,8 @@ class MediaDownloader:
                  site_descriptors: Any | None = None,
                  site_connectors: dict[str, Any] | None = None,
                  site_auth: Any | None = None,
-                 rendered_tab_factory: Any | None = None) -> None:
+                 rendered_tab_factory: Any | None = None,
+                 swarm_downloader: Any | None = None) -> None:
         self.context = context
         self.profile = profile or detect_profile()
         self._connector_factory = connector_factory
@@ -654,6 +655,10 @@ class MediaDownloader:
         # takes the page URL and returns a tab-shaped object
         # (network_requests / session_fetch_bytes / click / close).
         self._rendered_tab_factory = rendered_tab_factory
+        # Download swarm (media/download_swarm.py): an injected
+        # swarm downloader wins; otherwise it is built lazily,
+        # exactly like the kit downloader above.
+        self._swarm_downloader = swarm_downloader
 
     # ── download-kit accessors (Pass #76) ─────────────────────────────
 
@@ -1085,10 +1090,13 @@ class MediaDownloader:
                        url: str, target_dir: Path, audio_only: bool,
                        format_spec: str, timeout: float,
                        budget: dict[str, float],
-                       page_url: str = "") -> bool:
+                       page_url: str = "",
+                       swarm: bool = False,
+                       swarm_min_bytes: int | None = None) -> bool:
         """Dispatch one chain stage by name (the chain's real stage
         vocabulary).  Used for the canonical order and for the
-        learned-path-first attempt (Pass #87)."""
+        learned-path-first attempt (Pass #87).  ``swarm`` /
+        ``swarm_min_bytes`` ride through to the kit stage only."""
         tracker = self._tracker()
         if tracker is not None:
             from ..core.progress_events import CONNECTING
@@ -1110,7 +1118,8 @@ class MediaDownloader:
                                       budget)
         if stage == "kit":
             return self._stage_kit(report, url, target_dir, audio_only,
-                                   budget)
+                                   budget, swarm=swarm,
+                                   swarm_min_bytes=swarm_min_bytes)
         if stage == "connector":
             if self._stage_connector(report, url, target_dir,
                                      audio_only, budget):
@@ -1173,6 +1182,16 @@ class MediaDownloader:
             from .download_kit import ResumeDownloader
             self._kit_downloader = ResumeDownloader()
         return self._kit_downloader
+
+    def _swarm(self) -> Any:
+        """The parallel segmented fetcher (download_swarm.py).
+
+        Lazy, like the kit: constructing a MediaDownloader stays
+        side-effect free; tests may inject their own."""
+        if self._swarm_downloader is None:
+            from .download_swarm import SwarmDownloader
+            self._swarm_downloader = SwarmDownloader()
+        return self._swarm_downloader
 
     def _integrity_ledger(self) -> Any:
         if self._ledger is None:
@@ -1302,8 +1321,18 @@ class MediaDownloader:
                  audio_only: bool = False,
                  format_spec: str = "bestvideo*+bestaudio/best",
                  page_url: str = "", timeout: float = 1800.0,
-                 title_hint: str = "") -> DownloadReport:
-        """Run the fallback chain.  Never raises — returns a report."""
+                 title_hint: str = "",
+                 swarm: bool = False,
+                 swarm_min_bytes: int | None = None) -> DownloadReport:
+        """Run the fallback chain.  Never raises — returns a report.
+
+        ``swarm`` opts into the parallel segmented fetch for direct
+        file URLs (the kit stage tries the swarm first, large files
+        first — see ``swarm_min_bytes`` — and falls back to the
+        single-stream kit when the server will not serve ranges).
+        For extractor URLs the flag is inert: the swarm can only
+        fetch a direct file URL.
+        """
         started = time.perf_counter()
         report = DownloadReport(url=url or "")
         if not (url or "").strip():
@@ -1516,7 +1545,9 @@ class MediaDownloader:
                     if self._attempt_stage(
                             learned_rule.stage, report, work_url,
                             target_dir, audio_only, format_spec,
-                            timeout, budget, page_url):
+                            timeout, budget, page_url,
+                            swarm=swarm,
+                            swarm_min_bytes=swarm_min_bytes):
                         return self._succeed(report, started,
                                              format_facts,
                                              audio_only=audio_only)
@@ -1535,7 +1566,8 @@ class MediaDownloader:
                 if self._attempt_stage(
                         stage_name, report, work_url, target_dir,
                         audio_only, format_spec, timeout, budget,
-                        page_url):
+                        page_url, swarm=swarm,
+                        swarm_min_bytes=swarm_min_bytes):
                     return self._succeed(report, started, format_facts,
                                          audio_only=audio_only)
         except Exception as exc:  # noqa: BLE001 — the chain never raises
@@ -1666,7 +1698,9 @@ class MediaDownloader:
 
     def _stage_kit(self, report: DownloadReport, url: str,
                    target_dir: Path, audio_only: bool,
-                   budget: dict[str, float]) -> bool:
+                   budget: dict[str, float], *,
+                   swarm: bool = False,
+                   swarm_min_bytes: int | None = None) -> bool:
         """The download kit's resumable fetch, in the chain.
 
         Engages only when the matched source descriptor says the URL
@@ -1677,13 +1711,25 @@ class MediaDownloader:
         what landed.  Every other rule keeps flowing to proxy /
         browser exactly as before.  A kit failure is a stage log and
         the chain moves on — never a swallowed success, never the
-        end of the chain."""
+        end of the chain.
+
+        When ``swarm`` is opted in, the parallel segmented fetch
+        tries FIRST for the same direct file (large files first —
+        ``swarm_min_bytes``); a swarm refusal or failure falls
+        through to the single-stream kit below, exactly like any
+        other stage that did not land the file."""
         descriptor = self._descriptor_for(url)
         if descriptor is None or descriptor.extraction_rule != "direct":
             return False
         if time.perf_counter() > budget["deadline"]:
             return False
         dest = target_dir / _safe_name(url, audio_only)
+        swarm_attempted = False
+        if swarm:
+            swarm_attempted = True
+            if self._attempt_swarm(report, url, dest, budget,
+                                   swarm_min_bytes):
+                return True
         t0 = time.perf_counter()
         try:
             kit = self._kit()
@@ -1724,6 +1770,14 @@ class MediaDownloader:
                             "reported success, nothing on disk")
             return False
         _path, size = landed
+        if swarm_attempted:
+            # The swarm left part files + state for this dest; the
+            # kit landed the file instead, so the swarm attempt's
+            # leftovers are void — drop them, best-effort.
+            try:
+                self._swarm().discard(dest)
+            except Exception as e:  # noqa: BLE001 — cleanup never
+                record_failure("download._stage_kit.discard_swarm", e)
         report.stages.append(StageLog(
             stage="kit", url=url, latency_s=lat, size_bytes=size,
             ok=True,
@@ -1733,6 +1787,90 @@ class MediaDownloader:
         self._fill_success(report, {
             "path": _path, "bytes": size, "title": "",
             "extractor": "download-kit"}, size)
+        return True
+
+    def _attempt_swarm(self, report: DownloadReport, url: str,
+                       dest: Path, budget: dict[str, float],
+                       swarm_min_bytes: int | None) -> bool:
+        """Try the parallel segmented fetch for a direct file URL.
+
+        True only when the swarm landed the file.  A refusal (the
+        server will not serve ranges, the file is below the swarm
+        threshold) or a failure is a stage log and False — the kit
+        stage falls through to the single-stream kit, and the chain
+        beyond it is untouched.  Progress rides the bound tracker
+        (bytes + the segment axis); unbound downloads stay silent.
+        """
+        from .download_swarm import DEFAULT_MIN_SWARM_BYTES, resolve_workers
+
+        if time.perf_counter() > budget["deadline"]:
+            return False
+        tracker = self._tracker()
+        workers = resolve_workers(self.context)
+        t0 = time.perf_counter()
+        try:
+            result = self._swarm().download(
+                url, dest, workers=workers,
+                min_swarm_bytes=(swarm_min_bytes
+                                 if swarm_min_bytes is not None
+                                 else DEFAULT_MIN_SWARM_BYTES),
+                tracker=tracker)
+        except Exception as exc:  # noqa: BLE001 — a stage reports
+            lat = time.perf_counter() - t0
+            kind = classify_failure(exc)
+            report.stages.append(StageLog(
+                stage="swarm", url=url, latency_s=lat,
+                error_class=kind.value, error=_err_text(exc)))
+            self._log_stage("swarm", url, "", lat, 0, kind,
+                            _err_text(exc, 200))
+            return False
+        lat = time.perf_counter() - t0
+        if result.refused_reason:
+            report.stages.append(StageLog(
+                stage="swarm", url=url, latency_s=lat,
+                error_class=FailureKind.SITE_ERROR.value,
+                error=f"swarm refused: {result.refused_reason} — "
+                      "single-stream fallback"))
+            self._log_stage("swarm", url, "", lat, 0,
+                            FailureKind.SITE_ERROR,
+                            f"refused: {result.refused_reason}")
+            return False
+        if not result.ok:
+            kind = classify_failure(result.error or "swarm fetch failed")
+            report.stages.append(StageLog(
+                stage="swarm", url=url, latency_s=lat,
+                error_class=kind.value,
+                error=result.error or "swarm fetch failed"))
+            self._log_stage("swarm", url, "", lat, 0, kind,
+                            _err_text(result.error or "swarm failed", 200))
+            return False
+        landed = self._verify_landed(
+            {"path": result.path, "bytes": result.size_bytes})
+        if landed is None:
+            # Same phantom guard as the other stages: the swarm
+            # CLAIMS bytes — the disk decides.
+            report.stages.append(StageLog(
+                stage="swarm", url=url, latency_s=lat,
+                error_class=FailureKind.NO_MEDIA_FOUND.value,
+                error="swarm reported success but the file is "
+                      f"missing or empty on disk "
+                      f"({result.path or 'no path'})"))
+            self._log_stage("swarm", url, "", lat, 0,
+                            FailureKind.NO_MEDIA_FOUND,
+                            "reported success, nothing on disk")
+            return False
+        _path, size = landed
+        report.stages.append(StageLog(
+            stage="swarm", url=url, latency_s=lat, size_bytes=size,
+            ok=True,
+            note=f"download-swarm {result.segments_done}/"
+                 f"{result.segments_total} segments × {workers} "
+                 f"workers (resumed={result.resumed} "
+                 f"restarted={result.restarted})"))
+        self._log_stage("swarm", url, "", lat, size, FailureKind.OK, "")
+        self._fill_success(report, {
+            "path": _path, "bytes": size, "title": "",
+            "extractor": "download-swarm"}, size)
         return True
 
     # ── stage 1c: connector streams (B2) ──────────────────────────

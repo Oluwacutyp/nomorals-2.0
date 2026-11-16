@@ -1209,7 +1209,8 @@ class RuntimeMediaMixin:
         return self._fmt_started(res, engine)
 
     def _download_produce(self, url: str, audio_only: bool,
-                          chat: Any) -> tuple[str, bool]:
+                          chat: Any, swarm: bool = False
+                          ) -> tuple[str, bool]:
         """The /download download+send body — runs on the job worker
         thread in chat mode, synchronously on CLI.  Returns (reply
         text, sent): ``sent`` is True only when the file actually
@@ -1219,7 +1220,8 @@ class RuntimeMediaMixin:
 
         downloader = MediaDownloader(self.context)
         report_progress(f"downloading {url[:80]}")
-        report = downloader.download(url, audio_only=audio_only)
+        report = downloader.download(url, audio_only=audio_only,
+                                     swarm=swarm)
         if not report.ok:
             # The report's own summary is the canonical per-leg account
             # (stage, proxy, error class + reason or the leg's note,
@@ -1275,6 +1277,15 @@ class RuntimeMediaMixin:
 
         /download <url>          → best quality video (or whatever the URL is)
         /download <url> audio    → audio only (mp3)
+        /download <url> --swarm  → parallel segmented fetch for a
+                                    large direct file (byte-range
+                                    workers, resume, hash check);
+                                    falls back to the single stream
+                                    when the server will not serve
+                                    ranges
+        /download swarm          → the swarm queue's state (queued /
+                                    running / done / failed, with
+                                    segment counts)
 
         In chat the download runs as a background job (owner decision
         2026-10-19): the handler returns an ack immediately and the
@@ -1282,20 +1293,26 @@ class RuntimeMediaMixin:
         """
         tail = (tail or "").strip()
         if not tail:
-            return ("usage: /download <url> [audio]\n"
+            return ("usage: /download <url> [audio] [--swarm]\n"
                     "paste any media URL — YouTube, TikTok, Instagram, X, "
                     "SoundCloud, direct mp3/mp4 links, 1000+ sites via yt-dlp.\n"
                     "/download status — the source registry's growth "
-                    "state (seeds, grown sources, health, candidates).")
+                    "state (seeds, grown sources, health, candidates).\n"
+                    "/download swarm — the download swarm's queue "
+                    "(large files fetched in parallel segments).")
         words = tail.split()
         if words and words[0].lower() == "cancel":
             return self._cancel_download_job(
                 words[1] if len(words) > 1 else "", chat_key)
         if words and words[0].lower() == "status":
             return self._download_sources_status()
+        if words and words[0].lower() == "swarm" and len(words) == 1:
+            return self._download_swarm_status()
         audio_only = any(w.lower() in ("audio", "--audio", "-a") for w in words)
+        swarm = any(w.lower() in ("swarm", "--swarm") for w in words)
         url = " ".join(w for w in words
-                       if w.lower() not in ("audio", "--audio", "-a")).strip()
+                       if w.lower() not in ("audio", "--audio", "-a",
+                                            "swarm", "--swarm")).strip()
         if not url:
             return "usage: /download <url> [audio]"
         if not url.lower().startswith(("http://", "https://")):
@@ -1326,7 +1343,8 @@ class RuntimeMediaMixin:
                     title=url[:80])
             return self._play_download_bg(
                 chat, chat_key, f"⏳ {url[:60]}",
-                lambda: self._download_produce(url, audio_only, chat),
+                lambda: self._download_produce(url, audio_only, chat,
+                                               swarm=swarm),
                 title=url[:80])
         if _platform == "tiktok":
             text, _sent = self._tiktok_produce(url, audio_only, None)
@@ -1334,8 +1352,24 @@ class RuntimeMediaMixin:
         if _platform == "instagram":
             text, _sent = self._instagram_produce(url, None)
             return text
-        text, _sent = self._download_produce(url, audio_only, None)
+        text, _sent = self._download_produce(url, audio_only, None,
+                                             swarm=swarm)
         return text
+
+    def _download_swarm_status(self) -> str:
+        """/download swarm — the download swarm's durable queue.
+
+        The queue is the record of large-file swarm jobs (queued /
+        running / done / failed, with segment counts); a job
+        interrupted mid-download keeps its segment state beside the
+        file, so the next run resumes it instead of restarting.
+        """
+        from ...media.download_swarm import SwarmQueue
+
+        try:
+            return SwarmQueue(context=self.context).status_text()
+        except Exception as exc:  # noqa: BLE001 — status never raises
+            return f"couldn't read the swarm queue: {exc}"
 
     def _download_sources_status(self) -> str:
         """/download status — the source registry's growth state
