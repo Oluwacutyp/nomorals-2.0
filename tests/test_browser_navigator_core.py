@@ -47,6 +47,15 @@ from nomorals.browser.llm_decider import (
 )
 from nomorals.browser.vision_marks import PerceptionEscalator
 
+# NOTE (long-test H37): the file's six direct clock reads were wait-loop
+# deadlines (deadline = time.time() + N; while time.time() < deadline and
+# not broker.pending()) in _park_and_answer and two approval-park tests.
+# They measure elapsed time only — no timestamp is ever asserted and
+# broker.pending() is state-based — so they are time.monotonic(), which
+# the meta-test's own docstring blesses ("perf_counter / monotonic are
+# NOT counted: duration measurement is legitimate"). No frozen seed,
+# no production change: the ApprovalBroker never reads the test's clock.
+
 # ── A1: self-provisioning ---------------------------------------------------
 
 
@@ -573,8 +582,8 @@ def _park_and_answer(broker: ApprovalBroker, approver: Any,
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
     if answer is not None:
-        deadline = time.time() + 5
-        while time.time() < deadline and not broker.pending():
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and not broker.pending():
             time.sleep(0.01)
         pending = broker.pending()
         assert pending, "the run never parked for approval"
@@ -641,8 +650,8 @@ def _parked_loop(broker: ApprovalBroker, answer: bool) -> dict[str, Any]:
 
     thread = threading.Thread(target=_run, daemon=True)
     thread.start()
-    deadline = time.time() + 5
-    while time.time() < deadline and not broker.pending():
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and not broker.pending():
         time.sleep(0.01)
     pending = broker.pending()
     assert pending, "the loop never parked at the submit step"
@@ -782,8 +791,8 @@ def test_browser_run_parks_for_approval_and_the_verb_resumes_it(
         # The run parks at the submit step: nothing has executed,
         # and an approval is waiting on the owner.
         broker = runtime._browser_approval_broker()
-        deadline = time.time() + 10
-        while time.time() < deadline and not broker.pending():
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline and not broker.pending():
             time.sleep(0.02)
         pending = broker.pending()
         assert pending, "the run never parked for approval"
