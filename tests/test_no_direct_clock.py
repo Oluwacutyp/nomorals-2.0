@@ -144,6 +144,38 @@ BASELINE: dict[str, int] = {
     "tests/test_missions_p9.py": 1,
     "tests/test_missions_sweep.py": 4,
     "tests/test_missions_wiring.py": 4,
+    # Grandfathered (batch H13): the trial-flow seed's `now` must
+    # stay on the real clock — _load_assist_runs TTL-prunes
+    # terminal runs with started < now - 7d (flow.py:915-955), and
+    # the frozen MIDDAY instant (2026-10-14) is 32 days old, so a
+    # frozen seed's stored row is deleted on reload and the raw
+    # read-back finds nothing (proven by a round-1 freeze that
+    # broke exactly that assertion on both seam rungs). The file's
+    # other 8 reads are converted: monotonic mongod wait loops,
+    # frozen monitor tick nows (last_ts starts at 0), frozen
+    # failure-window starts (rows carry real-now ts, so the frozen
+    # starts sit earlier and the same rows pass).
+    "tests/test_mongo_p3_conformance.py": 1,
+    # Grandfathered (batch H13): six reads whose seeds production
+    # compares against the real clock, and the frozen MIDDAY instant
+    # (2026-10-14) sits on the wrong side of the comparison. The
+    # shopping _scenario seeds (2 reads) feed compute_steal_score's
+    # 30-day and get_steals' 7-day windows; the timeline _noon
+    # helper (1 read) feeds summary()/vitals_trend()'s 30-day
+    # windows; the congestion queue_depth probe (1 read) reads a
+    # hold whose expires_at acquire() stamped on the real clock;
+    # the trip poll deadline (1 read) is judged by is_closed() and
+    # polls_closing_soon() against real now; the campaign send_at
+    # (1 read) is judged by process() against real now. In every
+    # case a frozen seed changes the production outcome, and the
+    # real-clock comparison is correct behavior, not a seam to add.
+    # The file's other 11 reads are converted: monotonic wait
+    # loops, frozen Gmail watch expiry, frozen challenge _noon
+    # (all its production reads take an explicit now), frozen
+    # _rates now (the window filter has no upper bound, so the
+    # real-now-stamped corpus counts the same), and frozen past
+    # seeds (closed poll, stale claim) that are past on both clocks.
+    "tests/test_mongo_p5.py": 6,
     "tests/test_monitor_validation.py": 2,
     "tests/test_mood_patterns.py": 3,
     "tests/test_mqtt.py": 2,

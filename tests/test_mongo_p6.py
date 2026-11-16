@@ -58,6 +58,7 @@ from nomorals.storage.parity import (
 )
 from nomorals.storage.queue import WorkQueue
 from nomorals.storage.sidecars import SidecarSpec
+from tests.frozen_clock import MIDDAY_TS
 
 pymongo = pytest.importorskip("pymongo")
 
@@ -100,27 +101,27 @@ def mongo_uri(tmp_path_factory) -> str:
     try:
         direct = pymongo.MongoClient(base + "/?directConnection=true",
                                      serverSelectionTimeoutMS=500)
-        deadline = time.time() + 30
+        deadline = time.monotonic() + 30
         while True:
             try:
                 direct.admin.command("ping")
                 break
             except Exception:
-                if time.time() > deadline:
+                if time.monotonic() > deadline:
                     raise RuntimeError("mongod did not come up") from None
                 time.sleep(0.25)
         with contextlib.suppress(pymongo.errors.OperationFailure):
             direct.admin.command("replSetInitiate")
         client = pymongo.MongoClient(base + "/?replicaSet=rs0",
                                      serverSelectionTimeoutMS=500)
-        deadline = time.time() + 30
+        deadline = time.monotonic() + 30
         while True:
             try:
                 if client.admin.command("hello").get("isWritablePrimary"):
                     break
             except Exception:
                 pass
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 raise RuntimeError("mongod replica set did not elect a primary")
             time.sleep(0.25)
         yield base + "/?replicaSet=rs0"
@@ -691,7 +692,10 @@ class TestCutoverRehearsal:
         # Seed across KV + a ported domain + the queue + pinned domains.
         KVStore(db).set("p6:seed", {"answer": 42})
         log = ConversationLog(db)
-        now = time.time()
+        # Frozen: the conversation/message timestamps are carried
+        # data — the rehearsal parity-checks them across the flip,
+        # never compares them to the wall clock.
+        now = MIDDAY_TS
         log.ensure_conversation("conv-p6", title="rehearsal", agent="p6",
                                 channel="test", now=now)
         log.append_message(row_id="msg-p6", conversation_id="conv-p6",

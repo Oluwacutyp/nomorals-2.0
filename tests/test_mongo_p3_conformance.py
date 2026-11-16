@@ -41,6 +41,7 @@ from nomorals.storage.docstore import (
     MongoDocumentStore,
     SQLiteDocumentStore,
 )
+from tests.frozen_clock import MIDDAY_TS
 
 pymongo = pytest.importorskip("pymongo")
 
@@ -82,27 +83,27 @@ def mongo_uri(tmp_path_factory) -> str:
     try:
         direct = pymongo.MongoClient(base + "/?directConnection=true",
                                      serverSelectionTimeoutMS=500)
-        deadline = time.time() + 30
+        deadline = time.monotonic() + 30
         while True:
             try:
                 direct.admin.command("ping")
                 break
             except Exception:
-                if time.time() > deadline:
+                if time.monotonic() > deadline:
                     raise RuntimeError("mongod did not come up") from None
                 time.sleep(0.25)
         with contextlib.suppress(pymongo.errors.OperationFailure):
             direct.admin.command("replSetInitiate")
         client = pymongo.MongoClient(base + "/?replicaSet=rs0",
                                      serverSelectionTimeoutMS=500)
-        deadline = time.time() + 30
+        deadline = time.monotonic() + 30
         while True:
             try:
                 if client.admin.command("hello").get("isWritablePrimary"):
                     break
             except Exception:
                 pass
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 raise RuntimeError("mongod replica set did not elect a primary")
             time.sleep(0.25)
         yield base + "/?replicaSet=rs0"
@@ -414,10 +415,10 @@ def test_monitors_conformance(rung: Rung, tmp_path):
     assert len(rows) == 1 and rows[0]["interval_s"] == 120.0
     assert agent.status()["total"] == 1
 
-    ticked = agent.tick(now=time.time() + 1000.0)
+    ticked = agent.tick(now=MIDDAY_TS + 1000.0)
     assert ticked["checked"] == 1 and ticked["errors"] == []
     target_file.write_text("v2-longer", encoding="utf-8")
-    ticked = agent.tick(now=time.time() + 2000.0)
+    ticked = agent.tick(now=MIDDAY_TS + 2000.0)
     assert ticked["checked"] == 1
     assert len(ticked["changed"]) == 1
 
@@ -497,8 +498,6 @@ def test_failures_conformance(rung: Rung):
     every rung — the mixed-method proof that residue tables keep
     working when the ledger itself rides the seam.
     """
-    import time
-
     from nomorals.agents.evolution import _failures_table
     from nomorals.agents.failure import FailureAnalyzer
     from nomorals.agents.reasoning import _recent_summary_failures
@@ -549,13 +548,16 @@ def test_failures_conformance(rung: Rung):
 
     # ── satellites, same rows, same answers on every rung ──
     assert _recent_summary_failures(rung.db, "alpha tool blew up") == 2
-    fams = _repeated_families(rung.db, time.time() - 7 * 86400.0, 5)
+    # Frozen window starts are safe here: the rows carry real-now ts
+    # (FailureAnalyzer.record stamps time.time()), and both frozen
+    # starts sit earlier than the rows, so the same rows pass.
+    fams = _repeated_families(rung.db, MIDDAY_TS - 7 * 86400.0, 5)
     assert [f["family"] for f in fams] == ["network"]
     assert fams[0]["n"] == 2
     assert fams[0]["sample"] == "alpha tool blew up"
     table = _failures_table(rung.db)
     if table is not None:
-        assert table.count({"ts": {"$gt": time.time() - 86400.0}}) == 4
+        assert table.count({"ts": {"$gt": MIDDAY_TS - 86400.0}}) == 4
     loop = SkillEvolutionLoop(_ctx(rung.db), min_failures=2)
     found = loop.detect()
     assert [c["skill"] for c in found] == ["gold"]
@@ -910,6 +912,17 @@ def test_trial_flow_conformance(rung: Rung, tmp_path):
     settings = SimpleNamespace(home=str(tmp_path), timezone="UTC",
                                workspace_dir=str(tmp_path))
     ctx = _ctx(rung.db, settings=settings)
+    # Grandfathered (batch H13): the assist run's `started` is
+    # TTL-pruned against the real clock on reload —
+    # _load_assist_runs deletes terminal rows with started <
+    # now - 7d (flow.py:915-955), and the frozen MIDDAY instant
+    # (2026-10-14) is 32 days old — so a frozen seed's stored row
+    # is deleted when the fresh flow loads and the raw read-back
+    # finds nothing. (The in-memory copy survives — the load runs
+    # before the prune — which is why only the raw assertion
+    # failed.) The SMS watch's frozen deadline would still recover
+    # as timeout, but the two seeds share this one `now`, and the
+    # run's `started` genuinely needs the real clock.
     now = time.time()
     flow = TrialFlow(ctx)
     flow._assist_runs["run-1"] = {

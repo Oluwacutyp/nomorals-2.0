@@ -55,6 +55,7 @@ from nomorals.storage.docstore import (
 )
 from nomorals.storage.queue import WorkQueue
 from nomorals.storage.schedule_claim import ScheduleClaimStore
+from tests.frozen_clock import MIDDAY_TS
 
 # ---------------------------------------------------------------------------
 # mongod fixture — a real mongod 7.0 on an ephemeral port (P3 pattern)
@@ -105,27 +106,27 @@ def mongod(tmp_path_factory):
     try:
         direct = pymongo.MongoClient(base + "/?directConnection=true",
                                      serverSelectionTimeoutMS=500)
-        deadline = time.time() + 30
+        deadline = time.monotonic() + 30
         while True:
             try:
                 direct.admin.command("ping")
                 break
             except Exception:  # noqa: BLE001
-                if time.time() > deadline:
+                if time.monotonic() > deadline:
                     pytest.skip("mongod did not come up")
                 time.sleep(0.25)
         with contextlib.suppress(pymongo.errors.OperationFailure):
             direct.admin.command("replSetInitiate")
         client = pymongo.MongoClient(base + "/?replicaSet=rs0",
                                      serverSelectionTimeoutMS=500)
-        deadline = time.time() + 30
+        deadline = time.monotonic() + 30
         while True:
             try:
                 if client.admin.command("hello").get("isWritablePrimary"):
                     break
             except Exception:  # noqa: BLE001
                 pass
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 pytest.skip("mongod replica set did not elect a primary")
             time.sleep(0.25)
         yield base + "/?replicaSet=rs0"
@@ -340,7 +341,10 @@ class TestNativePathUntouched:
 
 
 def _job_row(job_id: str, next_run: float) -> dict:
-    now = time.time()
+    # Frozen: every ScheduleClaimStore comparison takes the caller's
+    # explicit now (due_jobs/claim default to real time only when
+    # now is None), so the frozen now is self-consistent here.
+    now = MIDDAY_TS
     return {"id": job_id, "name": job_id, "kind": "interval",
             "spec": "5m", "payload_kind": "tool", "payload": "{}",
             "enabled": 1, "next_run": next_run, "last_run": 0.0,
@@ -366,7 +370,7 @@ def claim_book(request, tmp_path, mongod):
 
 class TestScheduleClaim:
     def test_exactly_one_claimer(self, claim_book: ScheduleClaimStore):
-        now = time.time()
+        now = MIDDAY_TS
         claim_book.put_job(_job_row("j1", now - 1))
         assert [j["id"] for j in claim_book.due_jobs(now)] == ["j1"]
         tokens: list[str | None] = []
@@ -408,7 +412,7 @@ class TestScheduleClaim:
 
     def test_expired_claim_reclaimable_and_fenced(
             self, claim_book: ScheduleClaimStore):
-        now = time.time()
+        now = MIDDAY_TS
         claim_book.put_job(_job_row("j2", now - 1))
         first = claim_book.claim("j2", "w1", lease_seconds=0.05, now=now)
         assert first
@@ -584,7 +588,7 @@ class TestPriceSnapshotsTruth:
         engine._store_snapshot(PriceSnapshot(
             product_url="https://jumia.example/p/1", site="jumia",
             price_ngn=4200.0, title="Rice 50kg",
-            timestamp=time.time()))
+            timestamp=MIDDAY_TS))
         rows = db.query(
             "SELECT price_ngn FROM naija_price_snapshots "
             "WHERE product_url = ?", ("https://jumia.example/p/1",))

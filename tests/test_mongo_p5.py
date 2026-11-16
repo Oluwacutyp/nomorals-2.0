@@ -111,6 +111,7 @@ from nomorals.storage.docstore import (
     set_ambient_document_store,
     storage_backend_status,
 )
+from tests.frozen_clock import MIDDAY_TS
 
 PACKAGE_ROOT = Path(__file__).resolve().parent.parent / "nomorals"
 
@@ -166,27 +167,27 @@ def mongod(tmp_path_factory):
     try:
         direct = pymongo.MongoClient(base + "/?directConnection=true",
                                      serverSelectionTimeoutMS=500)
-        deadline = time.time() + 30
+        deadline = time.monotonic() + 30
         while True:
             try:
                 direct.admin.command("ping")
                 break
             except Exception:  # noqa: BLE001
-                if time.time() > deadline:
+                if time.monotonic() > deadline:
                     pytest.skip("mongod did not come up")
                 time.sleep(0.25)
         with contextlib.suppress(pymongo.errors.OperationFailure):
             direct.admin.command("replSetInitiate")
         client = pymongo.MongoClient(base + "/?replicaSet=rs0",
                                      serverSelectionTimeoutMS=500)
-        deadline = time.time() + 30
+        deadline = time.monotonic() + 30
         while True:
             try:
                 if client.admin.command("hello").get("isWritablePrimary"):
                     break
             except Exception:  # noqa: BLE001
                 pass
-            if time.time() > deadline:
+            if time.monotonic() > deadline:
                 pytest.skip("mongod replica set did not elect a primary")
             time.sleep(0.25)
         yield base + "/?replicaSet=rs0"
@@ -1953,6 +1954,12 @@ class TestShoppingDealsPort:
             Steal,
         )
 
+        # Grandfathered (batch H13): frozen seeds would fall outside
+        # production's real-clock windows — compute_steal_score
+        # filters timestamp >= now - 30d and get_steals filters
+        # discovered_at >= now - 7d, and MIDDAY (2026-10-14) is 32
+        # days old. The windows are correct: a 30-day median must be
+        # relative to real now.
         now = time.time()
         url = "https://www.jumia.com.ng/p/1"
         engine._store_snapshot(PriceSnapshot(
@@ -2053,6 +2060,10 @@ class TestShoppingDealsPort:
 
         path = tmp_path / "shopping.db"
         engine, hunter = self._engines(path, None, monkeypatch)
+        # Grandfathered (batch H13): same real-clock windows as the
+        # _scenario seeds above — compute_steal_score's 30-day and
+        # get_steals' 7-day filters run on the real clock, and frozen
+        # Oct 14 stamps fall outside both.
         now = time.time()
         url = "https://www.jumia.com.ng/p/1"
         engine._store_snapshot(PriceSnapshot(
@@ -2480,7 +2491,12 @@ class TestEmailIntegrationPort:
                 return {"history": []}
             if url.endswith("/watch"):
                 return {"historyId": state[0],
-                        "expiration": int((time.time() + 7 * 86400) * 1000)}
+                        # Frozen: the fake's expiration is stored but
+                        # never compared in the exercised paths —
+                        # watch_status only surfaces it, renew_watches
+                        # is never called here — so the frozen +7d
+                        # value is behavior-preserving.
+                        "expiration": int((MIDDAY_TS + 7 * 86400) * 1000)}
             return {}
 
         integ._gmail_request = fake_request
@@ -5002,6 +5018,12 @@ class TestHealthTimelinePort:
     def _noon(days_ago: float) -> float:
         """Local noon, ``days_ago`` days before today — a timestamp
         whose local calendar date is stable in every timezone."""
+        # Grandfathered (batch H13): HealthTimeline.summary() and
+        # vitals_trend() window 30 days on the real clock, and the
+        # frozen MIDDAY instant (2026-10-14) is 32 days old — frozen
+        # seeds would fall outside, so the summary would read empty
+        # and the vitals would vanish. The windows are correct: a
+        # 30-day recap must be relative to real now.
         lt = time.localtime(time.time() - days_ago * 86400.0)
         return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
                             12, 0, 0, 0, 0, -1))
@@ -5487,7 +5509,11 @@ class TestHealthChallengesPort:
     def _noon(days_ago: float) -> float:
         """Local noon, ``days_ago`` days before today — a timestamp
         whose local calendar date is stable in every timezone."""
-        lt = time.localtime(time.time() - days_ago * 86400.0)
+        # Frozen: every production read that matters here takes the
+        # caller's explicit now (checkin/at_risk) or a stored count
+        # (streak/freezes/risk_nudge), so the frozen "today" is
+        # self-consistent across the whole streak lifecycle.
+        lt = time.localtime(MIDDAY_TS - days_ago * 86400.0)
         return time.mktime((lt.tm_year, lt.tm_mon, lt.tm_mday,
                             12, 0, 0, 0, 0, -1))
 
@@ -6379,8 +6405,8 @@ class TestPlanningCongestionPort:
 
     @staticmethod
     def _wait_until(predicate, timeout=5.0):
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
             if predicate():
                 return True
             time.sleep(0.02)
@@ -6429,7 +6455,11 @@ class TestPlanningCongestionPort:
         # release flow + rates over the event corpus
         out["release_lessee"] = mon.release("lease-a", "lessee")
         out["release_missing"] = mon.release("lease-a", "lessee")
-        out["rates_a"] = mon._rates(a.resource_id, now=time.time())
+        # Frozen: _rates filters ts >= now - 300 with no upper
+        # bound, and the event corpus is stamped on the real clock
+        # during this scenario — every event is after the frozen
+        # cutoff, so the same corpus is counted.
+        out["rates_a"] = mon._rates(a.resource_id, now=MIDDAY_TS)
         out["wait_clear"] = mon.wait_estimate("lease-a", now=t0)
         # breaker: five jam observations open it; advise fails fast
         states = [mon._breaker_observe(a.resource_id, True)
@@ -6522,6 +6552,9 @@ class TestPlanningCongestionPort:
         # an expired hold stays PRESENT until the organ reaps it
         h_temp = mon.acquire("imp-a", "temp", ttl_s=0.05)
         assert rung.store.count(holds_c) == 3
+        # Grandfathered (batch H13): the hold's expires_at is stamped
+        # on the real clock by acquire() — a frozen now would read
+        # the 0.05s lease as still live and the depth as 3, not 2.
         assert mon.queue_depth("imp-a", now=time.time() + 10) == 2
         assert self._wait_until(lambda: mon.reap_stale() == 1)
         assert rung.store.count(holds_c) == 2
@@ -6628,6 +6661,11 @@ class TestTravelGroupsPort:
         # polls: votes, replace, deadline, too-few-options
         poll = store.create_poll(
             trip.id, "Beach or city?", ["Beach", "City", "Mountains"],
+            # Grandfathered (batch H13): vote() and
+            # polls_closing_soon() compare the deadline against the
+            # real clock (is_closed uses _now()) — a frozen deadline
+            # reads as already closed, so the votes would be refused
+            # and closing_soon would come back empty.
             deadline=time.time() + 3600, created_by="Ada")
         store.vote(poll.id, "Ada", "Beach")
         store.vote(poll.id, "Mama", 1)
@@ -6642,7 +6680,9 @@ class TestTravelGroupsPort:
         res2 = store.poll_result(poll2.id)
         out["poll2"] = (res2["counts"], res2["winner"], res2["total"])
         closed = store.create_poll(trip.id, "Late?", ["A", "B"],
-                                   deadline=time.time() - 10)
+                                   # Frozen: past on both clocks — the
+                                   # vote is refused either way.
+                                   deadline=MIDDAY_TS - 10)
         out["deadline_vote"] = store.vote(closed.id, "Ada", "A")
         out["short_poll"] = store.create_poll(trip.id, "One?", ["Only"])
         out["closing_soon"] = sorted(
@@ -7305,7 +7345,6 @@ class TestMarketingSendPort:
         if rung.store is None:
             pytest.skip("the claim is a seam property; native has "
                         "no claim")
-        import time
 
         e = self._engine(tmp_path / "send.db", rung)
         e.register_provider("mock", kind="mock", rate_per_minute=1000,
@@ -7313,7 +7352,10 @@ class TestMarketingSendPort:
         e.save_template("t", "Hi", "Hey")
         sid = e.enqueue("s@x.com", "t", {}, "mock")
         e._port.tables["send_queue"].update(sid, {
-            "claim_token": "clm_dead", "claim_until": time.time() - 10})
+            # Frozen: past on both clocks — process() compares the
+            # claim against the real clock, and the row is
+            # reclaimable either way.
+            "claim_token": "clm_dead", "claim_until": MIDDAY_TS - 10})
         assert e.process() == {"sent": 1, "failed": 0, "deferred": 0,
                                "blocked": 0}
         assert e.queue_depth("sent") == 1
@@ -7376,6 +7418,12 @@ class TestMarketingSendPort:
                             sender=lambda to, s, b: True)
         e.save_template("t", "Hi", "Hey")
         res = e.schedule_campaign("t", ["s1@x.com", "s2@x.com"], "mock",
+                                  # Grandfathered (batch H13):
+                                  # process() sends only rows with
+                                  # next_attempt_at <= real now — a
+                                  # frozen send_at reads as already due
+                                  # and the campaign would send at once
+                                  # instead of waiting.
                                   time.time() + 3600)
         assert res["queued"] == 2 and res["campaign_id"]
         assert e.process() == {"sent": 0, "failed": 0, "deferred": 0,
