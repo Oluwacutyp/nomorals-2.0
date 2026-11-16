@@ -2125,7 +2125,9 @@ class RuntimeExpressionMixin:
         routed library, /skills show <id> reads one file, /skills
         search <text> routes a task text, /skills drafts shows
         distilled drafts with their promotion progress, /skills
-        promote <id> promotes a draft now. The list also publishes a
+        promote <id> promotes a draft now, /skills distill <mission
+        id | lesson> writes a draft from a finished mission or from
+        a lesson in plain words. The list also publishes a
         living card (family "skills") whose buttons open skills in
         place — the same Living Chat surface as everything else."""
         library = self._skillbook()
@@ -2180,6 +2182,9 @@ class RuntimeExpressionMixin:
             return (f"promoted {result['skill_id']} to the live "
                     f"library (v{result['version']}) — it now routes "
                     "as a proven skill.")
+        if verb == "distill" and len(parts) >= 2:
+            return self._skillbook_distill(
+                library, text[len(parts[0]):].strip())
         live = library.docs(include_drafts=False)
         drafts = library.drafts()
         lines = [f"skill library — {len(live)} live, "
@@ -2193,6 +2198,54 @@ class RuntimeExpressionMixin:
             lines.append("the library card is live above — tap a "
                          "skill to open it.")
         return "\n".join(lines)
+
+    def _skillbook_distill(self, library, tail):  # type: ignore[no-untyped-def]
+        """``/skills distill`` — a draft from a mission or a lesson.
+
+        A tail that names a finished mission distills that mission
+        (its latest reflection lessons travel with it); anything else
+        is distilled as written.  A mission with nothing to teach
+        writes nothing — the refusal says so.
+        """
+        from ...missions.mission import MissionStatus, MissionStore, NotFound
+        from ...skills.distill_files import (
+            distill_record,
+            task_from_mission,
+            task_from_text,
+        )
+
+        mission = None
+        db = getattr(self.context, "db", None)
+        if db is not None:
+            try:
+                mission = MissionStore(db).get(tail)
+            except NotFound:
+                mission = None
+            except Exception:  # noqa: BLE001 — text form is the fallback
+                mission = None
+        if mission is not None:
+            if mission.status not in MissionStatus.TERMINAL:
+                return (f"mission {mission.id} is still "
+                        f"{mission.status} — distill it when it "
+                        "finishes.")
+            lessons = None
+            try:
+                rows = MissionStore(db).reflections(mission.id, limit=1)
+                if rows and isinstance(rows[0].get("lessons"), list):
+                    lessons = rows[0]["lessons"]
+            except Exception:  # noqa: BLE001 — metadata lessons stand
+                lessons = None
+            task = task_from_mission(mission, lessons=lessons)
+        else:
+            task = task_from_text(tail)
+        result = distill_record(library, task)
+        if not result.get("ok"):
+            return f"cannot distill: {result.get('reason')}"
+        revises = result.get("revises") or ""
+        suffix = f" — revises {revises}" if revises else ""
+        return (f"distilled {result['draft_id']} as a draft{suffix} — "
+                "it promotes after 2 successful missions, or now with "
+                f"/skills promote {result['draft_id']}.")
 
     def _skillbook_card(self, library, live, message) -> None:  # type: ignore[no-untyped-def]
         """Publish/revise the skills living card for this chat."""

@@ -36,6 +36,87 @@ def should_distill(task: Mapping[str, Any]) -> bool:
         or str(task.get("outcome") or "") == "failed"
 
 
+def task_from_text(text: str) -> dict[str, Any]:
+    """A distillable task from free text: the text is what was learned."""
+    text = " ".join(str(text or "").split())
+    return {
+        "goal": text[:200],
+        "outcome": "done",
+        "summary": text,
+        "mission_id": "",
+        "steps": [],
+        "lessons": [text] if text else [],
+        "tags": [],
+    }
+
+
+def task_from_mission(mission: Any,
+                      lessons: list[str] | None = None) -> dict[str, Any]:
+    """A distillable task from a completed mission (duck-typed).
+
+    Lessons are read from ``mission.metadata["lessons"]`` or
+    ``mission.state["lessons"]`` unless the caller passes them
+    explicitly — the runtime passes the mission's latest reflection
+    lessons, which live in the reflections table, not on the Mission
+    object.  ``outcome`` is "done" only for a done mission; anything
+    else (failed, cancelled, still running) distills as "failed".
+    """
+    goal = str(getattr(mission, "goal", "") or "")
+    mission_id = str(getattr(mission, "id", "") or "")
+    status = str(getattr(mission, "status", "") or "").lower()
+    outcome = "done" if status == "done" else "failed"
+    if lessons is None:
+        lessons = []
+        for source in (getattr(mission, "metadata", None),
+                       getattr(mission, "state", None)):
+            if isinstance(source, dict):
+                found = source.get("lessons")
+                if isinstance(found, list) and found:
+                    lessons = [str(item) for item in found]
+                    break
+    steps: list[dict[str, Any]] = []
+    state = getattr(mission, "state", None)
+    plan = state.get("plan") if isinstance(state, dict) else None
+    if isinstance(plan, dict):
+        for step in plan.get("steps") or []:
+            if not isinstance(step, dict):
+                continue
+            steps.append({
+                "name": step.get("name", ""),
+                "role": step.get("role", ""),
+                "tools": step.get("tools", []),
+            })
+    iterations = getattr(mission, "iterations", 0) or 0
+    tags = getattr(mission, "tags", None) or []
+    return {
+        "goal": goal,
+        "outcome": outcome,
+        "summary": f"mission {status} after {iterations} iterations",
+        "mission_id": mission_id,
+        "steps": steps,
+        "lessons": list(lessons),
+        "tags": list(tags) if isinstance(tags, list) else [],
+    }
+
+
+def distill_record(library: Any, task: Mapping[str, Any]) -> dict[str, Any]:
+    """Distill one task record, or refuse honestly when it teaches nothing.
+
+    Applies :func:`should_distill` first so a mission with no steps,
+    no lessons, and a passing outcome writes nothing — an empty draft
+    in the library is worse than no draft.
+    """
+    if not isinstance(task, dict) or not str(task.get("goal") or "").strip():
+        return {"ok": False, "reason": "nothing to distill — no goal given"}
+    if not should_distill(task):
+        return {
+            "ok": False,
+            "reason": "nothing to distill — the task has no steps, "
+                      "no lessons, and did not fail",
+        }
+    return distill_task(library, task)
+
+
 def _title_for(goal: str) -> str:
     text = " ".join(str(goal or "untitled task").split())
     return (text[:72].rstrip() + "…") if len(text) > 73 else text
