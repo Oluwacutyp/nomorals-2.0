@@ -510,6 +510,36 @@ def register(registry: Any) -> None:
                     "error": f"group roster diff tick failed: {exc}"}
 
     @registry.register(
+        "__group_rhythm_tick__",
+        description="Run one group rhythm tick (owner reports "
+        "2026-11-16): run the rhythm + estate cycle for every "
+        "claimed group and post due announcements — richest-"
+        "balance records, district events, the weekly gift "
+        "proposal — on their own clock, no message required. "
+        "Bot-first: an owner-surface runtime defers to the bot's "
+        "tick marker. Scheduler-internal; runs every ~5m. "
+        "Routine and silent — silent hours hold notices into "
+        "the morning digest, each run journals to its group's "
+        "audit log.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _group_rhythm_tick_tool() -> dict[str, Any]:
+        from ..agents.group_rhythm import run_group_rhythm_tick_once
+        from ..agents.notifier import resolve_gateway
+
+        try:
+            gateway = resolve_gateway(_context)
+            adapters = list(
+                (getattr(gateway, "adapters", None) or {}).items()
+            ) if gateway is not None else []
+            return run_group_rhythm_tick_once(
+                context=_context, adapters=adapters)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"group rhythm tick failed: {exc}"}
+
+    @registry.register(
         "__delegation_manager_tick__",
         description="Run one delegation-manager tick: recover "
         "delegated runs orphaned by a restart, resume what the "

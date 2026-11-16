@@ -431,7 +431,44 @@ class RuntimeGroupMixin:
             _log.debug("group side-send failed", exc_info=True)
             return None
 
-    def _claim_system_send(self, chat, what: str, text: str) -> bool:  # type: ignore[no-untyped-def]
+    # Bot-first system sends (owner reports 2026-11-16): an owner
+    # surface waits this long for the bot's claim on a system send
+    # before sending itself. The bot claims within ~1s of the same
+    # event in the live shape; the window covers realistic skew.
+    _BOT_CLAIM_WAIT_S = 5.0
+    # After one full wait with no bot claim, the owner surface
+    # stops waiting for this room for a while — the bot is down,
+    # not slow.
+    _BOT_ABSENT_COOLDOWN_S = 120.0
+
+    def _system_send_prefers_bot(self, surface, group_key,  # type: ignore[no-untyped-def]
+                                 platform: str) -> bool:
+        """True when THIS runtime should yield a system send to
+        the bot: this runtime is the owner's surface, and the bot
+        may be in the room. A verified demotion (``bot_admin``
+        False) means the bot is not the sender — no yield. Any
+        unproven standing yields anyway: the in-band claim
+        observation resolves it, and a slow owner never
+        double-sends. ``surface``/``group_key`` are optional —
+        without them the owner surface yields on the claim
+        observation alone."""
+        try:
+            if not self._is_owner_surface(platform):
+                return False
+        except Exception:  # noqa: BLE001 - fail to defer
+            return True
+        if surface is not None and group_key:
+            try:
+                state = surface.claim_state(group_key)
+            except Exception:  # noqa: BLE001 - unproven: yield
+                state = {}
+            if state.get("bot_admin") is False:
+                return False
+        return True
+
+    def _claim_system_send(self, chat, what: str, text: str, *,  # type: ignore[no-untyped-def]
+                           surface=None, group_key=None,
+                           bot_wait_s: float | None = None) -> bool:
         """Exactly-once gate for group surface sends (dupfix4 fix
         4): notices, ask answers, closes and feeds are system
         output both runtimes can emit for the same room, so each
@@ -443,7 +480,22 @@ class RuntimeGroupMixin:
         FAILS OPEN (True): a §33-approved notice is never
         silenced by a missing ledger. The 30s window matches the
         conversational claim window — an identical notice more
-        than 30s later is a new send, not a duplicate."""
+        than 30s later is a new send, not a duplicate.
+
+        Bot-first (owner reports 2026-11-16): the claim used to
+        be a race — whichever runtime claimed first sent, so a
+        system notice could go out from the owner's own account.
+        An owner surface now defers and observes: it polls the
+        ledger for the bot's claim for up to ``bot_wait_s``
+        (default 5s) and stands down the moment one appears. The
+        bot is the deterministic sender; the owner surface sends
+        only when no bot claim appears (bot absent/down) or the
+        bot is verified demoted. A full wait with no claim cools
+        the room down for two minutes, so one turn pays the wait
+        once. ``surface``/``group_key`` let the gate read the
+        room's bot standing; without them the owner yields on
+        the claim observation alone.
+        """
         try:
             ledger = self._shared_conversation_claims()
             if ledger is None:
@@ -453,8 +505,39 @@ class RuntimeGroupMixin:
                    + hashlib.sha1(str(text or "").encode("utf-8")
                                   ).hexdigest()[:16])
             platform = str(getattr(chat, "platform", "") or "")
-            return bool(ledger.claim(
-                key, self._claim_surface(platform)))
+            own = self._claim_surface(platform)
+            if self._system_send_prefers_bot(surface, group_key,
+                                             platform):
+                wait = (self._BOT_CLAIM_WAIT_S if bot_wait_s is None
+                        else float(bot_wait_s))
+                chat_key = str(getattr(chat, "key", "") or "")
+                absent_until = getattr(self, "_bot_absent_until",
+                                       None)
+                if absent_until is None:
+                    absent_until = self._bot_absent_until = {}
+                if time.monotonic() < float(
+                        absent_until.get(chat_key, 0.0) or 0.0):
+                    return bool(ledger.claim(key, own))
+                deadline = time.monotonic() + max(0.0, wait)
+                while True:
+                    holder = ""
+                    probe = getattr(ledger, "claimed_by", None)
+                    if probe is not None:
+                        try:
+                            holder = str(probe(key) or "")
+                        except Exception:  # noqa: BLE001 - probe
+                            holder = ""  # never fails a send
+                    if holder and holder != own:
+                        return False
+                    if holder == own:
+                        return True
+                    if probe is None \
+                            or time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.25)
+                absent_until[chat_key] = (
+                    time.monotonic() + self._BOT_ABSENT_COOLDOWN_S)
+            return bool(ledger.claim(key, own))
         except Exception:  # noqa: BLE001 - gate fault: fail open
             return True
 
@@ -668,8 +751,9 @@ class RuntimeGroupMixin:
                 record, settings=surface.store.settings(key))
         else:
             body, buttons = text, None
-        if not self._claim_system_send(message.chat, "action_notice",
-                                       body):
+        if not self._claim_system_send(
+                message.chat, "action_notice", body,
+                surface=surface, group_key=key):
             return
         result = self._send(
             message.chat, body, buttons=buttons,
@@ -1475,7 +1559,8 @@ class RuntimeGroupMixin:
 
             for notice in notices:
                 if not self._claim_system_send(
-                        message.chat, "notice", str(notice)):
+                        message.chat, "notice", str(notice),
+                        surface=surface, group_key=key):
                     continue
                 self._send(message.chat, str(notice))
                 # Celebration notices carry a moment (§21): a
@@ -1547,10 +1632,12 @@ class RuntimeGroupMixin:
         if ask_reply is not None:
             if isinstance(ask_reply, str):
                 if ask_reply and self._claim_system_send(
-                        message.chat, "ask", ask_reply):
+                        message.chat, "ask", ask_reply,
+                        surface=surface, group_key=key):
                     self._send(message.chat, ask_reply)
             elif self._claim_system_send(
-                    message.chat, "ask", ask_reply.text):
+                    message.chat, "ask", ask_reply.text,
+                    surface=surface, group_key=key):
                 self._send(
                     message.chat, ask_reply.text,
                     buttons=ask_reply.buttons,
@@ -2607,7 +2694,8 @@ class RuntimeGroupMixin:
                 if item.get("kind") == "line":
                     if not self._claim_system_send(
                             message.chat, "conflict",
-                            str(item.get("text") or "")):
+                            str(item.get("text") or ""),
+                            surface=surface, group_key=key):
                         continue
                     self._send(message.chat, str(item.get("text")
                                                  or ""))
@@ -2616,7 +2704,8 @@ class RuntimeGroupMixin:
                     text, buttons = self._sysdrop_render(
                         surface, key, message, drop)
                     if not self._claim_system_send(
-                            message.chat, "conflict", text):
+                            message.chat, "conflict", text,
+                            surface=surface, group_key=key):
                         continue
                     result = self._send(
                         message.chat, text, buttons=buttons,
@@ -2656,7 +2745,8 @@ class RuntimeGroupMixin:
                 text, buttons = self._proposal_feed_render(
                     surface, key, message, item)
                 if not self._claim_system_send(
-                        message.chat, "proposal", text):
+                        message.chat, "proposal", text,
+                        surface=surface, group_key=key):
                     continue
                 result = self._send(
                     message.chat, text, buttons=buttons,

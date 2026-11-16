@@ -3765,6 +3765,23 @@ class PartnerRuntime(
                     _log.warning(
                         "group roster diff tick job not registered: %s",
                         exc)
+                # Group rhythm (§33/P3, owner reports 2026-11-16):
+                # one durable "group rhythm tick" job (every 5m)
+                # running the rhythm + estate cycle across claimed
+                # groups on its own clock — richest-balance
+                # records, district events and the weekly gift
+                # proposal post when due, not on the next message.
+                # Bot-first via the shared tick marker; the
+                # per-turn drain stays the fast path for rooms
+                # with traffic. Idempotent; best-effort.
+                try:
+                    from ...agents.group_rhythm import ensure_group_rhythm_job
+
+                    ensure_group_rhythm_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "group rhythm tick job not registered: %s",
+                        exc)
                 # Delegation manager: one durable "delegation manager
                 # tick" job (every 5m) recovering delegated runs
                 # orphaned by a restart, resuming what the restart
