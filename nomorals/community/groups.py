@@ -22,7 +22,8 @@ Geneva-grade upgrades (mined 2026-10-10):
 
 Isolation: this module imports stdlib + ``nomorals.core`` only —
 plus ``nomorals.i18n`` (Wave 7), whose catalogs are static string
-data: no owner data crosses that seam in either direction.
+data, plus the in-package ``.digest`` organ (itself stdlib + core
+only): no owner data crosses that seam in either direction.
 No memory, no accounts, no vaults, no connectors — the package
 docstring is the law, ``tests/test_community_isolation.py`` the gate.
 
@@ -38,12 +39,20 @@ import json
 import random
 import re
 import time
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
+from .digest import (
+    DEFAULT_RITUALS,
+    Ritual,
+    RitualScheduler,
+    build_digest,
+    render_digest,
+    render_ritual,
+)
 
 _log = get_logger("nomorals.community.groups")
 
@@ -76,6 +85,11 @@ def _sanitize(value: str) -> str:
 
 def _now() -> float:
     return time.time()
+
+
+def _default_rituals(group_id: str) -> list[Ritual]:
+    """The five default rituals, stamped with the group's id."""
+    return [replace(r, group_id=group_id) for r in DEFAULT_RITUALS]
 
 
 # ── data model ─────────────────────────────────────────────────────────────
@@ -223,6 +237,66 @@ class GroupStore:
             tmp.replace(self._posts_path(group_id))
         except OSError as exc:
             _log.warning("group-posts save failed: %s", exc)
+
+    def _rituals_path(self, group_id: str) -> Path:
+        return self.data_dir / f"rituals_{_sanitize(group_id)}.json"
+
+    def load_rituals(self, group_id: str) -> list[Ritual]:
+        """Rituals for a group — the saved set, or the defaults when
+        none was saved yet. A corrupt file (or all-bad rows) degrades
+        to the defaults; never raises."""
+        try:
+            raw = json.loads(
+                self._rituals_path(group_id).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return _default_rituals(group_id)
+        rituals: list[Ritual] = []
+        for item in raw if isinstance(raw, list) else []:
+            try:
+                r = Ritual.from_dict(item)
+                if r.name:
+                    rituals.append(r)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return rituals or _default_rituals(group_id)
+
+    def save_rituals(self, group_id: str, rituals: list[Ritual]) -> None:
+        """Atomic save (tmp+replace, same shape as _save_posts).
+        Never raises."""
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            tmp = self._rituals_path(group_id).with_suffix(".tmp")
+            tmp.write_text(
+                json.dumps([r.to_dict() for r in rituals],
+                           ensure_ascii=False, indent=1),
+                encoding="utf-8",
+            )
+            tmp.replace(self._rituals_path(group_id))
+        except OSError as exc:
+            _log.warning("group-rituals save failed: %s", exc)
+
+    def system_post(self, group_id: str, text: str) -> GroupPost | None:
+        """Post as Devon herself — the ritual delivery path. Bypasses
+        the membership check (Devon is not a member of themed groups);
+        same atomic save and 200-post cap as post(). The member-post
+        guard is untouched. Never raises."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        group = self.get(group_id)
+        if group is None:
+            return None
+        p = GroupPost(
+            id="post_" + new_short_id(),
+            group_id=group_id,
+            author="Devon",
+            text=text[:2000],
+            created_at=_now(),
+        )
+        posts = self._load_posts(group_id)
+        posts.append(p)
+        self._save_posts(group_id, posts[-_POSTS_PER_GROUP:])
+        return p
 
     def _mutate(self, group_id: str, fn) -> ThemedGroup | None:
         """Load → apply fn(group) → save → return group, or None."""
@@ -606,6 +680,7 @@ def _usage() -> str:
         "/cgroup rep <member> · nudge · discover <member>\n"
         "/cgroup memory <group_id> remember <key> = <value> · recall <key> · "
         "search <query> · list · forget <key> · persona\n"
+        "/cgroup digest <group_id> · rituals <group_id> [list|run <name>|enable|disable]\n"
         "/cgroup schedule <minutes> <text> · posts · devices (AA-18 orchestration)\n"
         "Also: /cgroup event … · /cgroup meetup … — see events.py / meetups.py."
     )
@@ -742,6 +817,93 @@ def _control_memory(store: GroupStore, rest: str, who: str,
             lines.append(f"· `{fact['key']}`: {fact['value']}")
         return "\n".join(lines)
     return usage
+
+
+def _control_digest(store: GroupStore, rest: str, who: str,
+                    context: Any) -> str:
+    """Group digest (audit gap R2-29): build_digest over the group's
+    own feed — decisions, unanswered questions, mentions of the
+    caller. Membership-gated (a digest quotes other members' posts).
+    Never raises."""
+    usage = "Usage: /cgroup digest <group_id>"
+    segs = rest.split(None, 1)
+    if not segs:
+        return usage
+    gid = segs[0]
+    g = store.get(gid)
+    if g is None:
+        return f"No group `{gid}`. /cgroup list to see them."
+    if who not in g.members:
+        return (f"only members of **{g.name}** can read its digest — "
+                f"join it first: /cgroup join {gid}")
+    posts = store.feed(gid, limit=_POSTS_PER_GROUP)
+    messages = [{"id": p.id, "sender": p.author, "text": p.text,
+                 "ts": p.created_at, "reply_to": ""}
+                for p in posts]
+    digest = build_digest(messages, group_id=gid, group_name=g.name,
+                          me=who)
+    return render_digest(digest, me=who)
+
+
+def _control_rituals(store: GroupStore, rest: str, who: str,
+                     context: Any) -> str:
+    """Group rituals (audit gap R2-29): list / run / enable / disable
+    over the group's persisted rituals. List is membership-gated;
+    run / enable / disable post to the whole group, so they are
+    owner/admin only. A manual run marks the ritual delivered, so the
+    tick does not immediately re-fire it. Never raises."""
+    from datetime import UTC, datetime
+
+    usage = ("Usage: /cgroup rituals <group_id> [list | run <name> | "
+             "enable <name> | disable <name>]")
+    segs = rest.split(None, 1)
+    if not segs:
+        return usage
+    gid = segs[0]
+    g = store.get(gid)
+    if g is None:
+        return f"No group `{gid}`. /cgroup list to see them."
+    if who not in g.members:
+        return (f"only members of **{g.name}** can see its rituals — "
+                f"join it first: /cgroup join {gid}")
+    tail = segs[1] if len(segs) > 1 else ""
+    parts = tail.split(None, 1)
+    verb = parts[0].lower() if parts else "list"
+    arg = parts[1].strip() if len(parts) > 1 else ""
+    rituals = store.load_rituals(gid)
+    if verb == "list":
+        now = datetime.now(tz=UTC)
+        lines = [f"🕯️ Rituals for **{g.name}** —"]
+        for r in rituals:
+            nxt = r.next_due(now)
+            when = nxt.strftime("%a %H:%M UTC") if nxt else "never"
+            state = "enabled" if r.enabled else "disabled"
+            lines.append(f"• {r.name} ({r.kind}) — {state}, next {when}")
+        return "\n".join(lines)
+    if verb not in ("run", "enable", "disable"):
+        return usage
+    if g.role_of(who) not in (ROLE_OWNER, ROLE_ADMIN):
+        return (f"Only the group owner or an admin can {verb} a ritual "
+                f"in **{g.name}**.")
+    match = [r for r in rituals if r.name.lower() == arg.lower()]
+    if not match:
+        names = ", ".join(r.name for r in rituals)
+        return f"No ritual named `{arg}`. Rituals: {names}"
+    ritual = match[0]
+    if verb == "run":
+        text = render_ritual(ritual, datetime.now(tz=UTC))
+        if store.system_post(gid, text) is None:
+            return f"Could not post `{ritual.name}` to **{g.name}**."
+        RitualScheduler(rituals).mark_delivered(ritual)
+        store.save_rituals(gid, rituals)
+        return f"🕯️ Delivered `{ritual.name}` to **{g.name}**."
+    if verb == "enable":
+        ritual.enabled = True
+        store.save_rituals(gid, rituals)
+        return f"`{ritual.name}` enabled for **{g.name}**."
+    ritual.enabled = False
+    store.save_rituals(gid, rituals)
+    return f"`{ritual.name}` disabled for **{g.name}**."
 
 
 def _control_cgroup(tail: str, context, chat,
@@ -940,6 +1102,12 @@ def _control_cgroup(tail: str, context, chat,
 
     if cmd == "memory":
         return _control_memory(store, rest, who, context)
+
+    if cmd == "digest":
+        return _control_digest(store, rest, who, context)
+
+    if cmd == "rituals":
+        return _control_rituals(store, rest, who, context)
 
     # ── AA-18: device orchestration — scheduled posts + fleet view ──
     if cmd in ("schedule", "posts", "devices"):

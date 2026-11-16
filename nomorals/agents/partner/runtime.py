@@ -3865,6 +3865,18 @@ class PartnerRuntime(
                     _log.warning(
                         "watch loop tick job not registered: %s",
                         exc)
+                # Group rituals (audit gap R2-29): one durable
+                # "group ritual tick" job (every 5m) posting due
+                # rituals into their themed group feeds as Devon.
+                # Idempotent; best-effort.
+                try:
+                    from ...community.digest import ensure_group_ritual_job
+
+                    ensure_group_ritual_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "group ritual tick job not registered: %s",
+                        exc)
                 # Delegation manager: one durable "delegation manager
                 # tick" job (every 5m) recovering delegated runs
                 # orphaned by a restart, resuming what the restart

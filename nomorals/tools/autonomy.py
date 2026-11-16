@@ -683,6 +683,26 @@ def register(registry: Any) -> None:
                     "error": f"group digest tick failed: {exc}"}
 
     @registry.register(
+        "__group_ritual_tick__",
+        description="Run one group ritual tick (audit gap R2-29): "
+        "every themed community group with a ritual due within a "
+        "minute gets it rendered and posted into the group feed as "
+        "Devon, then marked delivered. Scheduler-internal; runs "
+        "every ~5m. Routine and silent — a run with nothing due "
+        "posts nothing.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _group_ritual_tick_tool() -> dict[str, Any]:
+        from ..community.digest import run_group_ritual_tick_once
+
+        try:
+            return run_group_ritual_tick_once()
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"group ritual tick failed: {exc}"}
+
+    @registry.register(
         "__watch_loop_tick__",
         description="Run one resident watch-loop tick (audit gap R2-22): "
         "re-scan the ops surfaces (stuck missions with one self-heal "

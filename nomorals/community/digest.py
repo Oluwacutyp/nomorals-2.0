@@ -33,10 +33,11 @@ vaults, or connectors.
 from __future__ import annotations
 
 import calendar
+import contextlib
 import re
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 from ..core.logging_setup import get_logger
@@ -56,6 +57,12 @@ __all__ = [
     "render_digest",
     "classify_message",
     "render_ritual",
+    "RITUAL_JOB",
+    "RITUAL_TOOL",
+    "RITUAL_SPEC",
+    "RITUAL_WINDOW_S",
+    "ensure_group_ritual_job",
+    "run_group_ritual_tick_once",
 ]
 
 DIGEST_LIMIT = 20
@@ -548,3 +555,90 @@ class RitualScheduler:
 
     def mark_delivered(self, ritual: Ritual, when: datetime | None = None) -> None:
         ritual.last_delivered = (when or datetime.now(tz=timezone.utc)).timestamp()
+
+# ── durable ritual tick (audit gap R2-29) ─────────────────────────────
+
+RITUAL_JOB = "group ritual tick"
+RITUAL_TOOL = "__group_ritual_tick__"
+RITUAL_SPEC = "every 5m"
+RITUAL_WINDOW_S = 60
+
+
+def ensure_group_ritual_job(scheduler: Any, *,
+                            spec: str = RITUAL_SPEC) -> Any:
+    """Register the durable group-ritual tick job. Idempotent —
+    mirrors ``ensure_group_digest_job``: an existing job at the
+    requested cadence is returned as-is, a stale one is replaced.
+    Best-effort: never raises."""
+    if scheduler is None:
+        return None
+    try:
+        for job in (scheduler.list_jobs() or []):
+            name = (job.get("name") if isinstance(job, dict)
+                    else getattr(job, "name", None))
+            if name == RITUAL_JOB:
+                job_spec = (job.get("spec") if isinstance(job, dict)
+                            else getattr(job, "spec", None))
+                if job_spec == spec:
+                    return job
+                with contextlib.suppress(Exception):
+                    job_id = (job.get("id") if isinstance(job, dict)
+                              else getattr(job, "id", None))
+                    scheduler.remove(job_id)
+                break
+        return scheduler.add(RITUAL_JOB, spec, "tool",
+                             {"tool": RITUAL_TOOL, "args": {}},
+                             routine=True)
+    except Exception:  # noqa: BLE001 - scheduling is best-effort
+        return None
+
+
+def run_group_ritual_tick_once(*, store: Any = None,
+                               now: datetime | None = None) -> dict[str, Any]:
+    """One ritual tick over every themed group: rituals due within
+    ``RITUAL_WINDOW_S`` of ``now`` are rendered and posted into the
+    group feed as Devon, then marked delivered. A group with nothing
+    due is skipped silently; one bad group never kills the pass. The
+    store is injected (tests) or built lazily from
+    ``.groups.GroupStore`` — a module-level import would cycle, since
+    groups.py imports this module for the /cgroup verbs. Never
+    raises."""
+    from .groups import GroupStore
+
+    tick_now = now or datetime.now(tz=UTC)
+    summary: dict[str, Any] = {"ok": True, "groups": 0, "delivered": [],
+                               "skipped": 0, "failed": []}
+    try:
+        store = store if store is not None else GroupStore()
+        groups = store.list_groups()
+    except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+        return {"ok": False, "error": f"group ritual tick failed: {exc}"}
+    for group in groups:
+        summary["groups"] += 1
+        try:
+            rituals = store.load_rituals(group.id)
+            scheduler = RitualScheduler(rituals)
+            due = scheduler.due(tick_now, window_s=RITUAL_WINDOW_S)
+            if not due:
+                summary["skipped"] += 1
+                continue
+            for ritual in due:
+                text = render_ritual(ritual, tick_now)
+                posted = store.system_post(group.id, text)
+                if posted is None:
+                    raise RuntimeError(
+                        f"ritual post failed for {group.id}")
+                scheduler.mark_delivered(ritual, tick_now)
+                # Save after each delivery, so a later ritual failing
+                # in the same pass never re-delivers an earlier one.
+                store.save_rituals(group.id, rituals)
+                summary["delivered"].append({
+                    "group": group.id,
+                    "group_name": group.name,
+                    "ritual": ritual.name,
+                    "post_id": posted.id,
+                })
+        except Exception as exc:  # noqa: BLE001 - one bad group never kills the pass
+            summary["failed"].append({"group": group.id,
+                                     "error": str(exc)})
+    return summary
