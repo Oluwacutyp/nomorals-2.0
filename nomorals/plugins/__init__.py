@@ -11,6 +11,7 @@ from .errors import (
     NotInstalled,
     PermissionDenied,
     PluginError,
+    PluginTestFailed,
     PluginTimeout,
 )
 from .loader import (
@@ -41,6 +42,7 @@ from .manifest import (
     validate_against_schema,
     version_key,
 )
+from .marketplace import Marketplace, run_plugin_tests
 from .registry import InstalledPlugin, PluginRegistry
 from .render import (
     THEMES,
@@ -73,6 +75,7 @@ __all__ = [
     "LoadedPlugin",
     "MANIFEST_FILENAME",
     "ManifestError",
+    "Marketplace",
     "NotInstalled",
     "PermissionDenied",
     "PluginCapabilities",
@@ -84,6 +87,7 @@ __all__ = [
     "PluginKV",
     "PluginManifest",
     "PluginRegistry",
+    "PluginTestFailed",
     "PluginTimeout",
     "THEMES",
     "call_entry",
@@ -98,6 +102,7 @@ __all__ = [
     "render_health",
     "render_plugin_card",
     "render_plugin_table",
+    "run_plugin_tests",
     "satisfies_version",
     "unload_plugin",
     "validate_against_schema",

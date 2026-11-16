@@ -12,6 +12,7 @@ __all__ = [
     "PluginTimeout",
     "DependencyError",
     "IncompatibleEngine",
+    "PluginTestFailed",
 ]
 
 
@@ -67,4 +68,14 @@ class IncompatibleEngine(PluginError):
     Raised at install/upgrade time. The message names the required spec
     and the running engine version so the user knows to upgrade Devon,
     not the plugin.
+    """
+
+
+class PluginTestFailed(PluginError):
+    """The plugin's own tests failed (or timed out) — install rejected.
+
+    Raised by the marketplace test gate (see
+    ``nomorals.plugins.marketplace.run_plugin_tests``) before anything
+    is installed. It is a :exc:`PluginError`, so every install caller
+    that catches ``PluginError`` refuses the install the same way.
     """

@@ -150,6 +150,38 @@ class PluginRegistry:
         self.home = Path(plugin_home)
         self.home.mkdir(parents=True, exist_ok=True)
         db.executescript(PLUGIN_PACKAGES_DDL)
+        #: Outcome of the marketplace test gate on the last install /
+        #: upgrade attempt (``run_plugin_tests`` result dict), or None
+        #: when no gate has run yet on this registry instance.
+        self.last_test_result: dict[str, Any] | None = None
+
+    def _gate_own_tests(self, staged: Path) -> None:
+        """Run the plugin's own tests; refuse the install on failure.
+
+        The marketplace test gate (audit gap R1-15): a plugin whose own
+        tests fail is rejected BEFORE anything lands — no DB row, no
+        directory. A plugin with no test files passes vacuously and the
+        result says so honestly. Zip sources are gated on their
+        extracted contents. Raises :exc:`PluginTestFailed` (a
+        :exc:`PluginError`) on failure or timeout.
+        """
+        from .marketplace import run_plugin_tests
+
+        if staged.is_dir():
+            self.last_test_result = run_plugin_tests(staged)
+            return
+        import tempfile
+
+        with tempfile.TemporaryDirectory(prefix="devon-plugin-tests-") as tmp:
+            dest = Path(tmp) / "extracted"
+            dest.mkdir(parents=True)
+            self._safe_extract(staged, dest)
+            # Tolerate a single top-level directory wrapper, same rule
+            # as _record_install.
+            inner = [p for p in dest.iterdir() if p.is_dir()]
+            root = (inner[0] if len(inner) == 1
+                    and not (dest / MANIFEST_FILENAME).exists() else dest)
+            self.last_test_result = run_plugin_tests(root)
 
     # ── install ─────────────────────────────────────────────────────
     def install(self, source: str | Path, *,
@@ -157,13 +189,16 @@ class PluginRegistry:
         """Install a plugin from a directory path, zip file, or URL.
 
         Enforces ``requires_devon`` and ``dependencies`` before anything
-        lands; runs the ``on_install`` lifecycle hook fail-fast (a
-        failing hook rolls the install back).
+        lands; runs the plugin's OWN test suite first (marketplace test
+        gate — a failing suite refuses the install atomically, before
+        any file or DB row lands); runs the ``on_install`` lifecycle
+        hook fail-fast (a failing hook rolls the install back).
 
         Returns the installed record. Raises :exc:`AlreadyInstalled`,
         :exc:`ManifestError`, :exc:`DependencyError`,
-        :exc:`IncompatibleEngine`, or :exc:`PluginError` on download
-        failure.
+        :exc:`IncompatibleEngine`, :exc:`PluginTestFailed`, or
+        :exc:`PluginError` on download failure. The test outcome of the
+        last attempt is on ``self.last_test_result``.
         """
         staged, manifest = self._stage(source)
         if self._get(manifest.name, manifest.version) is not None:
@@ -171,6 +206,10 @@ class PluginRegistry:
                 f"{manifest.name} {manifest.version} already installed")
         self._check_engine(manifest)
         self._check_dependencies(manifest)
+        # Marketplace test gate (audit gap R1-15): the plugin's own
+        # tests run before anything lands; a failure refuses the
+        # install atomically.
+        self._gate_own_tests(staged)
         plugin = self._record_install(staged, manifest, enabled=enabled)
         try:
             self._run_lifecycle(plugin, "on_install", fail_fast=True)
@@ -221,6 +260,9 @@ class PluginRegistry:
                 f"{manifest.name} {manifest.version} already installed")
         self._check_engine(manifest)
         self._check_dependencies(manifest)
+        # Same test gate as install: a newer version whose own tests
+        # fail is refused and the old version stays untouched.
+        self._gate_own_tests(staged)
         plugin = self._record_install(staged, manifest, enabled=enabled)
         try:
             self._run_lifecycle(plugin, "on_upgrade", fail_fast=True)

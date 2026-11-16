@@ -4264,7 +4264,9 @@ def _parser() -> argparse.ArgumentParser:
         help="plugin packages: install, list, enable/disable, run",
         description=("nm plugin install <path|url|zip>\n"
                      "nm plugin list [--json]\n"
+                     "nm plugin listings [--json]\n"
                      "nm plugin info <name> [--json]\n"
+                     "nm plugin review <name> <stars 1-5> [text]\n"
                      "nm plugin enable|disable <name>\n"
                      "nm plugin remove <name>\n"
                      "nm plugin run <name> [entry] [--json]"),

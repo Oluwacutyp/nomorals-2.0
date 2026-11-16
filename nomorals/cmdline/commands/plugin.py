@@ -16,13 +16,29 @@ def _registry(context: Any) -> Any:
     return PluginRegistry(context.db, base / "plugins")
 
 
+def _marketplace(context: Any) -> Any:
+    """The review/rating store over the SAME plugins dir as the registry.
+
+    Reviews live beside the installed plugins
+    (``<plugins>/marketplace_reviews.json``) so ``listings`` can join
+    installed plugins with their ratings.
+    """
+    from ...plugins import Marketplace
+    settings = getattr(context, "settings", None)
+    root = getattr(settings, "workspace_dir", None) if settings else None
+    base = Path(root) if root else Path.cwd() / "workspace"
+    return Marketplace(plugins_dir=base / "plugins")
+
+
 def _cmd_plugin(args: Any, context: Any) -> int:
     """Route ``nm plugin <verb>``."""
     words = list(getattr(args, "task", None) or [])
     if not words:
         print("usage: nm plugin install <path|url|zip>\n"
               "       nm plugin list [--json]\n"
+              "       nm plugin listings [--json]\n"
               "       nm plugin info <name> [--json]\n"
+              "       nm plugin review <name> <stars 1-5> [text]\n"
               "       nm plugin enable|disable <name>\n"
               "       nm plugin remove <name>\n"
               "       nm plugin run <name> [entry] [--json]",
@@ -33,8 +49,12 @@ def _cmd_plugin(args: Any, context: Any) -> int:
         return _pl_install(args, context, rest)
     if verb == "list":
         return _pl_list(args, context)
+    if verb == "listings":
+        return _pl_listings(args, context)
     if verb == "info":
         return _pl_info(args, context, rest)
+    if verb == "review":
+        return _pl_review(args, context, rest)
     if verb == "enable":
         return _pl_enable(args, context, rest)
     if verb == "disable":
@@ -56,12 +76,21 @@ def _pl_install(args: Any, context: Any, rest: list[str]) -> int:
     if not rest:
         print("usage: nm plugin install <path|url|zip>", file=sys.stderr)
         return 2
+    reg = _registry(context)
     try:
-        plugin = _registry(context).install(rest[0])
+        plugin = reg.install(rest[0])
     except PluginError as exc:
+        # PluginTestFailed is a PluginError: a plugin whose own tests
+        # fail is refused here, with the failure named, nothing installed.
         print(f"install failed: {exc}", file=sys.stderr)
         return 1
     print(f"installed {plugin.name} {plugin.version}")
+    result = getattr(reg, "last_test_result", None) or {}
+    found = result.get("tests_found", 0)
+    if found:
+        print(f"  tests: {found} passed")
+    else:
+        print("  tests: none found (vacuous pass)")
     if plugin.manifest.permissions:
         print("  permissions: " + ", ".join(plugin.manifest.permissions))
     print("  entry points: " + ", ".join(
@@ -81,6 +110,69 @@ def _pl_list(args: Any, context: Any) -> int:
         mark = "on " if p.enabled else "off"
         print(f"  [{mark}] {p.name} {p.version}  "
               f"{p.manifest.description[:60]}")
+    return 0
+
+
+def _pl_listings(args: Any, context: Any) -> int:
+    """Marketplace view: installed plugins + their rating summary."""
+    reg = _registry(context)
+    mp = _marketplace(context)
+    rows = []
+    for p in reg.list():
+        avg = mp.average_rating(p.name)
+        rows.append({
+            "name": p.name,
+            "version": p.version,
+            "enabled": p.enabled,
+            "description": p.manifest.description,
+            "average_rating": avg,
+            "review_count": len(mp.reviews(p.name)),
+        })
+    if _as_json(args):
+        print(json.dumps(rows, indent=2))
+        return 0
+    if not rows:
+        print("no plugins installed. `nm plugin install <path|url|zip>`")
+        return 0
+    for r in rows:
+        if r["average_rating"] is None:
+            rating = "unrated"
+        else:
+            n = r["review_count"]
+            rating = (f"★{r['average_rating']} "
+                      f"({n} review{'s' if n != 1 else ''})")
+        mark = "on " if r["enabled"] else "off"
+        print(f"  [{mark}] {r['name']} {r['version']}  {rating}  "
+              f"{r['description'][:60]}")
+    return 0
+
+
+def _pl_review(args: Any, context: Any, rest: list[str]) -> int:
+    """Record one review for an installed plugin (owner as reviewer)."""
+    from ...plugins import PluginError
+    if len(rest) < 2:
+        print("usage: nm plugin review <name> <stars 1-5> [text]",
+              file=sys.stderr)
+        return 2
+    name, stars_s = rest[0], rest[1]
+    text = " ".join(rest[2:])
+    try:
+        stars = int(stars_s)
+    except ValueError:
+        print(f"review failed: stars must be 1-5, got {stars_s!r}",
+              file=sys.stderr)
+        return 1
+    try:
+        _registry(context).get(name)
+    except PluginError as exc:
+        print(f"review failed: {exc}", file=sys.stderr)
+        return 1
+    try:
+        _marketplace(context).add_review(name, "owner", stars, text)
+    except ValueError as exc:
+        print(f"review failed: {exc}", file=sys.stderr)
+        return 1
+    print(f"reviewed {name}: {stars}/5")
     return 0
 
 

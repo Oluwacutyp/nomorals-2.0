@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
-from .errors import ManifestError
+from .errors import ManifestError, PluginTestFailed
 from .shipping import install_plugin as _ship_install
 from .shipping import list_plugins as _ship_list
 from .shipping import uninstall as _ship_uninstall
@@ -54,10 +54,6 @@ _STRIPPED_ENV = (
     "ALL_PROXY", "all_proxy", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
     "GITHUB_TOKEN", "GH_TOKEN", "HF_TOKEN", "TELEGRAM_BOT_TOKEN",
 )
-
-
-class PluginTestFailed(Exception):
-    """The plugin's own tests failed (or timed out) — install rejected."""
 
 
 def _find_test_files(root: Path) -> list[Path]:
@@ -92,8 +88,10 @@ def run_plugin_tests(plugin_dir: str | Path, *,
     # No -I / PYTHONNOUSERSITE: isolated mode would strip the user site
     # pytest itself lives in. Empty PYTHONPATH + cwd pinned to the plugin
     # dir + no creds/proxies + timeout is the sandbox boundary.
-    cmd = [sys.executable, "-m", "pytest", "-q", "--tb=short",
-           *[str(t) for t in tests]]
+    # -p no:cacheprovider keeps the sandbox from writing .pytest_cache
+    # into the plugin dir (which the registry then copies on install).
+    cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+           "--tb=short", *[str(t) for t in tests]]
     try:
         proc = subprocess.run(cmd, cwd=str(root), env=env,
                               capture_output=True, text=True, encoding="utf-8", errors="replace",
