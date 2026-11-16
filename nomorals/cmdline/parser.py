@@ -3827,6 +3827,9 @@ def _parser() -> argparse.ArgumentParser:
                        help="run one confined continual update (ledger pairs -> replay buffer -> adapter-only update vs the frozen eval harness)")
     train.add_argument("--force", action="store_true",
                        help="with --continual: run the update even when the daily interval has not elapsed")
+    train.add_argument("--quick", action="store_true",
+                       help="run the one-command phone training demo "
+                            "(seed + collected pairs, 3 epochs, artifact saved)")
     train.add_argument("--backend", default="",
                        help="override the training backend for this run")
     train.add_argument("--base-model", default="",

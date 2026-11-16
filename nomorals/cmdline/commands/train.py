@@ -49,6 +49,15 @@ def _cmd_train(args, context):
                     f"{result.get('error') or result.get('reason') or status}")
         _emit(args, result, text)
         return 0 if result.get("ok") else 1
+    if getattr(args, "quick", False):
+        # The one-command demo: seed + collected pairs, 3 epochs, artifact
+        # saved. Different job from --run (the full pipeline); --quick
+        # wins when both are passed, so the two never run together.
+        from ...training.quick import run_quick_training
+
+        result = run_quick_training(context)
+        _emit(args, result.to_dict(), result.render())
+        return 0 if result.ok else 1
 
     if not getattr(args, "run", False):
         _emit(args, {"started": False},

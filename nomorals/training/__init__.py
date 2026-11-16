@@ -63,6 +63,7 @@ from .preference import (
     build_preference_pairs, evaluate_on_held_out, gate_with_registry,
     production_gate, split_held_out, train_preference_adapter,
 )
+from .quick import QuickResult, collect_quick_dataset, run_quick_training
 from .trainer import (
     NativeTrainer, TrainConfig, TrainMetrics, TrainedModel, clip_grads,
     global_grad_norm, lr_factor,
@@ -86,6 +87,7 @@ __all__ = [
     "NativeTrainer",
     "PreferenceAdapter",
     "PreferencePair",
+    "QuickResult",
     "ReplayBuffer",
     "PROMOTION_STAGES",
     "RunStatus",
@@ -105,6 +107,7 @@ __all__ = [
     "check_leakage",
     "clean_text",
     "clip_grads",
+    "collect_quick_dataset",
     "confined_update",
     "corpus_stats",
     "decode_example",
@@ -134,6 +137,7 @@ __all__ = [
     "render_policy_card",
     "render_run_card",
     "run_continual_update_once",
+    "run_quick_training",
     "simhash",
     "sparkline",
     "split",
