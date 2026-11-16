@@ -943,8 +943,19 @@ class RuntimeMemoryMixin:
         /store woo <business> <url>    provision a WooCommerce store
         /store list                   all stores + status
         /store catalog <id> <desc>    AI-generate a product catalog
+        /store products ...           the store's own catalog (add/list/remove/feed)
+        /store page <product_id>      storefront page (cover brief, brief-only)
+        /store pay ...                rails, quotes, charges, records, refunds, disputes
+        /store invoice ...            create/list/pay
+        /store subscribe ...          create/list/cancel
+        /store ship ...               quotes, ETAs, shipments, tracking
+        /store reconcile ...          payments → finance ledger (run/status/unreconciled)
+        /store ticket ...             support inbox (open/list/reply/close/stats)
+        /store report [YYYY-MM]       monthly revenue report
+        /store tax <amount_kobo> [cc] Nigeria VAT 7.5% (or another jurisdiction)
         /store <id> <instruction>     conversational management
         """
+        from ...commerce.commands import COMMERCE_VERBS, handle_store_commerce
         from ...commerce.medusa import StoreManager
         mgr = getattr(self, "_store_manager", None)
         if mgr is None:
@@ -954,7 +965,11 @@ class RuntimeMemoryMixin:
         if not rest:
             return ("usage: /store provision <business> | /store woo "
                     "<business> <url> | /store list | /store catalog <id> "
-                    "<description> | /store <id> <instruction>")
+                    "<description> | /store products ... | /store pay ... | "
+                    "/store invoice ... | /store subscribe ... | /store ship ... | "
+                    "/store reconcile ... | /store ticket ... | /store report "
+                    "[YYYY-MM] | /store tax <amount_kobo> [cc] | /store <id> "
+                    "<instruction>")
         low = rest.lower()
         if low == "list":
             stores = mgr.list()
@@ -998,6 +1013,15 @@ class RuntimeMemoryMixin:
             for p in created[:10]:
                 lines.append(f"• {p['name']} — ₦{p['price_naira']:,}")
             return "\n".join(lines)
+        # Commerce organs (audit gap R1-5): catalog, storefront,
+        # payments, invoices, subscriptions, logistics, reconciliation,
+        # support, analytics, tax — before the <id> <instruction>
+        # fallthrough, so a store id can never shadow a commerce verb.
+        first = low.split(None, 1)[0] if low else ""
+        if first in COMMERCE_VERBS:
+            return handle_store_commerce(
+                rest, home=self.context.settings.home_path,
+                settings=self.context.settings)
         # /store <id> <instruction>
         parts = rest.split(None, 1)
         if len(parts) < 2:

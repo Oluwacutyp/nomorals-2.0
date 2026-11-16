@@ -705,7 +705,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "competitor": (0, None),   # /competitor track <account> | report <account> | digest | vs <them> <you> — no-access competitor intel (owner only)
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?
-    "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | <id> <instruction>
+    "store": (0, None),       # /store provision <biz> | woo <biz> <url> | list | catalog <id> <desc> | products ... | page <id> | pay ... | invoice ... | subscribe ... | ship ... | reconcile ... | ticket ... | report [YYYY-MM] | tax <kobo> [cc] | <id> <instruction>
     "mandate": (0, None),     # /mandate issue <scope> <per-txn> [per-day] [days] | list | revoke <id> | stop all
     "track": (0, None),       # /track LOS LHR 2026-12-01 [under 400k] | list
     "untrack": (1, None),     # /untrack <watch_id>
@@ -3427,7 +3427,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
              "usage": "/home status | /home what changed [hours] | /home unusual?",
              "example": "/home unusual?",
              "related": "/routine"},
-    "store": {"what": "self-hosted storefronts — Medusa (zero platform tax) or WooCommerce (budget). Provision, AI catalog, conversational management.",
+    "store": {"what": "self-hosted storefronts — Medusa (zero platform tax) or WooCommerce (budget). Provision, AI catalog, conversational management. Commerce organs: own catalog, storefront pages, payments (Paystack/Flutterwave/Monnify/M-Pesa/Stripe), invoices, subscriptions, shipping quotes + tracking, reconciliation into the finance ledger, support tickets, monthly reports, Nigeria VAT.",
               "usage": "/store provision <business> | /store woo <business> <url> | /store list | /store catalog <id> <desc> | /store <id> <instruction>",
               "example": "/store provision SuyaSpot",
               "related": "/routine"},
