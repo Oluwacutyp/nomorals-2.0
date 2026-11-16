@@ -354,6 +354,14 @@ def extract(
     instead of returning an empty "success". The model is asked for a JSON
     object; when it does not produce one the result keeps the raw text as
     the summary and says ``parsed: False`` instead of inventing structure.
+
+    The result is also fused with deterministic OCR text (see
+    :func:`_ground_extract`): ``document_kind`` classifies the image
+    (invoice / contract / receipt / other), ``claims`` checks every figure
+    the model emitted against the OCR text, and ``ungrounded`` lists the
+    figures the image does not contain. When no OCR path exists the
+    result says so in ``grounding`` instead of pretending the figures
+    were checked.
     """
     router = getattr(context, "router", None) if context is not None else None
     if router is None:
@@ -401,7 +409,83 @@ def extract(
         )
     if not structured["summary"]:
         structured["summary"] = "(the model returned no usable description)"
+    structured.update(
+        _ground_extract(structured, context, data, cache=cache,
+                        source=source))
     return structured
+
+
+def _ground_extract(
+    structured: dict[str, Any],
+    context: Any,
+    data: bytes,
+    *,
+    cache: dict[str, dict[str, Any]] | None,
+    source: str,
+) -> dict[str, Any]:
+    """Ground an :func:`extract` result against deterministic OCR text.
+
+    The model's figures are checked with
+    :func:`nomorals.vision.fusion.grounded_claims` and the image is
+    classified with :func:`nomorals.vision.fusion.classify_document_kind`
+    — both against native tesseract OCR only (``strategy="native"``).
+    Grounding against a second model transcription would be circular
+    (the second model can hallucinate the same numbers) and would cost
+    a second model call, so the native rung is the only valid ground.
+
+    What gets grounded is exactly what the owner will read in chat —
+    summary + key text + notable elements — not the raw reply, which is
+    JSON when parsed and would make noisy claims out of its fragments.
+
+    Grounding is additive metadata on a successful extraction, so it
+    never breaks ``extract()``: when tesseract is missing (or grounding
+    fails any other way) the result carries ``grounding`` as unavailable
+    with the reason named, ``document_kind`` as ``"unknown"``, and no
+    claims — the model result itself is still returned. An empty OCR
+    transcript is NOT unavailable: it is a valid empty transcript, so
+    any figure the model emitted is flagged unverified (an image with no
+    text cannot ground a figure).
+    """
+    from ..vision.fusion import classify_document_kind, grounded_claims
+    from ..vision.native import NativeUnavailable
+    from ..vision.seer import UNTRUSTED_VISION_PREFIX
+
+    def _unavailable(reason: str) -> dict[str, Any]:
+        return {
+            "document_kind": "unknown",
+            "ocr_text": "",
+            "ocr_method": "",
+            "claims": [],
+            "ungrounded": [],
+            "grounding": {"available": False, "reason": reason},
+        }
+
+    try:
+        ocr = read_text(context, data, cache=cache, source=source,
+                        strategy="native")
+    except NativeUnavailable as exc:
+        return _unavailable(str(exc))
+    except Exception as exc:  # noqa: BLE001 — grounding never breaks extract
+        _log.debug("vision extract grounding failed", exc_info=True)
+        return _unavailable(f"grounding failed: {exc}")
+    ocr_text = str(ocr.get("text") or "")
+    if ocr_text.startswith(UNTRUSTED_VISION_PREFIX):
+        ocr_text = ocr_text[len(UNTRUSTED_VISION_PREFIX):]
+    kind = classify_document_kind(ocr_text)
+    parts = [str(structured.get("summary") or "").strip(),
+             str(structured.get("key_text") or "").strip()]
+    parts += [str(e).strip()
+              for e in structured.get("notable_elements") or []
+              if str(e).strip()]
+    claims = grounded_claims("\n".join(p for p in parts if p), ocr_text)
+    return {
+        "document_kind": kind["kind"],
+        "ocr_text": ocr_text,
+        "ocr_method": str(ocr.get("method") or "native-ocr"),
+        "claims": claims,
+        "ungrounded": [c for c in claims if not c.get("grounded")],
+        "grounding": {"available": True},
+    }
 
 
 def format_chat_summary(result: dict[str, Any]) -> str:
@@ -444,6 +528,24 @@ def format_chat_summary(result: dict[str, Any]) -> str:
         meta_bits.append(str(scene))
     if meta_bits:
         lines.append(" · ".join(meta_bits))
+    kind = str(result.get("document_kind") or "")
+    if kind not in ("", "other", "unknown"):
+        lines.append(f"📄 Document: {kind}")
+    missing: list[str] = []
+    for claim in result.get("ungrounded") or []:
+        for number in claim.get("missing_numbers") or []:
+            if str(number) not in missing:
+                missing.append(str(number))
+    if missing:
+        lines.append(
+            "⚠️ Unverified figures: " + ", ".join(missing) +
+            " — not found in the image text")
+    grounding = result.get("grounding") or {}
+    if grounding and not grounding.get("available", True):
+        reason = str(grounding.get("reason") or "").strip()
+        lines.append(
+            "🔍 Figures not checked against image text" +
+            (f" ({reason})" if reason else ""))
     return "\n".join(line for line in lines if line.strip())
 
 

@@ -15,13 +15,14 @@ visual grounding.
 """
 
 from . import native
+from .fusion import fuse_image_text
 from .screenshot import (capture_screen, capture_screenshot,
                          screenshot_from_file)
 from .seer import Seer, see, see_bytes, UNTRUSTED_VISION_PREFIX
 
 __all__ = ["Seer", "see", "see_bytes", "UNTRUSTED_VISION_PREFIX",
            "capture_screen", "capture_screenshot", "screenshot_from_file",
-           "native", "register"]
+           "native", "fuse_image_text", "register"]
 
 
 def register(registry) -> None:
