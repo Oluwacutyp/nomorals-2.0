@@ -3877,6 +3877,20 @@ class PartnerRuntime(
                     _log.warning(
                         "group ritual tick job not registered: %s",
                         exc)
+                # Health drift (audit gap R2-28): one durable
+                # "health drift tick" job (daily 07:00) checking the
+                # owner's 3-day sleep/mood/HRV/activity trends against
+                # their baselines — an "act" report pings the owner
+                # once a day at most, a "watch" report reaches him
+                # through the morning briefing. Idempotent; best-effort.
+                try:
+                    from ...health.drift import ensure_health_drift_job
+
+                    ensure_health_drift_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "health drift tick job not registered: %s",
+                        exc)
                 # Delegation manager: one durable "delegation manager
                 # tick" job (every 5m) recovering delegated runs
                 # orphaned by a restart, resuming what the restart

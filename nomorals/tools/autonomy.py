@@ -724,6 +724,29 @@ def register(registry: Any) -> None:
                     "error": f"watch loop tick failed: {exc}"}
 
     @registry.register(
+        "__health_drift_tick__",
+        description="Run one health drift tick (audit gap R2-28): "
+        "check the owner's 3-day sleep/mood/HRV/activity trends "
+        "against their baselines and surface a drifted signal — an "
+        "\"act\" report pings the owner once a day at most, a "
+        "\"watch\" report is returned for the morning briefing and "
+        "never pinged. Scheduler-internal; runs daily at 07:00. "
+        "Routine and silent — a stable timeline pings nobody.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _health_drift_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..health.drift import run_health_drift_tick_once
+
+        try:
+            return run_health_drift_tick_once(
+                context=_context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"health drift tick failed: {exc}"}
+
+    @registry.register(
         "__show_schedule_tick__",
         description="Run one show-schedule tick: compose a DRAFT "
         "episode for every show whose schedule is due, from the "

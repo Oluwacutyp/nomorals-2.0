@@ -1742,6 +1742,14 @@ class BriefingComposer:
             self.providers.append(PatternsBriefingProvider())
         except Exception as exc:  # noqa: BLE001
             record_failure("morning_briefing.BriefingComposer.__init__.patterns_import", exc)
+        # Health drift (audit gap R2-28): lazy import, same cycle story.
+        # No drift → provider returns None; a "watch" report is never
+        # pinged, so the briefing is where the owner sees it.
+        try:
+            from ..health.drift import DriftBriefingProvider
+            self.providers.append(DriftBriefingProvider())
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.drift_import", exc)
 
     def register(self, provider: _Provider) -> None:
         self.providers.append(provider)

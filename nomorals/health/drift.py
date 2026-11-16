@@ -19,6 +19,7 @@ Safety rules, all test-enforced:
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import time
@@ -41,10 +42,16 @@ __all__ = [
     "HRV_DECLINE_RATIO",
     "ACTIVITY_DROP_RATIO",
     "MAX_PINGS_PER_DAY",
+    "DRIFT_JOB",
+    "DRIFT_TOOL",
+    "DRIFT_SPEC",
     "DriftSignal",
     "DriftReport",
     "RecoveryAction",
     "DriftMonitor",
+    "DriftBriefingProvider",
+    "ensure_health_drift_job",
+    "run_health_drift_tick_once",
     "recovery_plan",
     "IllnessWatch",
     "illness_watch",
@@ -759,3 +766,189 @@ class DriftMonitor:
             "INSERT INTO drift_pings (day, severity, ts) VALUES (?,?,?)",
             (_day(now), report.severity, now))
         return True
+
+
+# ── scheduled tick + briefing provider (audit gap R2-28) ──────────────
+#
+# The monitor above existed with zero production callers. This section is
+# the trigger: a durable daily job on the live scheduler (same shape as the
+# group-digest / watch-loop ticks) plus the morning-briefing provider that
+# carries the "watch" half — a watch report is never pinged, so it belongs
+# in the briefing, next to the health-patterns provider.
+
+DRIFT_JOB = "health drift tick"
+DRIFT_TOOL = "__health_drift_tick__"
+DRIFT_SPEC = "daily 07:00"
+
+
+def ensure_health_drift_job(scheduler, *, spec=DRIFT_SPEC):
+    """Register the durable drift tick on the live scheduler.
+
+    Mirror of the group-digest / watch-loop ensures: a routine tool job,
+    one per scheduler, replaced when its spec goes stale. Never raises —
+    scheduling is best-effort; a missing or broken scheduler yields None.
+    """
+    if scheduler is None:
+        return None
+    try:
+        for job in (scheduler.list_jobs() or []):
+            name = (job.get("name") if isinstance(job, dict)
+                    else getattr(job, "name", None))
+            if name != DRIFT_JOB:
+                continue
+            job_spec = (job.get("spec") if isinstance(job, dict)
+                        else getattr(job, "spec", None))
+            if job_spec == spec:
+                return job
+            with contextlib.suppress(Exception):
+                job_id = (job.get("id") if isinstance(job, dict)
+                          else getattr(job, "id", None))
+                scheduler.remove(job_id)
+            break
+        return scheduler.add(DRIFT_JOB, spec, "tool",
+                             {"tool": DRIFT_TOOL, "args": {}},
+                             routine=True)
+    except Exception:  # noqa: BLE001 - scheduling is best-effort
+        return None
+
+
+def run_health_drift_tick_once(*, context=None, timeline=None, monitor=None,
+                               notifier=None, now=None):
+    """One scheduled drift pass.
+
+    Builds a HealthTimeline + DriftMonitor when not injected, checks for
+    drift, and sends an "act" report through ``notifier`` when one is
+    given (the monitor's own 1/day cap still applies — a "watch" report
+    is never pinged, it is returned for the morning briefing). With no
+    notifier nothing is recorded as sent: the payload carries the
+    message and the recovery plan for the caller to deliver. The payload
+    always carries the illness watch. Closes what it builds. Never
+    raises: a bad tick reports {"ok": False, ...} so the job survives.
+    """
+    now = now if now is not None else time.time()
+    built: list[Any] = []
+    try:
+        if timeline is None:
+            from .timeline import HealthTimeline
+
+            timeline = HealthTimeline()
+            built.append(timeline)
+        if monitor is None:
+            monitor = DriftMonitor(timeline)
+            built.append(monitor)
+        report = monitor.check(now=now)
+        try:
+            watch = monitor.illness_watch_check(now=now)
+        except Exception:  # noqa: BLE001 - the watch is advisory
+            watch = IllnessWatch(active=False)
+        illness = {"active": watch.active, "detail": watch.detail,
+                   "signals": list(watch.signals)}
+        if report is None and not watch.active:
+            return {"ok": True, "drift": False, "illness_watch": illness}
+        sent: dict[str, str] = {}
+
+        def _send(message: str) -> None:
+            sent["message"] = message
+            if notifier is not None:
+                notifier.publish("health-drift", title="Health drift",
+                                 body=message)
+
+        notified = False
+        plan = recovery_plan(report) if report is not None else []
+        if report is not None and notifier is not None:
+            notified = monitor.maybe_notify(report, _send, now=now)
+        message = sent.get("message")
+        if message is None:
+            if report is not None:
+                # The caller's copy, built the same way maybe_notify
+                # builds the sent one.
+                message = report.format()
+                if plan:
+                    message += ("\n\nWant me to set any of these up? "
+                                + " / ".join(a.text for a in plan))
+                esc = monitor.escalation_note(now=now)
+                if esc:
+                    message += f"\n\n{esc}"
+            elif watch.active:
+                message = watch.detail
+            else:
+                message = ""
+        return {"ok": True, "drift": True,
+                "severity": report.severity if report is not None else "watch",
+                "kinds": sorted({s.kind for s in report.signals})
+                if report is not None else [],
+                "message": message,
+                "plan": [a.text for a in plan],
+                "notified": notified,
+                "illness_watch": illness}
+    except Exception as exc:  # noqa: BLE001 - a bad tick never kills the job
+        return {"ok": False, "error": f"health drift tick failed: {exc}"}
+    finally:
+        for obj in built:
+            with contextlib.suppress(Exception):  # close is best-effort
+                obj.close()
+
+
+class DriftBriefingProvider:
+    """Surfaces drift verdicts in the morning briefing.
+
+    The "watch" half of the drift organ: a "watch" report is never pinged,
+    so it belongs here, next to the health-patterns provider (priority 90).
+    An "act" report is shown too — the owner reads the briefing even when
+    the ping already fired. A stable timeline produces no section at all.
+    """
+
+    name = "health-drift"
+    title = "Health drift"
+    priority = 85
+    source = "health"
+
+    def __init__(self, timeline=None, monitor=None):
+        # Injectable for tests; the composer constructs with no args.
+        self._timeline = timeline
+        self._monitor = monitor
+
+    def collect(self, ctx, since):
+        try:
+            return self._collect(ctx, since)
+        except Exception as exc:  # noqa: BLE001 - drift is optional
+            _log.debug("drift provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx, since):
+        from ..agents.morning_briefing import BriefingSection
+
+        timeline = self._timeline
+        monitor = self._monitor
+        built: list[Any] = []
+        try:
+            if timeline is None:
+                from .timeline import HealthTimeline
+
+                timeline = HealthTimeline()
+                built.append(timeline)
+            if monitor is None:
+                monitor = DriftMonitor(timeline)
+                built.append(monitor)
+            report = monitor.check()
+            watch = monitor.illness_watch_check()
+        finally:
+            for obj in built:
+                with contextlib.suppress(Exception):  # close is best-effort
+                    obj.close()
+        if report is None and not watch.active:
+            return None
+        lines: list[str] = []
+        if report is not None:
+            lines.extend(report.format().split("\n"))
+            plan = recovery_plan(report)
+            if plan:
+                lines.append("")
+                lines.append("Want me to set any of these up?")
+                lines.extend(f"• {a.text}" for a in plan)
+        if watch.active:
+            lines.append("")
+            lines.append(f"🤒 {watch.detail}")
+        return BriefingSection(name=self.name, title=self.title,
+                               lines=lines, priority=self.priority,
+                               source=self.source)
