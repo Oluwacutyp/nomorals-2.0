@@ -44,6 +44,19 @@ _log = get_logger(__name__)
 #: config/env value is the default (ON); a kv flag (set by the CLI) wins.
 _OVERRIDE_KEY = "autonomy.enabled"
 
+#: Trajectory slice the thinking cycle writes (audit gap R1-10): one row
+#: per goal step the tick actually executes, in the same
+#: ``cog_trajectories`` table the LLM-router learning hook writes, so the
+#: calibration loop reads deliberate task cycles and router outcomes
+#: alike.  ``model_id`` is empty — the tick does not know which model (if
+#: any) executed a step, and an empty id is the store's wildcard.
+_THINKING_TASK_KIND = "goal-step"
+_THINKING_CAPABILITY = "cognitive-loop"
+#: Cap on the outcome/error text copied into an act (and so into a
+#: trajectory row): executor results are unbounded, trajectory rows are
+#: not.  The store itself caps nothing here, so the seam does.
+_THINKING_TEXT_CAP = 500
+
 
 def set_autonomy_enabled(context: Any, enabled: bool) -> bool:
     """Persistently enable/disable the autonomous cascade."""
@@ -352,12 +365,36 @@ class ModelBudget:
         }
 
 
+def _step_snapshot(goal: Any) -> dict[str, tuple[str, str, int]]:
+    """(status, result, attempts) per step id — the before/after diff key."""
+    return {s.id: (s.status, s.result or "", int(s.attempts or 0))
+            for s in (getattr(goal, "steps", None) or [])}
+
+
+def _changed_goal_steps(before: Any, after: Any) -> list[Any]:
+    """Steps whose state moved during one advance().
+
+    Compared by step id on (status, result, attempts): a step that
+    already finished in an earlier tick has the same snapshot on both
+    sides, so its act is never recorded twice.
+    """
+    snap = _step_snapshot(before)
+    return [s for s in (getattr(after, "steps", None) or [])
+            if snap.get(s.id) != (s.status, s.result or "",
+                                  int(s.attempts or 0))]
+
+
 class CognitiveLoop:
     """One heartbeat through goals, improvement, and personal training."""
 
     def __init__(self, context: Any) -> None:
         self.context = context
         self.settings = context.settings
+        # Thinking cycle (audit gap R1-10): lazy ThinkingStore over the
+        # shared trajectory table; None until first use, and the error
+        # that degraded it (so the tick stays honest about a skip).
+        self._thinking: Any | None = None
+        self._thinking_error: str | None = None
 
     # ── the tick ───────────────────────────────────────────────────────────
     def tick(self, *, executor: Any = None,
@@ -770,6 +807,7 @@ class CognitiveLoop:
                                    g.created_at))
         advanced: list[str] = []
         driven: list[str] = []
+        thinking: list[dict[str, Any]] = []
         for goal in active:
             if not any(s.status == "pending" for s in goal.steps):
                 if any(s.status == "blocked" for s in goal.steps):
@@ -781,15 +819,111 @@ class CognitiveLoop:
             if not gs.dependencies_met(goal):
                 continue  # still waiting on an unfinished dependency
             before = goal.project_id
+            # Thinking cycle (audit gap R1-10): snapshot the goal before
+            # the advance so the cycle can tell exactly which acts this
+            # tick executed — the snapshot is a distinct object from the
+            # post-advance re-read, so the diff is exact.
+            before_goal = goal
             gs.advance(goal.id, executor=executor)
             advanced.append(goal.id)
             if before:
                 driven.append(goal.id)
+            try:
+                after_goal = gs.get(goal.id)
+            except Exception:  # noqa: BLE001 — a lost re-read skips the cycle
+                after_goal = None
+            if after_goal is not None:
+                entry = self._think_goal(before_goal, after_goal)
+                if entry is not None:
+                    thinking.append(entry)
         resumed = self._tick_resume_suspended(executor=executor)
         return {"active": len(active), "advanced": advanced,
                 "project_driven": driven, "resumed": resumed,
                 "healed": self._tick_heal(),
-                "by_status": gs.status().get("by_status", {})}
+                "by_status": gs.status().get("by_status", {}),
+                "thinking": {
+                    "cycles": sum(1 for e in thinking
+                                  if "trajectories_written" in e),
+                    "goals": thinking}}
+
+    # ── thinking cycle (audit gap R1-10) ───────────────────────────────
+    def _thinking_store(self) -> Any | None:
+        """The ThinkingStore over the shared home-DB trajectory table.
+
+        Lazy + degraded: the store is built on first use (only a tick
+        that actually executed a step ever touches it), and when the
+        context has no usable DB the cycle is skipped — recorded on the
+        tick summary — instead of breaking the tick.  The store itself
+        is per-loop (its in-memory plans live only for the tick that
+        made them); the trajectories it writes are durable, one row per
+        act in the same ``cog_trajectories`` table the LLM-router
+        learning hook writes.
+        """
+        if self._thinking is not None:
+            return self._thinking
+        if self._thinking_error is not None:
+            return None
+        try:
+            from ..cognition.thinking import ThinkingStore
+            from ..cognition.trajectories import TrajectoryStore
+
+            db = getattr(self.context, "db", None)
+            if db is None:
+                raise ValueError("no database on context")
+            self._thinking = ThinkingStore(TrajectoryStore(db))
+        except Exception as exc:  # noqa: BLE001 — thinking degrades, never fatal
+            self._thinking_error = f"{type(exc).__name__}: {exc}"
+            _log.debug("thinking store unavailable: %s", exc)
+        return self._thinking
+
+    def _think_goal(self, before: Any, after: Any) -> dict[str, Any] | None:
+        """Run one thinking cycle over a goal's steps that changed state.
+
+        ``before``/``after`` are Goal snapshots around one advance().
+        Returns None when nothing changed (no phantom reflections);
+        otherwise the cycle entry for the tick summary.  Never raises:
+        a reflection failure is returned as an entry carrying ``error``
+        and the tick carries on.
+        """
+        changed = _changed_goal_steps(before, after)
+        if not changed:
+            return None
+        try:
+            store = self._thinking_store()
+            if store is None:
+                return {"goal_id": after.id, "goal_title": after.title,
+                        "skipped": (self._thinking_error
+                                    or "thinking unavailable")}
+            plan = store.new_plan(
+                after.title,
+                [s.description for s in after.steps],
+                task_kind=_THINKING_TASK_KIND,
+                capability=_THINKING_CAPABILITY)
+            for step in changed:
+                pos = next((i for i, s in enumerate(after.steps)
+                            if s.id == step.id), 0)
+                ok = step.status == "done"
+                text = (step.result or "")[:_THINKING_TEXT_CAP]
+                store.act(plan.id, pos, _THINKING_TASK_KIND, ok,
+                          outcome=text,
+                          error=text if step.status == "blocked" else "")
+            result = store.remember(plan.id)
+            reflection = result["reflection"]
+            return {
+                "goal_id": after.id,
+                "goal_title": after.title,
+                "plan_id": plan.id,
+                "trajectories_written": int(result["trajectories_written"]),
+                "success_rate": round(float(reflection.success_rate), 4),
+                "worked": list(reflection.worked),
+                "failed": list(reflection.failed),
+                "lessons": list(reflection.lessons),
+                "next_steps": list(reflection.next_steps),
+            }
+        except Exception as exc:  # noqa: BLE001 — reflection never kills a tick
+            record_failure("cognition.thinking_cycle", exc)
+            return {"goal_id": after.id, "goal_title": after.title,
+                    "error": f"{type(exc).__name__}: {exc}"}
 
     def _tick_resume_suspended(self, *, executor: Any = None) -> list[str]:
         """Wave 67: revive budget-suspended goals whose day has rolled
