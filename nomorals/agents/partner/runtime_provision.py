@@ -3478,6 +3478,309 @@ class RuntimeProvisionMixin:
                             window_days=window_days)
         return "📡 Status radar\n" + render_brief(brief)
 
+    def _control_contact(self, tail: str, message: Any = None) -> str:
+        """Per-contact total recall brief (census §6 #5).
+
+        /contact <name|@handle|id> — everything Devon recorded
+        between the owner and one contact: cached DM messages +
+        live per-chat history, statuses/stories, calls, media
+        Devon kept, deleted/edited originals she recovered, and
+        the group ledger record — across WhatsApp and Telegram.
+        A wa:/tg: prefix narrows to one platform.
+
+        Owner-only (control dispatch never reaches non-operators).
+        A read, not an act: it opens the local vault and, where a
+        live surface exists, reads that chat's history — no send
+        anywhere, so the standing stop does not halt it.
+
+        Resolution is the vault first (the journal is the record
+        of who Devon knows), then the group ledger, then a live
+        surface list — each step only when the earlier found
+        nothing.  An ambiguous name lists its candidates; an
+        unknown contact is refused plainly.  Every section names
+        its source; a down surface is named, never papered over.
+        """
+        from ...social.chat.base import ChatKind, ChatRef
+        from ...social.contact_recall import (
+            assemble_brief,
+            build_contact_index,
+            matches_contact,
+            render_brief,
+            resolve_contact,
+        )
+
+        usage = ("usage: /contact <name|@handle|id> — everything "
+                 "Devon recorded between you and one contact: "
+                 "messages, statuses, calls, media, groups. "
+                 "e.g. /contact Ada (wa:/tg: narrows the platform)")
+        raw = str(tail or "").strip()
+        if not raw:
+            return usage
+        platform = ""
+        query = raw
+        lowered = raw.lower()
+        for prefix, plat in (("wa:", "whatsapp"),
+                             ("whatsapp:", "whatsapp"),
+                             ("tg:", "telegram"),
+                             ("telegram:", "telegram")):
+            if lowered.startswith(prefix):
+                platform = plat
+                query = raw[len(prefix):].strip()
+                break
+        if not query:
+            return usage
+        svc = self._pairing_personal()
+        vault = svc["personal"].vault
+        rows = vault.journal()
+        recoveries = vault.recoveries()
+        index = build_contact_index(rows)
+        matches = resolve_contact(query, index, platform=platform)
+        contact: dict[str, Any] | None = None
+        ledger_id = ""
+        group_entries: list[dict[str, Any]] = []
+        if len(matches) > 1:
+            lines = [f"more than one contact matches '{query}':"]
+            for entry in matches:
+                label = {"whatsapp": "WhatsApp",
+                         "telegram": "Telegram"}.get(
+                    entry["platform"], entry["platform"])
+                name = (entry["names"][0]
+                        if entry["names"]
+                        else entry["counterpart_id"])
+                lines.append(
+                    f"· {name} — {label} · "
+                    f"{entry['counterpart_id']}")
+            lines.append("be specific: /contact wa:<name> or "
+                         "/contact tg:<name> (or the id)")
+            return "\n".join(lines)
+        if len(matches) == 1:
+            contact = dict(matches[0])
+        if contact is None:
+            # The group ledger knows members by id or @handle.
+            surface = None
+            try:
+                surface = self._group_surface()
+            except Exception:  # noqa: BLE001 - group half optional
+                surface = None
+            if surface is not None:
+                try:
+                    ledger_id, group_entries = (
+                        self._lookup_scan_ledger(surface, query))
+                except Exception:  # noqa: BLE001 - no proof
+                    ledger_id, group_entries = "", []
+            if ledger_id:
+                again = resolve_contact(ledger_id, index,
+                                        platform=platform)
+                if again:
+                    contact = dict(again[0])
+                else:
+                    name = ""
+                    for entry in group_entries:
+                        name = (str(entry.get("name") or "")
+                                or str(entry.get("username") or ""))
+                        if name:
+                            break
+                    contact = {
+                        "platform": platform or "telegram",
+                        "counterpart_id": ledger_id,
+                        "names": [name] if name else [],
+                        "kinds": {}, "total": 0,
+                        "first_ts": 0.0, "last_ts": 0.0}
+        if contact is None:
+            # Live fallbacks: Telegram by @handle, WhatsApp by
+            # exact recent-chat title.  An id found here still
+            # has to have SOMETHING recorded to brief on.
+            live_id = ""
+            live_platform = ""
+            if not platform or platform == "telegram":
+                adapter = None
+                try:
+                    adapter = self._group_adapter("telegram")
+                except Exception:  # noqa: BLE001 - no proof
+                    adapter = None
+                if adapter is not None and message is not None:
+                    found = None
+                    try:
+                        found = adapter.member_by_username(
+                            message.chat, query.lstrip("@"))
+                    except Exception:  # noqa: BLE001 - no proof
+                        found = None
+                    if found and str(found.get("id") or ""):
+                        live_id = str(found["id"])
+                        live_platform = "telegram"
+            if not live_id and (not platform
+                                or platform == "whatsapp"):
+                adapter = self._adapter_for("whatsapp")
+                if adapter is not None:
+                    try:
+                        chats = adapter.chats(limit=100) or []
+                    except Exception:  # noqa: BLE001 - no proof
+                        chats = []
+                    for entry in chats:
+                        title = str(entry.get("title") or "")
+                        if title and title.casefold() == (
+                                query.casefold()):
+                            live_id = str(entry.get("id") or "")
+                            live_platform = "whatsapp"
+                            break
+            if live_id:
+                again = resolve_contact(live_id, index,
+                                        platform=platform)
+                if again:
+                    contact = dict(again[0])
+                else:
+                    contact = {
+                        "platform": live_platform,
+                        "counterpart_id": live_id,
+                        "names": [query], "kinds": {},
+                        "total": 0, "first_ts": 0.0,
+                        "last_ts": 0.0}
+        if contact is None:
+            return (f"no record of {query} — nothing in the vault "
+                    "journal, and no group record either.")
+        platform = str(contact.get("platform") or "")
+        cid = str(contact.get("counterpart_id") or "")
+        label = {"whatsapp": "WhatsApp",
+                 "telegram": "Telegram"}.get(platform, platform)
+
+        def _same_id(observed: Any) -> bool:
+            return matches_contact(cid, observed)
+
+        journal_rows = [
+            row for row in rows
+            if str(row.get("platform") or "") == platform
+            and _same_id(row.get("counterpart_id"))]
+        recovery_rows = [
+            row for row in recoveries
+            if str(row.get("platform") or "") == platform
+            and (_same_id(row.get("counterpart_id"))
+                 or str(row.get("chat_key") or "")
+                 == f"{platform}:{cid}")]
+        cached_messages: list[dict[str, Any]] = []
+        accounts = sorted({str(row.get("account") or "")
+                           for row in journal_rows
+                           if row.get("account")})
+        for account in accounts:
+            try:
+                cached_messages.extend(vault.cached_chat(
+                    account, f"{platform}:{cid}"))
+            except Exception:  # noqa: BLE001 - cache is garnish
+                continue
+        cached_messages.sort(key=lambda m: float(m.get("ts") or 0))
+        live_history: list[dict[str, Any]] = []
+        live_notes: list[str] = []
+        adapter = self._adapter_for(platform)
+        if adapter is None:
+            live_notes.append(f"{label} — no live surface here, "
+                              "so no live history was read")
+        else:
+            history_fn = getattr(adapter, "history", None)
+            if not callable(history_fn):
+                live_notes.append(
+                    f"{label} — the surface exposes no history verb")
+            else:
+                try:
+                    found_rows = history_fn(
+                        ChatRef(platform=platform, chat_id=cid,
+                                kind=ChatKind.DM), 20) or []
+                except Exception as exc:  # noqa: BLE001 - named
+                    found_rows = []
+                    live_notes.append(
+                        f"{label} — live history refused "
+                        f"({type(exc).__name__})")
+                for row in found_rows:
+                    live_history.append({
+                        "message_id": str(
+                            getattr(row, "message_id", "") or ""),
+                        "text": str(getattr(row, "text", "") or ""),
+                        "incoming": bool(
+                            getattr(row, "incoming", False)),
+                        "ts": float(getattr(row, "ts", 0) or 0),
+                    })
+                if not found_rows and not live_notes:
+                    live_notes.append(
+                        f"{label} — live history came back empty")
+        groups = self._contact_group_summaries(
+            ledger_id or cid, group_entries)
+        brief = assemble_brief(
+            contact, journal_rows=journal_rows,
+            recoveries=recovery_rows,
+            cached_messages=cached_messages,
+            live_history=live_history, groups=groups,
+            live_notes=live_notes)
+        name = (brief["names"][0] if brief["names"]
+                else brief["counterpart_id"])
+        return f"👤 Contact — {name}\n" + render_brief(brief)
+
+    def _contact_group_summaries(
+            self, target_id: str,
+            known_entries: list[dict[str, Any]]
+            ) -> list[dict[str, Any]]:
+        """The group-ledger half of a contact brief, in the
+        /lookup dossier's shape (groups, message counts, economy,
+        moderation, reputation, identity history) — plain dicts
+        for the organ to render.  A missing surface or a refused
+        read leaves the half empty, never an exception."""
+        try:
+            surface = self._group_surface()
+        except Exception:  # noqa: BLE001 - group half optional
+            return []
+        try:
+            entries = surface.groups_for_member(target_id)
+        except Exception:  # noqa: BLE001 - no proof, no detail
+            entries = []
+        if not entries and known_entries:
+            entries = known_entries
+        out: list[dict[str, Any]] = []
+        for entry in entries:
+            key = str(entry.get("key") or "")
+            try:
+                member = surface.member(key, target_id) or {}
+            except Exception:  # noqa: BLE001 - no proof
+                member = {}
+            summary: dict[str, Any] = {
+                "key": key,
+                "kind": str(entry.get("kind") or "group"),
+                "title": str(entry.get("title") or key),
+                "message_count": int(member.get("message_count") or 0),
+                "last_seen": member.get("last_seen"),
+                "joined_ts": (member.get("joined_ts")
+                              or member.get("first_seen")),
+                "role": str(member.get("role") or ""),
+                "wallet": 0, "banked": 0, "warns": 0,
+                "strikes": 0, "bans": 0, "reputation_records": 0,
+                "identity_history": list(
+                    member.get("identity_history") or []),
+            }
+            try:
+                summary["wallet"] = surface.economy.balance(
+                    key, target_id)
+                summary["banked"] = surface.economy.bank_balance(
+                    key, target_id)
+            except Exception:  # noqa: BLE001 - dossier survives
+                pass
+            try:
+                summary["warns"] = len(member.get("warns") or [])
+                summary["strikes"] = surface.strikes_for(
+                    key, target_id).get("count", 0)
+                summary["bans"] = len(
+                    surface.bans.bans_for(target_id))
+            except Exception:  # noqa: BLE001 - dossier survives
+                pass
+            try:
+                records = surface.reputation_view(
+                    key, target_id,
+                    username=str(member.get("username") or ""),
+                    name=str(member.get("name") or "")).get(
+                        "records") or []
+                summary["reputation_records"] = len(records)
+            except Exception:  # noqa: BLE001 - dossier survives
+                pass
+            out.append(summary)
+        out.sort(key=lambda e: int(e.get("message_count") or 0),
+                 reverse=True)
+        return out
+
     def _relay_stopped_platforms(self) -> frozenset:
         """Platforms under the owner's standing stop right now."""
         svc = self._pairing_personal()

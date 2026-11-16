@@ -7691,6 +7691,13 @@ class PartnerRuntime(
             # standing stop does not halt it.
             return self._control_radar(command.tail)
 
+        if kind == "contact":
+            # Per-contact total recall brief (census §6 #5) —
+            # owner-only like the mass tools; a read of the vault
+            # + live per-chat history, so the standing stop does
+            # not halt it.
+            return self._control_contact(command.tail, message)
+
         if kind == "rules":
             return self._control_rules(message)
 

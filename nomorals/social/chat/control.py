@@ -753,6 +753,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "obroadcast": (0, None),  # /obroadcast <text> [| groups|channels|all] [| live] — owner speaks through Devon to all claimed groups/channels (§20b; owner only, arm-gated)
     "relay": (0, None),       # /relay <chat> [| <chat> ...] [| live] as a reply — post this everywhere, attribution kept (census §6 #2; owner only, arm-gated)
     "radar": (0, None),       # /radar [today|<N>d|<name>] — pattern briefs from the status/story vault: who posts, who went quiet, running themes (census §6 #3; owner only, a read)
+    "contact": (0, None),     # /contact <name|@handle|id> — everything Devon recorded between you and one contact: messages, statuses, calls, media, groups (census §6 #5; owner only, a read)
     "rules": (0, 0),          # /rules — this group's rules, rendered from the settings the enforcer reads (P1)
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
     "lookup": (0, 1),         # /lookup <id|@username> — the account dossier: ID, account-age estimate, phone when visible, groups, username/name history, economy + moderation record (DM + group)
@@ -1006,6 +1007,7 @@ _HELP_TEXT = "\n".join(
         "  /say telegram:123 text…                 send as her",
         "  /relay <chat> [| <chat> …] | live        post this everywhere (reply to the message)",
         "  /radar [today|<N>d|<name>]              status radar: who posts, who went quiet, running themes",
+        "  /contact <name|@handle|id>              everything Devon recorded between you and one contact",
         "  /proposals /approve <id> /deny <id>",
         "  /stage [committed|dating|…]",
         "  /power on <key> | /power on <identity> <passphrase> | /power off | /power status",
@@ -3717,6 +3719,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/radar [today|<N>d|<name>]",
             "example": "/radar",
             "related": "/pair /channeltexts /find"},
+    "contact": {"what": "per-contact total recall brief (census §6 #5): everything Devon recorded between you and one contact — cached DM messages plus live per-chat history, statuses and stories, calls, media she kept, deleted/edited originals she recovered, and the group ledger record — across WhatsApp and Telegram. Say it in plain words — “everything between me and Ada” — or type it. Owner only; a read of the vault and the account's history, so your standing stop does not halt it.",
+            "usage": "/contact <name|@handle|id>",
+            "example": "/contact Ada",
+            "related": "/radar /lookup /searchall /find"},
     "rules": {"what": "this group's rules — rendered live from the same settings the moderation enforcer reads, so what you see is what's enforced.",
             "usage": "/rules",
             "example": "/rules",
@@ -5003,7 +5009,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "joinlink", "newgroup", "newchannel", "leave",
       "myprofile", "privacy", "makepoll", "vcf", "addcontact",
       "sendloc", "sendcontact", "find", "findall", "searchall",
-      "sendlater", "deletechat", "clearhistory", "radar",
+      "sendlater", "deletechat", "clearhistory", "radar", "contact",
       "botprofile", "invoice",
       "labels", "catalog", "broadcast", "wpay"]),
     ("memory & thinking",
@@ -5258,6 +5264,7 @@ LIST_ONELINERS: dict[str, str] = {
     "forward": "forward the replied message to another chat — /forward <chat> as a reply",
     "relay": "post this everywhere — forward one message to WhatsApp groups + Telegram channels at once, attribution kept — /relay <chat> [| <chat> …] [| live] as a reply",
     "radar": "status radar — who posts, who went quiet, running themes from the status/story vault — /radar [today|<N>d|<name>]",
+    "contact": "everything between you and one contact — messages, statuses, calls, media, groups — /contact <name|@handle|id>",
     "unsend": "delete your own message for everyone — /unsend as a reply",
     "edit": "alias of /editmsg — /edit <new text> as a reply",
     "editmsg": "edit your own message — /editmsg <new text> as a reply",

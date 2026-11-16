@@ -536,6 +536,17 @@ class PersonalVault:
                     return dict(row)
             return None
 
+    def cached_chat(self, account_id: str, chat_key: str
+                    ) -> list[dict[str, Any]]:
+        """One chat's cached DM ring (oldest → newest), copies.
+        Empty when the account never cached that chat — the
+        cache only holds chats seen while antidelete/antiedit
+        was on, bounded per chat."""
+        with self._lock:
+            ring = (self._cache.get(account_id) or {}).get(
+                chat_key) or []
+            return [dict(row) for row in ring]
+
     def drop_message(self, account_id: str, chat_key: str,
                      message_id: str) -> None:
         with self._lock:
