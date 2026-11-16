@@ -7231,8 +7231,13 @@ class RuntimeGroupMixin:
                 "/community post <id|name> | <text> [| live] — "
                 "preview a cross-post to every linked WhatsApp "
                 "subgroup, then send it live once armed\n"
-                "/community arm | disarm | status — arm live "
-                "cross-posts, disarm them, or see the arm state")
+                "/community mirror <id|name> | <text> [| live] — "
+                "mirror one message to the community's groups on "
+                "the other platforms (rules, audit and per-target "
+                "policy applied), then send it live once armed\n"
+                "/community arm [post|mirror] | disarm [post|mirror] "
+                "| status — arm live cross-posts or mirrors, disarm "
+                "them, or see the arm state")
 
     def _community_visible_keys(self, surface, message,
                                 sender):  # type: ignore[no-untyped-def]
@@ -7518,6 +7523,184 @@ class RuntimeGroupMixin:
             lines.append(f"  – {key} — held: {reason}")
         return "\n".join(lines)
 
+    def _community_mirror_engine(self):  # type: ignore[no-untyped-def]
+        """The process-persistent mirror engine (audit gap R2-26):
+        one instance per runtime, built once — its seen_ids set is
+        the dedup memory. Tests may set ``_community_mirror_engine_inst``
+        directly."""
+        engine = getattr(self, "_community_mirror_engine_inst", None)
+        if engine is None:
+            from ...community.mirroring import MirrorEngine
+
+            engine = MirrorEngine()
+            self._community_mirror_engine_inst = engine
+        return engine
+
+    def _community_bridge_store(self):  # type: ignore[no-untyped-def]
+        """The per-group roster store for mirror attribution. Tests
+        may set ``_community_bridge_dir`` to a tmp dir."""
+        store = getattr(self, "_community_bridge_store_inst", None)
+        if store is None:
+            from ...community.bridges import BridgeStore
+
+            store = BridgeStore(getattr(self, "_community_bridge_dir", None))
+            self._community_bridge_store_inst = store
+        return store
+
+    def _community_mirror(self, surface, message, sender,
+                          tail):  # type: ignore[no-untyped-def]
+        """`/community mirror <id|name> | <text> [| live]` — mirror one
+        message to a community's groups on the OTHER platforms, via
+        the real MirrorEngine (audit gap R2-26).
+
+        Same shape as /community post (R2-21): a dry-run preview
+        plans without sending, the live run refuses unless armed
+        (`/community arm mirror`), paces at the arms floor, journals
+        the run, and reports per-target results. A live mirror is
+        refused when it was already sent (same deterministic message
+        id). Targets are the community's groups on a platform other
+        than the origin, that are visible to the sender, not channels,
+        and allow system output (§33 gate); everything else is held
+        and named. The sender is attributed from the per-group roster
+        (first hit wins), else the sender's display name — never
+        guessed.
+        """
+        import hashlib as _hashlib
+        import time as _time
+
+        from ...community.mirroring import MirrorEngine
+        from ...social.chat.base import ChatKind, ChatRef
+
+        tool = "community-mirror"
+        segments = [s.strip() for s in str(tail or "").split("|")]
+        head = segments[0].split()
+        query = " ".join(head[1:])
+        text = segments[1] if len(segments) > 1 else ""
+        live = len(segments) > 2 and segments[2].lower() == "live"
+        if not query:
+            return self._community_usage()
+        cid, row, error = self._community_resolve_id(surface, query)
+        if error:
+            return error
+        name = str(row.get("name") or cid)
+        origin_chat_platform = str(message.chat.platform or "").strip().lower()
+        origin = {"telegram-bot": "telegram"}.get(origin_chat_platform,
+                                                 origin_chat_platform)
+        if origin not in ("telegram", "whatsapp"):
+            return (f"mirroring starts from a Telegram or WhatsApp "
+                    f"room — this chat is {origin_chat_platform or '?'}.")
+        if not (text or "").strip():
+            return "empty message text — nothing to mirror"
+        visible = set(self._community_visible_keys(surface, message, sender))
+        targets: dict[str, list[str]] = {}
+        held: list[tuple[str, str]] = []
+        for key in row["groups"]:
+            bridge_platform = str(key).split(":", 1)[0]
+            bridge_platform = {"telegram-bot": "telegram"}.get(
+                bridge_platform, bridge_platform)
+            if bridge_platform == origin:
+                held.append((key, "same platform as the origin"))
+                continue
+            if surface.is_channel(key):
+                held.append((key, "a channel, not a group"))
+                continue
+            if key not in visible:
+                held.append((key, "you don't admin it"))
+                continue
+            if not surface.system_output_allowed(key):
+                held.append((key, "system output not allowed there"))
+                continue
+            targets.setdefault(bridge_platform, []).append(key)
+        if not targets:
+            held_note = "; ".join(f"{key} — {reason}" for key, reason in held)
+            return (f"no groups to mirror to in community {name}"
+                    + (f" — held: {held_note}" if held_note else "") + ".")
+        sender_id = str(message.sender_id or "")
+        author = str(getattr(message, "sender", "") or sender or sender_id)
+        store = self._community_bridge_store()
+        for key in row["groups"]:
+            try:
+                member = store.load(key).resolve(origin, sender_id)
+            except Exception:  # noqa: BLE001 — roster read never blocks
+                member = None
+            if member is not None:
+                author = member.display_name or author
+                break
+        msg_id = (f"mirror:{cid}:{origin}:"
+                  f"{_hashlib.sha1(text.encode('utf-8')).hexdigest()[:12]}")
+        message_dict = {"group_id": cid, "author_name": author,
+                        "origin_platform": origin, "text": text,
+                        "message_id": msg_id}
+        if not live:
+            engine = MirrorEngine(targets=targets)
+            deliveries = engine.mirror(message_dict)
+            lines = ["🪪 mirror dry-run — nothing sent.", "",
+                     f"from {origin} · {author}",
+                     f"would reach {len(deliveries)} group(s):"]
+            for d in deliveries:
+                lines.append(f"  · {d.to_target} ({d.to_platform}) — "
+                             f"{d.text}")
+            for key, reason in held:
+                lines.append(f"  – {key} — held: {reason}")
+            lines.append("say “| live” to send it — arm first: "
+                         "/community arm mirror")
+            return "\n".join(lines)
+        svc = self._community_service()
+        arms, journal = svc["arms"], svc["journal"]
+
+        def _journal_row(**extra):  # type: ignore[no-untyped-def]
+            row_j = {"tool": tool,
+                     "run_id": f"cm-{int(_time.time())}",
+                     "ts": _time.time()}
+            row_j.update(extra)
+            return journal.append(row_j)
+
+        if not arms.armed(tool):
+            _journal_row(community=cid,
+                         targets=sum(len(v) for v in targets.values()),
+                         sent=0, failed=0, refused="disarmed", results=[])
+            return ("⚠️ /community mirror is disarmed — a live mirror "
+                    "needs an explicit arm first.\n"
+                    "Arm it with: /community arm mirror")
+        engine = self._community_mirror_engine()
+        if msg_id in engine.seen_ids:
+            return (f"already mirrored — this exact text was already "
+                    f"mirrored to community {name} (same message id).")
+        senders = {}
+        for platform in targets:
+            def _send(target, txt, _platform=platform):  # type: ignore[no-untyped-def]
+                adapter_platform = {"telegram": "telegram-bot"}.get(
+                    _platform, _platform)
+                adapter = self._adapter_for(adapter_platform)
+                if adapter is None:
+                    raise RuntimeError(f"no live {_platform} surface here")
+                verdict = adapter.send(
+                    ChatRef.parse(target, kind=ChatKind.GROUP), txt)
+                if isinstance(verdict, dict):
+                    return bool(verdict.get("ok"))
+                return bool(getattr(verdict, "ok", False))
+            senders[platform] = _send
+        engine.targets = dict(targets)
+        engine.senders = dict(senders)
+        record = engine.mirror(
+            message_dict, sleep=_time.sleep,
+            pace_seconds=arms.pacing(tool, floor=3.0, default=3.0))
+        arms.note_live_run(tool)
+        sent = sum(1 for d in record if d.sent)
+        failed = len(record) - sent
+        _journal_row(community=cid, targets=len(record), sent=sent,
+                     failed=failed,
+                     results=[d.to_dict() for d in record])
+        lines = [f"🪪 community mirror live: sent {sent} of "
+                 f"{len(record)} group(s)."]
+        for d in record:
+            mark = "✓" if d.sent else "✗"
+            lines.append(f"  {mark} {d.to_target}"
+                         + ("" if d.sent else f": {d.error or 'failed'}"))
+        for key, reason in held:
+            lines.append(f"  – {key} — held: {reason}")
+        return "\n".join(lines)
+
     def _control_community(self, tail, message):  # type: ignore[no-untyped-def]
         """The §16 community board (/community): Telegram Communities
         and WhatsApp communities over one surface — list, show, link,
@@ -7558,14 +7741,26 @@ class RuntimeGroupMixin:
                                         " ".join(words[1:]))
         if verb == "post":
             return self._community_post(surface, message, sender, tail)
+        if verb == "mirror":
+            return self._community_mirror(surface, message, sender, tail)
         if verb == "arm":
             svc = self._community_service()
+            if len(words) > 1 and words[1].lower() == "mirror":
+                svc["arms"].arm("community-mirror")
+                return ("✅ /community mirror is ARMED. Live mirrors "
+                        "are possible now; a mirror still previews "
+                        "unless you say “| live”. Disarm any time: "
+                        "/community disarm mirror")
             svc["arms"].arm("community-post")
             return ("✅ /community post is ARMED. Live posts are "
                     "possible now; a post still previews unless you "
                     "say “| live”. Disarm any time: /community disarm")
         if verb == "disarm":
             svc = self._community_service()
+            if len(words) > 1 and words[1].lower() == "mirror":
+                svc["arms"].disarm("community-mirror")
+                return ("⏸️ /community mirror disarmed — live mirrors "
+                        "refuse until you arm it again.")
             svc["arms"].disarm("community-post")
             return ("⏸️ /community post disarmed — live posts refuse "
                     "until you arm it again.")
@@ -7575,10 +7770,14 @@ class RuntimeGroupMixin:
             limiter = self._community_rate_limiter()
             state = "armed" if arms.armed("community-post") \
                 else "disarmed"
+            mirror_state = ("armed" if arms.armed("community-mirror")
+                            else "disarmed")
             return (f"/community post: {state} · live runs: "
                     f"{arms.live_runs('community-post')} · rate: "
                     f"{limiter.limit} post/min, "
-                    f"{limiter.remaining()} remaining")
+                    f"{limiter.remaining()} remaining\n"
+                    f"/community mirror: {mirror_state} · live runs: "
+                    f"{arms.live_runs('community-mirror')}")
         if verb == "link":
             if len(words) < 3:
                 return self._community_usage()

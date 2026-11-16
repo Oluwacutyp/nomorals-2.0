@@ -604,6 +604,8 @@ def _usage() -> str:
         "/cgroup role <group_id> <member> <owner|admin|member>\n"
         "/cgroup welcome <group_id> <text> · lang <group_id> <locale> · events <group_id>\n"
         "/cgroup rep <member> · nudge · discover <member>\n"
+        "/cgroup memory <group_id> remember <key> = <value> · recall <key> · "
+        "search <query> · list · forget <key> · persona\n"
         "/cgroup schedule <minutes> <text> · posts · devices (AA-18 orchestration)\n"
         "Also: /cgroup event … · /cgroup meetup … — see events.py / meetups.py."
     )
@@ -639,6 +641,107 @@ def control_cgroup(tail: str, context=None, chat=None,
     except Exception as exc:  # noqa: BLE001 — chat must never blow up
         _log.warning("cgroup control failed: %s", exc)
         return "Community groups hit a snag — try again."
+
+
+def _control_memory(store: GroupStore, rest: str, who: str,
+                    context: Any) -> str:
+    """Group memory + persona (audit gap R2-26): the audit's first
+    option — a group-scoped command calling remember_group /
+    recall_group and build_persona, inside the existing isolation
+    boundary (memory lives under the group's own id, never shared
+    across groups). Membership-gated; ``forget`` is owner/admin.
+    Never raises."""
+    from . import mirroring as _mirroring
+
+    usage = ("Usage: /cgroup memory <group_id> "
+             "remember <key> = <value> | recall <key> | "
+             "search <query> | list | forget <key> | persona")
+    segs = rest.split(None, 1)
+    if not segs:
+        return usage
+    gid = segs[0]
+    g = store.get(gid)
+    if g is None:
+        return f"No group `{gid}`. /cgroup list to see them."
+    if who not in g.members:
+        return (f"only members of **{g.name}** can use its memory — "
+                f"join it first: /cgroup join {gid}")
+    tail = segs[1] if len(segs) > 1 else ""
+    parts = tail.split(None, 1)
+    verb = parts[0].lower() if parts else ""
+    arg = parts[1] if len(parts) > 1 else ""
+    if verb == "remember":
+        key, sep, value = arg.partition("=")
+        if not sep or not value.strip():
+            # `remember <key> <value>` without `=`.
+            fields = arg.split(None, 1)
+            key = fields[0] if fields else ""
+            value = fields[1] if len(fields) > 1 else ""
+        key = key.strip()
+        value = value.strip()
+        if not key or not value:
+            return "Usage: /cgroup memory <group_id> remember <key> = <value>"
+        _mirroring.remember_group(gid, key=key, value=value,
+                                  author_id=who, author_name=who)
+        return f"🧠 Remembered `{key}` for **{g.name}**."
+    if verb == "recall":
+        key = arg.strip()
+        if not key:
+            return "Usage: /cgroup memory <group_id> recall <key>"
+        found = _mirroring.recall_group(gid, key=key)
+        if not found:
+            return f"This group never stored `{key}`."
+        return f"`{key}`: {found[0]['value']}"
+    if verb == "search":
+        query = arg.strip()
+        if not query:
+            return "Usage: /cgroup memory <group_id> search <query>"
+        found = _mirroring.recall_group(gid, query=query)
+        if not found:
+            return f"Nothing in **{g.name}** matches {query!r}."
+        lines = [f"🔍 **Matches in {g.name}:**"]
+        for row in found[:10]:
+            lines.append(f"· `{row['key']}`: {row['value']}")
+        return "\n".join(lines)
+    if verb == "list":
+        found = _mirroring.recall_group(gid)
+        if not found:
+            return f"**{g.name}** has no stored memory yet."
+        lines = [f"🧠 **Memory in {g.name}:**"]
+        for row in found[:20]:
+            lines.append(f"· `{row['key']}`: {row['value']}")
+        return "\n".join(lines)
+    if verb == "forget":
+        key = arg.strip()
+        if not key:
+            return "Usage: /cgroup memory <group_id> forget <key>"
+        if g.role_of(who) not in ("owner", "admin"):
+            return "forgetting a memory is for the group's owner/admin."
+        from .group_memory import GroupMemoryStore
+
+        if GroupMemoryStore().forget(gid, key):
+            return f"🧠 Forgot `{key}`."
+        return f"No such fact `{key}` in **{g.name}**."
+    if verb == "persona":
+        from .group_memory import GroupMemoryStore
+        from .persona import build_persona
+
+        persona = build_persona(GroupMemoryStore(), gid)
+        if not persona.has_history:
+            return ("This group has no stored history yet — "
+                    "remember something first: /cgroup memory "
+                    f"{gid} remember <key> = <value>")
+        lines = [f"🎭 **{persona.name}** — the assistant for this group."]
+        if persona.traits:
+            lines.append("How it comes across: "
+                         + "; ".join(persona.traits))
+        if persona.greeting:
+            lines.append(f"Greeting style: {persona.greeting}")
+        lines.append(f"Facts ({len(persona.facts)}):")
+        for fact in persona.facts[:10]:
+            lines.append(f"· `{fact['key']}`: {fact['value']}")
+        return "\n".join(lines)
+    return usage
 
 
 def _control_cgroup(tail: str, context, chat,
@@ -834,6 +937,9 @@ def _control_cgroup(tail: str, context, chat,
         for m, c in top:
             lines.append(f"  {m} — {c} shared group{'s' if c != 1 else ''}")
         return "\n".join(lines)
+
+    if cmd == "memory":
+        return _control_memory(store, rest, who, context)
 
     # ── AA-18: device orchestration — scheduled posts + fleet view ──
     if cmd in ("schedule", "posts", "devices"):

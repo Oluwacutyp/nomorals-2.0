@@ -80,17 +80,31 @@ class MirrorEngine:
     """Mirror one message across platforms via injected senders.
 
     ``senders`` maps platform → ``callable(target, text) -> bool``.
-    ``targets`` maps platform → chat/channel id (caller-supplied).
-    No sender or no target for a platform → skipped, never guessed.
+    ``targets`` maps platform → chat/channel id, or a list of them —
+    a community has several groups on the same platform, so one
+    delivery is made per target. No sender or no target for a
+    platform → skipped, never guessed.
     """
 
     def __init__(self, senders: dict[str, Callable[[str, str], bool]] | None = None,
-                 targets: dict[str, str] | None = None) -> None:
+                 targets: dict[str, str | list[str]] | None = None) -> None:
         self.senders = dict(senders or {})
-        self.targets = dict(targets or {})
+        self.targets: dict[str, list[str]] = {
+            platform: ([target] if isinstance(target, str) else list(target))
+            for platform, target in (targets or {}).items()
+        }
         self.seen_ids: set[str] = set()
 
-    def mirror(self, message: dict[str, Any]) -> list[MirrorDelivery]:
+    def mirror(self, message: dict[str, Any], *,
+               sleep: Callable[[float], None] | None = None,
+               pace_seconds: float = 0.0) -> list[MirrorDelivery]:
+        """Mirror one message to every target except its origin.
+
+        ``sleep``/``pace_seconds`` pace the deliveries (a pause
+        between them, never before the first); with no sleep the
+        mirror is immediate. Dedup + loop protection run first, so
+        a repeated or already-bridged message returns [].
+        """
         payload = mirrored_payload(message)
         if message.get("bridged"):
             return []  # loop protection: already bridged, don't re-mirror
@@ -103,25 +117,30 @@ class MirrorEngine:
         text = format_bridged(str(payload.get("author_name", "")),
                               origin, str(payload.get("text", "")))
         deliveries: list[MirrorDelivery] = []
-        for platform, target in self.targets.items():
+        first = True
+        for platform, targets in self.targets.items():
             if platform == origin:
                 continue  # never echo back to the origin platform
             sender = self.senders.get(platform)
-            if sender is None:
+            for target in targets:
+                if not first and sleep is not None and pace_seconds > 0:
+                    sleep(float(pace_seconds))
+                first = False
+                if sender is None:
+                    deliveries.append(MirrorDelivery(
+                        to_platform=platform, to_target=target, text=text,
+                        sent=False, error="no sender injected for platform"))
+                    continue
+                try:
+                    sent = bool(sender(target, text))
+                except Exception as exc:  # noqa: BLE001 — sender is caller code
+                    _log.warning("mirror sender failed for %s: %s", platform, exc)
+                    deliveries.append(MirrorDelivery(
+                        to_platform=platform, to_target=target, text=text,
+                        sent=False, error=str(exc)))
+                    continue
                 deliveries.append(MirrorDelivery(
-                    to_platform=platform, to_target=target, text=text,
-                    sent=False, error="no sender injected for platform"))
-                continue
-            try:
-                sent = bool(sender(target, text))
-            except Exception as exc:  # noqa: BLE001 — sender is caller code
-                _log.warning("mirror sender failed for %s: %s", platform, exc)
-                deliveries.append(MirrorDelivery(
-                    to_platform=platform, to_target=target, text=text,
-                    sent=False, error=str(exc)))
-                continue
-            deliveries.append(MirrorDelivery(
-                to_platform=platform, to_target=target, text=text, sent=sent))
+                    to_platform=platform, to_target=target, text=text, sent=sent))
         return deliveries
 
 
