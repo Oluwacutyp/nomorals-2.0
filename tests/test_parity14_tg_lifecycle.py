@@ -49,11 +49,13 @@ from __future__ import annotations
 
 import asyncio
 import calendar
+import itertools
 import sys
 import time
 import types as _types
 from datetime import UTC, datetime
 from pathlib import Path
+from tests.frozen_clock import MIDDAY_TS
 from types import SimpleNamespace
 
 import pytest
@@ -68,6 +70,13 @@ from nomorals.social.chat.base import (
 ROOT = Path(__file__).resolve().parents[1]
 TG_OWNER = "4242424242"        # the owner's Telegram id (fixture)
 ENTITY = SimpleNamespace(id=int(TG_OWNER), first_name="Owner")
+
+# Fake-message identity: ids must stay unique — _process scopes
+# effects by chat + message id, so two messages sharing one id
+# replay the first one's recorded result instead of executing.
+# The ts is frozen (MIDDAY_TS): no handler this suite drives
+# reads a message ts against the real clock.
+_MSG_SEQ = itertools.count(1)
 
 
 # ── fake Telethon seam ─────────────────────────────────────
@@ -167,8 +176,18 @@ def _chat(chat_id=TG_OWNER, kind=ChatKind.DM):
                    kind=kind, peer=chat_id)
 
 
+# A scheduled send needs a genuinely-future instant: production
+# refuses anything at or before the real clock
+# (telegram.py send_scheduled, chatops.parse_schedule_args),
+# and there is no upper bound — so the helper anchors on a
+# fixed far-future instant instead of the real clock. A frozen
+# MIDDAY_TS + hours would read as past and every happy-path
+# schedule would refuse.
+_FAR_FUTURE = datetime(2030, 6, 15, 12, 0, tzinfo=UTC).timestamp()
+
+
 def _future(hours=2.0):
-    return time.time() + hours * 3600
+    return _FAR_FUTURE + (hours - 2.0) * 3600
 
 
 # ── catalog registration ───────────────────────────────────
@@ -276,7 +295,10 @@ def test_send_scheduled_refusals_before_traffic(fake_telethon,
     client = _FakeClient()
     ad = _adapter(client, tmp_path)
     res = ad.send_scheduled(_chat(), "too late",
-                            time.time() - 60)
+                            # MIDDAY_TS is long past on the real
+                            # clock, so the "future time" refusal
+                            # still fires.
+                            MIDDAY_TS - 60)
     assert not res.ok and "future time" in res.error
     res = ad.send_scheduled(_chat(), "   ", _future())
     assert not res.ok and "needs its words" in res.error
@@ -331,7 +353,9 @@ def test_send_scheduled_media_refusals(fake_telethon,
     ad = _adapter(client, tmp_path)
     res = ad.send_scheduled_media(
         _chat(), MediaRef(path="/x.jpg", kind="image"),
-        time.time() - 5)
+        # MIDDAY_TS is long past on the real clock, so the
+        # "future time" refusal still fires.
+        MIDDAY_TS - 5)
     assert not res.ok and "future time" in res.error
     # view-once is not an MTProto form — scheduled or not,
     # the answer is the refusal, never a permanent copy
@@ -552,8 +576,8 @@ def _op(rig, text, *, chat_id=TG_OWNER, kind=ChatKind.DM,
     msg = ChatMessage(
         chat=chat, incoming=True, text=text, sender="Owner",
         sender_id=TG_OWNER,
-        message_id=f"op-{time.time()}",
-        ts=time.time(), meta={"owner_command": True},
+        message_id=f"op-{next(_MSG_SEQ)}",
+        ts=MIDDAY_TS, meta={"owner_command": True},
         media=list(media or []))
     return rig["runtime"].handle_control(
         text, chat.key, message=msg)
@@ -565,6 +589,13 @@ def _journal_rows(rig, kind):
 
 
 def test_composed_schedule_fires_and_journals(rig):
+    # Grandfathered real-clock reads (baseline 2): the "+2h"
+    # landing is parsed against the real clock in production
+    # (parse_schedule_args takes time.time() from the
+    # handler), so the window assertion can only be stated
+    # against the real clock — a frozen "before" would sit
+    # ~32 days before the real landing and the window would
+    # never hold.
     before = time.time()
     out = _op(rig, "/sendlater +2h see you at the venue")
     assert out.startswith("scheduled — your message "
@@ -582,8 +613,12 @@ def test_composed_schedule_fires_and_journals(rig):
 def test_composed_schedule_absolute_and_media(rig):
     pic = rig["tmp"] / "venue.jpg"
     pic.write_bytes(b"\xff\xd8\xff\xe0" + b"x" * 16)
-    stamp = time.strftime(
-        "%Y-%m-%d %H:%M", time.gmtime(time.time() + 90000))
+    # An absolute future instant, as a literal: production
+    # validates it against the real clock (parse_schedule_args
+    # refuses past instants), so a frozen MIDDAY_TS + 25h
+    # would read as past and refuse. 2030 is safely future,
+    # with no upper bound in the parser or send_scheduled.
+    stamp = "2030-06-15 12:00"
     media = [MediaRef(path=str(pic), kind="image")]
     out = _op(rig, f"/sendlater {stamp} the venue",
               media=media)

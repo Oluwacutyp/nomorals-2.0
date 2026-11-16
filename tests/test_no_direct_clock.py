@@ -150,6 +150,19 @@ BASELINE: dict[str, int] = {
     "tests/test_orchestration_p9.py": 2,
     "tests/test_os_sweep.py": 9,
     "tests/test_os_timeline.py": 2,
+    # Grandfathered (batch H12): the composed "+2h" test asserts
+    # the parsed landing sits in a real-clock window — production
+    # parses relative offsets against the real clock
+    # (parse_schedule_args takes time.time() from the /sendlater
+    # handler), so a frozen "before" would sit ~32 days before
+    # the real landing and the window would never hold. The
+    # file's other reads are converted: the _future helper
+    # anchors on a fixed far-future instant (no upper bound in
+    # the parser or send_scheduled), past seeds freeze to
+    # MIDDAY_TS minus seconds, _op ids ride a counter and its
+    # ts freezes, and the absolute-stamp test uses a literal
+    # 2030 date.
+    "tests/test_parity14_tg_lifecycle.py": 2,
     # Grandfathered (batch H10): the pulse-marker ts must be stamped
     # on the real clock — check_pulse_catchup suppresses the catch-up
     # only when last_ts >= today's real-clock due time, so a frozen

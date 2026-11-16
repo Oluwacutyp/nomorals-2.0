@@ -45,6 +45,7 @@ What the pass found and where it is proven:
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import shutil
 import socketserver
@@ -57,12 +58,20 @@ import pytest
 
 from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef
 from nomorals.social.chat.chatops import format_poll_results
+from tests.frozen_clock import MIDDAY_TS
 
 PORT = 19461
 OWNER = "2348012345678"
 GROUP = "120363001234567890@g.us"
 OTHER_GROUP = "120363009999999999@g.us"
 ROOT = Path(__file__).resolve().parents[1]
+
+# Fake-message identity: ids must stay unique — _process scopes
+# effects by chat + message id, so two messages sharing one id
+# replay the first one's recorded result instead of executing.
+# The ts is frozen (MIDDAY_TS): no handler this suite drives
+# reads a message ts against the real clock.
+_MSG_SEQ = itertools.count(1)
 
 #: The one refusal both bridges emit for a poll outside
 #: bridge memory — transcribed from gobridge/profile.go
@@ -451,8 +460,8 @@ class FakeBridge(socketserver.ThreadingTCPServer):
 
 
 def wait_for(pred, timeout=25.0, step=0.1):
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if pred():
             return True
         time.sleep(step)
@@ -497,7 +506,7 @@ def rig(tmp_path_factory):
                          peer="owner"),
             incoming=True, text="hello", sender="owner",
             sender_id="owner",
-            message_id=f"beat-{time.time()}", ts=time.time()))
+            message_id=f"beat-{next(_MSG_SEQ)}", ts=MIDDAY_TS))
 
     beat()
     assert wait_for(
@@ -520,7 +529,7 @@ def _op(rig, text, *, chat_id=GROUP, kind=ChatKind.GROUP,
     msg = ChatMessage(
         chat=chat, incoming=True, text=text, sender="Owner",
         sender_id=OWNER,
-        message_id=f"op-{time.time()}", ts=time.time(),
+        message_id=f"op-{next(_MSG_SEQ)}", ts=MIDDAY_TS,
         meta={"owner_command": True}, reply_to=reply_to)
     return rig["runtime"].handle_control(
         text, chat.key, message=msg)
