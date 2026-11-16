@@ -8641,6 +8641,29 @@ class PartnerRuntime(
 
             return control_subscriptions(command.tail or arg,
                                          context=self.context)
+        if kind == "recurring":
+            # Subscription intelligence (audit gap R1-1): detected
+            # from the real Ledger — list, upcoming bills, bill-alert
+            # sync. Owner-only: money data, never a public command.
+            from ...finance.commands import control_recurring
+
+            return control_recurring(command.tail or arg,
+                                     context=self.context)
+        if kind == "trade":
+            # Paper-trading desk surface (audit gap R1-1): stats,
+            # positions, heat, kelly, size, open, close — paper only,
+            # the desk engine itself is live. Owner-only.
+            from ...finance.commands import control_trade
+
+            return control_trade(command.tail or arg,
+                                 context=self.context)
+        if kind == "import":
+            # Bank-statement CSV import into the ledger
+            # (audit gap R1-1). Owner-only.
+            from ...finance.commands import control_import
+
+            return control_import(command.tail or arg,
+                                  context=self.context)
         if kind == "predict":
             # Prediction pit: unlocked by beating challenges (see
             # nomorals/games/unlocks.py). Gated above in _progression_gate.

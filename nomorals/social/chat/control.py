@@ -921,6 +921,9 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "read": (0, None),        # /read [list] | open <n> | go <token> <verb> | get <token> <html|pdf|epub|txt> — routed long outputs in the reader, editions + raw downloads (owner-only)
     "insights": (0, None),    # /insights [days] — native money analytics
     "subscriptions": (0, None),  # /subscriptions [list|upcoming [days]|used <merchant> [YYYY-MM-DD]|cancel <merchant>] — subscription auditor (gap 9): detected from the real Ledger, unused flags from recorded usage, draft cancel text only
+    "recurring": (0, None),   # /recurring [list|upcoming|sync] — subscription intelligence: detected from the real Ledger, upcoming bills, bill-alert sync (audit gap R1-1)
+    "trade": (0, None),       # /trade stats|positions|heat|kelly|size|open|close — paper-trading desk surface (audit gap R1-1)
+    "import": (0, None),      # /import <csv path> — bank-statement CSV import into the ledger (audit gap R1-1)
     "predict": (0, 3),       # /predict <stake> <over|under> <1-99> — prediction pit (progression-unlocked)
     "menu": (0, 2),          # alias of /list ([group] [page] ride the same grammar)
     # wave 72 systems: media, execution, archives, builders
@@ -4686,7 +4689,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible",
                            "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "presence", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
-                          "balances", "goal", "goals", "careers", "ideas", "insights", "subscriptions", "alert"]),
+                          "balances", "goal", "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -4957,7 +4960,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "agent", "chatmode", "style", "stylepin", "doctor", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
-      "goals", "careers", "ideas", "insights", "subscriptions", "alert", "cost", "heal", "tour", "pulse"]),
+      "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
@@ -5542,6 +5545,9 @@ LIST_ONELINERS: dict[str, str] = {
     "goal": "money goals: /goal add|list|done|snooze|remove",
     "insights": "native money analytics: /insights [days]",
     "subscriptions": "subscription auditor: /subscriptions [list | upcoming [days] | used <merchant> [YYYY-MM-DD] | cancel <merchant>]",
+    "recurring": "subscription intelligence: /recurring [list | upcoming | sync]",
+    "trade": "paper-trading desk: /trade stats | positions | heat | kelly | size | open | close",
+    "import": "import a bank-statement CSV: /import <csv path>",
     "caption": "burn AI subtitles into a video: /caption [style] (attach or path)",
     "checkpoint": "snapshot the coding workdir: /checkpoint [label]",
     "checkpoints": "list saved coding checkpoints: /checkpoints",
