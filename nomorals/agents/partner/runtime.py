@@ -3723,6 +3723,24 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "failure loop job not registered: %s", exc)
+                # Calibration loop (audit gap R1-9): one durable
+                # "calibration loop tick" job (every 1h) replaying
+                # trajectory rows into a fresh calibration store,
+                # ranking learning targets into the weakness ledger,
+                # and persisting per-slice abstention thresholds that
+                # move with measured overconfidence — before this
+                # wiring the store was never constructed and the
+                # threshold/target functions had zero callers.
+                # Idempotent; best-effort.
+                try:
+                    from ...cognition.calibration_loop import (
+                        ensure_calibration_loop_job,
+                    )
+
+                    ensure_calibration_loop_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "calibration loop job not registered: %s", exc)
                 # Games seasons (AA-16): one durable "season tick"
                 # job (every 1h) rolling each group's quarterly
                 # season over at the boundary and paying closed

@@ -512,6 +512,58 @@ def register(registry: Any) -> None:
                     "error": f"failure loop pass failed: {exc}"}
 
     @registry.register(
+        "__calibration_loop__",
+        description="Run one calibration -> abstention -> learning-"
+        "targets pass: replay trajectory rows into a fresh "
+        "calibration store, rank learning targets and file the worst "
+        "as model weaknesses, and persist per-slice abstention "
+        "thresholds that move with measured overconfidence. "
+        "Scheduler-internal; runs every ~1h. Routine and silent — "
+        "thresholds are advisory values the abstention gate reads, "
+        "targets surface in the weakness ledger; nothing auto-applies.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _calibration_loop_tool() -> dict[str, Any]:
+        # The loop reads the SAME DB the router's learning attachment
+        # records trajectories into: agents/context wires
+        # attach_learning(router, db=context.db) with the very object
+        # the tool registry's context carries as .db — so the replay
+        # is the system's real recorded outcomes, not a side store.
+        # The ranking call lives here (L5), not in the L3 loop
+        # module: cognition must not import the autonomy organ.
+        from ..autonomy.model_weakness import (
+            learning_targets,
+            record_model_weakness,
+        )
+        from ..cognition.calibration_loop import run_calibration_loop_once
+
+        try:
+            db = getattr(_context, "db", None) or _db(_context)
+            result = run_calibration_loop_once(db)
+            targets = learning_targets(result["store"])
+            filed: list[str] = []
+            errors = 0
+            for target in targets:
+                try:
+                    filed.append(str(record_model_weakness(
+                        db, task=target["task"], model=target["model"],
+                        evidence=dict(target))))
+                except Exception:  # noqa: BLE001 - one bad filing never kills the tick
+                    errors += 1
+            result["targets"] = targets
+            result["weaknesses_filed"] = filed
+            result["weakness_errors"] = errors
+            # The rebuilt store is the tool's working object, not a
+            # reportable value — the scheduler renders the result for
+            # the owner, so it leaves the dict here.
+            result.pop("store", None)
+            return result
+        except Exception as exc:  # noqa: BLE001 - one bad pass never kills the job
+            return {"ok": False,
+                    "error": f"calibration loop pass failed: {exc}"}
+
+    @registry.register(
         "__season_tick__",
         description="Run one games season tick (AA-16): roll every "
         "group with a season board into the current quarter and pay "
