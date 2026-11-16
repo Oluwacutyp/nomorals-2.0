@@ -33,7 +33,6 @@ hand-built fixtures bypassing the seams that were broken):
 """
 from __future__ import annotations
 
-import time
 from types import SimpleNamespace
 
 from nomorals.social.chat.base import ChatKind, ChatRef
@@ -44,6 +43,44 @@ from nomorals.social.pairing import (
     toggle_live_verdicts,
 )
 from nomorals.social.personal import PersonalSurfaces, PersonalVault
+from tests.frozen_clock import MIDDAY_TS
+
+# Clock policy (batch H26): every seed below is MIDDAY_TS (noon
+# 2026-10-14, tests.frozen_clock) and the organ clock is frozen
+# with it — freeze seed AND now together (H16/H18 pattern).
+# Traced before freezing, per read:
+# * Wire ts-ms (_own/_status_wire/_vo_wire via _now_ms): the
+#   adapter stamps stale_replay past 180s (whatsapp.py:1555/
+#   :1588/:1884) but delivers regardless, and the stamp only
+#   rides alongside the promotion — the stale-command test in
+#   this file proves owner_command + stale_replay coexist, so a
+#   MIDDAY ts changes no verdict here. The message branch's
+#   personal turn runs before any stale early-return, so the
+#   view-once capture still lands (H15).
+# * observe_status_post ts: the live path has NO freshness check
+#   (personal.py:1052) — a post is attempted at any age. The
+#   sweep DOES expire: cycle_statuses drops posts older than
+#   24h against the organ's own clock (personal.py:1387) — so
+#   the rig freezes the organ clock to MIDDAY_TS too, and the
+#   2h-stale / 25h-dead seeds keep their deltas against it
+#   (stale still attempted live, dead still unswept).
+# * observe_message ts: carried into journal/vault rows only —
+#   no clock comparison anywhere on the path (personal.py:798);
+#   the view-once trace dedupe keys on (account, message_id).
+# * last_cycle is NOT MIDDAY: the beat fires when now -
+#   last_cycle > 60s on the REAL clock (runtime_provision.py:
+#   1725), so a MIDDAY seed would fire the whole beat
+#   (supervision / presence / surface / story / channel /
+#   status / disk / cache sweeps) on the first turn. The rig's
+#   job is to pin the beat quiet, and a far-future last_cycle
+#   pins it quiet deterministically (H20 precedent). The beat
+#   test overrides it with 0.0 to force a fire.
+# No test weakened; no production file touched. 0 reads
+# grandfathered.
+
+#: Last-cycle value that pins the housekeeping beat quiet: the
+#: beat fires only when real-now minus last_cycle exceeds 60s.
+_BEAT_QUIET_LAST_CYCLE = 1999999999.0
 
 OWNER_JID = "2348012345678@s.whatsapp.net"
 OWNER_LID = "105382746195847@lid"
@@ -53,7 +90,7 @@ REC_ID = "whatsapp:2348012345678"
 
 
 def _now_ms() -> int:
-    return int(time.time() * 1000)
+    return int(MIDDAY_TS * 1000)
 
 
 # ── rigs ────────────────────────────────────────────────────
@@ -119,7 +156,12 @@ def _runtime(tmp_path, adapter, **toggles):
         registry=registry, is_running=lambda rid: True)
     rt._adapter_for = lambda platform: adapter
     svc = rt._pairing_personal()
-    svc["last_cycle"] = time.time()      # the beat stays quiet
+    # Freeze the organ clock with the seeds (see the import-block
+    # note): the status sweep reads its "now" from the organ's
+    # own clock, so a MIDDAY post_ts needs a MIDDAY sweep-now or
+    # the 24h life expires it before any sweep reaches it.
+    svc["personal"]._clock = lambda: MIDDAY_TS
+    svc["last_cycle"] = _BEAT_QUIET_LAST_CYCLE  # beat stays quiet
     return rt, svc, registry.get(rec.id)
 
 
@@ -316,14 +358,15 @@ def test_refused_view_retried_next_process_not_same(tmp_path):
     registry = PairingRegistry(tmp_path / "paired.json")
     vault = PersonalVault(tmp_path / "personal")
     organ1 = PersonalSurfaces(registry, vault,
-                              status_viewer=refusing_viewer)
+                              status_viewer=refusing_viewer,
+                              clock=lambda: MIDDAY_TS)
     rec = registry.upsert(AccountRecord(
         id=REC_ID, platform="whatsapp",
         identity="2348012345678", status="linked", created_at=1.0))
     registry.set_toggles(rec.id, status_viewing=True)
     organ1.observe_status_post(
         "whatsapp", poster_id=POSTER, poster_name="Poster",
-        source_id="R1", ts=time.time())
+        source_id="R1", ts=MIDDAY_TS)
     assert calls == ["R1"]
     # same process: the sweep does NOT beat on a refused verb
     organ1.cycle_statuses("whatsapp")
@@ -333,7 +376,8 @@ def test_refused_view_retried_next_process_not_same(tmp_path):
     organ2 = PersonalSurfaces(
         PairingRegistry(tmp_path / "paired.json"),
         PersonalVault(tmp_path / "personal"),
-        status_viewer=refusing_viewer)
+        status_viewer=refusing_viewer,
+        clock=lambda: MIDDAY_TS)
     organ2.cycle_statuses("whatsapp")
     assert calls == ["R1", "R1"]
     # and the funnel still reconciles: one arrival, two traces
@@ -355,14 +399,15 @@ def test_landed_view_never_refired_after_restart(tmp_path):
     registry = PairingRegistry(tmp_path / "paired.json")
     vault = PersonalVault(tmp_path / "personal")
     organ1 = PersonalSurfaces(registry, vault,
-                              status_viewer=landing_viewer)
+                              status_viewer=landing_viewer,
+                              clock=lambda: MIDDAY_TS)
     rec = registry.upsert(AccountRecord(
         id=REC_ID, platform="whatsapp",
         identity="2348012345678", status="linked", created_at=1.0))
     registry.set_toggles(rec.id, status_viewing=True)
     organ1.observe_status_post(
         "whatsapp", poster_id=POSTER, poster_name="Poster",
-        source_id="L1", ts=time.time())
+        source_id="L1", ts=MIDDAY_TS)
     assert calls == ["L1"]
     # a new process over the same journal: redelivery AND the
     # sweep both leave the landed post alone — the viewed set
@@ -370,10 +415,11 @@ def test_landed_view_never_refired_after_restart(tmp_path):
     organ2 = PersonalSurfaces(
         PairingRegistry(tmp_path / "paired.json"),
         PersonalVault(tmp_path / "personal"),
-        status_viewer=landing_viewer)
+        status_viewer=landing_viewer,
+        clock=lambda: MIDDAY_TS)
     organ2.observe_status_post(
         "whatsapp", poster_id=POSTER, poster_name="Poster",
-        source_id="L1", ts=time.time())
+        source_id="L1", ts=MIDDAY_TS)
     organ2.cycle_statuses("whatsapp")
     assert calls == ["L1"]
 
@@ -569,7 +615,7 @@ def test_view_once_pathless_media_entry_is_a_miss(tmp_path):
         counterpart_id=TARGET_JID, sender_id=TARGET_JID,
         sender_name="Ada", message_id="vo6",
         media=[{"path": "", "kind": "image"}],
-        view_once=True, ts=time.time())
+        view_once=True, ts=MIDDAY_TS)
     assert len(_rows(personal, "view_once_missed")) == 1
     traces = _rows(personal, "view_once_trace")
     assert len(traces) == 1
@@ -605,7 +651,7 @@ def test_view_once_redelivery_writes_one_trace(tmp_path):
         counterpart_id=TARGET_JID, sender_id=TARGET_JID,
         sender_name="Ada", message_id="vo4", text="",
         media=[{"path": src, "kind": "image"}],
-        view_once=True, ts=time.time())
+        view_once=True, ts=MIDDAY_TS)
     assert len(_rows(personal, "view_once_trace")) == 1
     assert len([r for r in personal.vault.saved_entries(rec.id)
                 if r.get("kind") == "view_once"]) == 1
@@ -653,7 +699,7 @@ def _seed_capture(tmp_path, rt, svc):
         counterpart_id=TARGET_JID, sender_id=TARGET_JID,
         sender_name="Ada", message_id="seedmsg", text="",
         media=[{"path": src, "kind": "image"}],
-        view_once=True, ts=time.time())
+        view_once=True, ts=MIDDAY_TS)
     saved = [r for r in personal.vault.saved_entries()
              if r.get("kind") == "view_once"]
     assert len(saved) == 1
