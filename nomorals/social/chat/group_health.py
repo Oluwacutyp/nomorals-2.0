@@ -108,11 +108,9 @@ def build_group_health(surface: Any, group_key: str,
     except Exception:  # noqa: BLE001 - claim facts are advisory here
         claim = {"claimed": False, "source": ""}
     members = entry.get("members") or {}
-    silent_after = now - silent_days * 86400.0
     window_after = now - window_days * 86400.0
 
     current: list[dict[str, Any]] = []
-    silent: list[dict[str, Any]] = []
     bots = 0
     deleted = 0
     left = 0
@@ -132,24 +130,52 @@ def build_group_health(surface: Any, group_key: str,
             continue
         current.append(member)
         last_seen = float(member.get("last_seen") or 0.0)
-        first_seen = float(member.get("first_seen") or 0.0)
         if last_seen >= window_after:
             active_window += 1
         if not int(member.get("message_count") or 0):
             never_spoke += 1
-        if (last_seen < silent_after
-                and first_seen < silent_after):
-            silent.append({
-                "user_id": str(member.get("user_id") or ""),
-                "name": _display_name(member),
-                "username": str(member.get("username") or ""),
-                "last_seen": last_seen,
-                "first_seen": first_seen,
-                "message_count": int(member.get("message_count") or 0),
-                "days_quiet": max(
-                    0, int((now - last_seen) // 86400)),
-            })
-    silent.sort(key=lambda m: m["last_seen"])
+
+    # Quiet members + engagement come from the community insights
+    # organ (audit gap R2-27) — the one source for "who went
+    # quiet" and for the per-member ranking. The ledger holds
+    # per-member aggregates, not a message stream, so the organ
+    # is fed one message per member at its last_seen (members
+    # who never spoke get no message — "never" is reported, never
+    # faked), and the newcomer guard rides the organ's
+    # min_age_days, not a second inline copy of the rule.
+    from ...community import insights as _insights
+
+    quiet = _insights.quiet_members(
+        current,
+        [{"member_id": str(m.get("user_id") or ""),
+          "ts": float(m.get("last_seen") or 0.0)}
+         for m in current
+         if float(m.get("last_seen") or 0.0) > 0.0],
+        days=silent_days, now=now, min_age_days=silent_days)
+    by_id = {str(m.get("user_id") or ""): m for m in current}
+    silent: list[dict[str, Any]] = []
+    for row in quiet:
+        member = by_id.get(row["member_id"]) or {}
+        days_quiet = row["days_since_last"]
+        silent.append({
+            "user_id": row["member_id"],
+            "name": _display_name(member),
+            "username": str(member.get("username") or ""),
+            "last_seen": float(member.get("last_seen") or 0.0),
+            "first_seen": float(member.get("first_seen") or 0.0),
+            "message_count": int(member.get("message_count") or 0),
+            "days_quiet": (
+                int(days_quiet) if days_quiet is not None else None),
+        })
+    engagement = _insights.engagement_from_counts(
+        {str(m.get("user_id") or ""): int(m.get("message_count") or 0)
+         for m in current})
+    # Names for the top-talkers line are resolved here, where the
+    # ledger lives — the render only ever sees display names.
+    top_talkers = [
+        {"name": _display_name(by_id.get(row["member_id"]) or {}),
+         "messages": row["messages"]}
+        for row in (engagement.get("per_member") or [])[:5]]
 
     extras = surface._extras(group_key)
     rhythm_days = extras.get("rhythm_days") or {}
@@ -237,6 +263,8 @@ def build_group_health(surface: Any, group_key: str,
         "silent": silent,
         "silent_count": len(silent),
         "never_spoke": never_spoke,
+        "engagement": engagement,
+        "top_talkers": top_talkers,
         "msgs_7d": msgs_window,
         "msgs_per_day": (msgs_window / window_days
                          if window_days else 0.0),
@@ -327,6 +355,11 @@ def render_group_health(health: dict[str, Any]) -> str:
         + (f" · busiest {busy[0]} ({busy[1]})" if busy else "")
         + (f" · quiet days: {', '.join(health['quiet_days'])}"
            if health["quiet_days"] else ""))
+    top_talkers = health.get("top_talkers") or []
+    if top_talkers:
+        lines.append("Top talkers (all time): " + " · ".join(
+            f"{row['name']} ({row['messages']})"
+            for row in top_talkers[:5]))
     lines.append(
         f"Churn: +{health['joins_7d']} joined, "
         f"−{health['leaves_7d']} left in the last 7 days "
@@ -354,6 +387,8 @@ def render_group_health(health: dict[str, Any]) -> str:
         rest = len(health["silent"]) - len(shown)
         lines.append("Silent 14d+: " + ", ".join(
             f"{item['name']} ({item['days_quiet']}d)"
+            if item["days_quiet"] is not None
+            else f"{item['name']} (never spoke)"
             for item in shown)
             + (f" · and {rest} more" if rest else ""))
     roster = health["roster"] or {}

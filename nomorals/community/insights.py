@@ -23,6 +23,7 @@ from typing import Any, Iterable
 
 __all__ = [
     "engagement",
+    "engagement_from_counts",
     "quiet_members",
     "turnout",
     "summary",
@@ -44,20 +45,10 @@ def _display(item: Any) -> str:
     return str(_field(item, "display_name", "") or _field(item, "name", ""))
 
 
-def engagement(
-    messages: Iterable[Any],
-) -> dict[str, Any]:
-    """Message counts per member, ranked most → least.
-
-    Returns ``{"total": int, "active_members": int,
-    "per_member": [{member_id, messages, share}]}``. ``share`` is the
-    member's fraction of all messages. Empty input → zeros, no crash.
-    """
-    counts: Counter[str] = Counter()
-    for message in messages:
-        member = _member_id(message)
-        if member:
-            counts[member] += 1
+def _rank_counts(counts: Counter[str]) -> dict[str, Any]:
+    """Shared ranking core: a member→count map → the engagement
+    dict. Zero counts never rank (a member with no messages is
+    not an active member)."""
     total = sum(counts.values())
     per_member = [
         {
@@ -74,11 +65,49 @@ def engagement(
     }
 
 
+def engagement(
+    messages: Iterable[Any],
+) -> dict[str, Any]:
+    """Message counts per member, ranked most → least.
+
+    Returns ``{"total": int, "active_members": int,
+    "per_member": [{member_id, messages, share}]}``. ``share`` is the
+    member's fraction of all messages. Empty input → zeros, no crash.
+    """
+    counts: Counter[str] = Counter()
+    for message in messages:
+        member = _member_id(message)
+        if member:
+            counts[member] += 1
+    return _rank_counts(counts)
+
+
+def engagement_from_counts(
+    counts: dict[str, int] | Any,
+) -> dict[str, Any]:
+    """Engagement from per-member message counts, same shape as
+    :func:`engagement`. For callers that hold a ledger of
+    cumulative counts rather than a message stream — building a
+    synthetic stream of one row per message would be wasteful
+    and dishonest as an input shape. Zero counts never rank;
+    a negative count raises ``ValueError``."""
+    ranked: Counter[str] = Counter()
+    for member, count in dict(counts).items():
+        count = int(count)
+        if count < 0:
+            raise ValueError("message counts cannot be negative")
+        if count:
+            ranked[str(member)] += count
+    return _rank_counts(ranked)
+
+
 def quiet_members(
     members: Iterable[Any],
     messages: Iterable[Any],
     days: int = 14,
     now: float | None = None,
+    *,
+    min_age_days: float | None = None,
 ) -> list[dict[str, Any]]:
     """Members with no message in the last ``days`` days (or ever).
 
@@ -86,11 +115,23 @@ def quiet_members(
     days_since_last}]`` sorted longest-silent first. ``last_message_ts``
     is None for members who never posted; ``days_since_last`` is None
     for them too — "never" is reported, never faked as a number.
+
+    ``min_age_days`` is the newcomer guard: a member first seen
+    (``first_seen`` or ``joined_ts``) more recently than
+    ``min_age_days`` ago is never quiet — a newcomer who has not
+    spoken yet is new, not silent. ``None`` (the default) applies
+    no guard. A member with no first-seen info at all is treated
+    as old enough — absence of join info never silently exempts.
     """
     if days < 0:
         raise ValueError("days cannot be negative")
+    if min_age_days is not None and min_age_days < 0:
+        raise ValueError("min_age_days cannot be negative")
     now = now if now is not None else time.time()
     cutoff = now - days * 86400
+    min_age_cutoff = (
+        now - min_age_days * 86400 if min_age_days is not None else None
+    )
     last_seen: dict[str, float] = {}
     for message in messages:
         member = _member_id(message)
@@ -106,6 +147,17 @@ def quiet_members(
         member_id = _member_id(member)
         if not member_id:
             continue
+        if min_age_cutoff is not None:
+            first = _field(member, "first_seen", None)
+            if first is None:
+                first = _field(member, "joined_ts", None)
+            if first is not None:
+                try:
+                    first = float(first)
+                except (TypeError, ValueError):
+                    first = None
+                if first is not None and first >= min_age_cutoff:
+                    continue
         last = last_seen.get(member_id)
         if last is None or last < cutoff:
             quiet.append(
