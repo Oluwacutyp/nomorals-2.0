@@ -33,6 +33,21 @@ from nomorals.agents.scheduler import Scheduler, parse_schedule_spec
 from nomorals.agents.teachings import TeachingsLedger
 from nomorals.pulses.timezone import PulseAnchor
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
+
+# No-direct-clock (batch H29): 6 of this file's 7 reads are frozen.
+# The item-dict created_at is never read on the candidate path
+# (_store_candidates stores fetched_at=now; mark_served builds its
+# own row with created_at=now; motivation.py never reads created_at),
+# the backstop test's `now` only feeds _pending_shot's
+# next_run > now - 3600 check (the armed shot lands ~7 days ahead),
+# and the wait loops are monotonic deadlines. The 7th read —
+# _future_ts's datetime.now(LAGOS) — stays on the real clock,
+# grandfathered in the test_no_direct_clock baseline: the one-shots
+# it arms go through Scheduler.add, which refuses any "at" instant
+# <= time.time() on the real clock with no now seam, so a frozen
+# date would make the re-arm raise and the pending-shot assertion
+# fail (proved: freezing to MIDDAY arms 2026-10-22, in the past).
 
 LAGOS = ZoneInfo("Africa/Lagos")
 
@@ -49,7 +64,15 @@ def _future_ts(hour, minute=0, *, days=7) -> float:
     a fixed calendar date: the scheduler validates against the real
     clock, so a hardcoded date turns into "one-shot time is in the
     past" the day real time crosses it (the 2026-10-23 pins did
-    exactly that on 2026-10-23). Pure-function tests keep _ts."""
+    exactly that on 2026-10-23). Pure-function tests keep _ts.
+
+    Grandfathered (batch H29): this datetime.now(LAGOS) stays on the
+    real clock — see the baseline entry in test_no_direct_clock.py.
+    Scheduler.add refuses any "at" instant <= time.time() on the
+    real clock (scheduler.py:990) with no now seam, and the re-arm
+    the tests assert goes through it, so a frozen date would arm in
+    the past and the pending-shot assertion would fail. Freezing the
+    helper to MIDDAY would arm 2026-10-22, already past."""
     day = datetime.now(LAGOS).date() + timedelta(days=days)
     return datetime(day.year, day.month, day.day, hour, minute,
                     tzinfo=LAGOS).timestamp()
@@ -84,7 +107,12 @@ def _item(*, theme="discipline", source_type="wisdom",
         "tradition": tradition, "weight": 1.0,
         "source": {"type": source_type, "ref": ref, "label": label,
                    "passage": passage},
-        "created_at": time.time(), "served": [],
+        # Frozen (batch H29): the item dict's created_at is never read
+        # on the candidate path — _store_candidates stores
+        # fetched_at=now, mark_served builds its own row with
+        # created_at=now, and motivation.py never reads created_at —
+        # so the frozen stamp changes no verdict.
+        "created_at": MIDDAY_TS, "served": [],
     }
 
 
@@ -434,7 +462,11 @@ class CatchupBackstopTests(unittest.TestCase):
 
     def test_backstop_dispatches_through_the_scheduler(self):
         ctx = _ctx(self)
-        now = time.time()
+        # Frozen (batch H29): this `now` only feeds _pending_shot's
+        # next_run > now - 3600 check at the end, and the armed
+        # morning shot lands ~7 days ahead of the real today, so a
+        # frozen MIDDAY now still finds it.
+        now = MIDDAY_TS
         calls: list[dict] = []
 
         def _tools_call(tool, capabilities=None, **args):
@@ -451,15 +483,15 @@ class CatchupBackstopTests(unittest.TestCase):
         sched.add("motivation backstop (test)", "in 1 seconds", "tool",
                   {"tool": "motivation", "args": {"action": "backstop"}},
                   routine=True)
-        deadline = time.time() + 15
-        while time.time() < deadline and not calls:
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline and not calls:
             sched.tick()
             time.sleep(0.1)
         self.assertTrue(calls, "backstop job never dispatched")
         # the firing was journaled as a schedule run (ok=1)
         rows = []
-        deadline = time.time() + 10
-        while time.time() < deadline:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
             rows = ctx.db.query(
                 "SELECT ok FROM schedule_runs "
                 "ORDER BY started_at DESC LIMIT 1")

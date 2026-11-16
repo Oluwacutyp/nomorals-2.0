@@ -212,6 +212,25 @@ BASELINE: dict[str, int] = {
     "tests/test_monitor_validation.py": 2,
     "tests/test_mood_patterns.py": 3,
     "tests/test_mqtt.py": 2,
+    # Grandfathered (batch H29): _future_ts's datetime.now(LAGOS)
+    # stays on the real clock — the one-shots it arms go through
+    # Scheduler.add, which refuses any "at" instant <= time.time()
+    # on the real clock (scheduler.py:990) with no now seam, so a
+    # frozen date would arm in the past and the re-arm / pending-shot
+    # assertions would fail (proved: freezing to MIDDAY arms
+    # 2026-10-22, already past). Threading a now seam through
+    # Scheduler.add would be a production API change in a hygiene
+    # lane for a non-regression, and a fixed far-future anchor would
+    # break the helper's own documented contract — a rolling future
+    # date, never a fixed calendar date (the 2026-10-23 pins rotted
+    # exactly that way). The file's other 6 reads are frozen: the
+    # item-dict created_at (never read on the candidate path —
+    # _store_candidates stores fetched_at=now, mark_served builds
+    # its own row with created_at=now), the backstop test's `now`
+    # (only feeds _pending_shot's next_run > now - 3600 check, and
+    # the armed shot lands ~7 days ahead), and the wait-loop
+    # deadlines (monotonic).
+    "tests/test_motivation_m1.py": 1,
     "tests/test_orchestration_p9.py": 2,
     "tests/test_os_sweep.py": 9,
     "tests/test_os_timeline.py": 2,
