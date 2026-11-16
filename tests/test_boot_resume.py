@@ -38,7 +38,21 @@ from nomorals.missions import MissionStatus, MissionStore
 from nomorals.missions.runner import MissionRunner, StepOutcome, _serialize_plan
 from nomorals.social.chat.base import ChatAdapter, ChatRef, SendResult
 from nomorals.social.chat.gateway import ChatGateway
+from tests.frozen_clock import MIDDAY_TS
 
+# Clock policy (batch H18): wait-loop deadlines use time.monotonic()
+# (elapsed time, not counted); ordered-only seeds use MIDDAY_TS.
+# 3 reads stay on the real clock, grandfathered in
+# tests/test_no_direct_clock.py with reasons at the reads:
+# (1) the pulse markers — check_pulse_catchup (morning_pulse.py)
+# suppresses only when last_ts >= due on the real clock, and the
+# pulse is enabled by default, so a frozen marker would fire the
+# catch-up pulse into the adapter at boot; (2) the same-pid live
+# claim — MissionRunner._claim_is_live (runner.py) returns
+# age <= _stale_heartbeat_after() (900s) for our own pid, so a
+# frozen claim reads dead and the mission would resume instead of
+# being skipped. Foreign-pid claims are safe to freeze:
+# _claim_is_live decides purely on _process_alive(pid).
 DEAD_PID = 99999999  # certainly not a live process (pass #54 pattern)
 
 
@@ -77,8 +91,8 @@ class FakeAdapter(ChatAdapter):
                           message_id=f"m{len(self.sent)}")
 
     def wait_started(self, timeout: float = 5.0) -> bool:
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             if self.started_flag:
                 return True
             time.sleep(0.01)
@@ -104,20 +118,25 @@ def _make_context() -> tuple[Any, tempfile.TemporaryDirectory]:
                    "pulse_last_run_evening.json",
                    "pulse_last_run_midnight.json"):
         (ws / marker).write_text(
+            # Grandfathered (batch H18): real clock — check_pulse_catchup
+            # (morning_pulse.py) suppresses only when last_ts >= due on
+            # the real clock, and start() runs check_all_catchup on boot;
+            # a frozen marker would fire the catch-up pulse into the
+            # adapter. See the import-block note.
             json.dumps({"ts": time.time(), "delivered_text": True}),
             encoding="utf-8")
     from nomorals.agents.morning_briefing import _today_str
     context.db.execute(
         "INSERT OR REPLACE INTO briefings (id, date, sections_json, generated_at)"
         " VALUES (?, ?, '[]', ?)",
-        ("test-seed", _today_str(context), time.time()),
+        ("test-seed", _today_str(context), MIDDAY_TS),
     )
     return context, tmp
 
 
 def _wait(predicate, timeout: float = 30.0) -> bool:
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if predicate():
             return True
         time.sleep(0.05)
@@ -177,7 +196,7 @@ def _crashed_mission(ctx, store: MissionStore, name: str = "crashed",
     row = store.get(mission.id)
     assert row.status == MissionStatus.RUNNING, row.status
     assert row.state.get("completed_steps") == ["a"], row.state
-    stale = time.time() - 100000
+    stale = MIDDAY_TS - 100000
     row.state["heartbeat"] = {"pid": DEAD_PID, "at": stale}
     row.state["run_claim"] = {"token": "ghost", "pid": DEAD_PID, "at": stale}
     store.save(row)
@@ -240,7 +259,7 @@ class BootStartResumeTest(_BootBase):
         row.status = MissionStatus.DONE
         row.state["completed_steps"] = ["z"]
         row.state["milestones"] = [
-            {"event": "terminal:done", "title": "t", "at": time.time()}]
+            {"event": "terminal:done", "title": "t", "at": MIDDAY_TS}]
         self.store.save(row)
 
         executed: list[str] = []
@@ -302,6 +321,11 @@ class BootSweepTest(_BootBase):
         mine = _mission_with_plan(self.store, [_step("a")], name="mine")
         row = self.store.get(mine.id)
         row.status = MissionStatus.RUNNING
+        # Grandfathered (batch H18): real clock — this is OUR pid, so
+        # MissionRunner._claim_is_live returns age <=
+        # _stale_heartbeat_after() (900s); a frozen claim reads dead
+        # and the mission would resume instead of being skipped.
+        # See the import-block note.
         row.state["run_claim"] = {"token": "live", "pid": os.getpid(),
                                   "at": time.time()}
         row.state["heartbeat"] = {"pid": os.getpid(), "at": time.time()}
@@ -315,9 +339,9 @@ class BootSweepTest(_BootBase):
             row = self.store.get(foreign.id)
             row.status = MissionStatus.RUNNING
             row.state["run_claim"] = {"token": "live", "pid": sleeper.pid,
-                                      "at": time.time()}
+                                      "at": MIDDAY_TS}
             row.state["heartbeat"] = {"pid": sleeper.pid,
-                                      "at": time.time()}
+                                      "at": MIDDAY_TS}
             self.store.save(row)
             runtime = self._runtime()
             executed: list[str] = []
@@ -406,7 +430,7 @@ class BootSweepTest(_BootBase):
         row = self.store.get(interrupted.id)
         row.state["completed_steps"] = ["a"]
         row.state["heartbeat"] = {"pid": DEAD_PID,
-                                  "at": time.time() - 100000}
+                                  "at": MIDDAY_TS - 100000}
         self.store.save(row)
         # Never driven: created, planned, deliberately not started.
         pristine = _mission_with_plan(self.store, [_step("a")],

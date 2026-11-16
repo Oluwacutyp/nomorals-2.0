@@ -50,6 +50,20 @@ BASELINE: dict[str, int] = {
     "tests/test_autonomy_strategies.py": 6,
     "tests/test_autonomy_sweep.py": 10,
     "tests/test_books_sweep.py": 4,
+    # Grandfathered (batch H18): 3 reads stay on the real clock.
+    # (1) The pulse markers — check_pulse_catchup (morning_pulse.py)
+    # suppresses only when last_ts >= due on the real clock, and the
+    # pulse is enabled by default, so start()'s check_all_catchup
+    # would fire the catch-up pulse into the adapter at boot if the
+    # markers were frozen. (2) The same-pid live claim —
+    # MissionRunner._claim_is_live (runner.py) returns
+    # age <= _stale_heartbeat_after() (900s) for our own pid, so a
+    # frozen claim reads dead and the mission would resume instead
+    # of being skipped. Foreign-pid claims are frozen (the verdict
+    # is purely _process_alive), as are the dead-pid stale seeds,
+    # the briefing seed, the milestone seed, and the wait loops
+    # (monotonic deadlines).
+    "tests/test_boot_resume.py": 3,
     "tests/test_briefing.py": 5,
     "tests/test_builders_sweep.py": 5,
     "tests/test_challenges.py": 4,
