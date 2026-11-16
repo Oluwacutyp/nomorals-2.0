@@ -82,7 +82,7 @@ CHATOPS_COMMANDS = frozenset({
     "viewonce", "vv",
     "joinlink", "newgroup", "newchannel", "leave",
     "myprofile", "privacy", "makepoll", "vcf", "addcontact",
-    "sendloc", "sendcontact", "find", "findall",
+    "sendloc", "sendcontact", "find", "findall", "searchall",
     "statusaud", "statusviewers",
     "sendlater", "deletechat", "clearhistory",
     "botprofile", "invoice",
@@ -563,8 +563,16 @@ def _search_snippet(text: str, query: str,
     return out
 
 
+#: The platform label a search hit prints under
+#: ``show_platform`` — the two personal surfaces only; a hit
+#: from any other platform prints no label, never a raw key.
+_SEARCH_PLATFORMS = {"whatsapp": "WhatsApp",
+                     "telegram": "Telegram"}
+
+
 def format_search_results(verdict: Any, *, scope: str = "",
-                            show_chat: bool = False) -> str:
+                          show_chat: bool = False,
+                          show_platform: bool = False) -> str:
     """Render one search verdict (the adapters' shared
     search shape) as plain lines for the owner.
 
@@ -577,7 +585,10 @@ def format_search_results(verdict: Any, *, scope: str = "",
     archive).  A hit prints its date, its sender ("you"
     for the owner's own messages) and a snippet around
     the match; with ``show_chat`` it also names its
-    conversation.  Message ids and chat ids never print —
+    conversation; with ``show_platform`` it also names
+    the platform the hit lives on (the /searchall shape —
+    /find and /findall never pass it, so their rendering
+    is unchanged).  Message ids and chat ids never print —
     this is a reading surface, not a debug dump."""
     verdict = verdict if isinstance(verdict, dict) else {}
     if not verdict.get("ok"):
@@ -605,8 +616,9 @@ def format_search_results(verdict: Any, *, scope: str = "",
                      f"most recent")
         lines = [head + ":"]
         for msg in messages:
-            lines.append(_search_hit_line(msg, query,
-                                          show_chat=show_chat))
+            lines.append(_search_hit_line(
+                msg, query, show_chat=show_chat,
+                show_platform=show_platform))
     coverage = str(verdict.get("coverage") or "")
     if coverage:
         lines.append(f"(searched {coverage})")
@@ -614,7 +626,8 @@ def format_search_results(verdict: Any, *, scope: str = "",
 
 
 def _search_hit_line(msg: Any, query: str, *,
-                     show_chat: bool = False) -> str:
+                     show_chat: bool = False,
+                     show_platform: bool = False) -> str:
     when = ""
     ts = getattr(msg, "ts", None)
     if ts:
@@ -629,6 +642,12 @@ def _search_hit_line(msg: Any, query: str, *,
            else str(getattr(msg, "sender", "") or "")
            or "someone")
     parts = []
+    if show_platform:
+        chat = getattr(msg, "chat", None)
+        platform = str(getattr(chat, "platform", "") or "")
+        label = _SEARCH_PLATFORMS.get(platform, "")
+        if label:
+            parts.append(label)
     if show_chat:
         chat = getattr(msg, "chat", None)
         title = str(getattr(chat, "title", "") or "")

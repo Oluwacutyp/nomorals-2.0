@@ -639,6 +639,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "sendcontact": (1, None), # /sendcontact Name | +number — share a contact card in this chat
     "find": (1, None),        # /find words — search this chat's messages
     "findall": (1, None),     # /findall words — search every chat on this surface
+    "searchall": (1, None),   # /searchall words — search every chat on every surface
     "sendlater": (1, None),   # /sendlater +2h words — queue a message to land later in this chat (personal Telegram; /schedule is the cron surface)
     "deletechat": (0, None),  # /deletechat [chat name] — delete a conversation as the owner (personal Telegram)
     "clearhistory": (0, None), # /clearhistory [chat name] — wipe a chat's history, keep the chat (personal Telegram)
@@ -3139,6 +3140,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/findall words to look for",
               "example": "/findall invoice",
               "related": "/find · /channeltexts"},
+    "searchall": {"what": "search EVERY chat on EVERY surface for words at once — your WhatsApp and your personal Telegram, merged newest first under one cap, each match naming its platform and its conversation. The reach is the /findall reach on each surface: Telegram's server-side index across the account's chats; on WhatsApp the fan-out over the chats the bridge remembers, each filtered over its session memory. A surface with no paired account, no live adapter, or a refused search is named in the reply and the other surface's hits still show. A read, not an act as you: your standing stop does not halt it. Owner only.",
+              "usage": "/searchall words to look for",
+              "example": "/searchall invoice",
+              "related": "/findall · /find · /channeltexts"},
     "sendlater": {"what": "queue a message to land in THIS chat LATER, from your personal Telegram — Telegram's own scheduled send: Telegram holds the message and delivers it at the instant, nothing is parked here and re-sent. The when is a relative offset (+45s, +30m, +2h, +1d) or an absolute UTC date and time (2026-11-10 14:30); the reply restates the exact instant it parsed. Attach a photo/video (or reply to one) and the media is what gets scheduled, with your words as its caption. Personal Telegram only: the Bot API has no schedule parameter and WhatsApp has no scheduled send in either bridge library — asked there, the command says exactly that. (Distinct from /schedule, the cron-jobs surface.) An act as you: owner only, your standing stop halts it, a landed schedule is journaled.",
               "usage": "/sendlater +2h the words to send · /sendlater 2026-11-10 14:30 the words to send",
               "example": "/sendlater +30m running late — start without me",
@@ -4979,7 +4984,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "pollres", "tagall", "hidetag", "antitag", "viewonce", "vv",
       "joinlink", "newgroup", "newchannel", "leave",
       "myprofile", "privacy", "makepoll", "vcf", "addcontact",
-      "sendloc", "sendcontact", "find", "findall",
+      "sendloc", "sendcontact", "find", "findall", "searchall",
       "sendlater", "deletechat", "clearhistory",
       "botprofile", "invoice",
       "labels", "catalog", "broadcast", "wpay"]),
@@ -5265,6 +5270,7 @@ LIST_ONELINERS: dict[str, str] = {
     "sendcontact": "share a saveable contact card in this chat — /sendcontact Name | +number",
     "find": "search this chat's messages for words — /find the gate code",
     "findall": "search every chat on this surface for words — /findall invoice",
+    "searchall": "search every chat on every surface for words — /searchall invoice",
     "sendlater": "queue a message to land later in this chat (personal Telegram) — /sendlater +2h the words",
     "deletechat": "delete a conversation outright, as you (personal Telegram) — /deletechat [chat name]",
     "clearhistory": "wipe a chat's history but keep the chat (personal Telegram) — /clearhistory [chat name]",

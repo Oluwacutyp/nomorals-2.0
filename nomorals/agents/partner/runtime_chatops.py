@@ -304,6 +304,8 @@ class RuntimeChatOpsMixin:
                 return self._chatops_sendcontact(tail, message)
             if kind in ("find", "findall"):
                 return self._chatops_find(kind, tail, message)
+            if kind == "searchall":
+                return self._chatops_searchall(tail, message)
             if kind == "statusaud":
                 return self._chatops_statusaud(tail, message)
             if kind == "statusviewers":
@@ -3645,6 +3647,83 @@ class RuntimeChatOpsMixin:
         title = str(getattr(chat, "title", "") or "")
         return format_search_results(
             verdict, scope=title or "this chat")
+
+    def _chatops_searchall(self, tail: str,
+                           message: Any) -> str:
+        """/searchall — one query over EVERY surface: the
+        census's superhuman candidate #1.  /find and
+        /findall each resolve exactly one adapter from the
+        message's own platform; this fans out to both
+        personal surfaces — WhatsApp and the Telegram
+        userbot — and merges newest-first under one cap,
+        every hit naming its platform and its chat.
+
+        Each surface resolves independently (paired
+        account + live adapter): a surface with no paired
+        account, no live adapter, or a refused search is
+        NAMED in the reply and the other surface's hits
+        still show — one surface down never silences the
+        search.  Both down is a named failure, never
+        silence.  The origin surface does not limit the
+        search: run from the bot DM it still searches the
+        personal accounts, because the targets are the
+        personal accounts, not the room the command
+        arrived in.  A READ, not an act as you: like /find
+        and /findall, the standing stop does not halt it."""
+        from ...social.chat.chatops import format_search_results
+
+        query = str(tail or "").strip()
+        if not query:
+            return ("usage: /searchall words to look for — "
+                    "e.g. /searchall invoice")
+        merged: list[Any] = []
+        total = 0
+        coverages: list[str] = []
+        down: list[str] = []
+        for platform, label in (("whatsapp", "WhatsApp"),
+                                ("telegram", "Telegram")):
+            _svc, rec = self._chatops_personal_account(platform)
+            if rec is None:
+                down.append(f"{label} — no paired account")
+                continue
+            adapter = self._adapter_for(platform)
+            if adapter is None:
+                down.append(f"{label} — no live surface here")
+                continue
+            verdict = self._chatops_call(
+                adapter.search_global, query, 20)
+            if not (isinstance(verdict, dict)
+                    and verdict.get("ok")):
+                error = ""
+                if isinstance(verdict, dict):
+                    error = str(verdict.get("error") or "")
+                down.append(
+                    f"{label} — {error or 'the surface refused'}")
+                continue
+            messages = list(verdict.get("messages") or [])
+            merged.extend(messages)
+            subtotal = verdict.get("total")
+            if not isinstance(subtotal, int) \
+                    or subtotal < len(messages):
+                subtotal = len(messages)
+            total += subtotal
+            coverage = str(verdict.get("coverage") or "")
+            coverages.append(
+                f"{label}: {coverage}" if coverage else label)
+        if not coverages:
+            return ("the search didn't run on any surface — "
+                    + "; ".join(down) + ".")
+        merged.sort(key=lambda m: m.ts, reverse=True)
+        out = format_search_results(
+            {"ok": True, "query": query,
+             "messages": merged[:20], "total": total,
+             "coverage": "; ".join(coverages)},
+            scope="every chat on every surface",
+            show_chat=True, show_platform=True)
+        if down:
+            out += ("\n(" + "; ".join(down)
+                    + " — not searched.)")
+        return out
 
     # ── status depth (parity #13) ───────────────────────────
 
