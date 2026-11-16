@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import stat
-import time
 from pathlib import Path
 from typing import Any
 
@@ -29,6 +29,45 @@ from nomorals.storage.cookie_estate import (
     migrate_legacy,
 )
 from nomorals.storage.db import open_database
+from tests.frozen_clock import MIDDAY_TS
+
+#: A far-future expiry (2033) for seeds that must stay LIVE
+#: across the estate's real-clock expiry gate.  ``upsert`` /
+#: ``cookies_for`` default ``now`` to ``time.time()`` and the
+#: harvest paths (webnav, browser service, rendered tabs,
+#: solved sessions, media export) call them without a ``now``,
+#: so a frozen MIDDAY-relative expiry (MIDDAY + 3600) reads
+#: expired on the real clock and is dropped at write.  These
+#: tests prove cross-path visibility, not expiry — the
+#: expiry-sensitive behaviour is pinned by
+#: ``test_expired_dropped_at_write_and_read``, which freezes
+#: seed AND ``now`` together through the explicit-``now`` seam.
+#: The same literal already served this role at the export
+#: test below.
+_FAR_FUTURE_EXPIRY = 1999999999
+
+#: Clock discipline (no-direct-clock): every ``time.time()``
+#: read in this file is frozen to ``MIDDAY_TS`` (2026-10-14
+#: 12:00 local, ~32 days before the run) or replaced by the
+#: far-future expiry above.  Why each frozen seed is safe:
+#: * newest-wins (upsert) compares ``updated_at`` stamps only
+#:   — the stale/fresh seeds are MIDDAY ∓ 1000 around a
+#:   MIDDAY ``now`` passed to the same upserts.
+#: * the expiry test freezes seed AND ``now`` together
+#:   (``upsert(now=...)`` / ``cookies_for(now=...)``) — the
+#:   dead/live split is delta-only against the passed now.
+#: * the migration test freezes seed AND ``now`` together
+#:   (``_migrate_pending(now=...)`` / ``cookies_for(now=...)``)
+#:   AND the jar file's mtime (``os.utime``) — the jar's
+#:   ``updated_at`` comes from its file mtime, so a real-now
+#:   mtime would beat the sidecar's MIDDAY + 100 and the
+#:   owner-handed SID would lose.  The profile DB and solved
+#:   file need no utime: their ``updated_at`` comes from the
+#:   row's ``last_access`` / the file's ``saved_at``, both
+#:   frozen here.
+#: * ``_write_profile_db``'s ``updated_at`` default is never
+#:   taken in this file (every row passes one); it is frozen
+#:   to MIDDAY_TS so the read itself is gone.
 
 #: A session value long enough to be a real credential (the
 #: recipe guard only scans values of this length — shorter
@@ -83,33 +122,33 @@ def _jar_triples(session: Any) -> set[tuple[str, str, str]]:
 def test_upsert_newest_wins_older_loses(tmp_path):
     estate = _estate(tmp_path)
     first = estate.upsert([_rec("SID", "old-value", ".example.com")],
-                          source=SOURCE_WEBNAV)
+                          source=SOURCE_WEBNAV, now=MIDDAY_TS)
     assert first["added"] == 1
     stale = estate.upsert(
         [_rec("SID", "older-value", ".example.com",
-              updated_at=time.time() - 1000)],
-        source=SOURCE_SERVICE)
+              updated_at=MIDDAY_TS - 1000)],
+        source=SOURCE_SERVICE, now=MIDDAY_TS)
     assert stale["kept_newer"] == 1
     assert stale["added"] == 0 and stale["replaced"] == 0
     assert estate.cookies_for("example.com")[0]["value"] == "old-value"
     fresh = estate.upsert(
         [_rec("SID", "new-value", ".example.com",
-              updated_at=time.time() + 1000)],
-        source=SOURCE_SERVICE)
+              updated_at=MIDDAY_TS + 1000)],
+        source=SOURCE_SERVICE, now=MIDDAY_TS)
     assert fresh["replaced"] == 1
     assert estate.cookies_for("example.com")[0]["value"] == "new-value"
 
 
 def test_expired_dropped_at_write_and_read(tmp_path):
     estate = _estate(tmp_path)
-    now = time.time()
+    now = MIDDAY_TS
     result = estate.upsert([
         _rec("dead", "x", ".example.com", expires=now - 10),
         _rec("live", "y", ".example.com", expires=now + 3600),
         _rec("session", "z", ".example.com", expires=-1.0),
-    ], source=SOURCE_SERVICE)
+    ], source=SOURCE_SERVICE, now=now)
     assert result["skipped"] == 1
-    names = {r["name"] for r in estate.cookies_for("example.com")}
+    names = {r["name"] for r in estate.cookies_for("example.com", now=now)}
     assert names == {"live", "session"}
 
 
@@ -158,7 +197,8 @@ def test_clear_source_scopes_by_writer(tmp_path):
 def test_export_netscape_is_0600_and_skips_bad_values(tmp_path):
     estate = _estate(tmp_path)
     estate.upsert([
-        _rec("SID", "good-value", ".example.com", expires=1999999999),
+        _rec("SID", "good-value", ".example.com",
+             expires=_FAR_FUTURE_EXPIRY),
         _rec("bad", "has\ttab", ".example.com"),
         _rec("bad2", "has\nnewline", ".example.com"),
         _rec("sess", "s", ".example.com", expires=-1.0),
@@ -178,7 +218,7 @@ def test_status_domains_has_domain(tmp_path):
     assert estate.domains() == []
     assert estate.has_domain("example.com") is False
     estate.upsert([_rec("SID", "v", ".example.com",
-                        expires=time.time() + 600)],
+                        expires=_FAR_FUTURE_EXPIRY)],
                   source=SOURCE_SERVICE)
     assert estate.has_domain("www.example.com") is True
     assert estate.has_domain("other.com") is False
@@ -217,13 +257,13 @@ def _write_profile_db(profile: Path, rows: list[dict[str, Any]]) -> None:
              row.get("path", "/"), _chrome_ts(row.get("expires", -1))
              if row.get("expires", -1) > 0 else 0,
              int(bool(row.get("secure"))), int(bool(row.get("httpOnly"))),
-             -1, _chrome_ts(row.get("updated_at", time.time()))))
+             -1, _chrome_ts(row.get("updated_at", MIDDAY_TS))))
     conn.commit()
     conn.close()
 
 
 def test_migration_imports_both_estates_once_deduped(tmp_path):
-    now = time.time()
+    now = MIDDAY_TS
     sessions = tmp_path / "sessions"
     service = tmp_path / "service"
     profile = tmp_path / "profile"
@@ -241,6 +281,10 @@ def test_migration_imports_both_estates_once_deduped(tmp_path):
          "domain_specified": True, "domain_initial_dot": True,
          "path_specified": True, "discard": False, "rest": {}},
     ]), encoding="utf-8")
+    # The jar's updated_at comes from its file mtime — freeze
+    # that too, or the real-now mtime beats the sidecar's
+    # MIDDAY + 100 and the owner-handed SID loses.
+    os.utime(sessions / "default.json", (MIDDAY_TS, MIDDAY_TS))
     # Webnav sidecar: the SAME SID, newer (owner-handed wins).
     (profile / "imported_cookies.json").write_text(json.dumps([
         {"name": "SID", "value": "sidecar-value", "domain": ".example.com",
@@ -259,8 +303,9 @@ def test_migration_imports_both_estates_once_deduped(tmp_path):
                      "expires": now + 3600}],
     }), encoding="utf-8")
     estate = _estate(tmp_path, ensure=False)
-    result = estate._migrate_pending()
-    by_name = {r["name"]: r for r in estate.cookies_for("example.com")}
+    result = estate._migrate_pending(now=now)
+    by_name = {r["name"]: r for r in estate.cookies_for("example.com",
+                                                        now=now)}
     assert set(by_name) == {"SID", "svc-only", "nav-login", "cf_clearance"}
     assert by_name["SID"]["value"] == "sidecar-value"
     assert by_name["SID"]["imported"] is True
@@ -269,11 +314,11 @@ def test_migration_imports_both_estates_once_deduped(tmp_path):
     assert result["sources"]["solved"]["files"] == 1
     # A second ensure imports nothing again.
     before = {r["name"]: r["value"]
-              for r in estate.cookies_for("example.com")}
-    again = estate._migrate_pending()
+              for r in estate.cookies_for("example.com", now=now)}
+    again = estate._migrate_pending(now=now)
     assert all(v.get("already") for v in again["sources"].values())
     assert {r["name"]: r["value"]
-            for r in estate.cookies_for("example.com")} == before
+            for r in estate.cookies_for("example.com", now=now)} == before
 
 
 def test_migration_force_reruns(tmp_path):
@@ -319,7 +364,7 @@ def test_webnav_login_is_visible_to_the_browser_service(tmp_path):
     session = webnav.NavSession(profile_dir=profile, cookie_estate=estate)
     session._context = _FakeContext([_rec(
         "SID", "webnav-login", ".example.com",
-        expires=time.time() + 3600)])
+        expires=_FAR_FUTURE_EXPIRY)])
     session._harvest_cookies()
     assert {r["name"] for r in estate.cookies_for("www.example.com")} \
         == {"SID"}
@@ -353,7 +398,7 @@ def test_browser_service_save_is_visible_to_webnav_and_writes_no_jar(
         port_specified=False, domain=".example.com",
         domain_specified=True, domain_initial_dot=True,
         path="/", path_specified=True, secure=False,
-        expires=time.time() + 3600, discard=False,
+        expires=_FAR_FUTURE_EXPIRY, discard=False,
         comment=None, comment_url=None, rest={"HttpOnly": None},
         rfc2109=False)
     browser.cookie_jar.set_cookie(cookie)
@@ -379,7 +424,7 @@ def test_rendered_tab_persist_harvests_and_strips_the_file(tmp_path):
         playwright=None, cookie_estate=estate)
     tab._context = _FakeContext([_rec(
         "SID", "rendered-login", ".example.com",
-        expires=time.time() + 3600)])
+        expires=_FAR_FUTURE_EXPIRY)])
     out = tab.persist()
     assert out["harvested"] is True
     assert out["cookies"] == 1
@@ -408,7 +453,7 @@ def test_solved_session_rides_the_estate_not_the_file(tmp_path):
     record = store.save(
         "https://example.com/wall", "https://example.com/wall",
         [_rec("cf_clearance", "clear", ".example.com",
-              expires=time.time() + 3600)],
+              expires=_FAR_FUTURE_EXPIRY)],
         origins=[{"origin": "https://example.com", "localStorage": []}],
         cleared_via="test")
     assert len(record["cookies"]) == 1
@@ -433,7 +478,7 @@ def test_media_export_comes_from_the_estate(tmp_path):
 
     estate = _estate(tmp_path)
     estate.upsert([_rec("SID", "yt-login", ".youtube.com",
-                        expires=time.time() + 3600)],
+                        expires=_FAR_FUTURE_EXPIRY)],
                   source=SOURCE_WEBNAV)
     sessions_dir = tmp_path / "sessions"
     sessions_dir.mkdir(parents=True, exist_ok=True)
@@ -616,7 +661,7 @@ def test_replay_sees_a_webnav_login_through_the_estate(tmp_path):
     session = webnav.NavSession(profile_dir=profile, cookie_estate=estate)
     session._context = _FakeContext([_rec(
         "SID", "webnav-login", ".example.com",
-        expires=time.time() + 3600)])
+        expires=_FAR_FUTURE_EXPIRY)])
     session._harvest_cookies()
     recipe = compile_recipe(
         name="example:search", goal="search the site",
