@@ -13,6 +13,13 @@ class RuntimeBuildMixin:
     # ── swarm: /swarm ────────────────────────────────────────────────────────
     def _control_swarm(self, tail: str, *, chat_key: str) -> str:
         stripped = (tail or "").strip()
+        # /swarm board [run-id] — read-only view of a swarm's shared
+        # board (owner only: rides /swarm, absent from
+        # PUBLIC_COMMANDS). A goal starting with "board" is read as
+        # the verb, same as "research" below.
+        if stripped.lower() == "board" or stripped.lower().startswith("board "):
+            return self._control_swarm_board(stripped[5:].strip(),
+                                             chat_key=chat_key)
         # wave 86: /swarm research <topic> — the research swarm (parallel
         # researchers, conflict-aware synthesis) instead of devon builders.
         if stripped.lower().startswith("research"):
@@ -28,7 +35,8 @@ class RuntimeBuildMixin:
             goal, workers = parts[0].strip(), int(parts[1])
         if not goal:
             return ("usage: /swarm <goal> [workers 1-5] — parallel devon agents + fusion\n"
-                    "        /swarm research <topic> — parallel research swarm")
+                    "        /swarm research <topic> — parallel research swarm\n"
+                    "        /swarm board [run-id] — watch a swarm's shared board")
         chat = self._ref_from_key(chat_key)
         try:
             self.gateway.send(chat.platform, chat,
@@ -37,7 +45,9 @@ class RuntimeBuildMixin:
             record_failure("runtime_build._control_swarm", exc)
         started = time.time()
         try:
-            result = SwarmAgent(self.context, brain=self.brain, gateway=self.gateway).run(
+            result = SwarmAgent(self.context, brain=self.brain,
+                                gateway=self.gateway,
+                                chat_key=chat_key).run(
                 goal, workers=workers)
         except Exception as exc:  # noqa: BLE001
             return f"swarm crashed: {exc}"
@@ -46,6 +56,31 @@ class RuntimeBuildMixin:
         text = (f"🐝 swarm done: {ok_legs}/{len(result.legs)} legs ok, {elapsed:.0f}s\n\n"
                 f"{result.synthesis}")
         return self._send_long_checked(chat.platform, chat, text)
+
+    def _control_swarm_board(self, ref: str, *, chat_key: str) -> str:
+        """Read-only view of a swarm's board: the latest boards, or
+        one board by run id (exact id or unique prefix)."""
+        from ..swarm_board import store_for_context
+
+        store = store_for_context(self.context)
+        chat = self._ref_from_key(chat_key)
+        if not ref:
+            boards = store.list_boards()
+            if not boards:
+                return "no swarm boards yet — run /swarm <goal> first."
+            lines = ["🐝 swarm boards:"]
+            for record in reversed(boards[-5:]):
+                lines.append(
+                    f"  {record['id']} [{record.get('state', '')}] — "
+                    f"{str(record.get('goal', ''))[:80]}")
+            lines.append("watch one: /swarm board <run-id>")
+            return self._send_long_checked(chat.platform, chat,
+                                           "\n".join(lines))
+        board = store.resolve(ref)
+        if board is None:
+            return f"no swarm board matches '{ref}' — /swarm board lists them."
+        return self._send_long_checked(chat.platform, chat,
+                                       board.render_board())
 
     def _control_swarm_research(self, topic: str, *, chat_key: str) -> str:
         """wave 86: /swarm research <topic> — parallel research swarm."""

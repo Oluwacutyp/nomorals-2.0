@@ -770,6 +770,23 @@ def register(registry: Any) -> None:
                     "error": f"workflow tick failed: {exc}"}
 
     @registry.register(
+        "__swarm_board_tick__",
+        description="Run one swarm-board tick: wake stalled swarm boards — a board quiet past 10 minutes with unfinished work gets one @monitor wake-up naming the unfinished workers, and the owner is told once per stall episode. Scheduler-internal; runs every ~5m. Routine and silent — a live board pings nobody.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _swarm_board_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..agents.swarm_board import run_swarm_board_tick_once
+
+        try:
+            return run_swarm_board_tick_once(
+                _context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"swarm board tick failed: {exc}"}
+
+    @registry.register(
         "__show_schedule_tick__",
         description="Run one show-schedule tick: compose a DRAFT "
         "episode for every show whose schedule is due, from the "

@@ -3922,6 +3922,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "workflow tick job not registered: %s", exc)
+                # Swarm board (Antigravity /swarm): one durable
+                # "swarm board tick" job (every 5m) waking stalled
+                # swarm boards — a board quiet past 10 minutes with
+                # unfinished work gets one @monitor wake-up naming
+                # the unfinished workers, and the owner is told once
+                # per stall episode. Idempotent; best-effort.
+                try:
+                    from ...agents.swarm_board import ensure_swarm_board_job
+
+                    ensure_swarm_board_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "swarm board tick job not registered: %s", exc)
                 # Community orchestration (AA-18): one durable
                 # "community orchestration tick" job (every 1m)
                 # heartbeating this device into the fleet session

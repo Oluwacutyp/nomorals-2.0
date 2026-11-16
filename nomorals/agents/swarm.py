@@ -13,6 +13,9 @@ offline.
 Coordination:
 * each worker gets its own DevonAgent (own journal, own run id — no shared
   mutable state to lock);
+* every run gets a swarm board (public briefs, an append-only feed,
+  @mentions, a verifier per 2–4 workers, a monitor that wakes stalled
+  boards) — the team talks mid-run, not just at the fusion step;
 * a wall-clock budget caps the whole swarm and each worker;
 * a crashed worker is reported as a failed leg, never fatal to the rest;
 * the synthesis is a single model call over the digests, with a plain
@@ -36,6 +39,11 @@ from ..core.ids import new_short_id
 from ..core.tool_render import describe_exc, emit_progress
 from ..core.logging_setup import get_logger
 from .devon import DevonAgent, DevonResult
+from .swarm_board import (
+    SwarmBoard,
+    parse_verifier_verdict,
+    worker_name_for,
+)
 
 _log = get_logger(__name__)
 
@@ -117,6 +125,8 @@ class SwarmAgent:
         gateway: Any = None,
         wall_seconds: float = 420.0,
         blackboard: Any = None,
+        board: SwarmBoard | None = None,
+        chat_key: str = "",
         on_leg: Callable[[int, int, dict[str, Any]], None] | None = None,
     ) -> None:
         self.context = context
@@ -124,10 +134,19 @@ class SwarmAgent:
         self.gateway = gateway
         self.wall_seconds = float(wall_seconds)
         self.blackboard = blackboard
+        #: The run's shared board (public briefs, feed, @mentions,
+        #: verifiers). When None, :meth:`run` builds one on the
+        #: blackboard — a board that cannot be built degrades to
+        #: isolated legs, exactly as before.
+        self.board = board
+        #: Where the monitor tick sends its wake-up notice.
+        self.chat_key = str(chat_key or "")
         #: Progress hook: called as legs complete — (index, total, leg).
         #: Long swarms are otherwise silent; this feeds live UIs.
         self.on_leg = on_leg
         self._last_result: SwarmResult | None = None
+        #: Deterministic worker names for the current run.
+        self._leg_names: list[str] = []
 
     def _emit_leg(self, index: int, total: int, leg: dict[str, Any]) -> None:
         """Fire the leg-progress hook. Never raises."""
@@ -137,6 +156,80 @@ class SwarmAgent:
             self.on_leg(index, total, leg)
         except Exception:  # noqa: BLE001 — telemetry never breaks the swarm
             _log.debug("swarm on_leg hook failed", exc_info=True)
+
+    # ── the swarm board ──────────────────────────────────────────────────
+    def _board_store(self) -> Any:
+        """The durable board store under the runtime home, or None.
+
+        Best-effort: no home / a broken path means the board lives
+        in memory only, and the swarm still runs.
+        """
+        try:
+            home = getattr(getattr(self.context, "settings", None),
+                           "home", None)
+            if home is None:
+                home = getattr(self.context, "home", None)
+            if home is None:
+                return None
+            from .swarm_board import store_for_context
+
+            return store_for_context(self.context)
+        except Exception:  # noqa: BLE001 - durability is a bonus
+            _log.debug("swarm board store unavailable", exc_info=True)
+            return None
+
+    def _save_board(self, board: SwarmBoard) -> None:
+        """Persist a board (best-effort — never breaks the swarm)."""
+        store = self._board_store()
+        if store is None:
+            return
+        try:
+            store.save_board(board)
+        except Exception:  # noqa: BLE001 - durability is a bonus
+            _log.debug("swarm board save failed", exc_info=True)
+
+    def _ensure_board(self, run_id: str, goal: str) -> SwarmBoard | None:
+        """The run's board, built on the blackboard (never raises)."""
+        if self.board is not None:
+            return self.board
+        try:
+            board = SwarmBoard(run_id, goal=goal, board=self.blackboard)
+            board.chat_key = self.chat_key
+            self.board = board
+            return board
+        except Exception:  # noqa: BLE001 - isolated legs are the fallback
+            _log.debug("swarm board unavailable", exc_info=True)
+            return None
+
+    def _setup_board(self, board: SwarmBoard, subtasks: list[str]) -> list[str]:
+        """Roster + public briefs for a run. Returns worker names."""
+        taken: set[str] = set()
+        names: list[str] = []
+        for i, sub in enumerate(subtasks):
+            name = worker_name_for(sub, i, taken)
+            taken.add(name)
+            names.append(name)
+        # The coordinator posts the header and the briefs, but is
+        # NOT a roster member — the roster is workers + verifiers.
+        # (Members[0] is the first worker: the verifier flags it,
+        # the monitor wakes it, the owner reads it.)
+        workers_line = ", ".join("@" + n for n in names)
+        board.post(
+            "coordinator",
+            f"🐝 swarm {board.run_id}\ngoal: {board.goal[:200]}\n"
+            f"workers: {workers_line}",
+            kind="brief")
+        for i, (name, sub) in enumerate(zip(names, subtasks, strict=True)):
+            others = "; ".join(
+                s[:160] for j, s in enumerate(subtasks) if j != i)
+            board.brief(
+                name,
+                owns=sub[:400],
+                must_not_touch=others or "(nothing else)",
+                done="a digest posted to the board")
+        self._leg_names = names
+        self._save_board(board)
+        return names
 
     # ── decomposition ────────────────────────────────────────────────────────
     def _model_available(self) -> bool:
@@ -251,10 +344,29 @@ class SwarmAgent:
         except Exception:  # noqa: BLE001 - posting never breaks a leg
             _log.debug("swarm leg post failed", exc_info=True)
 
+    def _post_board_result(self, board: SwarmBoard, name: str,
+                           leg: dict[str, Any], *,
+                           kind: str = "result") -> None:
+        """Post a leg's digest to the board and mark the member
+        waiting. The coordinator posts it — the run's narrator —
+        so a worker's unread feed is the whole board, not the board
+        minus its own posts. Never raises."""
+        try:
+            board.post("coordinator",
+                       str(leg.get("digest") or "")[:4000], kind=kind)
+        except Exception:  # noqa: BLE001 - posting never breaks a leg
+            _log.debug("swarm board result post failed", exc_info=True)
+        try:
+            board.set_state(name, "waiting")
+        except Exception:  # noqa: BLE001 - state is bookkeeping
+            _log.debug("swarm board set_state failed", exc_info=True)
+
     def _run_leg(self, subtask: str, deadline: float, *,
                  index: int = 0, run_id: str = "",
                  on_progress: Callable[[int, int, str, str], None] | None = None,
-                 total_legs: int = 0) -> dict[str, Any]:
+                 total_legs: int = 0, member: str = "",
+                 verifier: bool = False,
+                 verifier_for: tuple[str, ...] = ()) -> dict[str, Any]:
         started = time.time()
         remaining = max(20.0, deadline - started)
         brief = subtask
@@ -265,6 +377,36 @@ class SwarmAgent:
                     f"{subtask}\n\nFindings already reported by fellow "
                     f"investigators — do not repeat them, build on them:\n{prior}"
                 )
+        board = self.board
+        if board is not None and member:
+            # A leg that starts later reads the messages addressed to
+            # it — briefs are public, but a mention is a direct ask.
+            # Only real messages count (not briefs, not "started"
+            # posts): verdicts, wake-ups, other workers' words.
+            try:
+                board.set_state(member, "active")
+            except Exception:  # noqa: BLE001 - a ghost member is not fatal
+                _log.debug("swarm board set_state failed", exc_info=True)
+            try:
+                addressed = [p for p in board.mentions_for(member)
+                             if p.get("kind")
+                             in ("message", "verdict", "wake")]
+            except Exception:  # noqa: BLE001 - mentions are a bonus
+                addressed = []
+            if addressed:
+                brief = (
+                    f"{brief}\n\nMessages addressed to you on the swarm "
+                    f"board — answer them in your digest:\n"
+                    + "\n".join(
+                        f"@{p['author']}: {str(p.get('text') or '')[:400]}"
+                        for p in addressed))
+                board.mark_read(member, max(p["seq"] for p in addressed))
+            if verifier:
+                progress = ("started: verifying "
+                            + ", ".join(verifier_for))
+            else:
+                progress = f"started: {subtask[:160]}"
+            board.post(member, progress, kind="progress")
         try:
             # step_timeout doubles as the per-leg wall budget (× max_steps
             # inside devon), so scale it to the swarm's remaining time.
@@ -296,6 +438,10 @@ class SwarmAgent:
                 "steps": 0,
                 "seconds": round(time.time() - started, 1),
             }
+        # The result post + the waiting state live in the
+        # orchestration (run / _verify_and_rerun), not here: a leg
+        # that timed out at the future level still gets its result
+        # posted, and the verdict phase posts verdicts the same way.
         self._post_leg(run_id, index, leg)
         return leg
 
@@ -330,6 +476,67 @@ class SwarmAgent:
                              for leg in legs if leg.get("ok"))
         return (merged or "all swarm legs failed"), False
 
+    def _verify_and_rerun(self, board: SwarmBoard, goal: str,
+                          subtasks: list[str], leg_names: list[str],
+                          result: SwarmResult, deadline: float,
+                          on_progress: Callable[[int, int, str, str], None]
+                          | None = None) -> None:
+        """Verifier phase, then exactly one re-run per flagged / failed
+        worker. A worker that fails twice is killed, not retried again.
+
+        The verifier phase only runs when at least one worker leg
+        succeeded — there is nothing to verify when everything failed.
+        Verifier legs are sequential (they read the same board, and a
+        swarm's verifiers are few), re-runs too: the second attempt
+        must see the first attempt's digest and the verifier's notes.
+        """
+        if not any(leg.get("ok") for leg in result.legs):
+            return
+        flags: dict[str, list[str]] = {}
+        for v_index, verifier in enumerate(board.assign_verifiers()):
+            group = board.verifier_group(verifier)
+            v_subtask = (
+                f"Verify the swarm work of "
+                f"{', '.join(group)}: read their digests on the board, "
+                f"check the work, and report one line per worker — "
+                f"'OK name: ...' or 'FLAG name: <problem>'.")
+            v_leg = self._run_leg(
+                v_subtask, deadline, index=len(subtasks) + v_index,
+                run_id=result.run_id, on_progress=on_progress,
+                total_legs=len(subtasks), member=verifier,
+                verifier=True, verifier_for=tuple(group))
+            self._post_board_result(board, verifier, v_leg,
+                                    kind="verdict")
+            for worker, notes in parse_verifier_verdict(
+                    str(v_leg.get("digest") or "")).items():
+                flags.setdefault(worker, []).extend(notes)
+        for i, leg in enumerate(list(result.legs)):
+            name = leg_names[i] if i < len(leg_names) else ""
+            notes = flags.get(name, [])
+            if leg.get("ok") and not notes:
+                continue
+            retry_brief = subtasks[i]
+            if notes:
+                retry_brief = (
+                    f"{subtasks[i]}\n\nVerifier notes — fix these, "
+                    f"do not repeat them:\n"
+                    + "\n".join(f"- {n}" for n in notes))
+            elif not leg.get("ok"):
+                retry_brief = (
+                    f"{subtasks[i]}\n\nYour first attempt failed: "
+                    f"{str(leg.get('digest') or '')[:400]}. Try again.")
+            new_leg = self._run_leg(
+                retry_brief, deadline, index=i, run_id=result.run_id,
+                on_progress=on_progress, total_legs=len(subtasks),
+                member=name)
+            result.legs[i] = new_leg
+            self._post_board_result(board, name, new_leg)
+            if not new_leg.get("ok") and name:
+                try:
+                    board.set_state(name, "killed")
+                except Exception:  # noqa: BLE001 - state is bookkeeping
+                    _log.debug("swarm board set_state failed", exc_info=True)
+
     # ── the run ──────────────────────────────────────────────────────────────
     def run(self, goal: str, workers: int = 3,
             on_progress: Callable[[int, int, str, str], None] | None = None) -> SwarmResult:
@@ -346,11 +553,19 @@ class SwarmAgent:
         subtasks, planner = self.decompose(goal, workers)
         result = SwarmResult(goal=goal, subtasks=subtasks)
 
+        # ── the board: roster + public briefs before any leg starts ──
+        board = self._ensure_board(result.run_id, goal)
+        leg_names: list[str] = []
+        if board is not None:
+            leg_names = self._setup_board(board, subtasks)
+
         pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="swarm")
         futures = [pool.submit(self._run_leg, sub, deadline,
                                index=i, run_id=result.run_id,
                                on_progress=on_progress,
-                               total_legs=len(subtasks))
+                               total_legs=len(subtasks),
+                               member=leg_names[i] if i < len(leg_names)
+                               else "")
                    for i, sub in enumerate(subtasks)]
         for i, future in enumerate(futures):
             try:
@@ -363,10 +578,29 @@ class SwarmAgent:
                 }
                 self._post_leg(result.run_id, i, leg)
             result.legs.append(leg)
+            if board is not None and i < len(leg_names):
+                self._post_board_result(board, leg_names[i], leg)
             self._emit_leg(i, len(subtasks), leg)
         # Don't wait on late legs past the swarm's own deadline: they are
         # bounded by devon's internal step budgets and finish on their own.
         pool.shutdown(wait=False, cancel_futures=True)
+
+        # ── verifier phase + one re-run per flagged / failed worker ──
+        if board is not None:
+            self._verify_and_rerun(
+                board, goal, subtasks, leg_names, result, deadline,
+                on_progress=on_progress)
+            # The run is over: everyone not killed is waiting. (A
+            # killed member stays killed — never revived by the sweep.)
+            for member in board.members:
+                if member.get("state") != "killed":
+                    try:
+                        board.set_state(member["name"], "waiting")
+                    except Exception:  # noqa: BLE001 - state is bookkeeping
+                        _log.debug("swarm board set_state failed",
+                                   exc_info=True)
+            board.state = "done"
+            self._save_board(board)
 
         result.synthesis, model_ok = self._synthesize(goal, result.legs)
         result.seconds = time.time() - started
