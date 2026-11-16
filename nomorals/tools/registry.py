@@ -693,6 +693,9 @@ class ToolRegistry:
             from ..media import distribute as _distribute
             from ..media import musicgen_chain as _musicgen_chain
             from ..media import global_rhythm as _global_rhythm
+            from ..media import sonic_bible as _sonic_bible
+            from ..media import music_critique as _music_critique
+            from ..media import lora_global as _lora_global
             from ..media.explore import tool as _explore_tool
             from ..media import trellis as _trellis
             from ..media import unirig as _unirig
@@ -701,6 +704,7 @@ class ToolRegistry:
             for _mod in (_music, _playback, _library, _video,
                          _ace_step, _vocals, _distribute,
                          _musicgen_chain, _global_rhythm, _explore_tool,
+                         _sonic_bible, _music_critique, _lora_global,
                          _trellis, _unirig, _blender_live):
                 try:
                     _mod.register(self)

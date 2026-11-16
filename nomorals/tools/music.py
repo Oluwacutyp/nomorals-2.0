@@ -152,6 +152,25 @@ def _save_draft_or_warn(draft: Any) -> str:
     return ""
 
 
+def _judge_or_warn(draft: Any) -> str:
+    """Judge a draft; "" when judged, else an honest note.
+
+    Judging must never break drafting — a failure is logged + recorded
+    and the reply says the draft went unjudged, never renders as if
+    judged. (Same pattern as _save_draft_or_warn.)
+    """
+    from ..media.song_draft import judge_draft
+
+    try:
+        res = judge_draft(draft)
+    except Exception as exc:  # noqa: BLE001
+        log.error("music draft judge failed: %s", exc)
+        record_failure("tools.music.judge_draft", exc)
+        return (f"\n\n⚠️ I couldn't judge this draft ({exc}) — it went "
+                "out unjudged; the critique loop and bible check didn't run.")
+    return f"\n\n{res['verdict']}"
+
+
 def _draft(topic: str, style: str, key: str, ctx: Any) -> str:
     from ..media.song_draft import draft_song, render_notebook
     from ..media.taste import TasteStore
@@ -167,7 +186,7 @@ def _draft(topic: str, style: str, key: str, ctx: Any) -> str:
         return f"draft failed: {exc}"
     _ACTIVE_DRAFTS[key] = draft
     note = _save_draft_or_warn(draft)
-    return render_notebook(draft) + note
+    return render_notebook(draft) + _judge_or_warn(draft) + note
 
 
 def _revise(instruction: str, key: str, ctx: Any) -> str:
@@ -184,7 +203,7 @@ def _revise(instruction: str, key: str, ctx: Any) -> str:
         return f"revise failed: {exc}"
     _ACTIVE_DRAFTS[key] = draft
     note = _save_draft_or_warn(draft)
-    return render_notebook(draft) + note
+    return render_notebook(draft) + _judge_or_warn(draft) + note
 
 
 def _notebook(key: str) -> str:

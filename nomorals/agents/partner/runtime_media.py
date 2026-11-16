@@ -175,6 +175,23 @@ class RuntimeMediaMixin:
             drafts = self._active_drafts = {}
         drafts[chat_key] = path
 
+    def _judge_draft_or_warn(self, draft: Any) -> str:
+        """Judge a draft; "" when judged, else an honest note.
+
+        Judging must never break drafting — a failure is logged +
+        recorded and the reply says the draft went unjudged.
+        """
+        from ...media.song_draft import judge_draft
+        try:
+            return f"\n\n{judge_draft(draft)['verdict']}"
+        except Exception as exc:  # noqa: BLE001
+            _log.error("draft judge failed: %s", exc)
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._judge_draft_or_warn", exc)
+            return (f"\n\n⚠️ I couldn't judge this draft ({exc}) — it went "
+                    "out unjudged; the critique loop and bible check "
+                    "didn't run.")
+
     def _control_music_draft(self, tail: str, chat_key: str = "") -> str:
         """ /music draft <topic> [style] — the artist's notebook: a full
         song draft (lyrics + cadence + melody contour + emotional arc +
@@ -208,7 +225,8 @@ class RuntimeMediaMixin:
         from ...social.chat.tgbot_buttons import actionable
 
         return actionable(
-            f"📝 draft: “{draft.title}”\n\n{preview}\n\n"
+            f"📝 draft: “{draft.title}”\n\n{preview}"
+            f"{self._judge_draft_or_warn(draft)}\n\n"
             f"revise: /music revise <note>",
             [[("🎤 Perform it", "music perform")]])
 
@@ -233,7 +251,8 @@ class RuntimeMediaMixin:
         preview = "\n".join(lines[:30])
         if len(lines) > 30:
             preview += f"\n… ({len(lines) - 30} more lines)"
-        return f"📝 revised: “{new.title}”\n\n{preview}"
+        return (f"📝 revised: “{new.title}”\n\n{preview}"
+                f"{self._judge_draft_or_warn(new)}")
 
     def _control_music_perform(self, chat_key: str = "") -> str:
         """ /music perform — perform the active draft: beat + vocals shaped

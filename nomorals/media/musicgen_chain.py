@@ -62,6 +62,7 @@ __all__ = [
     "fake_bed",
     "fake_vocal",
     "run_chain",
+    "route_stage_models",
     "register",
 ]
 
@@ -88,6 +89,9 @@ class ChainRequest:
     lora: str = ""            # LoRA adapter path ("" = base ACE-Step)
     reference_path: str = ""  # reference track for Matchering mastering
     bed_duration_s: int = 60
+    quality_level: str = "standard"  # fidelity ladder rung: draft |
+    # standard | high | master — the minimum model-quality bar route()
+    # enforces per stage (QualityLadder min_quality).
 
 
 @dataclass
@@ -280,16 +284,106 @@ def _master_wav(src_path: str, out_path: str) -> str:
     return out_path
 
 
+# ── fidelity routing: rent-best-model selection per stage ────────────────
+#
+# The card table is this pipeline's stated policy, aligned to the
+# fidelity ladder's own bars: full is the complete DiT model (0.9 clears
+# the master bar 0.85); turbo is the distilled fast variant, duration-
+# capped by the ACE-Step code itself (0.6 clears high, not master); a
+# sung vocal / RVC timbre is "good, not indistinguishable" per this
+# chain's own honest_limits (0.7 clears high, not master). The RANKING
+# is real (turbo is objectively the degraded variant); the numbers are
+# explicit policy, like the ladder's bars — the code says so.
+_STAGE_QUALITY = {"acestep-full": 0.9, "acestep-turbo": 0.6,
+                  "diffsinger": 0.7, "rvc": 0.7}
+
+
+def _bed_variants() -> list[str]:
+    """ACE-Step variants this machine can run: ["full"], ["turbo"], or []."""
+    try:
+        from .ace_step import probe_acestep
+        probe = probe_acestep()
+    except Exception:  # noqa: BLE001 — a failed probe means unavailable
+        return []
+    return [probe.variant] if probe.available and probe.variant else []
+
+
+def _vocal_available() -> bool:
+    """A DiffSinger voicebank + onnxruntime — the backend's two gates."""
+    try:
+        from ..voice.singing import DiffSingerBackend
+        DiffSingerBackend()
+    except Exception:  # noqa: BLE001 — no bank / no runtime = unavailable
+        return False
+    return True
+
+
+def _rvc_available(name: str) -> bool:
+    """The named RVC model is installed."""
+    try:
+        from ..voice import rvc_bridge
+        return any(m.name == name for m in rvc_bridge.list_models())
+    except Exception:  # noqa: BLE001 — no models dir = unavailable
+        return False
+
+
+def route_stage_models(req: ChainRequest, *,
+                      bed_probe: Callable[[], list[str]] | None = None,
+                      vocal_probe: Callable[[], bool] | None = None,
+                      rvc_probe: Callable[[str], bool] | None = None,
+                      ) -> dict[str, dict[str, Any]]:
+    """Route each model stage through :func:`fidelity.route`.
+
+    One decision point per stage, over candidate cards built from
+    PROBES — never a hardcoded favourite, never an invented model.
+    ``min_quality`` is the requested ladder rung's bar, so asking for
+    "master" on a turbo-only box routes the bed to no-candidate instead
+    of silently shipping turbo as master. Probes are injectable so tests
+    can pin routing without a GPU; production passes nothing.
+    Returns {"bed"|"vocal"|"rvc": route() result dict}.
+    """
+    from .fidelity import QualityLadder, route
+
+    bar = QualityLadder().rung(req.quality_level)["min_quality"]
+    bed_cards = [{"id": f"acestep-{v}", "capabilities": ["bed"],
+                  "quality": _STAGE_QUALITY[f"acestep-{v}"]}
+                 for v in ((bed_probe or _bed_variants)() or [])]
+    vocal_cards = ([{"id": "diffsinger", "capabilities": ["vocal"],
+                     "quality": _STAGE_QUALITY["diffsinger"]}]
+                   if (vocal_probe or _vocal_available)() else [])
+    rvc_cards = ([{"id": f"rvc:{req.rvc_model}", "capabilities": ["rvc"],
+                   "quality": _STAGE_QUALITY["rvc"]}]
+                 if req.rvc_model and (rvc_probe or _rvc_available)(req.rvc_model)
+                 else [])
+    rvc = (route("rvc", rvc_cards, min_quality=bar) if req.rvc_model
+           else {"model_id": None, "quality": None, "source": "request",
+                 "reason": "no RVC model requested"})
+    return {"bed": route("bed", bed_cards, min_quality=bar),
+            "vocal": route("vocal", vocal_cards, min_quality=bar),
+            "rvc": rvc}
+
+
 def run_chain(req: ChainRequest,
               bed_fn: Callable[..., str] | None = None,
               vocal_fn: Callable[..., str] | None = None,
               rvc_fn: Callable[..., str] | None = None,
-              master_fn: Callable[..., str] | None = None) -> ChainResult:
+              master_fn: Callable[..., str] | None = None,
+              *, bed_probe: Callable[[], list[str]] | None = None,
+              vocal_probe: Callable[[], bool] | None = None,
+              rvc_probe: Callable[[str], bool] | None = None,
+              ) -> ChainResult:
     """Run the full chain. ``*_fn`` inject test doubles; None = real backend.
 
     Real bed: ACEStepBackend.generate (fails closed when ACE-Step is
     absent — stage marked skipped with the reason). Real vocal:
     DiffSingerBackend.sing (same). Real RVC: rvc_bridge.convert.
+
+    Model selection runs through :func:`route_stage_models` first: each
+    stage runs its real backend only when routing picked a model for it.
+    A stage routing to no-candidate is skipped with the route reason —
+    never a fake model, never a silent downgrade. Injected ``*_fn``
+    doubles bypass routing (labelled fake, as before) and their routing
+    entry records that.
     """
     outdir = Path(req.workdir)
     outdir.mkdir(parents=True, exist_ok=True)
@@ -309,6 +403,19 @@ def run_chain(req: ChainRequest,
         json.dump(spec, fh, indent=2, ensure_ascii=False)
     stages.append(ChainStage("draft", "real", midi_path,
                              f"{len(notes)} notes, tone-fixed ({req.language})"))
+    # ── fidelity routing: one decision per model stage ───────────────
+    # Raises ValueError on an unknown quality level — fail fast, before
+    # any audio stage runs.
+    routing = route_stage_models(req, bed_probe=bed_probe,
+                                 vocal_probe=vocal_probe,
+                                 rvc_probe=rvc_probe)
+    for _task, _fn in (("bed", bed_fn), ("vocal", vocal_fn),
+                       ("rvc", rvc_fn)):
+        if _fn is not None:
+            routing[_task] = {"model_id": None, "quality": None,
+                              "source": "test double",
+                              "reason": "test double injected",
+                              "note": "test double — not routed"}
     # ── 2. BED ──
     bed_path = ""
     if bed_fn is not None:
@@ -316,6 +423,9 @@ def run_chain(req: ChainRequest,
         stages.append(ChainStage("bed", "fake", bed_path,
                                  "test double — NOT a real ACE-Step bed"))
         used_models.append("acestep")  # fake stands in for the real model
+    elif routing["bed"]["model_id"] is None:
+        stages.append(ChainStage("bed", "skipped", "",
+                                 str(routing["bed"]["reason"])[:300]))
     else:
         try:
             from .ace_step import ACEStepBackend
@@ -345,6 +455,9 @@ def run_chain(req: ChainRequest,
         stages.append(ChainStage("vocal", "fake", vocal_path,
                                  "test double — NOT a real DiffSinger vocal"))
         used_models.append("diffsinger")
+    elif routing["vocal"]["model_id"] is None:
+        stages.append(ChainStage("vocal", "skipped", "",
+                                 str(routing["vocal"]["reason"])[:300]))
     else:
         try:
             from ..voice.singing import DiffSingerBackend, Note
@@ -374,6 +487,9 @@ def run_chain(req: ChainRequest,
                                      "test double — NOT a real RVC conversion"))
             used_models.append("rvc")
             vocal_path = rvc_path
+        elif routing["rvc"]["model_id"] is None:
+            stages.append(ChainStage("rvc", "skipped", "",
+                                     str(routing["rvc"]["reason"])[:300]))
         else:
             try:
                 from ..voice import rvc_bridge
@@ -440,6 +556,7 @@ def run_chain(req: ChainRequest,
         "stems": stems,
         "stems_missing": [k for k, v in stems.items() if not v],
         "models_used": used_models,
+        "fidelity_routing": routing,
         "audience": req.audience, "licence_audit": audit,
         "licenses": {m: can_ship(m, req.audience) for m in used_models},
         "provenance": ("FAKE stages are test doubles, not real models. "
@@ -473,7 +590,11 @@ def register(registry: Any) -> None:
             "Full music generation chain: lyrics+tones → draft score → "
             "ACE-Step bed → DiffSinger vocal → RVC timbre → master. "
             "action=run (title, lyrics, language, genre, key, bpm, seed, "
-            "lora, voicebank, rvc_model, audience, workdir). Stages report "
+            "lora, voicebank, rvc_model, audience, workdir, quality). "
+            "quality is the fidelity ladder rung (draft|standard|high|"
+            "master, default standard) — a stage whose best available "
+            "model sits below the rung is skipped with the route reason, "
+            "never silently downgraded. Stages report "
             "real/skipped honestly; ok=False when no audio was produced. "
             "Licence is a label in the manifest (commercial_use flag per "
             "model), never a gate — audience just records intent."
@@ -487,12 +608,14 @@ def register(registry: Any) -> None:
                        lora: str = "",
                        voicebank: str = "", rvc_model: str = "",
                        audience: str = "private",
-                       workdir: str = "musicgen_out") -> dict:
+                       workdir: str = "musicgen_out",
+                       quality: str = "standard") -> dict:
         req = ChainRequest(title=title, lyrics=lyrics, language=language,
                            genre=genre, key=key, bpm=bpm, seed=seed,
                            lora=lora,
                            voicebank=voicebank, rvc_model=rvc_model,
-                           audience=audience, workdir=workdir)
+                           audience=audience, workdir=workdir,
+                           quality_level=quality or "standard")
         r = run_chain(req)
         return {"ok": r.ok, "title": r.title,
                 "stages": [{"name": s.name, "status": s.status,

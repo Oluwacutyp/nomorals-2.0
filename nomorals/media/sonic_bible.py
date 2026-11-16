@@ -18,7 +18,8 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 __all__ = ["SonicBible", "TrackDescriptor", "check_consistency",
-           "album_consistency", "register"]
+           "album_consistency", "register", "default_bible_path",
+           "save_bible", "load_bible"]
 
 # Key distance on the circle of fifths (C=0 ...): 0 = same, 1 = neighbour.
 _CIRCLE = {"C": 0, "G": 1, "D": 2, "A": 3, "E": 4, "B": 5, "F#": 6,
@@ -184,6 +185,44 @@ def album_consistency(bible: SonicBible,
             "results": results}
 
 
+def default_bible_path() -> str:
+    """Where the artist's stored bible lives.
+
+    Same convention as the taste store: ``~/.nomorals/sonic_bible.json``.
+    The draft path checks this file on every draft — a stored bible is
+    the sound contract drafts are judged against.
+    """
+    import os
+    from pathlib import Path
+
+    return str(Path(os.path.expanduser("~")) / ".nomorals" / "sonic_bible.json")
+
+
+def save_bible(bible: SonicBible, path: str = "") -> str:
+    """Persist a bible as JSON. Returns the path written."""
+    from pathlib import Path
+
+    p = Path(path or default_bible_path())
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(bible.to_json(), encoding="utf-8")
+    return str(p)
+
+
+def load_bible(path: str = "") -> SonicBible | None:
+    """Load the stored bible, or None when none is saved.
+
+    Never raises on a missing file. A corrupt file DOES raise — the
+    caller (judge_draft) reports it honestly instead of silently
+    judging against nothing.
+    """
+    from pathlib import Path
+
+    p = Path(path or default_bible_path())
+    if not p.is_file():
+        return None
+    return SonicBible.from_json(p.read_text(encoding="utf-8"))
+
+
 def register(registry: Any) -> None:
     """Tool registration: ``sonic_bible`` — consistency checking."""
     from ..core.policy import Capability
@@ -193,15 +232,33 @@ def register(registry: Any) -> None:
         description=(
             "Sonic bible + album consistency: action=check (bible JSON, "
             "track JSON → per-axis consistency score) | album (bible JSON, "
-            "tracks JSON list → whole-album coherence). The bible is the "
-            "artist's sound contract: keys, tempo window, palette, vocal "
+            "tracks JSON list → whole-album coherence) | save (bible JSON → "
+            "the stored artist bible drafts are judged against) | show "
+            "(the stored bible, or an honest 'none saved'). The bible is "
+            "the artist's sound contract: keys, tempo window, palette, vocal "
             "style, loudness target."
         ),
         capability=Capability.FS_WRITE,
     )
     def sonic_bible(action: str = "check", bible: str = "",
-                    track: str = "", tracks: str = "") -> dict:
+                    track: str = "", tracks: str = "",
+                    path: str = "") -> dict:
         import json as _json
+        if action == "save":
+            try:
+                b = SonicBible.from_dict(_json.loads(bible) if bible else {})
+            except Exception as exc:  # noqa: BLE001
+                from ..core.errors import ToolError
+                raise ToolError(f"bible must be JSON: {exc}") from exc
+            return {"ok": True, "path": save_bible(b, path),
+                    "artist": b.artist, "album": b.album}
+        if action == "show":
+            b = load_bible(path)
+            if b is None:
+                return {"ok": True, "bible": None,
+                        "reason": "no sonic bible saved yet — save one "
+                                  "with action=save and a bible JSON"}
+            return {"ok": True, "bible": b.to_dict()}
         try:
             b = SonicBible.from_dict(_json.loads(bible) if bible else {})
             if action == "album":

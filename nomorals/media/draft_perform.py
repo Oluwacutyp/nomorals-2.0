@@ -40,6 +40,70 @@ def _base_midi(key: str, energy: float) -> int:
     return root + int(energy * 7)
 
 
+def _section_events(sec: Any, sec_start_beats: float,
+                    draft: Any) -> list[Any]:
+    """One section's contour walk as NoteEvents (starts in beats).
+
+    Shared by :func:`draft_melody_events` (the perform path) and
+    :func:`draft_critique_sections` (the judge path) — the judge must
+    hear the draft's OWN melody, not a re-walked copy of it.
+    """
+    from ..core.midi import NoteEvent
+
+    sec_bars = max(1, int(sec.bars or 4))
+    lines = [ln for ln in (sec.lines or []) if (ln.text or "").strip()]
+    base = _base_midi(getattr(draft, "key", "C"),
+                      float(sec.energy or 0.5))
+    velocity = 70 + int(float(sec.energy or 0.5) * 40)  # 70–110
+    events: list[Any] = []
+    if lines:
+        beats_per_line = (sec_bars * 4) / len(lines)
+        for li, ln in enumerate(lines):
+            contour = list(ln.contour or ["hold"])
+            n_notes = max(1, len(contour))
+            note_dur = beats_per_line / n_notes
+            pitch = base
+            # small per-line variation so lines don't all start identical
+            pitch += (li % 3 - 1) * 2
+            for ni, move in enumerate(contour):
+                pitch += _CONTOUR_STEPS.get(str(move).lower(), 0)
+                # keep the voice in a singable band around the base
+                pitch = max(base - 7, min(base + 12, pitch))
+                start = sec_start_beats + li * beats_per_line + ni * note_dur
+                events.append(NoteEvent(
+                    note=int(pitch), start=round(start, 3),
+                    duration=round(note_dur * 0.92, 3),
+                    velocity=velocity))
+    return events
+
+
+def draft_critique_sections(draft: Any) -> list[dict[str, Any]]:
+    """The draft as critique sections: ``[{name, lyrics, melody}]``.
+
+    Melody is ``[(midi, start_s, dur_s)]`` in SECONDS — the critique
+    organ's breath/stress axes read seconds, while
+    :func:`draft_melody_events` works in beats. Same walk, same notes;
+    only the clock changes (``seconds = beats * 60 / tempo``).
+    """
+    beat_s = 60.0 / max(1.0, float(getattr(draft, "tempo", 100) or 100))
+    sections: list[dict[str, Any]] = []
+    bar = 0
+    for sec in (draft.sections or []):
+        sec_bars = max(1, int(sec.bars or 4))
+        events = _section_events(sec, bar * 4, draft)
+        lyrics = [(ln.text or "") for ln in (sec.lines or [])
+                  if (ln.text or "").strip()]
+        sections.append({
+            "name": sec.name or "verse",
+            "lyrics": lyrics,
+            "melody": [(int(e.note), round(float(e.start) * beat_s, 3),
+                        round(float(e.duration) * beat_s, 3))
+                       for e in events],
+        })
+        bar += sec_bars
+    return sections
+
+
 def draft_melody_events(draft: Any) -> list[Any]:
     """Build melody NoteEvents from the draft's per-line contours.
 
@@ -47,36 +111,11 @@ def draft_melody_events(draft: Any) -> list[Any]:
     bars evenly. Higher-energy sections sing in a higher register with
     stronger velocity — the draft's energy arc becomes dynamics.
     """
-    from ..core.midi import NoteEvent
-
     events: list[Any] = []
-    beats_per_bar = 4
     bar = 0
     for sec in (draft.sections or []):
         sec_bars = max(1, int(sec.bars or 4))
-        sec_start = bar * beats_per_bar
-        lines = [ln for ln in (sec.lines or []) if (ln.text or "").strip()]
-        base = _base_midi(getattr(draft, "key", "C"),
-                          float(sec.energy or 0.5))
-        velocity = 70 + int(float(sec.energy or 0.5) * 40)  # 70–110
-        if lines:
-            beats_per_line = (sec_bars * beats_per_bar) / len(lines)
-            for li, ln in enumerate(lines):
-                contour = list(ln.contour or ["hold"])
-                n_notes = max(1, len(contour))
-                note_dur = beats_per_line / n_notes
-                pitch = base
-                # small per-line variation so lines don't all start identical
-                pitch += (li % 3 - 1) * 2
-                for ni, move in enumerate(contour):
-                    pitch += _CONTOUR_STEPS.get(str(move).lower(), 0)
-                    # keep the voice in a singable band around the base
-                    pitch = max(base - 7, min(base + 12, pitch))
-                    start = sec_start + li * beats_per_line + ni * note_dur
-                    events.append(NoteEvent(
-                        note=int(pitch), start=round(start, 3),
-                        duration=round(note_dur * 0.92, 3),
-                        velocity=velocity))
+        events.extend(_section_events(sec, bar * 4, draft))
         bar += sec_bars
     _log.info("draft melody: %d events from %d sections",
               len(events), len(draft.sections or []))

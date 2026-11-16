@@ -302,6 +302,19 @@ def register(registry: Any) -> None:
                                    "dry_run": dry_run}
             if not dry_run:
                 out["result"] = job.run()
+                # The runbook's step 6: register the finished adapter so
+                # the chain can reach it. Registration is a follow-on, not
+                # the training — a failure here is reported, never fails
+                # a training run that already succeeded.
+                try:
+                    from .afrobeats import AfrobeatsLoRA
+                    weights = AfrobeatsLoRA().register_lora(
+                        genre, str(Path(out["result"]["output_dir"]) / "lora"))
+                    out["registered"] = True
+                    out["registered_path"] = weights.path
+                except Exception as exc:  # noqa: BLE001
+                    out["registered"] = False
+                    out["register_reason"] = str(exc)
             return out
         from ..core.errors import ToolError
         raise ToolError(f"unknown action {action!r}")

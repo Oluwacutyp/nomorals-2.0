@@ -232,9 +232,16 @@ class _FakeBedBackend:
 
 
 def test_chain_lora_reaches_backend(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
     import nomorals.media.ace_step as ace_mod
     from nomorals.media.musicgen_chain import ChainRequest, run_chain
     monkeypatch.setattr(ace_mod, "ACEStepBackend", _FakeBedBackend)
+    # routing is probe-gated: the backend's own probe must report an
+    # available variant (a real one — "full") or the bed is skipped.
+    monkeypatch.setattr(ace_mod, "probe_acestep",
+                        lambda: SimpleNamespace(available=True,
+                                                variant="full"))
     _FakeBedBackend.instances.clear()
     req = ChainRequest(title="t", lyrics="la la la", language="en",
                        lora="/tmp/my-style-lora", workdir=str(tmp_path))
@@ -253,9 +260,16 @@ def test_chain_lora_reaches_backend(tmp_path, monkeypatch):
 
 
 def test_chain_tool_exposes_lora(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
     import nomorals.media.ace_step as ace_mod
     from nomorals.media import musicgen_chain
     monkeypatch.setattr(ace_mod, "ACEStepBackend", _FakeBedBackend)
+    # routing is probe-gated: fake the probe with a real available
+    # variant ("full") or the bed stage is skipped, as in production.
+    monkeypatch.setattr(ace_mod, "probe_acestep",
+                        lambda: SimpleNamespace(available=True,
+                                                variant="full"))
     _FakeBedBackend.instances.clear()
 
     class _Reg:

@@ -265,6 +265,120 @@ def revise_draft(draft: SongDraft, instruction: str,
     return new
 
 
+# ── judging: critique loop + sonic-bible consistency ───────────────────
+
+#: Axes the draft actually declares, so the consistency verdict can be
+#: computed over them. A draft carries no palette (and no measured
+#: loudness), so the palette axis is unscored for drafts — scoring it
+#: 0.0 would be a false drift, and passing the bible's own palette
+#: through would be a faked pass.
+_DRAFT_CONSISTENCY_AXES = ("key", "mode", "bpm", "genre", "energy",
+                           "language", "loudness")
+
+
+def judge_draft(draft: SongDraft, *, bible: Any = None,
+                bible_path: str = "", language: str = "en") -> dict[str, Any]:
+    """Judge a draft: the critique loop + the sonic-bible check.
+
+    The critique half always runs: the draft's own melody (contours →
+    notes via :func:`draft_perform.draft_critique_sections`) is judged
+    by :func:`music_critique.critique_loop` — check → auto-fix → re-check
+    — and the verdict reports both the before-score and the loop result,
+    so a fix the loop verified shows up as a fix, never as a silent pass.
+
+    The consistency half runs against the artist's STORED bible
+    (``bible`` arg, else ``bible_path``, else the default store). A bible
+    derived from the draft itself would pass by construction, so when
+    none is stored the half reports honestly instead of inventing one.
+    The organ's result is returned verbatim; the draft verdict is
+    computed over the axes the draft declares (palette unscored).
+
+    A corrupt bible file never breaks judging — that half reports the
+    reason. Other failures propagate: the caller logs them and says so.
+    """
+    from .draft_perform import draft_critique_sections
+    from .music_critique import critique_loop, critique_song
+    from .sonic_bible import SonicBible, TrackDescriptor, check_consistency, load_bible
+
+    sections = draft_critique_sections(draft)
+    tempo = float(getattr(draft, "tempo", 100) or 100)
+    before = critique_song(draft.title, sections, language,
+                           bpm=tempo)
+    loop = critique_loop(draft.title, sections, language, bpm=tempo)
+    critique = {
+        "score": loop.score, "ship": loop.ship, "issues": loop.issues,
+        "axes": loop.axes, "fixes_applied": loop.fixes_applied,
+        "before": {"score": before.score, "ship": before.ship,
+                   "issues": before.issues},
+    }
+
+    # ── consistency against the stored bible ──
+    bible_obj = bible
+    bible_error = ""
+    if bible_obj is None:
+        try:
+            bible_obj = load_bible(bible_path)
+        except Exception as exc:  # noqa: BLE001 — corrupt file, not a crash
+            bible_error = str(exc)
+    if bible_obj is None:
+        consistency: dict[str, Any] = {
+            "available": False,
+            "reason": (f"couldn't load the stored bible: {bible_error}"
+                       if bible_error else
+                       "no sonic bible saved yet — save one with the "
+                       "sonic_bible tool (action=save) and drafts are "
+                       "judged against your sound"),
+        }
+    else:
+        if isinstance(bible_obj, dict):
+            bible_obj = SonicBible.from_dict(bible_obj)
+        energies = [float(s.energy or 0.5) for s in (draft.sections or [])]
+        track = TrackDescriptor(
+            title=draft.title, key=draft.key or "C",
+            mode=draft.mode or "major", bpm=tempo,
+            genre=draft.style or "pop",
+            energy=max(energies) if energies else 0.5,
+            language=language)
+        raw = check_consistency(bible_obj, track)
+        judged = [a for a in _DRAFT_CONSISTENCY_AXES if a in raw["axes"]]
+        unscored = [a for a in raw["axes"] if a not in judged]
+        draft_score = (sum(raw["axes"][a] for a in judged) / len(judged)
+                       if judged else 1.0)
+        consistency = {
+            "available": True, **raw,
+            "judged_axes": judged, "unscored": unscored,
+            "draft_drift": [d for d in raw["drift"] if d in judged],
+            "draft_score": round(draft_score, 3),
+            "draft_consistent": draft_score >= 0.7,
+        }
+
+    # ── verdict text for the reply ──
+    if critique["ship"]:
+        crit_line = (f"✅ ships — critique {critique['score']:.2f}")
+    else:
+        crit_line = (f"❌ doesn't ship — critique {critique['score']:.2f}")
+    if critique["fixes_applied"]:
+        crit_line += (f" (loop fixed: {', '.join(critique['fixes_applied'])}; "
+                      f"was {before.score:.2f})")
+    elif not critique["ship"] and critique["issues"]:
+        crit_line += f": {critique['issues'][0]}"
+    if not consistency["available"]:
+        cons_line = f"🎵 bible: {consistency['reason']}"
+    elif consistency["draft_consistent"]:
+        cons_line = (f"🎵 bible: consistent "
+                     f"{consistency['draft_score']:.2f}")
+        if consistency["draft_drift"]:
+            cons_line += f" (drift: {', '.join(consistency['draft_drift'])})"
+        if consistency["unscored"]:
+            cons_line += (f" — unscored: "
+                          f"{', '.join(consistency['unscored'])}")
+    else:
+        cons_line = (f"🎵 bible: drifts {consistency['draft_score']:.2f} — "
+                     f"{', '.join(consistency['draft_drift'])}")
+    return {"critique": critique, "consistency": consistency,
+            "verdict": f"{crit_line}\n{cons_line}"}
+
+
 # ── notebook rendering + persistence ─────────────────────────────────────
 
 def render_notebook(draft: SongDraft) -> str:
