@@ -510,6 +510,29 @@ def register(registry: Any) -> None:
                     "error": f"group roster diff tick failed: {exc}"}
 
     @registry.register(
+        "__delegation_manager_tick__",
+        description="Run one delegation-manager tick: recover "
+        "delegated runs orphaned by a restart, resume what the "
+        "restart interrupted, finalize finished workers, and "
+        "collect completed runs (delivering their results into the "
+        "owner's chat via the notifier). Scheduler-internal; runs "
+        "every ~5m. Never raises — a bad tick is recorded, never "
+        "fatal to the job.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _delegation_manager_tick_tool() -> dict[str, Any]:
+        from ..agents.delegation_manager import (
+            run_delegation_manager_tick_once,
+        )
+
+        try:
+            return run_delegation_manager_tick_once(_context)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"delegation manager tick failed: {exc}"}
+
+    @registry.register(
         "__orchestration__",
         description="Run one community orchestration tick (AA-18): "
         "heartbeat this device into the fleet session registry, let "

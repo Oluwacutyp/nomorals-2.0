@@ -3725,6 +3725,20 @@ class PartnerRuntime(
                     _log.warning(
                         "group roster diff tick job not registered: %s",
                         exc)
+                # Delegation manager: one durable "delegation manager
+                # tick" job (every 5m) recovering delegated runs
+                # orphaned by a restart, resuming what the restart
+                # interrupted, finalizing finished workers, and
+                # collecting completed runs into the owner's chat.
+                # Idempotent; best-effort.
+                try:
+                    from ...agents.delegation_manager import ensure_delegation_manager_job
+
+                    ensure_delegation_manager_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "delegation manager tick job not registered: %s",
+                        exc)
                 # Community orchestration (AA-18): one durable
                 # "community orchestration tick" job (every 1m)
                 # heartbeating this device into the fleet session

@@ -1949,6 +1949,177 @@ class RuntimeExpressionMixin:
             self._delegation_store_cache = cached
         return cached
 
+    def _delegation_manager(self):  # type: ignore[no-untyped-def]
+        cached = getattr(self, "_delegation_manager_cache", None)
+        if cached is None:
+            db = getattr(self.context, "db", None)
+            if db is None:
+                return None
+            from ...agents.delegation_manager import DelegationManager
+
+            cached = DelegationManager.from_context(self.context)
+            self._delegation_manager_cache = cached
+        return cached
+
+    @staticmethod
+    def _delegate_split_flags(text):  # type: ignore[no-untyped-def]
+        """Split "goal words --key value --key2 value2" into
+        (goal, flags). The flag syntax is how /delegate spawn
+        carries a roster input: ``spawn implementer fix the loop
+        --path nomorals/x.py --instruction "rewrite it"``."""
+        chunks = str(text or "").split(" --")
+        head = chunks[0].strip()
+        flags: dict[str, str] = {}
+        for chunk in chunks[1:]:
+            chunk = chunk.strip()
+            if not chunk:
+                continue
+            key, _, value = chunk.partition(" ")
+            key = key.strip().lower()
+            if key:
+                flags[key] = value.strip()
+        return head, flags
+
+    def _delegate_manage(self, verb, parts, message=None):  # type: ignore[no-untyped-def]
+        """The delegation manager's verbs: spawn / plan / runs /
+        track / steer / resume / resume-all / collect / recover.
+        The cockpit verbs (list / show / claims) stay on the store
+        in _control_delegate; these need the manager."""
+        from ...agents.delegation import DelegationError
+
+        manager = self._delegation_manager()
+        if manager is None:
+            return ("delegation state needs the database, which this "
+                    "runtime doesn't carry — contracts are unavailable "
+                    "here, not empty.")
+        chat = getattr(message, "chat", None) if message is not None else None
+        chat_key = str(getattr(chat, "key", "") or "")
+        if verb == "spawn" and len(parts) >= 3:
+            goal_text, flags = self._delegate_split_flags(
+                " ".join(parts[2:]))
+            mission_id = str(flags.pop("mission", "") or "")
+            try:
+                run = manager.spawn(
+                    role=parts[1], goal=goal_text,
+                    input=dict(flags) if flags else None,
+                    mission_id=mission_id, chat_key=chat_key)
+            except DelegationError as exc:
+                return f"cannot spawn: {exc}"
+            return (f"spawned run {run.id} — {run.role} working under "
+                    f"contract {run.contract_id}. /delegate track "
+                    f"{run.id} watches it; /delegate collect {run.id} "
+                    "brings the result back.")
+        if verb == "spawn":
+            return ("usage: /delegate spawn <role> <goal> "
+                    "[--<field> <value> ...] — roles: planner, "
+                    "implementer, reviewer, tester, refactorer, "
+                    "dep_hunter, api_designer")
+        if verb == "plan" and len(parts) >= 2:
+            try:
+                result = manager.plan_and_spawn(
+                    " ".join(parts[1:]), chat_key=chat_key)
+            except DelegationError as exc:
+                return f"cannot plan: {exc}"
+            lines = []
+            if result["plan_error"]:
+                lines.append(f"plan note: {result['plan_error']}")
+            if result["runs"]:
+                lines.append("spawned:")
+                for run in result["runs"]:
+                    lines.append(
+                        f"• {run.id} [{run.role}] — contract "
+                        f"{run.contract_id}")
+            if result["unassigned"]:
+                lines.append("not spawned (no roster worker for them):")
+                for item in result["unassigned"]:
+                    lines.append(
+                        f"• {item['step']} ({item['role']}): "
+                        f"{item['reason']}")
+            if not result["runs"] and not result["unassigned"]:
+                lines.append("the plan came back empty.")
+            return "\n".join(lines)
+        if verb == "plan":
+            return "usage: /delegate plan <goal>"
+        if verb == "runs":
+            status = ""
+            mission_id = ""
+            for part in parts[1:]:
+                if part.startswith("mission:"):
+                    mission_id = part[len("mission:"):]
+                elif part in ("running", "steering", "completed",
+                              "failed", "interrupted", "collected",
+                              "cancelled"):
+                    status = part
+            runs = manager.list_runs(mission_id=mission_id,
+                                     status=status, limit=12)
+            if not runs:
+                return ("no delegation runs yet — /delegate spawn "
+                        "<role> <goal> starts one.")
+            lines = ["delegation runs:"]
+            for run in runs:
+                lines.append(
+                    f"• {run.id} [{run.status}] {run.role} — "
+                    f"{run.contract_id}")
+            return "\n".join(lines)
+        if verb in ("track", "status") and len(parts) >= 2:
+            return manager.status_text(parts[1])
+        if verb in ("track", "status"):
+            return "usage: /delegate track <run id>"
+        if verb == "steer" and len(parts) >= 3:
+            try:
+                run = manager.steer(parts[1], " ".join(parts[2:]))
+            except DelegationError as exc:
+                return f"cannot steer: {exc}"
+            return (f"steered run {run.id} — the direction is recorded "
+                    "on the run and its contract; it reaches the "
+                    "worker on the next run.")
+        if verb == "steer":
+            return "usage: /delegate steer <run id> <direction>"
+        if verb == "resume" and len(parts) >= 2:
+            try:
+                run = manager.resume(parts[1])
+            except DelegationError as exc:
+                return f"cannot resume: {exc}"
+            return (f"resumed run {run.id} — generation "
+                    f"{run.generation}, worker re-running with its "
+                    "steering applied.")
+        if verb == "resume":
+            return "usage: /delegate resume <run id>"
+        if verb == "resume-all":
+            resumed = manager.resume_all_interrupted()
+            if not resumed:
+                return "nothing interrupted to resume."
+            return ("resumed: " + ", ".join(r.id for r in resumed))
+        if verb == "collect" and len(parts) >= 2:
+            outcome = manager.collect(parts[1])
+            if not outcome.get("ok"):
+                reasons = "; ".join(outcome.get("reasons")
+                                   or ["unknown"])
+                return f"cannot collect {parts[1]}: {reasons}"
+            line = (f"collected run {parts[1]} — contract "
+                    f"{outcome['contract_id']} done")
+            if outcome.get("replayed"):
+                line += " (already collected — no second delivery)"
+            elif not outcome.get("delivered"):
+                line += ("; delivery did not reach a channel — the "
+                         "result stays on the run record")
+            if outcome.get("reasons"):
+                line += " (" + "; ".join(outcome["reasons"]) + ")"
+            return line
+        if verb == "collect":
+            return "usage: /delegate collect <run id>"
+        if verb == "recover":
+            recovered = manager.recover()
+            if not recovered:
+                return "nothing interrupted to recover."
+            return ("recovered: " + ", ".join(r.id for r in recovered))
+        return ("usage: /delegate [list | show <contract> | claims "
+                "[<contract>] | spawn <role> <goal> [--<field> "
+                "<value> ...] | plan <goal> | runs [status | "
+                "mission:<id>] | track <run> | steer <run> "
+                "<direction> | resume <run> | resume-all | collect "
+                "<run> | recover]")
+
     def _control_skillbook(self, tail: str, message=None) -> str:  # type: ignore[no-untyped-def]
         """The flat-file skillbook (SKILLS system): /skills lists the
         routed library, /skills show <id> reads one file, /skills
@@ -2066,9 +2237,16 @@ class RuntimeExpressionMixin:
         """Accountable delegation cockpit (doc 6): /delegate lists
         work contracts with their verification state, /delegate show
         <id> renders one contract with its claim ledger, /delegate
-        claims [id] reads the ledger. State renders as text here and
-        as a living card (family "delegation") in chat — no second
-        control surface."""
+        claims [id] reads the ledger. The manager verbs run async
+        delegated work on top of the same contracts: spawn cuts a
+        contract and runs a roster subagent on a background thread,
+        plan decomposes a goal and spawns what the roster can run,
+        runs/track read durable run records, steer records direction
+        for the next run, resume re-runs an interrupted, failed, or
+        gate-refused run, collect delivers a finished run's result
+        into the chat. State renders as text here and as a living
+        card (family "delegation") in chat — no second control
+        surface."""
         store = self._delegation_store()
         if store is None:
             return ("delegation state needs the database, which this "
@@ -2111,6 +2289,16 @@ class RuntimeExpressionMixin:
                     f"• [{claim.kind}] {claim.claim[:80]} — "
                     f"{claim.verdict} · {claim.contract_id or '—'}")
             return "\n".join(lines)
+        if verb in ("spawn", "plan", "runs", "track", "status", "steer",
+                    "resume", "resume-all", "collect", "recover"):
+            return self._delegate_manage(verb, parts, message)
+        if verb not in ("list",):
+            return ("usage: /delegate [list | show <contract> | claims "
+                    "[<contract>] | spawn <role> <goal> [--<field> "
+                    "<value> ...] | plan <goal> | runs [status | "
+                    "mission:<id>] | track <run> | steer <run> "
+                    "<direction> | resume <run> | resume-all | collect "
+                    "<run> | recover]")
         contracts = store.recent_contracts(limit=12)
         if not contracts:
             return ("no work contracts yet — contracts are cut when a "
