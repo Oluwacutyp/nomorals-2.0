@@ -21,7 +21,6 @@ import json
 import os
 import sys
 import tempfile
-import time
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -50,6 +49,17 @@ from nomorals.social.drafts import (
 )
 from nomorals.social.series import SeriesStore, render_calendar
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
+
+#: Clock reads in this file (batch H31, no-direct-clock): all 7
+#: are frozen to MIDDAY_TS — the shorts-sweep seeds stay due
+#: (ContentCalendar.due fires when the scheduled time has passed
+#: on the real clock, and MIDDAY is ~32 days past); the series
+#: board renders past events too (no lower bound on the timeline,
+#: only the 14-day horizon); DraftQueue.schedule stores when_ts
+#: with no time validation, and schedule_post refuses a scheduler
+#: without schedule_once before the timestamp is ever used.
+#: No production file touched; no grandfathered reads.
 
 
 @pytest.fixture()
@@ -172,7 +182,7 @@ def test_skeptic_lets_evidenced_numbers_through(db, queue):
 def _an_hour_ago() -> str:
     from datetime import datetime, timedelta, timezone
 
-    return (datetime.now(timezone.utc)
+    return (datetime.fromtimestamp(MIDDAY_TS, tz=timezone.utc)
             - timedelta(hours=1)).isoformat()
 
 
@@ -309,7 +319,7 @@ def test_series_collects_all_three_kinds_and_board_renders(db, queue,
         tmp_path, get_niche=lambda name: {"posts_per_day": 5})
     from datetime import datetime, timedelta, timezone
 
-    soon = (datetime.now(timezone.utc)
+    soon = (datetime.fromtimestamp(MIDDAY_TS, tz=timezone.utc)
             + timedelta(hours=2)).isoformat()
     short = calendar.add("motivation", "launch teaser short",
                          platforms=["youtube"], scheduled_for=soon)
@@ -318,8 +328,8 @@ def test_series_collects_all_three_kinds_and_board_renders(db, queue,
     db.execute(
         "INSERT INTO social_posts (platform, content, status,"
         " scheduled_at, created_at) VALUES (?, ?, 'scheduled', ?, ?)",
-        ("x", "scheduled launch post", time.time() + 3600,
-         time.time()))
+        ("x", "scheduled launch post", MIDDAY_TS + 3600,
+         MIDDAY_TS))
     row = db.query_one("SELECT id FROM social_posts LIMIT 1")
     store.attach(series["id"], "post", str(row["id"]))
 
@@ -392,7 +402,7 @@ def test_scheduled_fire_without_poster_fails_loudly(queue,
     scheduler = _FakeUnifiedScheduler()
     draft = queue.create_draft("post me at six", platforms=["x"])
     queue.propose(draft.id)
-    schedule_post(scheduler, queue, draft.id, time.time() + 3600)
+    schedule_post(scheduler, queue, draft.id, MIDDAY_TS + 3600)
     assert queue.get(draft.id).status == "scheduled"
     fire = scheduler.actions["social.post_draft"]
     result = fire({"draft_id": draft.id})
@@ -410,7 +420,7 @@ def test_scheduled_fire_posts_through_the_wired_poster(
     scheduler = _FakeUnifiedScheduler()
     draft = queue.create_draft("post me at six", platforms=["x"])
     queue.propose(draft.id)
-    schedule_post(scheduler, queue, draft.id, time.time() + 3600)
+    schedule_post(scheduler, queue, draft.id, MIDDAY_TS + 3600)
     result = scheduler.actions["social.post_draft"](
         {"draft_id": draft.id})
     assert result["ok"] is True
@@ -427,7 +437,7 @@ def test_schedule_post_refuses_a_scheduler_without_schedule_once(queue):
     queue.propose(draft.id)
     with pytest.raises(RuntimeError, match="schedule_once"):
         schedule_post(_DurableShape(), queue, draft.id,
-                      time.time() + 3600)
+                      MIDDAY_TS + 3600)
     # Refused BEFORE any state moved.
     assert queue.get(draft.id).status == "pending_review"
 
