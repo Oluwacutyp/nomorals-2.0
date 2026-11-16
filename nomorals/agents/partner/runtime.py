@@ -7670,6 +7670,12 @@ class PartnerRuntime(
             # mass tools; needs the message for the source.
             return self._control_relay(command.tail, message)
 
+        if kind == "radar":
+            # Status/story radar (census §6 #3) — owner-only like
+            # the mass tools; a read of the local vault, so the
+            # standing stop does not halt it.
+            return self._control_radar(command.tail)
+
         if kind == "rules":
             return self._control_rules(message)
 

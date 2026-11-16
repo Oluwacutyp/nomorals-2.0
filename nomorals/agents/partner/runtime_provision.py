@@ -3402,6 +3402,50 @@ class RuntimeProvisionMixin:
                          f"held — {item.get('reason')}")
         return "\n".join(lines)
 
+    def _control_radar(self, tail: str) -> str:
+        """Status/story radar (census §6 #3).
+
+        /radar — the pattern brief over the last 7 days of the
+        status/story vault; /radar today — the last 24 hours;
+        /radar <N>d — the last N days (1..30); /radar <name> — the
+        brief for one poster only.
+
+        Owner-only (control dispatch never reaches non-operators).
+        A read, not an act: it opens the local journal and counts —
+        no platform verb fires, so the standing stop does not halt
+        it.  The vault is the record: every observed status
+        (``status_arrival``) and every saved story (``story``).
+        """
+        from ...social.status_radar import build_brief, render_brief
+
+        tail = (tail or "").strip()
+        window_days = 7
+        name = ""
+        if tail:
+            lowered = tail.lower()
+            if lowered == "today":
+                window_days = 1
+            elif lowered.endswith("d") and lowered[:-1].isdigit():
+                window_days = max(1, min(30, int(lowered[:-1])))
+            else:
+                name = tail
+        svc = self._pairing_personal()
+        rows = svc["personal"].vault.journal()
+        if name:
+            needle = name.lower()
+            rows = [row for row in rows
+                    if needle in str(row.get("poster_name") or "")
+                    .lower()
+                    or needle in str(row.get("counterpart_id") or "")
+                    .lower()]
+            if not rows:
+                return (f"No one matching '{name}' in the status "
+                        "vault — no status or story from them is "
+                        "journaled.")
+        brief = build_brief(rows, now=time.time(),
+                            window_days=window_days)
+        return "📡 Status radar\n" + render_brief(brief)
+
     def _relay_stopped_platforms(self) -> frozenset:
         """Platforms under the owner's standing stop right now."""
         svc = self._pairing_personal()

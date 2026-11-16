@@ -906,6 +906,50 @@ class ResearchProvider(_Provider):
         return out
 
 
+class StatusRadarProvider(_Provider):
+    """Status/story radar (census §6 #3): pattern briefs from the
+    personal vault — who posts a lot, who went quiet, running
+    themes.  Never raises — a radar hiccup must not sink the
+    morning briefing.  Absent when the vault holds nothing to
+    brief on (the house rule: never pad)."""
+    name = "status_radar"
+    title = "📡 Status radar"
+    priority = 35  # beside People (25): people patterns, after cadence
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx, since)
+        except Exception as exc:  # noqa: BLE001 — radar is optional
+            _log.debug("status radar provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        from pathlib import Path
+
+        from ..social.status_radar import (
+            build_brief,
+            load_journal_rows,
+            render_brief,
+        )
+
+        ws = getattr(getattr(ctx, "settings", None),
+                     "workspace_dir", "") or ""
+        if not ws:
+            return None
+        journal = (Path(ws) / "data" / "social" / "personal"
+                   / "journal.jsonl")
+        if not journal.exists():
+            return None
+        rows = load_journal_rows(journal)
+        brief = build_brief(rows, now=time.time())
+        if brief.total == 0:
+            return None
+        lines = render_brief(brief).splitlines()[:10]
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="status_vault", lines=lines)
+
+
 class FromYourPastProvider(_Provider):
     """Spaced-repetition resurfacing (build-map #40): memories due on the
     forgetting curve, Readwise-style. 2-3 cards max, lowest priority so
@@ -1601,6 +1645,13 @@ class BriefingComposer:
             self.providers.append(ResearchProvider())
         except Exception as exc:  # noqa: BLE001
             record_failure("morning_briefing.BriefingComposer.__init__.research", exc)
+        # Status radar (census §6 #3): local class, constructed
+        # defensively like research; an empty vault → provider
+        # returns None, so the section never pads a briefing.
+        try:
+            self.providers.append(StatusRadarProvider())
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.status_radar", exc)
         # From-your-past (spaced repetition, build-map #40): local class,
         # constructed defensively — no due cards → provider returns None.
         try:

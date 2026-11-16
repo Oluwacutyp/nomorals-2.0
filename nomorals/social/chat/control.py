@@ -751,6 +751,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "chfollow": (0, None),    # /chfollow <channel link> [| live] — every paired account follows (§14; owner only, arm-gated)
     "obroadcast": (0, None),  # /obroadcast <text> [| groups|channels|all] [| live] — owner speaks through Devon to all claimed groups/channels (§20b; owner only, arm-gated)
     "relay": (0, None),       # /relay <chat> [| <chat> ...] [| live] as a reply — post this everywhere, attribution kept (census §6 #2; owner only, arm-gated)
+    "radar": (0, None),       # /radar [today|<N>d|<name>] — pattern briefs from the status/story vault: who posts, who went quiet, running themes (census §6 #3; owner only, a read)
     "rules": (0, 0),          # /rules — this group's rules, rendered from the settings the enforcer reads (P1)
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
     "lookup": (0, 1),         # /lookup <id|@username> — the account dossier: ID, account-age estimate, phone when visible, groups, username/name history, economy + moderation record (DM + group)
@@ -1003,6 +1004,7 @@ _HELP_TEXT = "\n".join(
         "  /providers                          probe every provider: live or why not",
         "  /say telegram:123 text…                 send as her",
         "  /relay <chat> [| <chat> …] | live        post this everywhere (reply to the message)",
+        "  /radar [today|<N>d|<name>]              status radar: who posts, who went quiet, running themes",
         "  /proposals /approve <id> /deny <id>",
         "  /stage [committed|dating|…]",
         "  /power on <key> | /power on <identity> <passphrase> | /power off | /power status",
@@ -3709,6 +3711,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/relay <chat> [| <chat> …] [| live|dry] (as a reply to the message) · /relay from <chat> <message_id> | <chat> [| …] [| live] · /relay arm|disarm|status|pacing <s>|runs",
             "example": "/relay Gold Signals | t.me/somegroup | live",
             "related": "/forward /obroadcast /pair"},
+    "radar": {"what": "status/story radar (census §6 #3): pattern briefs from the vault that already journals every status and story she sees — who posts a lot, who went quiet, what themes run through statuses, what is worth a look. Bare briefs the last 7 days; today briefs the last 24 hours; <N>d briefs the last N days; a name briefs one poster only. Say it in plain words — “who has gone quiet on statuses” — or type it. Owner only; a read of the local journal, so your standing stop does not halt it.",
+            "usage": "/radar [today|<N>d|<name>]",
+            "example": "/radar",
+            "related": "/pair /channeltexts /find"},
     "rules": {"what": "this group's rules — rendered live from the same settings the moderation enforcer reads, so what you see is what's enforced.",
             "usage": "/rules",
             "example": "/rules",
@@ -4991,7 +4997,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "joinlink", "newgroup", "newchannel", "leave",
       "myprofile", "privacy", "makepoll", "vcf", "addcontact",
       "sendloc", "sendcontact", "find", "findall", "searchall",
-      "sendlater", "deletechat", "clearhistory",
+      "sendlater", "deletechat", "clearhistory", "radar",
       "botprofile", "invoice",
       "labels", "catalog", "broadcast", "wpay"]),
     ("memory & thinking",
@@ -5245,6 +5251,7 @@ LIST_ONELINERS: dict[str, str] = {
     "unstar": "unstar the replied message — /unstar as a reply",
     "forward": "forward the replied message to another chat — /forward <chat> as a reply",
     "relay": "post this everywhere — forward one message to WhatsApp groups + Telegram channels at once, attribution kept — /relay <chat> [| <chat> …] [| live] as a reply",
+    "radar": "status radar — who posts, who went quiet, running themes from the status/story vault — /radar [today|<N>d|<name>]",
     "unsend": "delete your own message for everyone — /unsend as a reply",
     "edit": "alias of /editmsg — /edit <new text> as a reply",
     "editmsg": "edit your own message — /editmsg <new text> as a reply",
