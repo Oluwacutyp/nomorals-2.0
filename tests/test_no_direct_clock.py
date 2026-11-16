@@ -88,6 +88,24 @@ BASELINE: dict[str, int] = {
     "tests/test_core.py": 1,
     "tests/test_core_sweep.py": 2,
     "tests/test_cost_display.py": 7,
+    # Grandfathered (batch H39): 1 read stays on the real clock.
+    # s07a's fresh heartbeat (test_d15p6_acceptance_battery.py:290)
+    # must be stamped on the real clock — mission_liveness
+    # (missions/mission.py:111) computes the heartbeat age against
+    # time.time() with no now seam, and MissionsAdapter.discover
+    # calls it without passing its own `now`
+    # (outcome_steward.py:249), so a frozen MIDDAY heartbeat reads
+    # ~32 days stale and the healthy RUNNING mission opens an
+    # "orphaned" case instead of opening nothing. Threading a now
+    # seam through mission_liveness would be a production API change
+    # in a hygiene lane for a non-regression (H21 precedent). The
+    # file's other 5 reads are frozen to MIDDAY_TS: the mission
+    # created/updated seeds are only compared as ages against
+    # thresholds they clear by orders of magnitude (PENDING_STALE_S
+    # 86400s; the reap limit is 5s of silence; UNSEEN_RESULT_S 600s),
+    # and the dead-heartbeat seeds only need to read "older than the
+    # limit" on any clock.
+    "tests/test_d15p6_acceptance_battery.py": 1,
     "tests/test_deep_research.py": 2,
     "tests/test_digital_twin.py": 15,
     "tests/test_dj_live.py": 1,

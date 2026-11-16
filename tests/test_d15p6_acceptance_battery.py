@@ -35,6 +35,19 @@ from nomorals.agents.outcome_steward import (
 from nomorals.core.jobs import JobRegistry
 from nomorals.missions.mission import Mission, MissionStatus, MissionStore
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
+
+# Clock reads in this file are frozen to MIDDAY_TS (tests.frozen_clock),
+# except s07a's fresh heartbeat (see the comment at the read): every
+# frozen seed is only ever compared as an age against a threshold it
+# clears by orders of magnitude on any clock — PENDING staleness
+# (PENDING_STALE_S = 86400s, outcome_steward.py:128), the registry
+# dead-man's switch (5s of silence, jobs.py:34/290), and the unseen
+# result window (UNSEEN_RESULT_S = 600s, outcome_steward.py:132) —
+# so freezing changes no verdict. The steward's own sweep /
+# run_stewardship_cycle take an explicit `now` seam, but the tests
+# drive them without one, so the frozen seeds read even older on
+# the real clock and every staleness verdict still holds.
 
 # ── harness ───────────────────────────────────────────────────────────
 
@@ -82,7 +95,7 @@ def make_ctx(gateway=None):
 
 def _mission(store, *, status, state=None, goal="do the thing",
              age_s=0.0):
-    now = time.time() - age_s
+    now = MIDDAY_TS - age_s
     mission = Mission(goal=goal, status=status,
                       state=dict(state or {}),
                       created_at=now, updated_at=now)
@@ -90,7 +103,7 @@ def _mission(store, *, status, state=None, goal="do the thing",
 
 
 def _liveness_state(extra=None):
-    state = {"heartbeat": {"at": time.time() - 100000.0,
+    state = {"heartbeat": {"at": MIDDAY_TS - 100000.0,
                            "pid": 999999},
              "last_error": ("runner died — no heartbeat for 27h "
                             "(pid 999999 is gone)")}
@@ -102,7 +115,7 @@ def _liveness_state(extra=None):
 def _presumed_dead(registry, fn):
     job = registry.submit(fn, tool="report", heartbeat_interval_s=1.0)
     for _ in range(100):
-        job.last_heartbeat_at = time.time() - 100.0
+        job.last_heartbeat_at = MIDDAY_TS - 100.0
         registry.reap()
         if job.status == "presumed-dead":
             break
@@ -286,6 +299,16 @@ class StewardScenarios(unittest.TestCase):
 
     # Scenario 7a: a slow, healthy operation is left alone.
     def test_s07a_healthy_running_mission_opens_nothing(self):
+        # GRANDFATHERED (batch H39): this heartbeat must stay on the
+        # real clock. mission_liveness (missions/mission.py:111)
+        # computes the heartbeat age against time.time() with no now
+        # seam, and MissionsAdapter.discover calls it without passing
+        # its own `now` (outcome_steward.py:249), so a frozen MIDDAY
+        # heartbeat reads ~32 days stale and this healthy RUNNING
+        # mission opens an "orphaned" case instead of opening
+        # nothing. Threading a now seam through mission_liveness
+        # would be a production API change in a hygiene lane for a
+        # non-regression (H21 precedent).
         _mission(self.missions, status=MissionStatus.RUNNING,
                  state={"heartbeat": {"at": time.time(), "pid": 4242}},
                  goal="slow render")
@@ -354,9 +377,9 @@ class StewardScenarios(unittest.TestCase):
         job = self.registry.submit(lambda: {"report": "landed"},
                                    tool="report")
         self.registry.collect(job.id, timeout=10)
-        job.ended_at = time.time() - 700.0
+        job.ended_at = MIDDAY_TS - 700.0
         _mission(self.missions, status=MissionStatus.RUNNING,
-                 state={"heartbeat": {"at": time.time() - 100000.0,
+                 state={"heartbeat": {"at": MIDDAY_TS - 100000.0,
                                       "pid": 999999}},
                  goal="orphaned render")
         report = run_stewardship_cycle(self.db,
