@@ -108,9 +108,9 @@ def test_routed_rpc_degrades_to_the_healthy_route(monkeypatch):
     b = SolanaRPC("https://fast.example", timeout=5.0, budget_s=60.0)
     routed = RoutedRPC([a, b])
     assert routed.get_slot() == 1       # A answers once, slowly
-    t0 = time.time()
+    t0 = time.monotonic()
     assert routed.get_slot() == 99      # A's budget is spent → B
-    assert time.time() - t0 < 0.25      # no second stall was paid
+    assert time.monotonic() - t0 < 0.25  # no second stall was paid
     routed.reset_budgets()              # a new cycle re-arms A
     assert a.budget_left() == pytest.approx(0.2)
 
@@ -181,15 +181,15 @@ def test_stuck_slice_worker_is_abandoned_and_replaced(monkeypatch):
     stuck = _StuckBackend()
     monkeypatch.setattr(fh, "_backends", lambda: [stuck])
     baseline = fh.live_workers()
-    t0 = time.time()
+    t0 = time.monotonic()
     rep = fh.run_slice(0.2)
-    elapsed = time.time() - t0
+    elapsed = time.monotonic() - t0
     assert rep["ok"] is False and rep.get("worker_stuck") is True
     assert elapsed < 5.0                # the slice did NOT wait 30s
     assert fh.live_workers() == baseline + 1   # visible, not hidden
     stuck.release.set()                 # the wedged serve now exits
-    deadline = time.time() + 5.0
-    while fh.live_workers() != baseline and time.time() < deadline:
+    deadline = time.monotonic() + 5.0
+    while fh.live_workers() != baseline and time.monotonic() < deadline:
         time.sleep(0.05)
     assert fh.live_workers() == baseline       # ledger back to base
 
