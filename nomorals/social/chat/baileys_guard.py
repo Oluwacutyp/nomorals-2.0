@@ -79,6 +79,25 @@ class WarningDetector:
         self.first_warning: str = ""
         self.first_warning_at: float = 0.0
 
+    def state_dict(self) -> dict:
+        """Serialisable detector state (for the adapter's durable store)."""
+        return {
+            "stopped": self.stopped,
+            "first_warning": self.first_warning,
+            "first_warning_at": self.first_warning_at,
+        }
+
+    @classmethod
+    def from_state(cls, state: dict) -> WarningDetector:
+        """Rebuild a detector from :meth:`state_dict` output."""
+        detector = cls()
+        if isinstance(state, dict):
+            detector.stopped = bool(state.get("stopped", False))
+            detector.first_warning = str(state.get("first_warning") or "")
+            detector.first_warning_at = float(
+                state.get("first_warning_at") or 0.0)
+        return detector
+
     def note(self, text: str) -> bool:
         """Record bridge/log text. Returns True iff this tripped the stop."""
         if self.stopped:
@@ -135,6 +154,39 @@ class BaileysPacer:
         """Human-like inter-send delay: base ±50% jitter, min 2s."""
         jitter = self._rng.uniform(0.5, 1.5)
         return max(2.0, base * jitter)
+
+    def state_dict(self) -> dict:
+        """Serialisable pacer state (for the adapter's durable store)."""
+        return {
+            "session_age_days": self.session_age_days,
+            "sent_today": self._sent_today,
+            "day": self._day,
+            "recent": list(self._recent[-BURST_MAX:]),
+        }
+
+    @classmethod
+    def from_state(cls, state: dict, *, clock=None, rng=None) -> BaileysPacer:
+        """Rebuild a pacer from :meth:`state_dict` output.
+
+        Missing or malformed fields fall back to a fresh pacer — a
+        corrupt state file must never break the adapter's startup.
+        A stale day is left as-is: ``_roll_day`` resets the count
+        the first time the rebuilt pacer is asked.
+        """
+        if not isinstance(state, dict):
+            state = {}
+        pacer = cls(
+            session_age_days=int(state.get("session_age_days") or 0),
+            clock=clock, rng=rng)
+        try:
+            pacer._sent_today = max(0, int(state.get("sent_today") or 0))
+            pacer._day = int(state.get("day") or pacer._day)
+            recent = state.get("recent") or []
+            pacer._recent = [float(t) for t in recent
+                             if isinstance(t, (int, float))]
+        except (TypeError, ValueError):
+            pass
+        return pacer
 
     def record_sent(self) -> None:
         self._roll_day()

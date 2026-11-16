@@ -787,6 +787,51 @@ class RuntimeProvisionMixin:
                 f"closes the loop here and in /pair journal "
                 f"button_probe.")
 
+    def _pair_guard(self, args: list) -> str:
+        """Report (and, on `clear`, lift) the Baileys safety guard.
+
+        /pair guard — the guard's live state: daily cap, sends
+        today, session age, burst limit, and whether a WhatsApp
+        warning has latched the stop. /pair guard clear — lift
+        the latch (owner-only by construction: /pair is). The
+        latch is a safety stop, not a punishment; clearing it is
+        the owner's call."""
+        adapter = self._adapter_for("whatsapp")
+        if adapter is None:
+            return ("📵 no WhatsApp surface is running right now — "
+                    "the Baileys guard has nothing to report.")
+        state = getattr(adapter, "baileys_guard_state", None)
+        if state is None:
+            return ("📵 this WhatsApp surface predates the Baileys "
+                    "guard — restart it to pick the guard up.")
+        words = [str(a or "").strip().lower() for a in args]
+        if words and words[0] == "clear":
+            clearer = getattr(adapter, "clear_baileys_warning", None)
+            if clearer is None:
+                return ("📵 this WhatsApp surface cannot clear a "
+                        "guard warning.")
+            return str(clearer())
+        info = state()
+        lines = [
+            "🛡️ Baileys guard — WhatsApp sends",
+            ("Daily cap: " + str(info["daily_cap"])
+             + " (sent today: " + str(info["sent_today"]) + ")"
+             + " · session age: " + str(info["session_age_days"])
+             + " days"
+             + (" (assumed — no pairing age on record)"
+                if info["age_assumed"] else "")),
+            ("Burst: at most " + str(info["burst_max"]) + " sends in "
+             + str(int(info["burst_window_s"])) + "s"),
+        ]
+        if info["warning_stopped"]:
+            lines.append(
+                "⚠️ STOPPED — WhatsApp warning latched: "
+                + str(info["first_warning"] or "unknown")
+                + " · clear with /pair guard clear")
+        else:
+            lines.append("Warning: none latched — sends flowing")
+        return "\n".join(lines)
+
     @staticmethod
     def _pair_launch_note(sup: Any, rec: Any) -> str | None:
         """The beat after a bridge (re)start: if the process died
@@ -1384,8 +1429,22 @@ class RuntimeProvisionMixin:
                 gateway.stop_one("whatsapp")
             from ...social.chat import build_adapter
 
+            # Baileys guard age: the pairing record's created_at is
+            # the only age evidence the adapter ever sees — a re-link
+            # of a long-running account must not be treated as a
+            # day-1 session. Advisory only: a bad value never blocks
+            # the attach.
+            age_days = None
+            try:
+                created = float(getattr(rec, "created_at", 0.0) or 0.0)
+                if created > 0:
+                    age_days = max(
+                        0, int((time.time() - created) // 86400))
+            except Exception as exc:  # noqa: BLE001 - age is advisory
+                record_failure("runtime_provision.wa_surface_age", exc)
             adapter = build_adapter(self.settings, "whatsapp",
-                                    whatsapp_port=desired_port)
+                                    whatsapp_port=desired_port,
+                                    whatsapp_session_age_days=age_days)
             if adapter is None:
                 # chat.whatsapp_enabled is off — paired but
                 # surfaceless; say so on the record AND the reply.
@@ -2177,6 +2236,13 @@ class RuntimeProvisionMixin:
                                            list|quick" pins the
                                            form; "status" reports
                                            the evidence so far
+        /pair guard [clear]              the Baileys safety guard:
+                                           daily cap, sends today,
+                                           session age, burst
+                                           limit, and whether a
+                                           WhatsApp warning has
+                                           latched the stop;
+                                           "clear" lifts the latch
         /pair page                         the pairing page (same
                                            state, in a browser)
 
@@ -2833,6 +2899,8 @@ class RuntimeProvisionMixin:
             return "\n".join([head] + lines)
         if sub == "buttons":
             return self._pair_buttons(parts[1:])
+        if sub == "guard":
+            return self._pair_guard(parts[1:])
         if sub == "page":
             # The web rungs, best first: Devon's own pairing page
             # in PHP (served by Devon on loopback when a PHP
@@ -2868,7 +2936,8 @@ class RuntimeProvisionMixin:
                 "id · /pair use id · /pair route [platform] · "
                 "/pair toggle id name on|off · /pair saved [id] "
                 "· /pair recovered [id] · /pair journal [kind] "
-                "[count] · /pair page")
+                "[count] · /pair buttons [list|quick] · /pair "
+                "guard [clear] · /pair page")
 
     # ── mass actions (§14: massreact / pollvote / chfollow) ─────────
     def _mass_service(self) -> dict[str, Any]:
