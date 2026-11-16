@@ -13,20 +13,25 @@ machine, resource manager, timeline); this ``__init__`` stays minimal with
 NO eager imports so those modules can land without touching this file and
 without import cycles.
 
-RETIRED 2026-11-16 (audit gap R1-14): the control-plane cluster —
-``kernel.py`` (``OSKernel``), ``services.py`` (``ServiceRegistry``),
-``health.py`` (``HealthMonitor``) — was deleted, not wired.  It had zero
-production importers, and wiring it would have been a Potemkin fix:
-``start_all()`` starts nothing by default (every built-in descriptor
-has ``autostart=False``); the registry's default factories would build
-duplicate live services (a second ``LLMRouter``, a second
-``WhatsAppAdapter``); ``arm_signals()`` would overwrite the SIGTERM-as-
-interrupt handlers the entry points already own; the bus delivers
-inline without a started dispatcher; and readiness/health already
-exist (``/health``, ``/ready``, the update health gate) with real
-consumers, while the kernel's checks were import-only probes.  The
-live process lifecycle stays where it is: the L7 entry points
-(``nm`` dispatch, ``PartnerRuntime.run``, ``api.serve``) own signals
-and teardown via ``core/shutdown`` + ``finally`` blocks.  Pinned by
-``tests/test_gapfix_os_kernel.py``.
+WIRED 2026-11-16 (audit gap R1-14, reversed): the control-plane
+cluster — ``kernel.py`` (``OSKernel``), ``services.py``
+(``ServiceRegistry``), ``health.py`` (``HealthMonitor``) — was
+deleted once as "unfit" and RESTORED by owner order, because the
+capability was wanted and only the implementation was broken.  One
+``OSKernel`` is constructed per process in the live entry point
+(``scripts/run_chat_bot.py::main``), AFTER ``PartnerRuntime.start()``,
+and ADOPTS the live instances — scheduler, gateway adapters, router,
+database — via ``ServiceRegistry.adopt()``; the registry never builds
+a second ``LLMRouter`` or ``WhatsAppAdapter`` (the unadopted built-in
+descriptors are unregistered at boot).  The kernel supervises: its
+thread watches liveness and restarts a dead service through the
+service's own stop/start path, with exponential backoff and a 5-
+attempt budget, journaling the death in the failure ledger and the
+restart in the beacon (``nm status`` / ``/health`` show it).  Signals
+stay with the entry points — ``arm_signals()`` chains the previous
+handler, it never replaces one — and the bus dispatcher stays off
+(inline delivery is the proven behavior).  Health delegates to the
+real probes ``/health`` and ``/ready`` already use (``SELECT 1``,
+``providers()``, scheduler tick freshness, adapter ``health()``).
+Pinned by ``tests/test_gapfix_os_control_plane.py``.
 """

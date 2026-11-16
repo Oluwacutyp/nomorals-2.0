@@ -106,6 +106,16 @@ def build_beacon_state(runtime: Any) -> dict[str, Any]:
             state["router"] = router.stats_snapshot()
     except Exception:  # noqa: BLE001
         pass
+    # OS control plane (gap R1-14): the kernel supervises the live
+    # services; its restart ledger rides the beacon so `nm status` and
+    # /health can show a dead service coming back. Duck-typed on
+    # purpose — beacon.py is L5 and must never import L6 os.
+    try:
+        kernel = getattr(runtime, "_kernel", None)
+        if kernel is not None and hasattr(kernel, "supervision_summary"):
+            state["kernel"] = kernel.supervision_summary()
+    except Exception:  # noqa: BLE001
+        pass
     return state
 
 

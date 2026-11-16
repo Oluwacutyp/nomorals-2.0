@@ -309,6 +309,125 @@ def _install_signal_handlers(stop: threading.Event, log: logging.Logger) -> None
             log.debug("shutdown handler for %s not installed: %s", _name, exc)
 
 
+def _scheduler_health(sched: object) -> tuple[bool, str]:
+    """Real scheduler probe (gap R1-14): the loop thread must be alive
+    AND the tick clock fresh — a live thread that stopped ticking is
+    dead. Same shape as the /health readiness probes: a tuple the
+    monitor normalizes, never a raise."""
+    running = getattr(sched, "running", None)
+    if callable(running) and not running():
+        return False, "scheduler thread is not running"
+    last = getattr(sched, "_last_tick_at", None)
+    if last is None:
+        return True, "scheduler started, no tick yet"
+    tick_s = float(getattr(sched, "tick_seconds", 20.0) or 20.0)
+    age = time.time() - float(last)
+    if age > 3.0 * tick_s:
+        return False, f"scheduler tick is {age:.0f}s stale"
+    return True, "scheduler ticking"
+
+
+def _db_health(db: object) -> tuple[bool, str]:
+    """The exact /ready probe: the database answers SELECT 1."""
+    try:
+        db.query("SELECT 1")  # type: ignore[attr-defined]
+    except Exception as exc:  # noqa: BLE001 — a failed probe is a failed check
+        return False, f"database unreachable: {exc}"
+    return True, "database answers"
+
+
+def _attach_os_kernel(runtime: object, context: object,
+                      started: list, log: logging.Logger) -> object | None:
+    """Construct the ONE OSKernel for this process and adopt the live
+    services (gap R1-14, reversed: restore + wire, never delete).
+
+    The kernel supervises — it never owns boot: the scheduler, the
+    gateway adapters, the router and the database are adopted as the
+    live instances they already are (``ServiceRegistry.adopt``), so
+    the registry can never build a second copy of any of them. The
+    unadopted built-in descriptors (browser/model/bridge/queue/
+    browser_service) are unregistered, so a lookup raises instead of
+    building a surprise service. Signals stay with this script's own
+    handlers (``stop.set()``); the kernel is stopped from the finally
+    block in ``main()`` and never arms signals itself.
+
+    Returns the kernel, or None when the attach fails — logged loudly,
+    and the bot still runs, unsupervised (the missing ``"kernel"``
+    section in the beacon shows it).
+    """
+    from nomorals.os.kernel import OSKernel
+
+    try:
+        kernel = OSKernel()
+        runtime._kernel = kernel  # noqa: SLF001 — beacon reads it duck-typed
+        scheduler = getattr(runtime, "_scheduler", None)
+        if scheduler is not None:
+            kernel.services.adopt(
+                "scheduler", scheduler, description="live job scheduler",
+                health_check=lambda: _scheduler_health(scheduler),
+                on_start=lambda s: s.start(), on_stop=lambda s: s.stop(),
+                health_role="liveness", tags=("core",))
+        gateway = getattr(runtime, "gateway", None)
+        if gateway is not None:
+            adapters = getattr(gateway, "adapters", {}) or {}
+            for name in started:
+                adapter = adapters.get(name)
+                if adapter is None:
+                    continue
+
+                def _adapter_start(a: object, _name: str = name,
+                                   _gw: object = gateway) -> None:
+                    if a.health().get("running"):  # type: ignore[attr-defined]
+                        return
+                    result = _gw.start_one(_name, runtime.on_message)  # type: ignore[attr-defined]
+                    if not result.get("ok"):
+                        raise RuntimeError(
+                            f"adapter {_name} restart refused: "
+                            f"{result.get('error')}")
+
+                def _adapter_stop(a: object, _name: str = name,
+                                  _gw: object = gateway) -> None:
+                    _gw.stop_one(_name)  # type: ignore[attr-defined]
+
+                kernel.services.adopt(
+                    f"adapter:{name}", adapter,
+                    description=f"live {name} adapter",
+                    health_check=(lambda a=adapter: (
+                        bool(a.health().get("running")),
+                        "adapter running" if a.health().get("running")
+                        else "adapter thread is not running")),
+                    on_start=_adapter_start, on_stop=_adapter_stop,
+                    health_role="liveness", tags=("adapter",))
+        router = getattr(context, "router", None)
+        if router is not None:
+            kernel.services.adopt(
+                "router", router, description="live LLM router",
+                health_check=lambda: (
+                    bool(router.providers()), "providers available"
+                    if router.providers() else "no providers"),
+                restartable=False, health_role="readiness")
+        db = getattr(context, "db", None)
+        if db is not None:
+            kernel.services.adopt(
+                "database", db, description="live database",
+                health_check=lambda: _db_health(db),
+                restartable=False, health_role="readiness")
+        for name in ("browser", "model", "bridge", "queue",
+                     "browser_service"):
+            kernel.services.unregister(name)
+        kernel.start()
+        kernel.supervise(heartbeat=runtime._tick_beacon)  # noqa: SLF001
+        log.info("os kernel up: supervising %s",
+                 ", ".join(kernel.services.started_services()) or "none")
+        return kernel
+    except Exception as exc:  # noqa: BLE001 — supervision must never break boot
+        from nomorals.console.failures import record_failure
+
+        record_failure("run_chat_bot.os_kernel_attach", exc)
+        log.error("os kernel attach failed (bot runs unsupervised): %s", exc)
+        return None
+
+
 def _wait_for_shutdown(stop: threading.Event) -> None:
     """Block until ``stop`` is set, waking every :data:`_SHUTDOWN_POLL_S`.
 
@@ -385,6 +504,11 @@ def main() -> int:
             runtime = PartnerRuntime(context, session_bridge=bridge)
             started = runtime.start()
             progress.stage("adapters up")
+            # OS control plane (gap R1-14): one kernel adopts the live
+            # services and supervises them. Best-effort at boot — a
+            # failed attach is logged loudly and the bot runs
+            # unsupervised; it never breaks the boot.
+            kernel = _attach_os_kernel(runtime, context, started, log)
             # Stores verified BEFORE ready: a store that cannot even
             # be read is a boot failure, reported honestly (DM +
             # console) instead of surfacing as weird behaviour later.
@@ -429,6 +553,15 @@ def main() -> int:
             try:
                 _wait_for_shutdown(stop)
             finally:
+                # Kernel first: ordered teardown of the supervised
+                # services (reverse order), then the runtime's own
+                # stop (idempotent no-ops for what the kernel already
+                # stopped) and the final beacon.
+                try:
+                    if kernel is not None:
+                        kernel.stop()
+                except Exception as exc:  # noqa: BLE001 - best-effort shutdown
+                    record_failure("run_chat_bot.shutdown_kernel", exc)
                 try:
                     runtime.stop()
                 except Exception as exc:  # noqa: BLE001 - best-effort shutdown

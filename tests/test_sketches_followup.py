@@ -324,6 +324,32 @@ def test_s11_repetition_remove_failure_logs_debug(caplog):
     assert _msgs(caplog, "repetition remove failed")
 
 
+# ── S12 tail-80: kernel stop() debug lines ─────────────────────
+
+def test_s12_kernel_stop_failures_log_debug(caplog):
+    import threading
+
+    from nomorals.os.kernel import OSKernel
+
+    def boom(*a, **k):
+        raise RuntimeError("teardown boom")
+
+    kern = OSKernel.__new__(OSKernel)
+    kern._lock = threading.Lock()
+    kern._started = True
+    kern._ready = True
+    kern._shutdown_hooks = [("bad-hook", boom)]
+    kern.services = SimpleNamespace(stop_all=boom)
+    kern.health = SimpleNamespace(stop_background=boom)
+    kern.bus = SimpleNamespace(stop=boom)
+    with caplog.at_level(logging.DEBUG):
+        kern.stop(timeout_s=1.0)
+    assert _msgs(caplog, "shutdown hook bad-hook failed")
+    assert _msgs(caplog, "services stop_all failed")
+    assert _msgs(caplog, "health stop_background failed")
+    assert _msgs(caplog, "bus stop failed")
+
+
 # ── S13 tail-80: chat_profile get_profile debug line ───────────
 
 def test_s13_chat_profile_read_failure_logs_debug(caplog):

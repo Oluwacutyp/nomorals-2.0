@@ -52,6 +52,18 @@ def _runtime_section(context: Any) -> tuple[dict[str, Any], list[str]]:
         if state.get("last_error"):
             text.append(f"          last error: {str(state['last_error'])[:120]}")
             data["last_error"] = str(state["last_error"])[:200]
+        # OS control plane (gap R1-14): the kernel's restart ledger rides
+        # the beacon — a dead service coming back is visible here.
+        kernel = state.get("kernel") or {}
+        if isinstance(kernel, dict) and kernel:
+            restarts = int(kernel.get("restarts_total") or 0)
+            down = kernel.get("down") or []
+            data["kernel"] = {"restarts_total": restarts, "down": down,
+                              "supervising": bool(kernel.get("supervising"))}
+            line = f"          kernel:   supervising, {restarts} restart(s)"
+            if down:
+                line += f", down: {', '.join(str(d) for d in down)}"
+            text.append(line)
         return data, text
     ago = f"{age:.0f}s" if age is not None else "unknown"
     return ({"available": True, "state": "stale", "beacon_age_s": age},

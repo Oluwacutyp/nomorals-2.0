@@ -810,6 +810,12 @@ class APIServer:
                         runtime["beacon_age_s"] = round(age, 1)
                     if state.get("last_error"):
                         runtime["last_error"] = str(state["last_error"])[:200]
+                    # OS control plane (gap R1-14): the kernel's restart
+                    # ledger rides the beacon, so a dead service coming
+                    # back is visible here. Absent when the bot runs
+                    # without a kernel (or an old beacon).
+                    if isinstance(state.get("kernel"), dict):
+                        runtime["kernel"] = state["kernel"]
                 payload["runtime"] = runtime
             except Exception:  # noqa: BLE001 - health must degrade, not 500
                 payload["runtime"] = {"state": "unknown"}

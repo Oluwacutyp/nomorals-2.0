@@ -1,15 +1,12 @@
 """Sweep tests for nomorals/os/ — new behavior added in the os sweep.
 
-Covers: session presence/expiry, bridge handoff, project
-tags/search/summary, timeline FTS/prune/export/import, update
-journal/recovery/quarantine/history, new verifiers, mission
-guards/callbacks/diagrams, replay compare/HTML, snapshot
-tags/prune/diff/tar/pre-post, resource render/alerts, generic session
-adapter.
-
-(The kernel / service-registry / health-monitor sweep classes were
-removed with those modules — audit gap R1-14, 2026-11-16: the control
-plane was retired, not wired. See tests/test_gapfix_os_kernel.py.)
+Covers: health probe roles/thresholds/manual checks/background loop,
+service scopes/lifecycle/overrides, kernel shutdown hooks, session
+presence/expiry, bridge handoff, project tags/search/summary, timeline
+FTS/prune/export/import, update journal/recovery/quarantine/history,
+new verifiers, mission guards/callbacks/diagrams, replay compare/HTML,
+snapshot tags/prune/diff/tar/pre-post, resource render/alerts, generic
+session adapter.
 """
 
 from __future__ import annotations
@@ -22,7 +19,14 @@ import unittest
 from pathlib import Path
 from types import SimpleNamespace
 
+from nomorals.core.events import EventBus
 from nomorals.os import adapters as os_adapters
+from nomorals.os.health import (
+    HealthMonitor,
+    HealthStatus,
+    as_health_check,
+)
+from nomorals.os.kernel import OSKernel
 from nomorals.os.mission_state import (
     COMPLETED,
     FAILED,
@@ -50,6 +54,7 @@ from nomorals.os.replay import (
     replay_mission,
 )
 from nomorals.os.resources import ResourceManager
+from nomorals.os.services import FACTORY, SINGLETON, ServiceRegistry
 from nomorals.os.session import SessionStore
 from nomorals.os.session_bridge import SessionBridge
 from nomorals.os.snapshots import SnapshotManager
@@ -80,10 +85,218 @@ def _event(topic, data, event_id="e1", ts=1700000000.0):
                            ts=ts, source="test")
 
 
+class HealthSweepTests(unittest.TestCase):
+    def test_roles_recorded(self) -> None:
+        m = HealthMonitor()
+        m.register_check(lambda: True, name="live", role="liveness")
+        m.register_check(lambda: True, name="ready", role="readiness")
+        m.register_check(lambda: True, name="boot", role="startup")
+        self.assertEqual(m.check_names(role="liveness"), ["live"])
+        results = m.check_all()
+        self.assertEqual(results["live"].role, "liveness")
+
+    def test_flap_suppression(self) -> None:
+        fired: list[HealthStatus] = []
+        m = HealthMonitor()
+        m.register_check(lambda: False, name="flaky", failure_threshold=3,
+                         success_threshold=2)
+        m.on_failure("flaky", fired.append)
+        m.check_all()
+        m.check_all()
+        self.assertEqual(fired, [])  # not yet declared down
+        self.assertFalse(m.is_down("flaky"))
+        m.check_all()
+        self.assertTrue(m.is_down("flaky"))
+        self.assertEqual(len(fired), 1)  # fired once, on declaration
+
+    def test_recovery_needs_consecutive_success(self) -> None:
+        state = {"ok": False}
+        m = HealthMonitor()
+        m.register_check(lambda: state["ok"], name="svc",
+                         failure_threshold=1, success_threshold=2)
+        m.check_all()
+        self.assertTrue(m.is_down("svc"))
+        state["ok"] = True
+        m.check_all()
+        self.assertTrue(m.is_down("svc"))  # one success is not enough
+        m.check_all()
+        self.assertFalse(m.is_down("svc"))
+
+    def test_manual_check(self) -> None:
+        m = HealthMonitor()
+        manual = m.register_manual("cache-warm")
+        self.assertFalse(m.check_one("cache-warm").ok)
+        manual.set(True, "warmed 1024 entries")
+        status = m.check_one("cache-warm")
+        self.assertTrue(status.ok)
+        self.assertEqual(status.role, "startup")
+
+    def test_check_timeout(self) -> None:
+        m = HealthMonitor()
+        m.register_check(lambda: (time.sleep(5), True)[1], name="slow",
+                         timeout_s=0.2)
+        status = m.check_one("slow")
+        self.assertFalse(status.ok)
+        self.assertIn("timed out", status.detail)
+
+    def test_background_loop_and_summary(self) -> None:
+        m = HealthMonitor()
+        m.register_check(lambda: True, name="ok1", role="readiness",
+                         interval_s=0.5)
+        m.register_check(lambda: False, name="bad1", role="liveness",
+                         interval_s=0.5, failure_threshold=1)
+        m.start_background()
+        try:
+            deadline = time.time() + 5
+            while time.time() < deadline:
+                if m.last_status("ok1") and m.last_status("bad1"):
+                    break
+                time.sleep(0.1)
+            summary = m.summary()
+            self.assertFalse(summary["alive"])
+            self.assertTrue(summary["ready"])
+            self.assertIn("liveness:bad1", summary["down"])
+            rendered = m.render()
+            self.assertIn("✗ [liveness] bad1", rendered)
+            self.assertIn("✓ [readiness] ok1", rendered)
+        finally:
+            m.stop_background()
+
+    def test_history(self) -> None:
+        m = HealthMonitor()
+        m.register_check(lambda: True, name="h")
+        m.check_all()
+        m.check_all()
+        self.assertEqual(len(m.history("h", limit=10)), 2)
 
 
+class ServicesSweepTests(unittest.TestCase):
+    def test_factory_scope_builds_fresh(self) -> None:
+        reg = ServiceRegistry()
+        reg.register("fresh", lambda: object(), scope=FACTORY)
+        self.assertIsNot(reg.lookup("fresh"), reg.lookup("fresh"))
+
+    def test_singleton_scope_caches(self) -> None:
+        reg = ServiceRegistry()
+        reg.register("one", lambda: object(), scope=SINGLETON)
+        self.assertIs(reg.lookup("one"), reg.lookup("one"))
+
+    def test_bad_scope_rejected(self) -> None:
+        reg = ServiceRegistry()
+        with self.assertRaises(ValueError):
+            reg.register("x", lambda: 1, scope="bogus")
+
+    def test_override_context(self) -> None:
+        reg = ServiceRegistry()
+        reg.register("svc", lambda: "real")
+        self.assertEqual(reg.lookup("svc"), "real")
+        with reg.override("svc", "mock"):
+            self.assertEqual(reg.lookup("svc"), "mock")
+        self.assertEqual(reg.lookup("svc"), "real")
+
+    def test_override_unknown_raises(self) -> None:
+        reg = ServiceRegistry()
+        with self.assertRaises(Exception):
+            with reg.override("nope", 1):
+                pass
+
+    def test_lifecycle_start_stop_order(self) -> None:
+        reg = ServiceRegistry()
+        order: list[str] = []
+        reg.register("base", lambda: "b",
+                     on_start=lambda i: order.append("start:base"),
+                     on_stop=lambda i: order.append("stop:base"))
+        reg.register("top", lambda: "t", depends_on=("base",),
+                     on_start=lambda i: order.append("start:top"),
+                     on_stop=lambda i: order.append("stop:top"))
+        reg.start_service("top")
+        self.assertEqual(order, ["start:base", "start:top"])
+        self.assertTrue(reg.is_started("top"))
+        reg.stop_service("base")  # stops dependent first
+        self.assertEqual(order[-2:], ["stop:top", "stop:base"])
+        self.assertFalse(reg.is_started("base"))
+
+    def test_start_all_respects_autostart(self) -> None:
+        reg = ServiceRegistry()
+        reg.register("lazy", lambda: object())
+        reg.register("eager", lambda: object(), autostart=True)
+        reg.start_all()
+        self.assertFalse(reg.is_started("lazy"))
+        self.assertTrue(reg.is_started("eager"))
+
+    def test_restart_recycles(self) -> None:
+        reg = ServiceRegistry()
+        reg.register("r", lambda: object())
+        first = reg.start_service("r")
+        second = reg.restart("r")
+        self.assertIsNot(first, second)
+        self.assertTrue(reg.is_started("r"))
+
+    def test_circular_dependency_rejected(self) -> None:
+        reg = ServiceRegistry()
+        reg.register("a", lambda: 1, depends_on=("b",))
+        reg.register("b", lambda: 2, depends_on=("a",))
+        with self.assertRaises(ValueError):
+            reg.start_all(only_autostart=False)
+
+    def test_tags_and_render(self) -> None:
+        reg = ServiceRegistry()
+        reg.register("web", lambda: 1, tags=("net", "public"))
+        self.assertEqual(reg.find_by_tag("net"), ["web"])
+        rendered = reg.render()
+        self.assertIn("web", rendered)
+        self.assertIn("[net,public]", rendered)
+
+    def test_health_check_for_still_works(self) -> None:
+        reg = ServiceRegistry()
+        self.assertIsNotNone(reg.health_check_for("browser"))
 
 
+class KernelSweepTests(unittest.TestCase):
+    def test_shutdown_hooks_run_lifo(self) -> None:
+        kernel = OSKernel(bus=EventBus())
+        calls: list[str] = []
+        kernel.on_shutdown(lambda: calls.append("first"), name="first")
+        kernel.on_shutdown(lambda: calls.append("second"), name="second")
+        kernel.start()
+        self.assertTrue(kernel.ready)
+        kernel.stop()
+        self.assertEqual(calls, ["second", "first"])
+        self.assertFalse(kernel.ready)
+
+    def test_failing_hook_does_not_break_stop(self) -> None:
+        kernel = OSKernel(bus=EventBus())
+
+        def bad() -> None:
+            raise RuntimeError("boom")
+
+        kernel.on_shutdown(bad)
+        kernel.start()
+        kernel.stop()  # must not raise
+        self.assertFalse(kernel.started)
+
+    def test_render_and_status(self) -> None:
+        kernel = OSKernel(bus=EventBus())
+        kernel.start()
+        try:
+            st = kernel.status()
+            self.assertTrue(st["ready"])
+            self.assertIsNotNone(st["uptime_s"])
+            self.assertIn("browser", st["services"])
+            self.assertIn("health_summary", st)
+            rendered = kernel.render()
+            self.assertIn("READY", rendered)
+            self.assertIn("services", rendered)
+        finally:
+            kernel.stop()
+
+    def test_restart_service(self) -> None:
+        kernel = OSKernel(bus=EventBus())
+        kernel.services.register("tmp", lambda: object())
+        first = kernel.services.start_service("tmp")
+        second = kernel.restart_service("tmp")
+        self.assertIsNot(first, second)
+        kernel.stop()
 
 
 class SessionSweepTests(unittest.TestCase):
