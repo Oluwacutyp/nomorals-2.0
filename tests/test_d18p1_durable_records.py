@@ -42,8 +42,31 @@ from nomorals.browser.jobs import (
 from nomorals.core.jobs import JobRegistry
 from nomorals.media_edit.jobs import JobManager, MediaJobRecordStore
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
 
-OLD = time.time() - 7200.0
+# Frozen-clock note (H19): every direct clock read in this file is a
+# seed or an explicit "now" passed to the steward adapters, and every
+# one is delta-only against the production thresholds — so freezing
+# seed AND now together preserves every verdict exactly:
+# * BrowserAdapter.discover / RenderAdapter.discover (outcome_steward
+#   .py:816/:903) compute age = now - updated_at and skip when
+#   age <= BROWSER_STUCK_S / RENDER_STUCK_S (3600s). Stuck seeds sit
+#   at MIDDAY_TS - 7200 (age 7200, discovered); fresh seeds sit at
+#   MIDDAY_TS (age 0, skipped) — the same deltas as on the real clock.
+# * BrowserAdapter.collect / RenderAdapter.collect (:841/:926) never
+#   read their `now` argument at all (status -> establishes only), so
+#   the frozen value is inert there.
+# * _browser_snapshot / _media_snapshot created_at / started_at =
+#   now - 7200 feed only the adapters' ORDER BY created_at and the
+#   updated_at fallback (never taken here — updated_at is always
+#   passed explicitly), never a comparison.
+# * OutcomeSteward.sweep() (outcome_steward.py:1247) defaults its
+#   now to the real clock when not passed; a frozen OLD seed is ~32
+#   days old on that clock, still far past the 3600s stuck bound, so
+#   the orphan cases still open.
+# * The :283 wait-loop deadline is elapsed time -> time.monotonic().
+
+OLD = MIDDAY_TS - 7200.0
 
 
 def _file_db(test: unittest.TestCase) -> Database:
@@ -57,7 +80,7 @@ def _file_db(test: unittest.TestCase) -> Database:
 
 def _browser_snapshot(run_id: str, status: str, *,
                       updated_at: float) -> dict:
-    now = time.time()
+    now = MIDDAY_TS
     return {"run_id": run_id, "url": "https://example.com/a",
             "goal": "check the thing", "status": status, "steps": 2,
             "stopped_reason": "", "final_url": "https://example.com/a",
@@ -69,7 +92,7 @@ def _browser_snapshot(run_id: str, status: str, *,
 
 def _media_snapshot(job_id: str, status: str, *,
                     updated_at: float) -> dict:
-    now = time.time()
+    now = MIDDAY_TS
     return {"job_id": job_id, "kind": "video", "label": "trim intro",
             "backend": "", "input_ref": "/media/in.mp4",
             "output_ref": "", "status": status, "error": "",
@@ -101,7 +124,7 @@ class BrowserRecordTests(unittest.TestCase):
         # steward's collect reads it as succeeded.
         BrowserJobManager(db=db)
         case = SimpleNamespace(detail={"run_id": job.job_id})
-        items = BrowserAdapter(db).collect(case, time.time())
+        items = BrowserAdapter(db).collect(case, MIDDAY_TS)
         self.assertEqual(items[0].establishes, "succeeded")
 
     def test_crashed_run_discovered_by_steward_adapter(self):
@@ -112,9 +135,9 @@ class BrowserRecordTests(unittest.TestCase):
         store.record(_browser_snapshot("br-stuck2", "queued",
                                        updated_at=OLD))
         store.record(_browser_snapshot("br-fresh", "running",
-                                       updated_at=time.time()))
+                                       updated_at=MIDDAY_TS))
         found = {(c.subject_key, c.reason)
-                 for c in BrowserAdapter(db).discover(time.time())}
+                 for c in BrowserAdapter(db).discover(MIDDAY_TS)}
         self.assertIn(("browser:br-stuck1", "unknown-outcome"), found)
         self.assertIn(("browser:br-stuck2", "overdue"), found)
         self.assertNotIn(("browser:br-fresh", "unknown-outcome"), found)
@@ -185,7 +208,7 @@ class BrowserRecordTests(unittest.TestCase):
         self.assertEqual(row["cancel_state"], "unhonored")
         # ...and the steward's evidence says so, in words.
         case = SimpleNamespace(detail={"run_id": job.job_id})
-        items = BrowserAdapter(db).collect(case, time.time())
+        items = BrowserAdapter(db).collect(case, MIDDAY_TS)
         self.assertIn("without honoring it", items[0].summary)
 
     def test_cancel_unknown_and_terminal(self):
@@ -262,7 +285,7 @@ class MediaRecordTests(unittest.TestCase):
         # last recorded state; the steward collects succeeded.
         JobManager(db=db)
         case = SimpleNamespace(detail={"job_id": job_id})
-        items = RenderAdapter(db).collect(case, time.time())
+        items = RenderAdapter(db).collect(case, MIDDAY_TS)
         self.assertEqual(items[0].establishes, "succeeded")
 
     def test_cancel_queued_and_running_records(self):
@@ -280,9 +303,9 @@ class MediaRecordTests(unittest.TestCase):
         second = mgr.submit("video", "queued one",
                             lambda progress: {"output": "/m/two.mp4"})
         # Wait until the first is actually running.
-        deadline = time.time() + 5
+        deadline = time.monotonic() + 5
         while mgr.status(first)["status"] != "running":
-            self.assertLess(time.time(), deadline)
+            self.assertLess(time.monotonic(), deadline)
             time.sleep(0.02)
         mgr.cancel(second)  # queued -> cancelled, confirmed at once
         row = MediaJobRecordStore(db).get(second)
@@ -306,9 +329,9 @@ class MediaRecordTests(unittest.TestCase):
         store.record(_media_snapshot("mj-stuck2", "queued",
                                      updated_at=OLD))
         store.record(_media_snapshot("mj-fresh", "running",
-                                     updated_at=time.time()))
+                                     updated_at=MIDDAY_TS))
         found = {(c.subject_key, c.reason)
-                 for c in RenderAdapter(db).discover(time.time())}
+                 for c in RenderAdapter(db).discover(MIDDAY_TS)}
         self.assertIn(("render:mj-stuck1", "unknown-outcome"), found)
         self.assertIn(("render:mj-stuck2", "overdue"), found)
         self.assertNotIn(("render:mj-fresh", "unknown-outcome"), found)
