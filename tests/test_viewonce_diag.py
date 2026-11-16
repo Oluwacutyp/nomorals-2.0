@@ -27,10 +27,22 @@ This file pins the diagnostic instruments, through the real seams:
 """
 from __future__ import annotations
 
-import time
+import itertools
 from types import SimpleNamespace
 
 from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef
+from tests.frozen_clock import MIDDAY_TS
+
+# Clock policy (batch H32): every seed below is MIDDAY_TS (noon
+# 2026-10-14, tests.frozen_clock). The trace ts is carried, never
+# compared: observe_message stamps it into the view_once_trace row
+# (personal.py:798), toggle_activity takes the journal max per kind
+# with no clock comparison, _chatops_viewonce renders the last trace
+# with no age filter, and toggle_live_verdicts formats the arrival
+# ts with no recency gate — so a frozen seed changes no verdict.
+# Message ids stay unique via a counter, never frozen: _process
+# scopes effects by chat + message id (H11 pattern).
+_MSG_SEQ = itertools.count(1)
 
 OWNER_JID = "2348012345678@s.whatsapp.net"
 REC_ID = "whatsapp:2348012345678"
@@ -195,7 +207,7 @@ def _dm_message(chat_jid, reply_to=""):
                      kind=ChatKind.DM, peer=chat_jid),
         incoming=True, text="/vv", sender="Owner",
         sender_id=OWNER_JID, reply_to=reply_to,
-        message_id=f"cmd-{time.time()}", ts=time.time())
+        message_id=f"cmd-{next(_MSG_SEQ)}", ts=MIDDAY_TS)
 
 
 def _missed_arrival(personal, *, ts, message_id="m-missed"):
@@ -224,7 +236,7 @@ def test_vv_empty_names_last_arrival_when_none_saved(tmp_path):
     names the last trace row and its outcome."""
     rt, svc = _chatops_runtime(tmp_path, view_once=True)
     personal = svc["personal"]
-    ts = time.time() - 3600
+    ts = MIDDAY_TS - 3600
     _missed_arrival(personal, ts=ts)
     reply = rt._chatops_viewonce("viewonce", "", _dm_message(CHAT_C))
     assert "no view-once captures yet" in reply
@@ -253,7 +265,7 @@ def test_vv_empty_names_standin_account_trace(tmp_path):
         counterpart_id=CHAT_A, sender_id=CHAT_A,
         sender_name="Ada", message_id="m-standin", text="",
         media=[], view_once=True, media_missing=True,
-        ts=time.time() - 600)
+        ts=MIDDAY_TS - 600)
     assert [r for r in personal.vault.journal("whatsapp:primary")
             if r.get("kind") == "view_once_trace"]
     reply = rt._chatops_viewonce("viewonce", "", _dm_message(CHAT_C))
@@ -274,7 +286,7 @@ def test_vv_empty_no_longer_tells_owner_to_turn_on_when_on(tmp_path):
 def test_toggle_activity_reports_last_arrival(tmp_path):
     rt, svc = _chatops_runtime(tmp_path, view_once=True)
     personal = svc["personal"]
-    ts = time.time() - 3600
+    ts = MIDDAY_TS - 3600
     _missed_arrival(personal, ts=ts)
     activity = personal.toggle_activity(REC_ID)
     assert "view_once" not in activity
@@ -286,7 +298,7 @@ def test_pair_verdict_names_arrivals_seen_none_saved(tmp_path):
 
     rt, svc = _chatops_runtime(tmp_path, view_once=True)
     personal = svc["personal"]
-    ts = time.time() - 3600
+    ts = MIDDAY_TS - 3600
     _missed_arrival(personal, ts=ts)
     activity = personal.toggle_activity(REC_ID)
     rec = svc["registry"].get(REC_ID)
