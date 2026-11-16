@@ -59,7 +59,15 @@ from nomorals.social.chat.base import (
     SendResult,
 )
 from nomorals.social.chat.gateway import ChatGateway
+from tests.frozen_clock import MIDDAY_TS
 
+#: Clock discipline (batch H25): wait-loop deadlines ride
+#: time.monotonic(); message ts and the briefing generated_at freeze
+#: to MIDDAY_TS (tests.frozen_clock). The pulse-marker ts below
+#: stays on the real clock — grandfathered, see the baseline entry
+#: in tests/test_no_direct_clock.py: start()'s check_all_catchup
+#: suppresses only when last_ts >= due on the real clock, so a
+#: frozen marker would fire the catch-up pulse into the adapter.
 #: See test_partner_brain_gate for why context homes honour
 #: NM_TEST_TMPDIR (the /tmp tmpfs + swallowed-COMMIT trap).
 _TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
@@ -274,8 +282,8 @@ class FakeAdapter(ChatAdapter):
                           message_id=f"m{len(self.sent)}")
 
     def wait_started(self, timeout: float = 5.0) -> bool:
-        end = time.time() + timeout
-        while time.time() < end:
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
             if self.started_flag:
                 return True
             time.sleep(0.01)
@@ -283,8 +291,8 @@ class FakeAdapter(ChatAdapter):
 
 
 def _wait(predicate, timeout: float = 8.0) -> bool:
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if predicate():
             return True
         time.sleep(0.02)
@@ -305,6 +313,13 @@ def _make_runtime_context() -> tuple[Any, tempfile.TemporaryDirectory]:
     context = build_context(settings, with_executor=False,
                             with_tools=False)
     ws = Path(context.settings.workspace_dir)
+    # Grandfathered (batch H25): the marker ts stays on the real
+    # clock — start() runs check_all_catchup on boot
+    # (runtime.py:3259-3261) and check_slot_catchup suppresses only
+    # when last_ts >= due on the real clock, with pulse_enabled
+    # defaulting True, so a frozen MIDDAY marker would fire the
+    # catch-up pulse into the adapter and break the exact
+    # adapter.sent assertions. Same shape as H10/H18/H23.
     for marker in ("pulse_last_run.json",
                    "pulse_last_run_afternoon.json",
                    "pulse_last_run_evening.json",
@@ -316,7 +331,7 @@ def _make_runtime_context() -> tuple[Any, tempfile.TemporaryDirectory]:
     context.db.execute(
         "INSERT OR REPLACE INTO briefings (id, date, sections_json,"
         " generated_at) VALUES (?, ?, '[]', ?)",
-        ("test-seed", _today_str(context), time.time()),
+        ("test-seed", _today_str(context), MIDDAY_TS),
     )
     return context, tmp
 
@@ -358,14 +373,14 @@ class RuntimeDeliberationSeamTests(unittest.TestCase):
                        peer="grp-1")
         return ChatMessage(chat=chat, incoming=True, text=text,
                            sender="faheem", message_id=message_id,
-                           ts=time.time())
+                           ts=MIDDAY_TS)
 
     def _dm_msg(self, platform: str) -> ChatMessage:
         chat = ChatRef(platform=platform, chat_id="peer-1",
                        kind=ChatKind.DM, peer="peer-1")
         return ChatMessage(chat=chat, incoming=True, text="ok",
                            sender="peer", message_id="dm-1",
-                           ts=time.time())
+                           ts=MIDDAY_TS)
 
     def test_deliberation_held_on_whatsapp(self) -> None:
         _stub_bundle(self.runtime.brain, [DELIBERATION_V1])
