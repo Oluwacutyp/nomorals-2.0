@@ -90,6 +90,22 @@ from unittest import mock
 import pytest
 
 from nomorals.integrations import market_data as md
+from tests.frozen_clock import MIDDAY_TS
+
+# Frozen-clock trace (batch H21) — every provider timestamp in this
+# file is a seed for a freshness verdict production computes against
+# the REAL clock: quote() calls _record_quote_result with no now
+# (market_data.py:787 `now = now or time.time()`), and get_ohlcv's
+# _attempt_chain compares bar ts against time.time() directly (:1869)
+# — neither takes a now seam. So a seed freezes ONLY where the
+# verdict it produces is unchanged on the real clock: a stale seed
+# stays stale (age only grows), and a serve that asserts no age
+# stays a serve. The reads that pin an exact age or a fresh verdict
+# (fresh quote, fresh OHLCV, stale-quote age ≈ 3600, the shared
+# _fresh_router payloads the scheduler job also runs, the persist
+# test's ok==1) stay on the real clock — grandfathered in
+# tests/test_no_direct_clock.py with reasons at each read.
+# MIDDAY_TS = 2026-10-14 12:00 local, ~32 days before 2026-11-15.
 
 
 # ── helpers ───────────────────────────────────────────────────────────
@@ -202,7 +218,12 @@ def test_day_one_quote_tries_binance_first():
     def fake(url, params=None):
         calls.append(url)
         if "binance" in url:
-            return _binance_ticker(int(time.time() * 1000))
+            # FROZEN (H21): only source + call count are asserted
+            # here, and a stale quote is still returned (consumer
+            # policy unchanged) — a MIDDAY closeTime reads stale
+            # on the real clock (~32d > the 300s binance cadence)
+            # but still serves from binance on the first call.
+            return _binance_ticker(int(MIDDAY_TS * 1000))
         raise AssertionError(f"unexpected {url}")
 
     with mock.patch.object(md, "_fetch", side_effect=fake):
@@ -215,6 +236,12 @@ def test_day_one_quote_tries_binance_first():
 
 
 def test_fresh_quote_records_fresh_and_surfaces_timestamp():
+    # GRANDFATHERED (H21): this test pins a FRESH verdict plus
+    # quote_age_s < 5 and quote_ts ≈ now — but quote() computes
+    # freshness against the real clock (_record_quote_result takes
+    # no now from any quote() branch), so a frozen provider ts
+    # would read stale (~32d > the 300s binance cadence) and
+    # ok==1 / health=="verified-live" would fail.
     now_ms = int(time.time() * 1000)
     with mock.patch.object(md, "_fetch",
                            return_value=_binance_ticker(now_ms)):
@@ -310,6 +337,10 @@ def test_missing_api_key_records_nothing():
 
 
 def test_ohlcv_outcomes_record_per_attempt():
+    # GRANDFATHERED (H21): pins df.attrs freshness=="fresh", but
+    # _attempt_chain compares the newest bar against time.time()
+    # directly (market_data.py:1869) and get_ohlcv takes no now —
+    # frozen bars would read stale and this would fail.
     now_ms = int(time.time() * 1000)
     with mock.patch.object(md, "_fetch",
                            return_value=_klines_payload(now_ms)):
@@ -325,6 +356,11 @@ def test_ohlcv_outcomes_record_per_attempt():
 
 
 def test_stale_quote_is_its_own_class_and_still_returned():
+    # GRANDFATHERED (H21): pins quote_age_s ≈ 3600 (abs=5) — the
+    # age itself is the assertion, and quote() computes it against
+    # the real clock (_record_quote_result takes no now), so a
+    # frozen seed would read ~32d and the age pin would fail
+    # (the stale verdict alone would still hold).
     stale_ms = int((time.time() - 3600) * 1000)  # 1h old, cadence 5m
     with mock.patch.object(md, "_fetch",
                            return_value=_binance_ticker(stale_ms)):
@@ -341,7 +377,10 @@ def test_stale_quote_is_its_own_class_and_still_returned():
 
 
 def test_stale_ohlcv_bars_are_recorded_stale():
-    old_ms = int((time.time() - 30 * 86400) * 1000)  # 30d-old 1h bars
+    # FROZEN (H21): only the stale verdict is asserted (no age
+    # pin) — a MIDDAY seed 30d back reads ~62d old on the real
+    # clock, still far past _ohlcv_stale_after_s("1h") = 10800s.
+    old_ms = int((MIDDAY_TS - 30 * 86400) * 1000)  # 30d-old 1h bars
     with mock.patch.object(md, "_fetch",
                            return_value=_klines_payload(old_ms)):
         df = md.get_ohlcv("BTC/USDT", "crypto", "1h", 3,
@@ -379,7 +418,11 @@ def test_daily_fixing_cadence_is_not_flagged_stale_on_a_weekend():
 def test_gold_api_stale_spot_is_classified_stale():
     from datetime import datetime, timezone
 
-    old = datetime.fromtimestamp(time.time() - 7200, timezone.utc)
+    # FROZEN (H21): only the stale verdict is asserted — a MIDDAY
+    # seed 2h back reads ~32d old on the real clock, still far
+    # past the 300s gold_api cadence, and the ISO shape is
+    # unchanged (same strftime format, different date).
+    old = datetime.fromtimestamp(MIDDAY_TS - 7200, timezone.utc)
     payload = {"price": 4195.60, "currency": "USD", "symbol": "XAU",
                "updatedAt": old.strftime("%Y-%m-%dT%H:%M:%SZ")}
 
@@ -420,7 +463,12 @@ def test_demoted_provider_is_last_resort_and_visibly_so():
     for _ in range(3):
         md.record_quote_outcome("binance", "stale",
                                 error_class="stale_quote")
-    stale_ms = int((time.time() - 3600) * 1000)
+    # FROZEN (H21): only source + source_demoted are asserted
+    # (no age pin) — the demotion flag is health-driven (the 3
+    # prior stale outcomes), not freshness-driven, and a MIDDAY
+    # seed 1h back reads ~32d old on the real clock, still stale
+    # and still served as the fallback of last resort.
+    stale_ms = int((MIDDAY_TS - 3600) * 1000)
 
     def fake(url, params=None):
         if "binance" in url:
@@ -450,6 +498,13 @@ def test_legacy_breaker_vocabulary_still_works():
 
 def _fresh_router(url, params=None):
     """Serve every keyless probe a fresh, liquid-symbol payload."""
+    # GRANDFATHERED (H21): this router is shared by the two
+    # health-loop tests AND the scheduler-job test, which drives
+    # the real price_sources tool through sched.run_now with the
+    # pinned payload {"action": "health"} — no now reaches
+    # verify_price_sources there, so the probes are judged against
+    # the real clock. Frozen payloads would read stale on that
+    # clock and verified_live would be 0, not len(SOURCES).
     now_ms = int(time.time() * 1000)
     if "binance" in url:
         if "klines" in url:
@@ -489,6 +544,9 @@ def _fresh_router(url, params=None):
     if "gold-api" in url:
         from datetime import datetime, timezone
 
+        # GRANDFATHERED (H21): same shared-router reason as the
+        # router's now_ms above — the scheduler-job test runs
+        # this payload against the real clock.
         ts = datetime.fromtimestamp(time.time(), timezone.utc)
         return json.dumps({"price": 4195.6, "currency": "USD",
                            "symbol": "XAU",
@@ -496,6 +554,8 @@ def _fresh_router(url, params=None):
                                "%Y-%m-%dT%H:%M:%SZ")}).encode()
     if "open.er-api" in url:
         return json.dumps({"result": "success",
+                           # GRANDFATHERED (H21): shared-router
+                           # reason — see the router's now_ms above.
                            "time_last_update_unix": int(time.time()),
                            "rates": {"EUR": 0.92, "NGN": 1331.19}}).encode()
     if "ecb.europa" in url:
@@ -537,6 +597,10 @@ def test_health_loop_dead_fetcher_stands_providers_down():
 def test_price_outcomes_persist_across_restart(tmp_path):
     kv, _db = _kv(tmp_path)
     assert md.bind_price_source_store(kv) is True
+    # GRANDFATHERED (H21): asserts ok==1 after the rebind — a
+    # frozen closeTime would record "stale" instead (quote()
+    # computes freshness against the real clock, no now seam),
+    # so ok would be 0 and this would fail.
     now_ms = int(time.time() * 1000)
     with mock.patch.object(md, "_fetch",
                            return_value=_binance_ticker(now_ms)):

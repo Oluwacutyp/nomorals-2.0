@@ -215,6 +215,34 @@ BASELINE: dict[str, int] = {
     "tests/test_orchestration_p9.py": 2,
     "tests/test_os_sweep.py": 9,
     "tests/test_os_timeline.py": 2,
+    # Grandfathered (batch H21): 7 reads stay on the real clock —
+    # production computes price freshness against the real clock
+    # with no now seam on the driven paths, and these tests pin
+    # exact ages / fresh verdicts that only hold relative to real
+    # now. (1) The fresh quote (:218) pins freshness=="fresh",
+    # quote_age_s < 5 and quote_ts ≈ now; quote() calls
+    # _record_quote_result with no now (market_data.py:787), so a
+    # frozen provider ts would read stale. (2) The fresh OHLCV
+    # (:313) pins freshness=="fresh"; _attempt_chain compares the
+    # newest bar against time.time() directly (:1869) and
+    # get_ohlcv takes no now. (3) The stale quote (:328) pins
+    # quote_age_s ≈ 3600 (abs=5) — the age itself is asserted.
+    # (4–6) The shared _fresh_router payloads (:453/:492/:499)
+    # feed the health loop AND the scheduler-job test, which
+    # drives the real price_sources tool through sched.run_now
+    # with the pinned payload {"action": "health"} — no now
+    # reaches verify_price_sources there (its own now seam is
+    # unreachable from the job path), so frozen payloads would
+    # read stale and verified_live would be 0. (7) The persist
+    # test (:540) asserts ok==1 after rebind; a frozen closeTime
+    # would record "stale" instead. The file's other 4 reads are
+    # frozen: the day-one chain test (only source + call count
+    # asserted; stale still serves), the 30d-old bars (no age
+    # pin; ~62d still past the 10800s bar-stale bound), the
+    # gold-api stale spot (no age pin; ~32d still past the 300s
+    # cadence), and the demoted-provider test (only source +
+    # source_demoted asserted; the flag is health-driven).
+    "tests/test_pass91_price_sources_open.py": 7,
     # Grandfathered (batch H12): the composed "+2h" test asserts
     # the parsed landing sits in a real-clock window — production
     # parses relative offsets against the real clock
