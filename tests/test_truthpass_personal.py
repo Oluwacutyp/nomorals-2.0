@@ -58,6 +58,7 @@ Fixed here, pinned below:
 """
 from __future__ import annotations
 
+import itertools
 import json
 import socketserver
 import threading
@@ -67,6 +68,25 @@ from pathlib import Path
 import pytest
 
 from nomorals.social.chat.base import ChatKind, ChatMessage, ChatRef, SendResult
+from tests.frozen_clock import MIDDAY_TS
+
+# Message ids must stay unique per message (the runtime scopes
+# effects by chat:{chat_key}:{message_id} and a redelivered id
+# replays instead of re-applying), so they come from a counter,
+# never from the clock.  Timestamps are the frozen MIDDAY_TS:
+# every ts in this file is recorded only, never compared against
+# the real clock — status posts (observe_status_post records
+# post_ts; the only real-clock comparison is cycle_statuses'
+# 24h expiry, never called here), view-once/antidelete/antitag
+# observations (the personal-surface turn runs before the
+# stale_replay early-return, so a >180s-old bridge ts still
+# lands the observation; the stale stamp only blocks command
+# execution, which no bridge-message test here asserts),
+# revoke/edit/call-offer feeds (ts recorded only, cache keyed
+# by message id), and the organ-level story/status ts (recorded
+# only).  Bridge payloads carry ts in ms, hence
+# int(MIDDAY_TS * 1000).
+_MSG_SEQ = itertools.count(1)
 
 PORT = 19397
 OWNER = "2348012345678"
@@ -149,8 +169,8 @@ class FakeBridge(socketserver.ThreadingTCPServer):
 
 
 def wait_for(pred, timeout=25.0, step=0.1):
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if pred():
             return True
         time.sleep(step)
@@ -190,7 +210,7 @@ class TGStoriesAdapter:
             pic.write_bytes(b"\xff\xd8story")
         return [{"poster_id": "555", "poster_name": "Tunde",
                  "story_id": "7", "path": str(pic),
-                 "kind": "image", "ts": time.time()}]
+                 "kind": "image", "ts": MIDDAY_TS}]
 
     def view_stories(self, poster_id, max_id):
         self.viewed.append((poster_id, max_id))
@@ -250,7 +270,7 @@ def rig(tmp_path_factory):
                          peer="owner"),
             incoming=True, text="hello", sender="owner",
             sender_id="owner",
-            message_id=f"beat-{time.time()}", ts=time.time()))
+            message_id=f"beat-{next(_MSG_SEQ)}", ts=MIDDAY_TS))
 
     beat()
     assert wait_for(
@@ -276,8 +296,8 @@ def wa_self(text, reply_to="", mid=None):
         chat=ChatRef(platform="whatsapp", chat_id=OWNER,
                      kind=ChatKind.DM, title="you", peer=OWNER),
         incoming=True, text=text, sender="Owner", sender_id=OWNER,
-        message_id=mid or f"cmd-{time.time()}", reply_to=reply_to,
-        ts=time.time(), meta={"self_chat": True, "from_owner": True})
+        message_id=mid or f"cmd-{next(_MSG_SEQ)}", reply_to=reply_to,
+        ts=MIDDAY_TS, meta={"self_chat": True, "from_owner": True})
 
 
 def sends_with(env, needle):
@@ -289,7 +309,7 @@ def sends_with(env, needle):
 
 def test_status_go_shape_lid_poster_viewed_reacted_saved(rig):
     bridge, vault, rec = rig["bridge"], rig["vault"], rig["rec"]
-    now_ms = int(time.time() * 1000)
+    now_ms = int(MIDDAY_TS * 1000)
     # Go onMessage, status branch: media is nil (Go nil slice →
     # JSON null) for a text status; poster is a LID.
     bridge.emit({"type": "status_post", "id": "ST-LID-1",
@@ -310,7 +330,7 @@ def test_status_go_shape_pn_poster_media_saved(rig):
     bridge, vault, rec = rig["bridge"], rig["vault"], rig["rec"]
     pic = rig["tmp"] / "status-pic.jpg"
     pic.write_bytes(b"\xff\xd8fake-jpeg-bytes")
-    now_ms = int(time.time() * 1000)
+    now_ms = int(MIDDAY_TS * 1000)
     bridge.emit({"type": "status_post", "id": "ST-PN-1",
                  "from": {"id": PN_POSTER, "name": "Bola"},
                  "text": "",
@@ -327,7 +347,7 @@ def test_status_go_shape_pn_poster_media_saved(rig):
 
 def test_status_node_shape_viewed_and_reacted(rig):
     bridge = rig["bridge"]
-    now_ms = int(time.time() * 1000)
+    now_ms = int(MIDDAY_TS * 1000)
     # Node bridge status_post: media is [] (never null) when the
     # post carries no media.
     before = len(bridge.cmds("status_view"))
@@ -341,7 +361,7 @@ def test_status_node_shape_viewed_and_reacted(rig):
 
 def test_status_burst_all_viewed(rig):
     bridge = rig["bridge"]
-    now_ms = int(time.time() * 1000)
+    now_ms = int(MIDDAY_TS * 1000)
     before = len(bridge.cmds("status_view"))
     for i in (1, 2, 3):
         bridge.emit({"type": "status_post", "id": f"BURST-{i}",
@@ -362,7 +382,7 @@ def _dm(mid, **kw):
             "from": {"id": PN_POSTER, "name": "Bola"}, "text": "",
             "media": [], "reply_to": "", "mentioned": False,
             "mentions": [], "view_once": False,
-            "ts": int(time.time() * 1000)}
+            "ts": int(MIDDAY_TS * 1000)}
     base.update(kw)
     return base
 
@@ -387,7 +407,7 @@ def test_viewonce_captured_and_miss_journaled(rig):
 
 def test_antidelete_and_antiedit_recoveries(rig):
     bridge, vault, rec = rig["bridge"], rig["vault"], rig["rec"]
-    now_ms = int(time.time() * 1000)
+    now_ms = int(MIDDAY_TS * 1000)
     bridge.emit(_dm("DM-1", text="secret plans"))
     time.sleep(0.4)
     bridge.emit({"type": "revoke", "id": "DM-1",
@@ -413,7 +433,7 @@ def test_anticall_rejects_call_offer(rig):
     bridge = rig["bridge"]
     # Go handleEvent CallOffer shape: "from" is a bare string.
     bridge.emit({"type": "call_offer", "id": "CALL-1",
-                 "from": PN_POSTER, "ts": int(time.time() * 1000)})
+                 "from": PN_POSTER, "ts": int(MIDDAY_TS * 1000)})
     assert wait_for(lambda: len(bridge.cmds("reject_call")) >= 1)
 
 
@@ -461,7 +481,7 @@ def test_refused_status_verbs_journal_and_ledger(rig):
                      "from": {"id": PN_POSTER, "name": "Bola"},
                      "text": "will refuse", "media": None,
                      "view_once": False,
-                     "ts": int(time.time() * 1000)})
+                     "ts": int(MIDDAY_TS * 1000)})
         assert wait_for(lambda: any(
             r.get("kind") == "status_view_failed"
             and r.get("source_id") == "REFUSE-1"
@@ -516,8 +536,8 @@ def test_statusreact_answers_on_personal_bot_dm(rig):
         chat=ChatRef(platform="telegram-personal", chat_id=TG_OWNER,
                      kind=ChatKind.DM, title="", peer=TG_OWNER),
         incoming=True, text="/statusreact", sender="Owner",
-        sender_id=TG_OWNER, message_id=f"tg-{time.time()}",
-        ts=time.time()))
+        sender_id=TG_OWNER, message_id=f"tg-{next(_MSG_SEQ)}",
+        ts=MIDDAY_TS))
     assert wait_for(lambda: any(
         "/statusreact is" in text
         for _chat, text in rig["personal_rec"].sent))
@@ -529,8 +549,8 @@ def test_statusreact_main_bot_owner_told_where_it_lives(rig):
         chat=ChatRef(platform="telegram-bot", chat_id=TG_OWNER,
                      kind=ChatKind.DM, title="", peer=TG_OWNER),
         incoming=True, text="/statusreact", sender="Owner",
-        sender_id=TG_OWNER, message_id=f"tb-{time.time()}",
-        ts=time.time()))
+        sender_id=TG_OWNER, message_id=f"tb-{next(_MSG_SEQ)}",
+        ts=MIDDAY_TS))
     assert wait_for(lambda: len(rig["bot_rec"].sent) >= 1)
     text = rig["bot_rec"].sent[0][1]
     # the gate stands (no operator power on the public bot) but
@@ -545,8 +565,8 @@ def test_statusreact_main_bot_stranger_gets_generic_redirect(rig):
         chat=ChatRef(platform="telegram-bot", chat_id="999",
                      kind=ChatKind.DM, title="", peer="999"),
         incoming=True, text="/statusreact", sender="Stranger",
-        sender_id="999", message_id=f"ts-{time.time()}",
-        ts=time.time()))
+        sender_id="999", message_id=f"ts-{next(_MSG_SEQ)}",
+        ts=MIDDAY_TS))
     assert wait_for(lambda: len(rig["bot_rec"].sent) >= 1)
     text = rig["bot_rec"].sent[0][1]
     assert "public chat" in text and "game list" in text
@@ -603,8 +623,8 @@ def _op(rig, text, *, chat_id=PN_POSTER, kind=ChatKind.DM,
                    kind=kind, title="", peer=chat_id)
     msg = ChatMessage(
         chat=chat, incoming=True, text=text, sender="Owner",
-        sender_id=OWNER, message_id=f"op-{time.time()}",
-        reply_to=reply_to, ts=time.time(),
+        sender_id=OWNER, message_id=f"op-{next(_MSG_SEQ)}",
+        reply_to=reply_to, ts=MIDDAY_TS,
         meta={"owner_command": True})
     return rig["runtime"].handle_control(
         text, chat.key, message=msg)
@@ -720,7 +740,7 @@ def test_organ_refused_view_and_react_journal_once(tmp_path):
     for _ in range(2):  # redelivery must not spam the journal
         personal.observe_status_post(
             "whatsapp", poster_id=PN_POSTER, poster_name="Bola",
-            text="hi", source_id="S-REF-1", ts=time.time())
+            text="hi", source_id="S-REF-1", ts=MIDDAY_TS)
     kinds = [r.get("kind") for r in vault.journal(rec.id)]
     assert kinds.count("status_view_failed") == 1
     assert kinds.count("status_react_failed") == 1
@@ -732,7 +752,7 @@ def test_organ_refused_story_view_journals(tmp_path):
         story_fetcher=lambda r: [{
             "poster_id": "555", "poster_name": "Tunde",
             "story_id": "9", "path": "", "kind": "image",
-            "ts": time.time()}],
+            "ts": MIDDAY_TS}],
         story_viewer=lambda r, poster, max_id: False)
     personal.cycle_stories("whatsapp")
     kinds = [r.get("kind") for r in vault.journal(rec.id)]
