@@ -1,5 +1,1 @@
-{
-  "library": true,
-  "reason": "Podcast/radio show composer (schedule + segments + RSS). New in NEW_MODULES_17; CLI/chat wiring is follow-up.",
-  "owner_decision_needed": "Wire into CLI/chat (show commands) or keep as import-only library."
-}
+{"library":true,"owner_decision_needed":"Automatic episode scheduling: a show's schedule is free text today and no scheduler reads it — decide whether scheduled shows should compose episodes on their own (from the morning pulse / research) or stay manual-only.","reason":"Podcast/radio show composer (schedule + segments + RSS). Wired 2026-11-16: /show chat surface + durable JSON store under data/shows.json (audit gap R1-4)."}

@@ -2170,6 +2170,243 @@ class RuntimeReachMixin:
         except (ValueError, KeyError, PermissionError, LookupError) as exc:
             return str(exc)
 
+    def _show_store(self) -> Any:
+        """ShowStore on the durable home path (shows wiring)."""
+        from ...shows.store import ShowStore
+
+        path = (self.context.settings.home_path / "data" / "shows.json")
+        return ShowStore(path)
+
+    def _resolve_show(self, store: Any, ref: str) -> Any:
+        """Exact show id, else unique id-prefix, else None."""
+        ref = (ref or "").strip()
+        hit = store.get_show(ref)
+        if hit is not None:
+            return hit
+        matches = [s for s in store.list_shows()
+                   if str(s.get("id", "")).startswith(ref)]
+        return matches[0] if len(matches) == 1 else None
+
+    def _resolve_episode(self, store: Any, ref: str) -> Any:
+        """Exact episode id, else unique id-prefix, else None."""
+        ref = (ref or "").strip()
+        hit = store.get_episode(ref)
+        if hit is not None:
+            return hit
+        matches = []
+        for show in store.list_shows():
+            matches.extend(
+                ep for ep in store.list_episodes(str(show.get("id", "")))
+                if str(ep.get("id", "")).startswith(ref))
+        return matches[0] if len(matches) == 1 else None
+
+    def _control_show(self, tail: str, *, chat_key: str = "") -> str:
+        """Shows: /show list|create|show|episode|episodes|rss|publish|delete|remove.
+
+        The audit gap R1-4 organ (nomorals/shows/composer.py) had no
+        production importer at all — no durable store, no chat
+        command, no way to create, keep, or publish a show. This is
+        its surface. Shows + composed episodes live in
+        <home>/data/shows.json (atomic tmp+replace; a corrupt file is
+        quarantined and the load raises instead of silently starting
+        empty). Owner-only: the kind is absent from PUBLIC_COMMANDS,
+        so caller_may_run denies non-owners before this runs.
+        Composing never generates scripts — the caller supplies the
+        segments (``kind:text`` fields, kind defaults to script);
+        publishing delegates to the composer's publicface gate, so an
+        episode stays a draft unless the owner publishes it AND it
+        carries no private-data markers. The link a published episode
+        gets (/p/show-<id>) is the descriptor the gate returns; no
+        route serves that path yet, and the reply says so instead of
+        pretending the episode is live.
+        """
+        from ...shows.composer import Episode, Show, compose_episode, publish_episode
+
+        usage = ("usage: /show list | create <title> [| schedule | "
+                 "voices,comma | bed_track] | show <id> | episode "
+                 "<show_id> <title> [| kind:text | ...] | episodes "
+                 "<show_id> | rss <episode_id> | publish <episode_id> "
+                 "| delete <show_id> | remove <episode_id>")
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else "list"
+        rest = parts[1] if len(parts) > 1 else ""
+        try:
+            store = self._show_store()
+        except ValueError as exc:
+            return str(exc)
+        try:
+            if verb in ("list", ""):
+                shows = store.list_shows()
+                if not shows:
+                    return ("no shows yet — /show create <title> "
+                            "[| schedule | voices,comma | bed_track] "
+                            "starts one.")
+                lines = [f"shows ({len(shows)}):"]
+                for show in shows:
+                    count = len(store.list_episodes(
+                        str(show.get("id", ""))))
+                    line = (f"  {show['id']}: {show['title']} "
+                            f"({count} episode(s))")
+                    if show.get("schedule"):
+                        line += f" — {show['schedule']}"
+                    lines.append(line)
+                return "\n".join(lines)
+            if verb == "create":
+                fields = [f.strip() for f in rest.split("|")]
+                title = fields[0] if fields else ""
+                if not title:
+                    return ("usage: /show create <title> [| schedule | "
+                            "voices,comma | bed_track]")
+                schedule = fields[1] if len(fields) > 1 else ""
+                voices = ([v.strip() for v in fields[2].split(",")
+                           if v.strip()]
+                          if len(fields) > 2 and fields[2] else [])
+                bed_track = fields[3] if len(fields) > 3 else ""
+                show = Show(title=title, schedule=schedule,
+                            voices=voices, bed_track=bed_track)
+                stored = store.put_show(show.to_dict())
+                return (f"show created: {stored['id']} — {stored['title']}"
+                        + (f" — {stored['schedule']}"
+                           if stored.get("schedule") else ""))
+            if verb == "show":
+                show = self._resolve_show(store, rest)
+                if show is None:
+                    return (f"no show matching {rest.strip()!r} — "
+                            "/show list shows ids.")
+                episodes = store.list_episodes(str(show.get("id", "")))
+                lines = [f"{show['title']} — {show['id']}"]
+                if show.get("schedule"):
+                    lines.append(f"  schedule: {show['schedule']}")
+                if show.get("voices"):
+                    lines.append("  voices: "
+                                 + ", ".join(show["voices"]))
+                if show.get("bed_track"):
+                    lines.append(f"  bed track: {show['bed_track']}")
+                if not episodes:
+                    lines.append("  no episodes yet — /show episode "
+                                 f"{show['id']} <title> | <script text> "
+                                 "composes one.")
+                else:
+                    lines.append(f"  episodes ({len(episodes)}):")
+                    for ep in episodes:
+                        line = (f"    {ep['id']}: {ep['title']} — "
+                                f"{ep.get('word_count', 0)} words, "
+                                f"~{ep.get('duration_seconds', 0)}s")
+                        if ep.get("published"):
+                            line += " [published]"
+                        lines.append(line)
+                return "\n".join(lines)
+            if verb == "episode":
+                fields = [f.strip() for f in rest.split("|")]
+                head = fields[0].split(None, 1) if fields else []
+                if len(head) < 2:
+                    return ("usage: /show episode <show_id> <title> "
+                            "[| kind:text | ...] — kinds: script, voice, "
+                            "bed, ad; a bare field is a script segment")
+                show = self._resolve_show(store, head[0])
+                if show is None:
+                    return (f"no show matching {head[0]!r} — "
+                            "/show list shows ids.")
+                segments: list[dict[str, Any]] = []
+                for field in fields[1:]:
+                    if not field:
+                        continue
+                    kind, sep, value = field.partition(":")
+                    head_word = kind.strip()
+                    if sep and " " not in head_word and head_word not in (
+                            "script", "voice", "bed", "ad"):
+                        return (f"unknown segment kind {head_word!r} — "
+                                "kinds: script, voice, bed, ad")
+                    if not sep:
+                        segments.append({"kind": "script", "text": field})
+                    elif head_word in ("script", "voice", "ad"):
+                        segments.append({"kind": head_word,
+                                         "text": value.strip()})
+                    elif head_word == "bed":
+                        segments.append({"kind": "bed",
+                                         "ref": value.strip()})
+                    else:
+                        segments.append({"kind": "script", "text": field})
+                if not segments:
+                    return ("an episode needs at least one segment — "
+                            "/show episode <show_id> <title> | <script "
+                            "text>")
+                episode = compose_episode(Show(**show), segments,
+                                          title=head[1])
+                stored = store.put_episode(episode.to_dict())
+                return (f"episode composed: {stored['id']} — "
+                        f"{stored['title']} ({stored['word_count']} "
+                        f"words, ~{stored['duration_seconds']}s, "
+                        f"{show['title']})")
+            if verb == "episodes":
+                show = self._resolve_show(store, rest)
+                if show is None:
+                    return (f"no show matching {rest.strip()!r} — "
+                            "/show list shows ids.")
+                episodes = store.list_episodes(str(show.get("id", "")))
+                if not episodes:
+                    return (f"no episodes for {show['title']} yet — "
+                            "/show episode "
+                            f"{show['id']} <title> | <script text> "
+                            "composes one.")
+                lines = [f"episodes for {show['title']} "
+                         f"({len(episodes)}):"]
+                for ep in episodes:
+                    line = (f"  {ep['id']}: {ep['title']} — "
+                            f"{ep.get('word_count', 0)} words, "
+                            f"~{ep.get('duration_seconds', 0)}s")
+                    if ep.get("published"):
+                        line += " [published]"
+                    lines.append(line)
+                return "\n".join(lines)
+            if verb == "rss":
+                episode = self._resolve_episode(store, rest)
+                if episode is None:
+                    return (f"no episode matching {rest.strip()!r} — "
+                            "/show episodes <show_id> lists them.")
+                return episode.get("rss_item") or "(no RSS item stored)"
+            if verb == "publish":
+                episode = self._resolve_episode(store, rest)
+                if episode is None:
+                    return (f"no episode matching {rest.strip()!r} — "
+                            "/show episodes <show_id> lists them.")
+                # The stored row carries publish state the dataclass
+                # does not know — pass only the composer's own fields.
+                kept = {k: episode[k] for k in (
+                    "id", "show_id", "title", "script_text",
+                    "duration_seconds", "word_count", "segments",
+                    "rss_item", "created_ts") if k in episode}
+                result = publish_episode(Episode(**kept),
+                                         owner_approved=True)
+                store.set_episode_published(
+                    str(episode["id"]), published=result.published,
+                    link=(result.link.url_path
+                          if result.link is not None else None))
+                if not result.published:
+                    return (f"left as draft: {episode['title']} — "
+                            f"{result.reason}")
+                return (f"published: {episode['title']} — "
+                        f"{result.link.url_path}. No route serves that "
+                        "path yet — the link is the descriptor the gate "
+                        "returns, not a live page.")
+            if verb == "delete":
+                show = self._resolve_show(store, rest)
+                if show is None:
+                    return (f"no show matching {rest.strip()!r} — "
+                            "/show list shows ids.")
+                store.delete_show(str(show["id"]))
+                return f"deleted show: {show['title']}"
+            if verb == "remove":
+                episode = self._resolve_episode(store, rest)
+                if episode is None:
+                    return (f"no episode matching {rest.strip()!r} — "
+                            "/show episodes <show_id> lists them.")
+                store.delete_episode(str(episode["id"]))
+                return f"removed episode: {episode['title']}"
+            return usage
+        except (ValueError, KeyError) as exc:
+            return str(exc)
+
     def _presence_watch_store(self) -> Any:
         """PresenceWatchStore on the durable home path."""
         from ...social.presence_watch import PresenceWatchStore
