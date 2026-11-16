@@ -683,6 +683,27 @@ def register(registry: Any) -> None:
                     "error": f"group digest tick failed: {exc}"}
 
     @registry.register(
+        "__watch_loop_tick__",
+        description="Run one resident watch-loop tick (audit gap R2-22): "
+        "re-scan the ops surfaces (stuck missions with one self-heal "
+        "attempt, chronic routing roles, unrecovered pivots), redeliver "
+        "the durable pending-alert queue the moment a platform is "
+        "reachable again, and re-mine the reasoning journal for new "
+        "prevention skills. Scheduler-internal; runs every ~5m. "
+        "Routine and silent — an all-quiet tick pages nobody.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _watch_loop_tick_tool() -> dict[str, Any]:
+        from ..agents.watcher import WatchLoop
+
+        try:
+            return {"ok": True, **WatchLoop(_context).tick()}
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"watch loop tick failed: {exc}"}
+
+    @registry.register(
         "__show_schedule_tick__",
         description="Run one show-schedule tick: compose a DRAFT "
         "episode for every show whose schedule is due, from the "

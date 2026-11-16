@@ -17,10 +17,21 @@ single tick for cron.
 """
 from __future__ import annotations
 
+import contextlib
 import time
 from typing import Any
 
-__all__ = ["WatchLoop"]
+#: Durable scheduler job + tool for the resident loop (audit gap R2-22).
+WATCH_LOOP_JOB = "watch loop tick"
+WATCH_LOOP_TOOL = "__watch_loop_tick__"
+#: Live cadence — the dominant resident-tick cadence in this runtime
+#: (group rhythm, delegation manager, unified scheduler all ~5m). The
+#: module's 60s default governs the standalone daemon's run() loop
+#: only; the scheduler tool runs one tick per job fire.
+WATCH_LOOP_SPEC = "every 5m"
+
+__all__ = ["WatchLoop", "WATCH_LOOP_JOB", "WATCH_LOOP_TOOL",
+           "WATCH_LOOP_SPEC", "ensure_watch_loop_job"]
 
 
 class WatchLoop:
@@ -114,3 +125,32 @@ class WatchLoop:
         except KeyboardInterrupt:  # pragma: no cover  # noqa: E106 - deliberate top-level shutdown
             print(f"\nstopped after {self.ticks} tick(s)", file=sys.stderr)
         return 0
+
+
+def ensure_watch_loop_job(scheduler: Any, *,
+                          spec: str = WATCH_LOOP_SPEC) -> Any:
+    """Register the durable watch-loop tick job. Idempotent — mirrors
+    ``ensure_group_digest_job``: an existing job at the requested
+    cadence is returned as-is, a stale one is replaced.
+    Best-effort: never raises."""
+    if scheduler is None:
+        return None
+    try:
+        for job in (scheduler.list_jobs() or []):
+            name = (job.get("name") if isinstance(job, dict)
+                    else getattr(job, "name", None))
+            if name == WATCH_LOOP_JOB:
+                job_spec = (job.get("spec") if isinstance(job, dict)
+                            else getattr(job, "spec", None))
+                if job_spec == spec:
+                    return job
+                with contextlib.suppress(Exception):
+                    job_id = (job.get("id") if isinstance(job, dict)
+                              else getattr(job, "id", None))
+                    scheduler.remove(job_id)
+                break
+        return scheduler.add(WATCH_LOOP_JOB, spec, "tool",
+                             {"tool": WATCH_LOOP_TOOL, "args": {}},
+                             routine=True)
+    except Exception:  # noqa: BLE001 - scheduling is best-effort
+        return None

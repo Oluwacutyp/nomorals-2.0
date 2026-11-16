@@ -3850,6 +3850,21 @@ class PartnerRuntime(
                     _log.warning(
                         "group digest tick job not registered: %s",
                         exc)
+                # Resident watch loop (audit gap R2-22): one durable
+                # "watch loop tick" job (every 5m) re-scanning the ops
+                # surfaces (stuck missions with one self-heal attempt,
+                # chronic roles, unrecovered pivots), redelivering the
+                # durable pending-alert queue, and re-mining the
+                # reasoning journal for prevention skills.
+                # Idempotent; best-effort.
+                try:
+                    from ...agents.watcher import ensure_watch_loop_job
+
+                    ensure_watch_loop_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "watch loop tick job not registered: %s",
+                        exc)
                 # Delegation manager: one durable "delegation manager
                 # tick" job (every 5m) recovering delegated runs
                 # orphaned by a restart, resuming what the restart

@@ -3860,8 +3860,8 @@ def _parser() -> argparse.ArgumentParser:
     watch = sub.add_parser("watch", aliases=CLI_ALIASES["watch"],
                            help="background watchers with smart alerts")
     watch.add_argument("action", nargs="?", default="list",
-                       choices=["add", "list", "tick", "pause", "resume", "rm",
-                                "history", "alerts"])
+                       choices=["add", "list", "tick", "loop", "pause",
+                                "resume", "rm", "history", "alerts"])
     watch.add_argument("ref", nargs="?", default="",
                        help="plain-language spec (add) or watcher id/name")
     watch.add_argument("--severity", default="",

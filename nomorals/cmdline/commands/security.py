@@ -360,12 +360,33 @@ def _cmd_monitor(args, context):
 
 
 def _cmd_watch(args, context):
-    """Background watchers with smart alerts — thin shell over agents.watchers."""
+    """Background watchers with smart alerts — thin shell over agents.watchers.
+
+    ``loop`` is the one action that does NOT belong to that system: it
+    runs one tick of the resident watch loop (``agents.watcher``,
+    singular) — the ops sweep — and prints the report.
+    """
+    action = getattr(args, "action", "") or "list"
+    ref = getattr(args, "ref", "") or ""
+
+    if action == "loop":
+        # Resident watch loop (audit gap R2-22). Kept apart from
+        # WatcherAgent on purpose: the two systems share only the word
+        # "watch" — this one re-scans ops surfaces and redelivers the
+        # pending-alert queue, the other watches user-named things.
+        from ...agents.watcher import WatchLoop
+
+        try:
+            report = WatchLoop(context).tick()
+        except Exception as exc:  # noqa: BLE001 - one bad tick is reported, not fatal
+            print(f"watch loop tick failed: {exc}")
+            return 1
+        _emit(args, {"ok": True, **report}, WatchLoop.format(report))
+        return 0
+
     from ...agents.watchers import WatcherAgent
 
     agent = WatcherAgent(context)
-    action = getattr(args, "action", "") or "list"
-    ref = getattr(args, "ref", "") or ""
 
     if action == "add":
         if not ref:
