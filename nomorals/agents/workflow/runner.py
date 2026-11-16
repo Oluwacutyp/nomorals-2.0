@@ -215,14 +215,17 @@ def run_workflow_tick_once(context: Any, *,
             elif state in ("done", "failed") \
                     and not record.get("summary_delivered") \
                     and notifier is not None:
-                chat_key = str(record.get("chat_key") or "")
                 text = str(record.get("summary") or "")
                 if not text and state == "failed":
                     text = (f"workflow {record.get('name', '')} "
                             f"failed: {record.get('error', '')}")
-                if chat_key and text:
+                if text:
                     try:
-                        notifier.send(chat_key, text)
+                        notifier.publish(
+                            "workflow",
+                            title=(f"Workflow "
+                                   f"{record.get('name', '')} {state}"),
+                            body=text)
                     except Exception as exc:  # noqa: BLE001 - delivery is best-effort
                         record_failure(
                             f"workflow:{record['id']}:deliver", exc)

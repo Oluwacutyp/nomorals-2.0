@@ -553,9 +553,9 @@ class _FakeNotifier:
     def __init__(self):
         self.sent = []
 
-    def send(self, chat_key, text, **kw):
-        self.sent.append((chat_key, text))
-        return True
+    def publish(self, kind, title="", body="", **kw):
+        self.sent.append((kind, title, body))
+        return {"ok": True}
 
 
 class _FakeContext:
@@ -602,7 +602,7 @@ class RunnerTests(unittest.TestCase):
         got = store.get_workflow(wf["id"])
         self.assertEqual(got["state"], "done")
         self.assertTrue(
-            any("done" in text for _, text in notifier.sent))
+            any("done" in body for _, _, body in notifier.sent))
 
     def test_tick_never_raises_when_the_store_raises(self):
         from nomorals.agents.workflow.runner import (

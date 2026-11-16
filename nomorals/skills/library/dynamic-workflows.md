@@ -1,3 +1,13 @@
+---
+id: dynamic-workflows
+title: Dynamic workflows — saved, reviewable agent scripts
+summary: How multi-agent work runs as code: `/workflow <task>` writes a synchronous Python script (phase, log, agent, parallel, pipeline), saves it durably, shows it in chat, and runs it on the scheduler clock — no review gate, schema-typed handoffs, per-agent worktrees, multi-turn handles.
+topics: workflows, agents, scripts, delegation, parallel, review
+triggers: workflow, run workflow, agent script, multi-agent script
+layer: agents
+version: 1
+---
+
 # Dynamic workflows — saved, reviewable agent scripts
 
 A workflow is a short synchronous Python script that coordinates
