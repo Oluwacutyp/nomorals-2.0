@@ -312,6 +312,19 @@ BASELINE: dict[str, int] = {
     "tests/test_wp_economy_pages.py": 2,
     "tests/test_wisdom_ingestor.py": 1,
     "tests/test_workspace_sweep.py": 2,
+    # Grandfathered (batch H17): 4 claim seeds stay on the real
+    # clock — the INSTALLED feed reads it. make_claims_feed's _feed
+    # calls claims_as_findings with no now (feed.py), so the
+    # pipeline's weekly_content run stamps freshness against
+    # time.time(); a frozen MIDDAY seed (~32 days old on the real
+    # clock) reads stale and the claim never feeds. The feed
+    # callable takes only the niche name, so there is no now seam
+    # to thread a frozen instant through, and hand-rolling the feed
+    # in the test would stop proving the production factory feeds.
+    # The file's other 10 reads (explicit-now findings, niche
+    # discovery/adoption seeds, artifact citations, outcome NOW)
+    # are frozen.
+    "tests/test_ws4p5_ws3_contracts.py": 4,
 }
 
 

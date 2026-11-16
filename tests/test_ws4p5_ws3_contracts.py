@@ -37,6 +37,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.frozen_clock import MIDDAY_TS
+
 from nomorals.media.explore import ExploreStore
 from nomorals.media.explore.feed import (
     claims_as_findings,
@@ -51,6 +53,18 @@ from nomorals.social.drafts import DraftQueue
 
 HOUR = 3600.0
 DAY = 86400.0
+
+# Grandfathered (batch H17): 4 claim seeds stay on the real clock —
+# the INSTALLED feed reads it. make_claims_feed's _feed calls
+# claims_as_findings with no now (feed.py), so the pipeline's
+# weekly_content run stamps freshness against time.time(); a frozen
+# MIDDAY seed (~32 days old on the real clock) reads stale and the
+# claim never feeds. The feed callable takes only the niche name,
+# so there is no now seam to thread a frozen instant through, and
+# hand-rolling the feed in the test would stop proving the
+# production factory feeds. The 4 seeds: pipeline-run (:177),
+# appends-after-research (:221), dedupes-against-research (:244),
+# build-context install (:641). Every other read is frozen.
 
 CLEAN_COPY = ("Shipping agents that finish real work — here is what"
               " changed this week and why it matters.")
@@ -129,7 +143,7 @@ def _gold_cluster(store, t0):
 
 class TestClaimsFeed:
     def test_fresh_trend_claim_projects_with_identity_and_basis(self):
-        now = time.time()
+        now = MIDDAY_TS
         store = ExploreStore()
         _claim(store, key="gold trading", at=now - 600,
                basis="seen in 2 sweeps; velocity 4x baseline")
@@ -150,7 +164,7 @@ class TestClaimsFeed:
         assert f["source"] == "explore"
 
     def test_spike_and_unverified_feed_labelled(self):
-        now = time.time()
+        now = MIDDAY_TS
         store = ExploreStore()
         _claim(store, key="burst topic", kind="spike", at=now - 300,
                text="burst topic: one huge sweep")
@@ -164,7 +178,7 @@ class TestClaimsFeed:
         assert "unverified" in findings["unverified"]["snippet"]
 
     def test_stale_claims_do_not_feed(self):
-        now = time.time()
+        now = MIDDAY_TS
         store = ExploreStore()
         _claim(store, key="old trend", at=now - 4 * DAY)  # trend: 3d
         _claim(store, key="old spike", kind="spike",
@@ -174,6 +188,8 @@ class TestClaimsFeed:
         assert [f["claim_key"] for f in findings] == ["live trend"]
 
     def test_pipeline_run_receives_the_feed(self, queue):
+        # Grandfathered: the installed feed reads the real clock
+        # (see the note above HOUR) — a frozen seed reads stale.
         now = time.time()
         store = ExploreStore()
         _claim(store, key="gold trading", at=now - 600)
@@ -199,7 +215,7 @@ class TestClaimsFeed:
         assert stamped[0].metadata["claim_kind"] == "trend"
 
     def test_explicit_findings_bypass_the_feed(self, queue):
-        now = time.time()
+        now = MIDDAY_TS
         store = ExploreStore()
         _claim(store, key="gold trading", at=now - 600)
         set_findings_feed(make_claims_feed(store))
@@ -218,6 +234,8 @@ class TestClaimsFeed:
 
     def test_feed_appends_after_research_never_displaces(
             self, queue, monkeypatch):
+        # Grandfathered: the installed feed reads the real clock
+        # (see the note above HOUR) — a frozen seed reads stale.
         now = time.time()
         store = ExploreStore()
         _claim(store, key="gold trading", at=now - 600)
@@ -241,6 +259,8 @@ class TestClaimsFeed:
         assert result.findings[1]["claim_key"] == "gold trading"
 
     def test_feed_dedupes_against_research(self, queue, monkeypatch):
+        # Grandfathered: the installed feed reads the real clock
+        # (see the note above HOUR) — a frozen seed reads stale.
         now = time.time()
         store = ExploreStore()
         _claim(store, key="gold trading", at=now - 600,
@@ -280,7 +300,7 @@ class TestNicheRegistry:
     def test_proposed_invisible_adopted_visible(self, tmp_path):
         from nomorals.media.explore import adopt_niche
 
-        t0 = time.time() - 100000
+        t0 = MIDDAY_TS - 100000
         store = self._proposed_store(t0)
         proposed = {r["slug"] for r in drafting_niches(store)}
         assert "gold_trading" not in proposed
@@ -305,7 +325,7 @@ class TestNicheRegistry:
         from nomorals.media.contentops.niches import registry
         from nomorals.media.explore import adopt_niche
 
-        t0 = time.time() - 100000
+        t0 = MIDDAY_TS - 100000
         store = self._proposed_store(t0)
         thesis = store.niche_proposal("gold_trading")["thesis"]
         resolve = drafting_plugin_resolver(store)
@@ -329,7 +349,7 @@ class TestNicheRegistry:
         from nomorals.storage.db import Database
         from nomorals.storage.kv import KVStore
 
-        t0 = time.time() - 100000
+        t0 = MIDDAY_TS - 100000
         db = Database(":memory:")
         db.migrate()
         store = _gold_cluster(ExploreStore(KVStore(db)), t0)
@@ -386,7 +406,7 @@ class TestArtifactCitations:
         blob = b"fake-video-bytes-for-a-clip"
         art = artifacts.put(blob, type="video", creator="test",
                             metadata={"title": "Clip One"})
-        now = time.time()
+        now = MIDDAY_TS
         store = ExploreStore()
         self._channel_claim(store, artifact_id=art.id, now=now)
 
@@ -414,7 +434,7 @@ class TestArtifactCitations:
 
     def test_unverified_artifact_id_cites_nothing(self, tmp_path):
         artifacts = self._artifact_store(tmp_path)
-        now = time.time()
+        now = MIDDAY_TS
         store = ExploreStore()
         self._channel_claim(store, artifact_id="no-such-artifact",
                             now=now)
@@ -432,7 +452,7 @@ class TestArtifactCitations:
 
 
 class TestClaimOutcomes:
-    NOW = time.time()
+    NOW = MIDDAY_TS
 
     def _manager(self, db, results):
         from nomorals.social.base import PlatformAdapter, PostResult
@@ -638,6 +658,8 @@ class TestProductionWiring:
         try:
             assert cp_module._FINDINGS_FEED is not None
             store, _engine, _beats = explore_for_context(context)
+            # Grandfathered: the installed feed reads the real clock
+            # (see the note above HOUR) — a frozen seed reads stale.
             _claim(store, key="gold trading", at=time.time() - 300)
             # the pipeline's real entry point, no findings=
             # injection: the installed feed reaches the run
