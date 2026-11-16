@@ -16,9 +16,6 @@ from nomorals.games.extra_content import (
 )
 from nomorals.community.parties_quick import PartyQuick, build_playlist
 from nomorals.community.token_economy import TokenEconomy, TOKEN_DISCLAIMER
-from nomorals.sources.health_plus import (
-    NEW_SOURCE_DESCRIPTORS, SourceHealth, new_source_descriptors,
-)
 from nomorals.console.tui_facade import TUIFacade
 from nomorals.scheduler.facade import SchedulerFacade, parse_schedule_spec
 from nomorals.plugins.marketplace import Marketplace, PluginTestFailed
@@ -185,24 +182,35 @@ def test_token_unverified_cannot_earn():
 
 # ── 4. sources + health ─────────────────────────────────────────────────────
 
-def test_five_new_sources_and_health():
-    assert len(NEW_SOURCE_DESCRIPTORS) == 5
-    domains = {d["domain"] for d in NEW_SOURCE_DESCRIPTORS}
-    assert {"punchng.com", "audiomack.com", "techcrunch.com",
-            "espn.com", "yorubaculture.example"} <= domains
-    descs = new_source_descriptors()
-    assert len(descs) == 5
-    health = SourceHealth()
-    assert health.success_rate("punchng.com") is None  # unknown, not failed
-    assert health.is_stale("punchng.com") is True  # never probed = stale
-    health.probe("punchng.com", lambda s: (True, 0.2))
-    health.probe("espn.com", lambda s: (False, 0.5))
-    assert health.success_rate("punchng.com") == 1.0
-    assert health.success_rate("espn.com") == 0.0
-    chain = health.fallback_chain(["espn.com", "punchng.com", "never-probed.example"])
-    assert chain[0] == "punchng.com"  # healthy first
-    assert chain[-1] == "espn.com"  # known-dead last
-    assert health.health_report()
+def test_five_new_sources_and_health(tmp_path):
+    """The five sources are registry seeds and the registry is the
+    ONE health truth (gap R1-16: sources/health_plus.py deleted —
+    its SourceHealth never ran; every method duplicated the
+    registry's persisted machinery)."""
+    from nomorals.media.source_registry import _seed
+    from nomorals.storage.db import Database
+    from nomorals.storage.kv import KVStore
+
+    db = Database(":memory:")
+    db.migrate()
+    reg = _seed(store=KVStore(db))
+    domains = {"punchng.com", "audiomack.com", "techcrunch.com",
+               "espn.com", "yorubaculture.example"}
+    for domain in domains:
+        assert reg.for_domain(domain) is not None, domain
+    punch = reg.for_domain("punchng.com")
+    espn = reg.for_domain("espn.com")
+    assert reg.stats_for(punch)["ok"] == 0  # unknown, not failed
+    assert reg.health_for(punch) == "unknown"
+    reg.record_outcome(punch, True, latency_s=0.2)
+    for _ in range(3):  # STAND_DOWN_AFTER
+        reg.record_outcome(espn, False, error_class="fetch")
+    assert reg.stats_for(punch)["success_rate"] == 1.0
+    assert reg.stats_for(espn)["success_rate"] == 0.0
+    chain = [d.domain for d in reg.ordered_for(kind="news")]
+    assert "punchng.com" in chain  # healthy first
+    assert "espn.com" not in chain  # known-dead leaves the ordering
+    assert reg.health_for(punch) == "verified-live"
 
 
 # ── 5. facades preserve APIs ────────────────────────────────────────────────

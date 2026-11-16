@@ -28,8 +28,8 @@ with fake fetchers/probers — offline, like every pass suite:
 * AA-61  research's weak_sources computation is canonical in the
   pipeline, consumed by run_job ranking/fetch selection, and
   surfaced on run output.
-* AA-62  health_plus's five descriptors are media-registry seeds;
-  its SourceHealth delegates to the registry when bound.
+* AA-62  five descriptors are media-registry seeds (the registry
+  is the one health truth; sources/health_plus.py deleted, gap R1-16).
 * AA-63  owner book descriptors persist in the registry's KV store
   and are restored on first use after a restart.
 """
@@ -823,41 +823,26 @@ def test_aa61_run_output_surfaces_the_weak_set(tmp_path):
         "noise.example"]
 
 
-# ── AA-62: health_plus seeds + delegation ─────────────────────────────
+# ── AA-62: five descriptors are registry seeds ─────────────────────────
 
 
 def test_aa62_all_five_descriptors_are_registry_seeds():
     from nomorals.media.source_registry import _seed
-    from nomorals.sources.health_plus import NEW_SOURCE_DESCRIPTORS
 
+    # Kept literal here: the test owns the expectation now that the
+    # (deleted) health_plus descriptor copy is gone.
+    expected = (
+        ("punchng.com", ("news",)),
+        ("audiomack.com", ("music",)),
+        ("techcrunch.com", ("news", "tech")),
+        ("espn.com", ("news", "sports")),
+        ("yorubaculture.example", ("culture",)),
+    )
     reg = _seed()
-    for row in NEW_SOURCE_DESCRIPTORS:
-        desc = reg.for_domain(row["domain"])
-        assert desc is not None, row["domain"]
-        assert set(row["kinds"]) <= set(desc.kinds), row["domain"]
-
-
-def test_aa62_source_health_delegates_to_registry(tmp_path):
-    from nomorals.sources.health_plus import SourceHealth
-
-    reg = _registry(tmp_path)
-    sh = SourceHealth(registry=reg)
-    desc = reg.for_domain("techcrunch.com")
-    result = sh.probe("techcrunch.com", lambda s: (True, 0.05))
-    assert result.ok
-    assert reg.stats_for(desc)["ok"] == 1  # landed in the ONE registry
-    assert sh.success_rate("techcrunch.com") == 1.0
-    assert sh.is_healthy("techcrunch.com")
-    for _ in range(10):
-        sh.probe("techcrunch.com", lambda s: (False, 0.01))
-    assert not reg.is_active(desc)  # registry stood it down/disabled it
-    assert not sh.is_healthy("techcrunch.com")
-    chain = sh.fallback_chain(["techcrunch.com", "espn.com"])
-    assert chain[0] == "espn.com"  # the registry's standing orders it
-    # unbound, the class keeps its in-memory behaviour exactly
-    plain = SourceHealth()
-    plain.probe("x.example", lambda s: (True, 0.01))
-    assert plain.success_rate("x.example") == 1.0
+    for domain, kinds in expected:
+        desc = reg.for_domain(domain)
+        assert desc is not None, domain
+        assert set(kinds) <= set(desc.kinds), domain
 
 
 # ── AA-63: owner book descriptors persist ─────────────────────────────

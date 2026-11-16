@@ -35,12 +35,12 @@ EXPECTED_ASSETS = (
     *[f"media_edit/workflows/{name}.json" for name in (
         "img2img", "inpaint", "txt2img", "upscale", "wan22_i2v",
         "wan22_t2v")],
-    # domain seed libraries (19)
+    # domain seed libraries (18)
     *[f"{pkg}/library.json" for pkg in (
         "assets", "commitments", "decisions", "focus", "household",
         "identity", "legacy", "life", "meta", "people", "preferences",
         "publicface", "pulses", "retrieval", "reviews", "scam", "shows",
-        "sources", "media/upgrade")],
+        "media/upgrade")],
     # builder templates the scaffolder copies wholesale
     *[f"builders/templates/{kind}/requirements.txt" for kind in (
         "bot", "cli_tool", "dashboard", "rest_api", "telegram_bot",

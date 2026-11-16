@@ -2922,11 +2922,12 @@ def _seed(store: Any = None) -> SourceRegistry:
             licence=Licence.LICENSED, trust_tier=TrustTier.COMMUNITY,
             rate_limit_per_min=10, notes=notes,
             search_url_template=template))
-    # AA-62: the sources/health_plus.py descriptors are registry
-    # seeds — punchng.com and audiomack.com were already seeded
-    # above (identical keys; first-wins keeps one row per source);
-    # the three that existed ONLY as health_plus dicts join here,
-    # with the kinds health_plus declares for them.
+    # The remaining three descriptors join here as registry seeds
+    # (punchng.com and audiomack.com were already seeded above
+    # under identical keys; first-wins keeps one row per source).
+    # (Gap R1-16: sources/health_plus.py, which carried a second
+    # copy of these descriptors, is deleted — the registry seeds
+    # are the one copy.)
     for nation, language, domain, name, kinds, notes in (
             ("US", "en", "techcrunch.com", "TechCrunch",
              ("news", "tech"), "Global tech news."),

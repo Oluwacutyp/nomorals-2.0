@@ -110,7 +110,6 @@ include = ["nomorals*"]
 "nomorals.reviews" = ["library.json"]
 "nomorals.scam" = ["library.json"]
 "nomorals.shows" = ["library.json"]
-"nomorals.sources" = ["library.json"]
 "nomorals.media.upgrade" = ["library.json"]
 # Builder templates are copied wholesale by scaffold.copytree, so the
 # whole tree ships (code files, READMEs, requirements, data) — two depth
