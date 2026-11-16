@@ -41,6 +41,7 @@ from ..core.logging_setup import get_logger
 from .devon import DevonAgent, DevonResult
 from .swarm_board import (
     SwarmBoard,
+    parse_breaker_verdict,
     parse_verifier_verdict,
     worker_name_for,
 )
@@ -87,6 +88,18 @@ class SwarmResult:
     synthesis: str = ""
     seconds: float = 0.0
     run_id: str = field(default_factory=lambda: new_short_id("swarm"))
+    #: Concrete attacks the breaker found ({worker, attack, breaker}).
+    #: Empty with ``breaker_ran`` True means the breaker ran and
+    #: found nothing — a recorded absence, never a silent green.
+    breaker_findings: list[dict[str, Any]] = field(default_factory=list)
+    #: True once the breaker phase ran (at least one leg survived to
+    #: be attacked). False when everything failed before it.
+    breaker_ran: bool = False
+    #: Re-plan records, one per worker that failed verification
+    #: twice ({trigger, worker, original, revised, changes,
+    #: failures, final_ok}). The trigger fires at most once per
+    #: worker — a third failure ends the run, it never re-plans.
+    replans: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -101,6 +114,9 @@ class SwarmResult:
             "seconds": round(self.seconds, 2),
             "run_id": self.run_id,
             "ok": self.ok,
+            "breaker_findings": self.breaker_findings,
+            "breaker_ran": self.breaker_ran,
+            "replans": self.replans,
         }
 
 
@@ -366,7 +382,9 @@ class SwarmAgent:
                  on_progress: Callable[[int, int, str, str], None] | None = None,
                  total_legs: int = 0, member: str = "",
                  verifier: bool = False,
-                 verifier_for: tuple[str, ...] = ()) -> dict[str, Any]:
+                 verifier_for: tuple[str, ...] = (),
+                 breaker: bool = False,
+                 breaker_for: tuple[str, ...] = ()) -> dict[str, Any]:
         started = time.time()
         remaining = max(20.0, deadline - started)
         brief = subtask
@@ -404,6 +422,9 @@ class SwarmAgent:
             if verifier:
                 progress = ("started: verifying "
                             + ", ".join(verifier_for))
+            elif breaker:
+                progress = ("started: breaking "
+                            + ", ".join(breaker_for))
             else:
                 progress = f"started: {subtask[:160]}"
             board.post(member, progress, kind="progress")
@@ -476,22 +497,124 @@ class SwarmAgent:
                              for leg in legs if leg.get("ok"))
         return (merged or "all swarm legs failed"), False
 
+    def _repair_step(self, goal: str, subtask: str,
+                     failures: list[dict[str, Any]]) -> dict[str, Any]:
+        """Repair one subtask through the planner (lazy import —
+        the orchestrator is a heavy module)."""
+        from .orchestrator import MasterOrchestrator
+
+        return MasterOrchestrator(self.context).repair_step(
+            goal, subtask, failures)
+
+    def _break_attempts(self, board: SwarmBoard, goal: str,
+                        subtasks: list[str], leg_names: list[str],
+                        result: SwarmResult, deadline: float,
+                        on_progress: Callable[[int, int, str, str],
+                                              None] | None,
+                        record_failure: Callable[..., None]
+                        ) -> list[dict[str, Any]]:
+        """Breaker phase: one breaker per 2–4 workers ATTACKS the
+        surviving work. A concrete attack re-runs the worker once,
+        like a verifier flag. Returns the findings; an empty return
+        with the phase run means the breaker found nothing — the
+        caller records that absence, it is never silent."""
+        findings: list[dict[str, Any]] = []
+        ok_workers = {leg_names[i] for i, leg in enumerate(result.legs)
+                      if leg.get("ok") and i < len(leg_names)}
+        if not ok_workers:
+            return findings
+        attacks: dict[str, list[str]] = {}
+        for b_index, breaker in enumerate(board.assign_breakers()):
+            group = [w for w in board.breaker_group(breaker)
+                     if w in ok_workers]
+            if not group:
+                continue
+            b_subtask = (
+                f"Try to BREAK the work of {', '.join(group)}: read "
+                f"their digests on the board, attack them — find the "
+                f"flaw, the untested case, the silent assumption. "
+                f"Use adversarial tests, edge cases, failure-path "
+                f"probes. Report one line per worker — 'BREAK name: "
+                f"<concrete attack>' or 'HOLD name: <why it holds>'.")
+            b_leg = self._run_leg(
+                b_subtask, deadline, index=len(subtasks) + b_index,
+                run_id=result.run_id, on_progress=on_progress,
+                total_legs=len(subtasks), member=breaker,
+                breaker=True, breaker_for=tuple(group))
+            self._post_board_result(board, breaker, b_leg,
+                                    kind="breaker")
+            for worker, notes in parse_breaker_verdict(
+                    str(b_leg.get("digest") or "")).items():
+                attacks.setdefault(worker, []).extend(notes)
+        for worker, notes in attacks.items():
+            findings.append({"worker": worker,
+                             "attack": notes[0] if notes else "",
+                             "attacks": list(notes)})
+        if not findings:
+            board.post("coordinator",
+                       "breaker: no findings — the surviving work "
+                       "held against attack",
+                       kind="breaker")
+            return findings
+        for i, leg in enumerate(list(result.legs)):
+            name = leg_names[i] if i < len(leg_names) else ""
+            notes = attacks.get(name, [])
+            if not notes:
+                continue
+            # The break IS a failed verification attempt: the
+            # worker's work did not survive attack.
+            record_failure(name, leg.get("digest"), notes)
+            retry_brief = (
+                f"{subtasks[i]}\n\nBreaker attack — fix this, do not "
+                f"repeat it:\n"
+                + "\n".join(f"- {n}" for n in notes))
+            new_leg = self._run_leg(
+                retry_brief, deadline, index=i, run_id=result.run_id,
+                on_progress=on_progress, total_legs=len(subtasks),
+                member=name)
+            result.legs[i] = new_leg
+            self._post_board_result(board, name, new_leg)
+            if not new_leg.get("ok"):
+                record_failure(
+                    name, new_leg.get("digest"), notes)
+        return findings
+
     def _verify_and_rerun(self, board: SwarmBoard, goal: str,
                           subtasks: list[str], leg_names: list[str],
                           result: SwarmResult, deadline: float,
                           on_progress: Callable[[int, int, str, str], None]
                           | None = None) -> None:
-        """Verifier phase, then exactly one re-run per flagged / failed
-        worker. A worker that fails twice is killed, not retried again.
+        """Verifier phase, breaker phase, then one re-plan per worker
+        that failed verification twice.
 
-        The verifier phase only runs when at least one worker leg
-        succeeded — there is nothing to verify when everything failed.
-        Verifier legs are sequential (they read the same board, and a
-        swarm's verifiers are few), re-runs too: the second attempt
-        must see the first attempt's digest and the verifier's notes.
+        A failed attempt is one count per worker: a crashed leg, a
+        verifier FLAG, or a breaker BREAK each count once, however
+        many notes the attempt carried. At two failures the named
+        trigger ``verification_failed_twice`` fires exactly once:
+        the planner repairs the plan for that subtask and the worker
+        gets ONE retry against the revised brief — never the old one.
+        A third failure kills the worker, with the full history
+        attached to the replan record. No re-plan loop exists.
         """
         if not any(leg.get("ok") for leg in result.legs):
             return
+        failures: dict[str, list[dict[str, Any]]] = {}
+        replanned: set[str] = set()
+
+        def _record_failure(name: str, digest: Any,
+                            notes: list[str]) -> None:
+            entries = failures.setdefault(name, [])
+            entries.append({
+                "attempt": len(entries) + 1,
+                "digest": str(digest or "")[:400],
+                "notes": [str(n)[:400] for n in (notes or [])],
+            })
+
+        # Attempt 1: crashed legs already failed once.
+        for i, leg in enumerate(result.legs):
+            name = leg_names[i] if i < len(leg_names) else ""
+            if name and not leg.get("ok"):
+                _record_failure(name, leg.get("digest"), [])
         flags: dict[str, list[str]] = {}
         for v_index, verifier in enumerate(board.assign_verifiers()):
             group = board.verifier_group(verifier)
@@ -510,6 +633,13 @@ class SwarmAgent:
             for worker, notes in parse_verifier_verdict(
                     str(v_leg.get("digest") or "")).items():
                 flags.setdefault(worker, []).extend(notes)
+        # A flag on a leg that had NOT already failed is that
+        # worker's first failed attempt.
+        for i, leg in enumerate(result.legs):
+            name = leg_names[i] if i < len(leg_names) else ""
+            if name and leg.get("ok") and flags.get(name):
+                _record_failure(name, leg.get("digest"),
+                                flags[name])
         for i, leg in enumerate(list(result.legs)):
             name = leg_names[i] if i < len(leg_names) else ""
             notes = flags.get(name, [])
@@ -531,11 +661,52 @@ class SwarmAgent:
                 member=name)
             result.legs[i] = new_leg
             self._post_board_result(board, name, new_leg)
-            if not new_leg.get("ok") and name:
+            if not new_leg.get("ok"):
+                _record_failure(name, new_leg.get("digest"), notes)
+        # ── breaker phase ──
+        result.breaker_ran = True
+        result.breaker_findings = self._break_attempts(
+            board, goal, subtasks, leg_names, result, deadline,
+            on_progress, _record_failure)
+        # ── re-plan phase: exactly one repair per double failure ──
+        for i in range(len(result.legs)):
+            name = leg_names[i] if i < len(leg_names) else ""
+            history = failures.get(name, [])
+            if not name or len(history) < 2 or name in replanned:
+                continue
+            replanned.add(name)
+            try:
+                record = self._repair_step(goal, subtasks[i], history)
+            except Exception as exc:  # noqa: BLE001 — a repair that
+                # cannot be built fails closed: the worker is killed,
+                # never retried on the old brief.
+                _log.exception("swarm re-plan failed for %s: %r",
+                               name, exc)
                 try:
                     board.set_state(name, "killed")
-                except Exception:  # noqa: BLE001 - state is bookkeeping
-                    _log.debug("swarm board set_state failed", exc_info=True)
+                except Exception:  # noqa: BLE001 - bookkeeping
+                    _log.debug("swarm board set_state failed",
+                               exc_info=True)
+                continue
+            record["worker"] = name
+            result.replans.append(record)
+            revised_leg = self._run_leg(
+                record["revised"], deadline, index=i,
+                run_id=result.run_id, on_progress=on_progress,
+                total_legs=len(subtasks), member=name)
+            result.legs[i] = revised_leg
+            self._post_board_result(board, name, revised_leg)
+            if not revised_leg.get("ok"):
+                _record_failure(name, revised_leg.get("digest"), [])
+                record["failures"] = list(history)
+                record["final_ok"] = False
+                try:
+                    board.set_state(name, "killed")
+                except Exception:  # noqa: BLE001 - bookkeeping
+                    _log.debug("swarm board set_state failed",
+                               exc_info=True)
+            else:
+                record["final_ok"] = True
 
     # ── the run ──────────────────────────────────────────────────────────────
     def run(self, goal: str, workers: int = 3,

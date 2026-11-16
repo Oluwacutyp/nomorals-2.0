@@ -323,6 +323,7 @@ class SwarmWiringTests(unittest.TestCase):
                 with lock:
                     calls.append({"subtask": subtask, "index": index,
                                   "verifier": bool(kw.get("verifier")),
+                                  "breaker": bool(kw.get("breaker")),
                                   "verifier_for": kw.get("verifier_for", ())})
                 return script(self, subtask, index, kw)
 
@@ -368,11 +369,11 @@ class SwarmWiringTests(unittest.TestCase):
         result = agent.run("audit the parser and the api", workers=2)
         self.assertTrue(result.ok)
         self.assertTrue(state["verifier_seen"])
-        # Worker legs only (verifier legs excluded): the flagged
-        # worker ran twice (once + one re-run), the other once.
+        # Worker legs only (verifier and breaker legs excluded): the
+        # flagged worker ran twice (once + one re-run), the other once.
         by_index: dict[int, int] = {}
         for call in calls:
-            if call["verifier"]:
+            if call["verifier"] or call.get("breaker"):
                 continue
             by_index[call["index"]] = by_index.get(call["index"], 0) + 1
         self.assertEqual(sorted(by_index.values()), [1, 2])
@@ -394,15 +395,22 @@ class SwarmWiringTests(unittest.TestCase):
                     "steps": 1, "seconds": 0.1}
 
         agent, calls = self._stub_agent(_script)
-        agent.run("audit the parser and the api", workers=2)
+        result = agent.run("audit the parser and the api", workers=2)
         board = agent.board
         states = {m["name"]: m["state"] for m in board.members}
-        # Worker 0 failed, was re-run once, failed again, and is
-        # recorded killed — not revived.
+        # Worker 0 failed, was re-run once, failed again, was
+        # re-planned ONCE (verification_failed_twice), failed a
+        # third time, and is recorded killed — not revived, and
+        # never re-planned again.
         self.assertIn("killed", states.values())
         runs_of_zero = [c for c in calls
                         if c["index"] == 0 and not c["verifier"]]
-        self.assertEqual(len(runs_of_zero), 2)
+        self.assertEqual(len(runs_of_zero), 3)
+        self.assertEqual(len(result.replans), 1)
+        self.assertEqual(result.replans[0]["trigger"],
+                         "verification_failed_twice")
+        self.assertGreaterEqual(
+            len(result.replans[0]["failures"]), 2)
 
 
 class RenderTests(unittest.TestCase):

@@ -59,6 +59,7 @@ __all__ = [
     "ensure_swarm_board_job",
     "parse_mentions",
     "parse_verifier_verdict",
+    "parse_breaker_verdict",
     "run_swarm_board_tick_once",
     "store_for_context",
     "worker_name_for",
@@ -85,6 +86,11 @@ BOARD_STATES = ("active", "done", "failed")
 _MENTION_RE = re.compile(r"@([A-Za-z0-9][A-Za-z0-9_-]*)")
 _FLAG_RE = re.compile(
     r"^\s*FLAG\s+@([A-Za-z0-9][A-Za-z0-9_-]*)\s*:\s*(.+?)\s*$",
+    re.IGNORECASE | re.MULTILINE)
+#: A breaker's attack line: ``BREAK @name: <concrete attack>``.
+#: ``HOLD @name: ...`` lines are not attacks.
+_BREAK_RE = re.compile(
+    r"^\s*BREAK\s+@([A-Za-z0-9][A-Za-z0-9_-]*)\s*:\s*(.+?)\s*$",
     re.IGNORECASE | re.MULTILINE)
 _WORD_RE = re.compile(r"[a-z0-9]+")
 #: Words that carry no identity when naming a worker from its subtask.
@@ -122,6 +128,20 @@ def parse_verifier_verdict(digest: str) -> dict[str, list[str]]:
     for match in _FLAG_RE.finditer(digest or ""):
         flags.setdefault(match.group(1), []).append(match.group(2).strip())
     return flags
+
+
+def parse_breaker_verdict(digest: str) -> dict[str, list[str]]:
+    """Attacks from a breaker leg's digest.
+
+    One line per concrete attack: ``BREAK @name: <attack>``.
+    ``HOLD @name: ...`` lines are not attacks. Returns
+    {worker name: [attacks]}.
+    """
+    attacks: dict[str, list[str]] = {}
+    for match in _BREAK_RE.finditer(digest or ""):
+        attacks.setdefault(match.group(1), []).append(
+            match.group(2).strip())
+    return attacks
 
 
 def worker_name_for(subtask: str, index: int,
@@ -194,6 +214,7 @@ class SwarmBoard:
         self._feed: list[dict[str, Any]] = []
         self._members: dict[str, dict[str, Any]] = {}
         self._verifiers: dict[str, list[str]] = {}
+        self._breakers: dict[str, list[str]] = {}
         self._seq = 0
         now = time.time()
         self.created_at = now
@@ -373,6 +394,39 @@ class SwarmBoard:
         with self._lock:
             return list(self._verifiers.get(verifier, []))
 
+    # ── breakers ───────────────────────────────────────────────────
+    def assign_breakers(self) -> list[str]:
+        """One breaker per 2–4 workers (1–4 workers → 1 breaker,
+        5 workers → 2 breakers, …). Idempotent. Mirrors
+        :meth:`assign_verifiers`: the breaker is a distinct role
+        whose job is to ATTACK the attempt, not review it."""
+        with self._lock:
+            if self._breakers:
+                return sorted(self._breakers)
+            workers = [m["name"] for m in self._members.values()
+                       if m["role"] == "worker"]
+            breakers: list[str] = []
+            for start in range(0, len(workers), MAX_VERIFIER_WORKERS):
+                group = workers[start:start + MAX_VERIFIER_WORKERS]
+                name = f"breaker-{len(breakers) + 1}"
+                self._breakers[name] = list(group)
+                self.add_member(name, "breaker")
+                breakers.append(name)
+            return breakers
+
+    def breaker_for(self, worker: str) -> str | None:
+        """The breaker covering ``worker``, or None."""
+        with self._lock:
+            for breaker, group in self._breakers.items():
+                if worker in group:
+                    return breaker
+        return None
+
+    def breaker_group(self, breaker: str) -> list[str]:
+        """The workers one breaker covers."""
+        with self._lock:
+            return list(self._breakers.get(breaker, []))
+
     # ── mentions / unread ──────────────────────────────────────────
     def mentions_for(self, name: str, *, since: int = 0) -> list[dict[str, Any]]:
         """Posts mentioning ``name`` (``@name``, ``@all``, or the
@@ -394,7 +448,9 @@ class SwarmBoard:
                 if (name in mentions or "all" in mentions
                         or (role == "worker" and "workers" in mentions)
                         or (role == "verifier"
-                            and "verifiers" in mentions)):
+                            and "verifiers" in mentions)
+                        or (role == "breaker"
+                            and "breakers" in mentions)):
                     hits.append(dict(post))
             return hits
 
@@ -501,6 +557,8 @@ class SwarmBoard:
                 "feed": [dict(p) for p in self._feed],
                 "verifiers": {k: list(v)
                               for k, v in self._verifiers.items()},
+                "breakers": {k: list(v)
+                             for k, v in self._breakers.items()},
                 "created_at": self.created_at,
                 "updated_at": self.updated_at,
                 "last_activity_at": self._last_activity_at,
@@ -571,6 +629,11 @@ class SwarmBoard:
             for name, group in verifiers.items():
                 if isinstance(group, list):
                     board._verifiers[str(name)] = [str(g) for g in group]
+        breakers = record.get("breakers") or {}
+        if isinstance(breakers, dict):
+            for name, group in breakers.items():
+                if isinstance(group, list):
+                    board._breakers[str(name)] = [str(g) for g in group]
         board._last_activity_at = float(
             record.get("last_activity_at") or board._last_activity_at)
         return board

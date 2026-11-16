@@ -258,7 +258,9 @@ class MasterOrchestrator:
         debate_critic: Callable[[WorkArtifact, tuple[str, ...]], Critique] | None = None,
     ) -> None:
         self.context = context
-        self.executor = executor or (context.executor if context is not None else None)
+        self.executor = executor or (
+            getattr(context, "executor", None)
+            if context is not None else None)
         self.supervisor = supervisor or Supervisor()
         if blackboard is not None:
             self.blackboard = blackboard
@@ -375,6 +377,135 @@ class MasterOrchestrator:
         # tell a degraded plan from a model-made one.
         plan.plan_error = plan_error
         return self._repair(plan)
+
+    def repair_step(self, goal: str, subtask: str,
+                    failures: list[dict[str, Any]]) -> dict[str, Any]:
+        """Repair one subtask after verification failed it twice.
+
+        Named trigger ``verification_failed_twice``: the planner
+        produces a REVISED subtask brief that names what changed, so
+        the retry runs against the revised plan, not the old one.
+        The record is plain JSON-safe data: trigger, goal, original
+        + revised brief, the changes list, and the failure history
+        it was built from.
+
+        Model path: ask the brain to revise the subtask given the
+        failures (same call shape as :meth:`plan`). Template path
+        (no router / model failure): deterministic revision built
+        FROM the failure evidence — the failure notes become hard
+        constraints in the revised brief, and the changes list names
+        exactly what was added. A model reply that is empty,
+        identical to the original, or unparseable falls back to the
+        template revision — a vacuous repair is never returned.
+        """
+        subtask = " ".join(str(subtask or "").split()).strip()
+        if not subtask:
+            raise ValueError(
+                "repair needs a subtask — what failed?")
+        clean_failures: list[dict[str, Any]] = []
+        for entry in failures or []:
+            if not isinstance(entry, dict):
+                continue
+            digest = str(entry.get("digest") or "").strip()[:400]
+            notes = [str(n).strip()[:400]
+                     for n in (entry.get("notes") or [])
+                     if str(n).strip()]
+            clean_failures.append({
+                "attempt": entry.get("attempt", len(clean_failures) + 1),
+                "digest": digest,
+                "notes": notes,
+            })
+        if not clean_failures:
+            raise ValueError(
+                "repair needs the failure history — what went wrong?")
+        revised, changes = self._template_repair(subtask, clean_failures)
+        router = getattr(self.context, "router", None) \
+            if self.context is not None else None
+        if router is not None:
+            try:
+                from ..llm.base import Message, SamplingParams
+
+                failure_lines = "\n".join(
+                    self._failure_lines(clean_failures))
+                prompt = (
+                    "Revise ONE subtask after verification failed it "
+                    "twice. Reply with JSON only, shaped as "
+                    '{"revised": "<the full revised subtask brief>", '
+                    '"changes": ["<what changed>", ...]}.\n'
+                    f"Goal: {goal}\nSubtask: {subtask}\nFailures:\n"
+                    f"{failure_lines}\nThe revised brief MUST differ "
+                    "from the original, MUST address every listed "
+                    "failure, and MUST NOT repeat the failing approach. "
+                    "The changes list names each difference "
+                    "concretely.")
+                response = brain_for(self.context).chat(
+                    [Message.user(prompt)],
+                    SamplingParams(temperature=0.2, max_tokens=1024,
+                                   json_mode=True),
+                    task_kind="plan")
+                if response.ok:
+                    data = _extract_json(response.text or "")
+                    model_revised = ""
+                    model_changes: list[str] = []
+                    if isinstance(data, dict):
+                        model_revised = str(
+                            data.get("revised") or "").strip()
+                        model_changes = [
+                            str(c).strip()
+                            for c in (data.get("changes") or [])
+                            if str(c).strip()]
+                    if (model_revised and model_revised != subtask
+                            and model_changes):
+                        revised, changes = model_revised, model_changes
+            except Exception:  # noqa: BLE001 — model repair is a
+                # bonus; the template revision below always stands.
+                pass
+        return {
+            "trigger": "verification_failed_twice",
+            "goal": str(goal or ""),
+            "original": subtask,
+            "revised": revised,
+            "changes": changes,
+            "failures": clean_failures,
+        }
+
+    @staticmethod
+    def _failure_lines(failures: list[dict[str, Any]]) -> list[str]:
+        """One evidence line per failure, notes included."""
+        lines: list[str] = []
+        for failure in failures:
+            attempt = failure.get("attempt", "?")
+            digest = str(failure.get("digest") or "").strip()
+            lines.append(f"attempt {attempt}: "
+                         f"{digest or 'failed'}")
+            for note in failure.get("notes") or []:
+                lines.append(f"  - {note}")
+        return lines
+
+    @staticmethod
+    def _template_repair(
+            subtask: str,
+            failures: list[dict[str, Any]]) -> tuple[str, list[str]]:
+        """Deterministic revision from the failure evidence."""
+        lines = MasterOrchestrator._failure_lines(failures)
+        constraints = "\n".join(f"- {line}" for line in lines)
+        revised = (
+            f"{subtask}\n\n"
+            "Revised plan (verification failed twice — do it "
+            "differently):\n"
+            f"{constraints}\n"
+            "Do NOT repeat any failure above. Work around each "
+            "listed failure explicitly and say how in your digest.")
+        changes: list[str] = []
+        for failure in failures:
+            attempt = failure.get("attempt", "?")
+            digest = str(failure.get("digest") or "").strip()
+            short = (digest[:80] + "…") if len(digest) > 80 else digest
+            changes.append(
+                f"attempt {attempt} failure is now a hard constraint"
+                + (f": {short}" if short else ""))
+        changes.append("added an explicit do-not-repeat list")
+        return revised, changes
 
     def _parse_plan(self, goal: str, text: str) -> Plan | None:
         data = _extract_json(text)
