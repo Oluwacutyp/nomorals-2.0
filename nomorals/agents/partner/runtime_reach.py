@@ -1920,6 +1920,256 @@ class RuntimeReachMixin:
             return "will deleted."
         return usage
 
+    def _family_registry(self) -> Any:
+        """FamilyRegistry on the durable home path (family-mode wiring)."""
+        from ...family.registry import family_registry
+
+        root = self.context.settings.home_path / "family"
+        return family_registry(root)
+
+    def _control_family(self, tail: str, *, chat_key: str = "") -> str:
+        """Family mode: /family list|add|revoke|role|item|items|show|share|delete|audit|check|policy.
+
+        The MORE_TO_ADD gap 4 organ (nomorals/family/) had no production
+        importer at all — this is its surface. The household lives under
+        <home>/family/ (members.json, audit.jsonl, one directory per
+        person); the organ owns the layout, this handler only points it
+        at Devon's home. Owner-only: the kind is absent from
+        PUBLIC_COMMANDS, so caller_may_run denies non-owners before
+        this runs. The chat surface speaks as the household's first
+        active owner (resolved from the roster, never a claimed role —
+        the roster may call the owner by their real name, not "owner").
+        Item writes act as the item's owner instead, so the organ's
+        per-role kid-safe rules apply to the member the item belongs to
+        (a child's flagged write is refused, a teen's is masked). The
+        audit read goes through the organ's claimed-role path on
+        purpose: the dispatch layer already established the caller is
+        the owner, and the roster-gated path would refuse a household
+        whose owner record uses a different person_id (or none yet).
+        The household shared layer (nomorals/household — commitments,
+        calendar, assets) is NOT exposed here; it stays import-only
+        (see household/library.json).
+        """
+        import datetime as _dt
+        import uuid as _uuid
+
+        from ...family.locales import get_locale_pack, list_locale_packs
+        from ...family.policy import family_policy
+
+        usage = ("usage: /family list | add <person_id> <name> "
+                 "[| role | locale] | revoke <person_id> [reason] "
+                 "| role <person_id> <role> | item <person_id> <kind> "
+                 "<title> [| body | shared|private] | items <person_id> "
+                 "| show <person_id> <item_id> | share <person_id> "
+                 "<item_id> | delete <person_id> <item_id> | audit [n] "
+                 "| check <role> <text> | policy")
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+        registry = self._family_registry()
+        household = registry.household
+
+        def _owner_actor() -> str:
+            members = household.list_members(actor_role="owner")
+            for m in members:
+                if (m.get("role") == "owner"
+                        and m.get("status") == "active"):
+                    return str(m["person_id"])
+            return "owner"
+
+        def _roster_lines(members: list) -> list[str]:
+            lines = [f"household ({len(members)} member(s)):"]
+            for m in members:
+                line = (f"  {m['person_id']} — {m['display_name']} "
+                        f"({m['role']}, {m.get('locale', 'ng')})")
+                if m.get("status") == "revoked":
+                    line += " [revoked]"
+                lines.append(line)
+            return lines
+
+        try:
+            if verb == "":
+                members = household.list_members(actor_role="owner")
+                if not members:
+                    return ("no household yet — /family add owner "
+                            "<your name> sets you up as the first owner.")
+                lines = _roster_lines(members)
+                lines.append("verbs: add | revoke | role | item | items | "
+                             "show | share | delete | audit | check | policy")
+                return "\n".join(lines)
+            if verb == "list":
+                members = household.list_members(actor_role="owner")
+                if not members:
+                    return ("no members yet — /family add owner <your name> "
+                            "sets you up as the first owner.")
+                return "\n".join(_roster_lines(members))
+            if verb == "add":
+                fields = [f.strip() for f in rest.split("|")]
+                head = fields[0].split(None, 1) if fields else []
+                if len(head) < 2:
+                    return ("usage: /family add <person_id> <name> "
+                            "[| role | locale]")
+                person_id, display_name = head
+                role = fields[1] if len(fields) > 1 and fields[1] else ""
+                locale = fields[2] if len(fields) > 2 and fields[2] else "ng"
+                if not role:
+                    existing = household.list_members(actor_role="owner")
+                    role = "owner" if not existing else "adult"
+                added = registry.call(
+                    "family_person_add", actor_id=_owner_actor(),
+                    actor_role="owner", person_id=person_id,
+                    display_name=display_name, role=role, locale=locale)
+                return (f"added: {added['person_id']} — "
+                        f"{added['display_name']} "
+                        f"({added['role']}, {added.get('locale', 'ng')})")
+            if verb == "revoke":
+                head = rest.split(None, 1)
+                if not head:
+                    return "usage: /family revoke <person_id> [reason]"
+                reason = head[1] if len(head) > 1 else ""
+                revoked = registry.call(
+                    "family_person_revoke", actor_id=_owner_actor(),
+                    actor_role="owner", person_id=head[0], reason=reason)
+                return (f"revoked: {revoked['person_id']} — "
+                        f"{revoked['display_name']} ({revoked['role']})")
+            if verb == "role":
+                head = rest.split(None, 1)
+                if len(head) < 2:
+                    return "usage: /family role <person_id> <role>"
+                before = household.get_member(head[0])
+                old = before["role"] if before else ""
+                changed = household.set_role(
+                    actor_id=_owner_actor(), actor_role="owner",
+                    person_id=head[0], role=head[1].strip())
+                return (f"role: {changed['person_id']} is now "
+                        f"{changed['role']} (was {old})")
+            if verb == "item":
+                fields = [f.strip() for f in rest.split("|")]
+                head = fields[0].split(None, 2) if fields else []
+                if len(head) < 3:
+                    return ("usage: /family item <person_id> <kind> <title> "
+                            "[| body | shared|private]")
+                person_id, kind, title = head
+                body = fields[1] if len(fields) > 1 else ""
+                visibility = (fields[2].lower()
+                              if len(fields) > 2 and fields[2] else "private")
+                if visibility not in ("shared", "private"):
+                    return ("visibility must be shared or private — e.g. "
+                            "/family item ada note title | body | shared")
+                item_id = _uuid.uuid4().hex[:12]
+                stored = registry.call(
+                    "family_item_put", actor_id=person_id,
+                    actor_role="owner", person_id=person_id,
+                    item_id=item_id, kind=kind, title=title, body=body,
+                    visibility=visibility)
+                out = (f"stored: {stored['id']} — {stored['title']} "
+                       f"({stored['kind']}, {stored['visibility']})")
+                if stored.get("flags"):
+                    out += " — flagged: " + ", ".join(stored["flags"])
+                return out
+            if verb == "items":
+                person_id = rest.strip()
+                if not person_id:
+                    return "usage: /family items <person_id>"
+                items = registry.call(
+                    "family_item_list", actor_id=_owner_actor(),
+                    actor_role="owner", person_id=person_id)
+                if not items:
+                    return f"no items for {person_id}."
+                lines = [f"items for {person_id} ({len(items)}):"]
+                for it in items:
+                    line = (f"  {it['id']}: {it['kind']} — {it['title']} "
+                            f"({it['visibility']})")
+                    if it.get("flags"):
+                        line += " [flagged: " + ", ".join(it["flags"]) + "]"
+                    lines.append(line)
+                return "\n".join(lines)
+            if verb == "show":
+                head = rest.split(None, 1)
+                if len(head) < 2:
+                    return "usage: /family show <person_id> <item_id>"
+                item = registry.call(
+                    "family_item_get", actor_id=_owner_actor(),
+                    actor_role="owner", person_id=head[0],
+                    item_id=head[1].strip())
+                lines = [item["title"],
+                         f"  kind: {item['kind']} · visibility: "
+                         f"{item['visibility']} · kid-safe: "
+                         f"{'yes' if item.get('kid_safe') else 'no'}"]
+                if item.get("body"):
+                    lines.append(f"  {item['body']}")
+                if item.get("flags"):
+                    lines.append("  flagged: " + ", ".join(item["flags"]))
+                return "\n".join(lines)
+            if verb == "share":
+                head = rest.split(None, 1)
+                if len(head) < 2:
+                    return "usage: /family share <person_id> <item_id>"
+                shared = registry.call(
+                    "family_item_share", actor_id=_owner_actor(),
+                    actor_role="owner", person_id=head[0],
+                    item_id=head[1].strip())
+                return f"shared: {shared['id']} — {shared['title']}"
+            if verb == "delete":
+                head = rest.split(None, 1)
+                if len(head) < 2:
+                    return "usage: /family delete <person_id> <item_id>"
+                result = registry.call(
+                    "family_item_delete", actor_id=_owner_actor(),
+                    actor_role="owner", person_id=head[0],
+                    item_id=head[1].strip())
+                if result.get("deleted"):
+                    return f"deleted: {head[1].strip()}"
+                return f"no item {head[1].strip()} for {head[0]}."
+            if verb == "audit":
+                try:
+                    limit = int(rest.strip()) if rest.strip() else 10
+                except ValueError:
+                    return "/family audit [n] — n must be a number."
+                entries = household.audit_log(actor_role="owner")
+                if not entries:
+                    return "audit log is empty."
+                shown = entries[-limit:] if limit > 0 else entries
+                lines = [f"audit ({len(entries)} entries):"]
+                for e in shown:
+                    when = _dt.datetime.fromtimestamp(
+                        e["ts"]).strftime("%Y-%m-%d %H:%M")
+                    detail = f" {e['detail']}" if e.get("detail") else ""
+                    lines.append(
+                        f"  {when} — {e['actor_id']} {e['action']} "
+                        f"{e.get('target', '')}{detail}")
+                return "\n".join(lines)
+            if verb == "check":
+                head = rest.split(None, 1)
+                if len(head) < 2:
+                    return "usage: /family check <role> <text>"
+                result = registry.call(
+                    "family_kid_check", text=head[1],
+                    role=head[0].strip(), locale="ng")
+                flags = result.get("flags") or []
+                if not result.get("allowed"):
+                    return (f"refused for {result['role']} — flagged: "
+                            + ", ".join(flags))
+                text = result.get("text", "")
+                if text != head[1]:
+                    return (f"masked for {result['role']}: {text} "
+                            f"(flagged: " + ", ".join(flags) + ")")
+                if flags:
+                    return (f"passes for {result['role']} — flagged: "
+                            + ", ".join(flags))
+                return f"passes for {result['role']} — clean"
+            if verb == "policy":
+                policy = family_policy()
+                packs = list_locale_packs()
+                return ("family policy — allowlist: "
+                        + ", ".join(policy["allowlist"])
+                        + " (everything else denied).\nlocales: "
+                        + ", ".join(packs)
+                        + f" (default {get_locale_pack(None)['code']}).")
+            return usage
+        except (ValueError, KeyError, PermissionError, LookupError) as exc:
+            return str(exc)
+
     def _publicface_store(self) -> Any:
         """PublicPageStore on the durable home path (E-6 public-face wiring)."""
         from ...publicface.publish import PublicPageStore
