@@ -31,8 +31,23 @@ from urllib.parse import urlparse
 from ..core.logging_setup import get_logger
 from .. import organs as _bus
 from .pipeline import ResearchContext, ResearchJob
+from .scheduler import default_jobs
 
 _log = get_logger(__name__)
+
+
+def watch_id_for(topic: str, queries: list[str]) -> str:
+    """The deterministic id for a watch: topic + queries, hashed.
+
+    One id per (topic, queries) pair — re-adding the same watch
+    re-uses the row instead of duplicating it, and the installer
+    can test presence without inserting.
+    """
+    import hashlib
+    return "w_" + hashlib.sha256(
+        ((topic or "").strip() + "|"
+         + "|".join(q.strip() for q in (queries or []))).encode()
+    ).hexdigest()[:12]
 
 # Traditions/topics that belong in the wisdom corpus rather than a briefing.
 _WISDOM_HINTS = (
@@ -133,27 +148,63 @@ class ResearchOrgan:
     def add_watch(self, topic: str, queries: list[str],
                   cadence_hours: float = 24.0,
                   goals: list[str] | None = None,
+                  max_results: int | None = None,
+                  fetch_top: int | None = None,
                   created_by: str = "system") -> str:
         topic = (topic or "").strip()
         queries = [q.strip() for q in (queries or []) if q.strip()]
         if not topic or not queries:
             raise ValueError("watch needs a topic and at least one query")
-        import hashlib
-        wid = "w_" + hashlib.sha256(
-            (topic + "|" + "|".join(queries)).encode()).hexdigest()[:12]
+        wid = watch_id_for(topic, queries)
+        # The table defaults (6 / 2) apply when the caller passes None;
+        # an explicit value is stored so the watch runs as defined.
+        max_results = 6 if max_results is None else int(max_results)
+        fetch_top = 2 if fetch_top is None else int(fetch_top)
         self.db.execute(
             "INSERT INTO research_watches"
-            " (id, topic, queries, cadence_hours, goals, created_at, created_by)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)"
+            " (id, topic, queries, cadence_hours, goals, max_results,"
+            " fetch_top, created_at, created_by)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
             " ON CONFLICT(id) DO UPDATE SET"
             " topic=excluded.topic, queries=excluded.queries,"
             " cadence_hours=excluded.cadence_hours, goals=excluded.goals,"
+            " max_results=excluded.max_results,"
+            " fetch_top=excluded.fetch_top,"
             " enabled=1",
             (wid, topic, json.dumps(queries), float(cadence_hours),
-             json.dumps(goals or []), time.time(), created_by),
+             json.dumps(goals or []), max_results, fetch_top,
+             time.time(), created_by),
         )
         _log.info("research watch added: %s (%s)", wid, topic)
         return wid
+
+    def install_default_watches(self) -> dict[str, list[str]]:
+        """Install the out-of-the-box watches (audit gap R1-12).
+
+        ``default_jobs()`` (money-watch + builder-watch, 24h each)
+        had zero production callers — the organ ran, but only for
+        watches added by hand. Install-only-if-absent: a watch whose
+        id already exists — including one the owner disabled via
+        ``remove_watch`` — is left exactly as it is, never silently
+        re-enabled. Returns ``{"installed": [...], "already_present":
+        [...]}`` with deterministic watch ids.
+        """
+        installed: list[str] = []
+        already: list[str] = []
+        existing = {w["id"] for w in self.list_watches()}
+        for job in default_jobs():
+            wid = watch_id_for(job.topic, job.queries)
+            if wid in existing:
+                already.append(wid)
+                continue
+            self.add_watch(
+                job.topic, job.queries,
+                cadence_hours=float(job.cadence_hours),
+                goals=list(job.goals or []),
+                max_results=job.max_results, fetch_top=job.fetch_top,
+                created_by="system")
+            installed.append(wid)
+        return {"installed": installed, "already_present": already}
 
     def remove_watch(self, watch_id: str) -> bool:
         cur = self.db.execute(
@@ -162,8 +213,9 @@ class ResearchOrgan:
 
     def list_watches(self) -> list[dict[str, Any]]:
         rows = self.db.query(
-            "SELECT id, topic, queries, cadence_hours, goals, enabled,"
-            " created_by FROM research_watches ORDER BY created_at DESC")
+            "SELECT id, topic, queries, cadence_hours, goals, max_results,"
+            " fetch_top, enabled, created_by FROM research_watches"
+            " ORDER BY created_at DESC")
         out = []
         for r in rows or []:
             out.append({
@@ -171,6 +223,8 @@ class ResearchOrgan:
                 "queries": json.loads(r["queries"] or "[]"),
                 "cadence_hours": r["cadence_hours"],
                 "goals": json.loads(r["goals"] or "[]"),
+                "max_results": r["max_results"],
+                "fetch_top": r["fetch_top"],
                 "enabled": bool(r["enabled"]),
                 "created_by": r["created_by"],
                 "last_run": self._last_run(r["id"]),
@@ -328,7 +382,9 @@ class ResearchOrgan:
         return ResearchJob(
             id=watch["id"], topic=watch["topic"], queries=watch["queries"],
             cadence_hours=float(watch["cadence_hours"]),
-            goals=watch["goals"])
+            goals=watch["goals"],
+            max_results=watch.get("max_results"),
+            fetch_top=watch.get("fetch_top"))
 
     def tick(self) -> OrganTickReport:
         """One autonomous cycle. Safe to call on a schedule; idempotent."""

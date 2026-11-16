@@ -335,6 +335,13 @@ def compose_agency(context: Any, *, db: Any = None) -> dict[str, Any]:
             spec_dir=base / "impossible_specs")
 
     research_organ = _try(_research)
+    if research_organ is not None:
+        # Gapfix R1-12: install the out-of-the-box research watches
+        # (money-watch + builder-watch) on the organ. Install-only-
+        # if-absent, so an owner-removed default is never silently
+        # re-added; best-effort like every organ construction here —
+        # a failed install must never break boot.
+        _try(research_organ.install_default_watches)
     wisdom_organ = _try(_wisdom)
     impossible = _try(_impossible)
 
