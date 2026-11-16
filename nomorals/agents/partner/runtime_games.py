@@ -74,6 +74,53 @@ def _charagent_save_graph(store: Any, graph: Any) -> None:
         record_failure("runtime_games._charagent_save_graph", e)
 
 
+def _character_voice_audio(char: Any, line: str) -> tuple[str, str, str]:
+    """Render a character's line in their own voice.
+
+    Audit gap R1-44: the generative specialists in
+    ``characters/specialists.py`` were implemented but never invoked.
+    This is the voice rung's call site — ``/charagent talk`` renders
+    the character's line via ``character_voice`` (XTTS clone), then
+    chains ``swap_voice`` (RVC) when the character names an RVC model,
+    exactly the ladder's ``character_voice_rvc`` job: RVC converts a
+    rendered line into the character's voice identity, and the code
+    rung is the unswapped render delivered as-is.
+
+    Returns (path, backend, reason): ``path`` is the wav to deliver
+    ("" when nothing was rendered), ``backend`` names the TTS backend
+    that rendered it, ``reason`` is "" on success and the specialist's
+    honest wall otherwise. Never raises.
+    """
+    from ...characters.specialists import character_voice, swap_voice
+
+    try:
+        res = character_voice(char, line)
+    except Exception as e:
+        record_failure("runtime_games._character_voice_audio", e)
+        return "", "", f"voice render failed: {e}"
+    if not res.get("ok"):
+        return "", "", str(res.get("reason") or "voice render failed")
+    path = str(res.get("path") or "")
+    backend = str(res.get("backend") or "")
+    if not path:
+        return "", backend, "voice render produced no audio"
+    if getattr(char, "rvc_model", ""):
+        try:
+            swapped = swap_voice(char, path)
+        except Exception as e:
+            record_failure("runtime_games._character_voice_audio.swap", e)
+            swapped = {"ok": False}
+        if swapped.get("ok") and swapped.get("path"):
+            return str(swapped["path"]), backend, ""
+        # The RVC swap failed: the unswapped render is delivered
+        # as-is (the ladder job's code rung), never a crash, never
+        # silence.
+        _log.debug("rvc swap failed for %s: %s",
+                   getattr(char, "name", "?"),
+                   swapped.get("reason") or "unknown")
+    return path, backend, ""
+
+
 class RuntimeGamesMixin:
     """RuntimeGamesMixin for :class:`PartnerRuntime`."""
 
@@ -2286,7 +2333,25 @@ class RuntimeGamesMixin:
             store.save(c)
             _charagent_save_graph(store, graph)
             last = dlg.turns[-1] if dlg.turns else None
-            return f"🎭 {c.name}: {last.text}" if last else "…"
+            if last is None:
+                return "…"
+            line = last.text or ""
+            reply = f"🎭 {c.name}: {line}"
+            if line and c.voice_name:
+                # Voice rung (audit gap R1-44): a character with a
+                # cloned voice speaks their line. The voice note IS
+                # the reply when it lands; a failed render falls back
+                # to the text reply and names the wall.
+                path, backend, reason = _character_voice_audio(c, line)
+                if path:
+                    deliver = getattr(self, "_deliver_voice_note", None)
+                    if callable(deliver):
+                        return deliver(chat_key, path, reply, backend)
+                    # No voice transport on this runtime — the audio
+                    # exists; name it rather than dropping it.
+                    return f"{reply}\n🔊 {path}"
+                return f"{reply}\n🔇 voice: {reason}"
+            return reply
 
         if verb == "play":
             bits = rest.split()

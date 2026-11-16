@@ -37,8 +37,14 @@ because that is what the existing detection expects: ``voice/tts.py``
 probes ``find_spec("TTS")`` in-process, ``rvc_bridge.detect_rvc()``
 probes an importable ``rvc_python``, and ``faceswap`` imports
 insightface in-process. A venv install would stay invisible to all
-three. Once provisioned, ``character_voice`` / ``swap_voice`` /
-``swap_face`` light up with no further code change.
+three. Once provisioned, the voice rungs light up through
+``/charagent talk`` (audit gap R1-44): a character with a cloned voice
+speaks their line as a voice note, RVC-swapped when an RVC model is
+named, with the text reply as the fallback when the render fails.
+``swap_face`` and ``lora_for`` have no live call site yet — there is
+no out-of-game character render path for a face swap, and no live
+local server to implant a per-character LoRA into — so they stay
+named remainders, not silently wired.
 
 Honest box check: the provision MEASURES the box (RAM, free disk,
 CPUs, profile) and refuses a backend whose floor the box cannot meet,
