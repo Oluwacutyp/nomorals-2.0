@@ -55,6 +55,44 @@ def _cmd_project(args: argparse.Namespace, context: Any) -> int:
                  f"{st.get('title', '')}")
         _emit(args, st, human)
         return 0
+    if action == "integrity":
+        # `nm project integrity <id> [mode]`: show the mode, or set it.
+        # The mode rides the second positional (the description slot).
+        from ...agents.auditor import AuditorError, get_integrity_mode, set_integrity_mode
+        mode = (getattr(args, "description", "") or "").strip()
+        if mode:
+            try:
+                set_integrity_mode(pm.db, pid, mode)
+            except AuditorError as exc:
+                print(f"project: {exc}", file=sys.stderr)
+                return 1
+            _emit(args, {"project_id": pid, "integrity_mode": mode},
+                  f"{pid} integrity mode: {mode}")
+            return 0
+        cur = get_integrity_mode(pm.db, pid)
+        _emit(args, {"project_id": pid, "integrity_mode": cur},
+              f"{pid} integrity mode: {cur}")
+        return 0
+    if action == "audit":
+        # `nm project audit <id>`: re-run the project's evidence now
+        # under its integrity mode and print the verdict.
+        from ...agents.auditor import audit_project_step
+        p = pm._load(pid)
+        if p is None:
+            _emit(args, {"ok": False}, f"unknown project: {pid}")
+            return 1
+        verdict = audit_project_step(pm, p)
+        if verdict is None:
+            _emit(args, {"project_id": pid, "audited": False},
+                  f"{pid}: nothing to audit")
+            return 0
+        text = (f"{pid}: audit "
+                f"{'PASSED' if verdict.passed else 'FAILED'} "
+                f"[{verdict.mode}] — "
+                + ("; ".join(verdict.reasons)
+                   or "evidence re-ran clean"))
+        _emit(args, verdict.to_dict(), text)
+        return 0 if verdict.passed else 1
     if action in ("plan", "run", "advance"):
         fn = getattr(pm, action if action != "advance" else "advance")
         res = fn(pid)

@@ -36,6 +36,7 @@ from ..core.logging_setup import get_logger
 from ..llm.base import Message
 from ..storage.kv import KVStore
 from ..llm.brain import brain_for
+from .auditor import AuditorError, audit_project_step, get_integrity_mode
 from .failures import record_failure
 
 __all__ = ["Project", "ProjectStep", "ProjectManager", "register"]
@@ -515,6 +516,17 @@ class ProjectManager:
                     return out
         try:
             result = exec_fn(step.description)
+            # Auditor gate (Antigravity Teamwork): a step's evidence
+            # must still reproduce under the project's integrity
+            # mode. A failed audit raises here, so the existing
+            # self-correction path treats it as a failed attempt and
+            # the run never reports success.
+            audit = audit_project_step(
+                self, p, step_id=step.id,
+                run_fn=getattr(self, "_auditor_run_fn", None))
+            if audit is not None and not audit.passed:
+                raise AuditorError(
+                    "audit failed: " + "; ".join(audit.reasons))
             step.status = "done"
             step.result = str(result or "ok")[:4000]
         except BudgetSuspended as exc:  # noqa: BLE001 — budget, not a failure
@@ -1223,6 +1235,7 @@ class ProjectManager:
             return {"ok": False, "error": f"unknown project: {project_id}"}
         d = p.to_dict()
         d["ok"] = True
+        d["integrity_mode"] = get_integrity_mode(self.db, p.id)
         return d
 
     def list_projects(self) -> list[dict[str, Any]]:

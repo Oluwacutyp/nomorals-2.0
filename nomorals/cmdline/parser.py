@@ -789,7 +789,8 @@ def _parser() -> argparse.ArgumentParser:
                              help="Manage projects")
     project.add_argument("action", nargs="?", default="list",
                         choices=["list", "create", "get", "update", "delete",
-                                 "heal", "replan", "status", "plan", "run", "advance"],
+                                 "heal", "replan", "status", "plan", "run", "advance",
+                                 "audit", "integrity"],
                         help="Action to perform")
     project.add_argument("title", nargs="?", default="", help="Project title (or id for other actions)")
     project.add_argument("description", nargs="?", default="", help="Project objective")
