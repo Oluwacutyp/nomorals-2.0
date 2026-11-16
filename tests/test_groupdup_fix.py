@@ -71,6 +71,28 @@ from nomorals.social.chat.base import (
 )
 from nomorals.social.chat.gateway import ChatGateway
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
+
+#: Clock reads in this file (batch H28, no-direct-clock): the
+#: pulse-marker and briefing seeds are frozen to MIDDAY_TS —
+#: the marker is never read here (no runtime.start(), no
+#: /pulse catchup; check_pulse_catchup runs only on those
+#: paths, morning_pulse.py:1903) and the briefing row is for
+#: date 2000-01-01, never returned by latest_briefing for
+#: today. The empty-pending sweeps run at MIDDAY_TS + 60
+#: (pending_count() == 0 is asserted immediately before, so
+#: expire() returns [] for any now). The bridge ts-ms is
+#: int(MIDDAY_TS * 1000) — the adapter dedupe is id-based
+#: with an arrival-time window (_seen_inbound_redelivery,
+#: whatsapp.py:1371) and a stale ts only stamps
+#: stale_replay, never drops delivery. The ONE live failover
+#: sweep stays on the real clock, grandfathered: the deferral
+#: registers at the real clock (register() stamps
+#: created_at/deadline from time.time(), peer_deferral.py)
+#: and expire() fires only when deadline <= now, so a frozen
+#: now (~32 days before the deadline) expires nothing and
+#: the failover claim never runs — the same shape H14
+#: grandfathered in test_groupdup2_followups.py.
 
 _TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
 
@@ -153,12 +175,12 @@ def _context(home: str):
                    "pulse_last_run_evening.json",
                    "pulse_last_run_midnight.json"):
         (ws / marker).write_text(
-            json.dumps({"ts": time.time(), "delivered_text": True}),
+            json.dumps({"ts": MIDDAY_TS, "delivered_text": True}),
             encoding="utf-8")
     context.db.execute(
         "INSERT OR REPLACE INTO briefings (id, date, sections_json,"
         " generated_at) VALUES (?, ?, '[]', ?)",
-        ("groupdup", "2000-01-01", time.time()))
+        ("groupdup", "2000-01-01", MIDDAY_TS))
     return context
 
 
@@ -582,9 +604,9 @@ def test_end_to_end_group_quit_exactly_one_reply(split_whatsapp):
     rt_a._process_inner(_group_msg(userbot_replies[0], "q2"))
     assert _texts(ad_a["whatsapp"])[baseline_a:] == []
     assert rt_a._peer_deferral().pending_count() == 0
-    rt_a._sweep_peer_deferrals(now=time.time() + 60)
+    rt_a._sweep_peer_deferrals(now=MIDDAY_TS + 60)
     assert _texts(ad_a["whatsapp"])[baseline_a:] == []
-    rt_b._sweep_peer_deferrals(now=time.time() + 60)
+    rt_b._sweep_peer_deferrals(now=MIDDAY_TS + 60)
     assert len([t for t in _texts(ad_b["whatsapp"])[baseline_b:]
                 if "table closed" in t]) == 1
 
@@ -627,6 +649,13 @@ def test_end_to_end_group_fresh_game_exactly_one_reply(
     assert _texts(ad_a["whatsapp"])[baseline_a:] == []
     assert _texts(ad_b["whatsapp"])[baseline_b:] == []
     # The bot's fast failover (unknown side, 3s) answers first.
+    # Grandfathered (batch H28): the deferral registered at the
+    # real clock (register() stamps created_at/deadline from
+    # time.time(), peer_deferral.py) and expire() fires only
+    # when deadline <= now, so a frozen now (Oct 14, ~32 days
+    # before the deadline) expires nothing and the failover
+    # claim never runs — the same shape H14 grandfathered in
+    # test_groupdup2_followups.py.
     rt_a._sweep_peer_deferrals(now=time.time() + 4.0)
     bot_lists = _texts(ad_a["whatsapp"])[baseline_a:]
     assert len(bot_lists) == 1, bot_lists
@@ -637,7 +666,7 @@ def test_end_to_end_group_fresh_game_exactly_one_reply(
         bot_lists[0], "g2", sender_id=BOT_JID))
     assert _texts(ad_b["whatsapp"])[baseline_b:] == []
     assert rt_b._peer_deferral().pending_count() == 0
-    rt_b._sweep_peer_deferrals(now=time.time() + 60)
+    rt_b._sweep_peer_deferrals(now=MIDDAY_TS + 60)
     assert _texts(ad_b["whatsapp"])[baseline_b:] == []
 
 # ── 5. buttons: derivation through the adapter + journal ──────
@@ -761,7 +790,7 @@ def test_whatsapp_adapter_redelivery_dedupe():
                  "title": "Devon"},
         "from": {"id": OWNER_JID, "name": "death"},
         "text": "microsoft loop",
-        "ts": int(time.time() * 1000),
+        "ts": int(MIDDAY_TS * 1000),
     }
     adapter._dispatch(dict(event), msgs.append)
     adapter._dispatch(dict(event), msgs.append)

@@ -136,6 +136,16 @@ BASELINE: dict[str, int] = {
     # file's other reads (seeds, the empty-pending sweep) are
     # frozen.
     "tests/test_groupdup2_followups.py": 7,
+    # Grandfathered (batch H28): the live failover sweep is a
+    # proof about a real-clock-relative window — the deferral
+    # registers at the real clock (register() stamps
+    # created_at/deadline from time.time(), peer_deferral.py)
+    # and expire() fires only when deadline <= now, so a frozen
+    # now (~32 days before the deadline) expires nothing and
+    # the failover claim never runs. The file's other reads
+    # (pulse/briefing seeds, the empty-pending sweeps, the
+    # bridge ts-ms) are frozen.
+    "tests/test_groupdup_fix.py": 1,
     # Grandfathered (batch H8): the daily-streak test's first
     # claim goes through the runtime control (real clock) and
     # the second must be the consecutive real day; the rob test's
