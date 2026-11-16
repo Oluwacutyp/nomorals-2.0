@@ -750,6 +750,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "pollvote": (0, None),    # /pollvote <poll link> | <option> [| count] [| live] — vote from every paired account (§14; owner only, arm-gated)
     "chfollow": (0, None),    # /chfollow <channel link> [| live] — every paired account follows (§14; owner only, arm-gated)
     "obroadcast": (0, None),  # /obroadcast <text> [| groups|channels|all] [| live] — owner speaks through Devon to all claimed groups/channels (§20b; owner only, arm-gated)
+    "relay": (0, None),       # /relay <chat> [| <chat> ...] [| live] as a reply — post this everywhere, attribution kept (census §6 #2; owner only, arm-gated)
     "rules": (0, 0),          # /rules — this group's rules, rendered from the settings the enforcer reads (P1)
     "member": (0, 1),         # /member [@name] — group member card: tenure, activity, identity changes (P1)
     "lookup": (0, 1),         # /lookup <id|@username> — the account dossier: ID, account-age estimate, phone when visible, groups, username/name history, economy + moderation record (DM + group)
@@ -1001,6 +1002,7 @@ _HELP_TEXT = "\n".join(
         "  /model [provider [fallback …]]          switch model live (persists)",
         "  /providers                          probe every provider: live or why not",
         "  /say telegram:123 text…                 send as her",
+        "  /relay <chat> [| <chat> …] | live        post this everywhere (reply to the message)",
         "  /proposals /approve <id> /deny <id>",
         "  /stage [committed|dating|…]",
         "  /power on <key> | /power on <identity> <passphrase> | /power off | /power status",
@@ -3703,6 +3705,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/obroadcast <text> [| groups|channels|all] [| live|dry] · /obroadcast arm|disarm|status|pacing <s>|runs",
             "example": "/obroadcast maintenance tonight 9pm, back by 10 | live",
             "related": "/massreact /groups /gbackup"},
+    "relay": {"what": "cross-platform relay (census §6 #2): post this everywhere — forward one message to WhatsApp groups + Telegram channels + her channels at once, keeping platform attribution. Targets on the message's own platform ride the native forward verb (the platform's own forwarded mark, never a retyped copy); targets on another platform get the message re-posted with an attribution header naming the source platform and chat, text verbatim, media carried when it is on local disk. Say it in plain words — “post this everywhere” — or type it: reply to the message, or say from <chat> <message_id>. Arm-gated like the §14 mass tools; a run dry-runs unless you say live.",
+            "usage": "/relay <chat> [| <chat> …] [| live|dry] (as a reply to the message) · /relay from <chat> <message_id> | <chat> [| …] [| live] · /relay arm|disarm|status|pacing <s>|runs",
+            "example": "/relay Gold Signals | t.me/somegroup | live",
+            "related": "/forward /obroadcast /pair"},
     "rules": {"what": "this group's rules — rendered live from the same settings the moderation enforcer reads, so what you see is what's enforced.",
             "usage": "/rules",
             "example": "/rules",
@@ -4678,7 +4684,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "notion",
+    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
@@ -5011,7 +5017,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
-      "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "notion", "gcal", "trello", "exness", "stripe",
+      "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "worldmodel", "glossary", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
@@ -5238,6 +5244,7 @@ LIST_ONELINERS: dict[str, str] = {
     "star": "star the replied message (WhatsApp) — /star as a reply",
     "unstar": "unstar the replied message — /unstar as a reply",
     "forward": "forward the replied message to another chat — /forward <chat> as a reply",
+    "relay": "post this everywhere — forward one message to WhatsApp groups + Telegram channels at once, attribution kept — /relay <chat> [| <chat> …] [| live] as a reply",
     "unsend": "delete your own message for everyone — /unsend as a reply",
     "edit": "alias of /editmsg — /edit <new text> as a reply",
     "editmsg": "edit your own message — /editmsg <new text> as a reply",

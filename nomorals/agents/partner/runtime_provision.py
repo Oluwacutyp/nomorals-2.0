@@ -3093,6 +3093,323 @@ class RuntimeProvisionMixin:
         self._obroadcast_svc = svc
         return svc
 
+    def _relay_service(self) -> dict[str, Any]:
+        """The /relay arms + journal, built once, lazily — the SAME
+        store files the §14 mass tools and /obroadcast use (one arms
+        store, one journal, keyed by tool name), but the relay's own
+        pacing floor (3s between targets, not 20s between accounts).
+        Relay forwards as him through paired accounts, never as the
+        bot — the source platform's gate is the chatops one.
+        """
+        svc = getattr(self, "_relay_svc", None)
+        if svc is not None:
+            return svc
+        from pathlib import Path
+
+        from ...social.mass_actions import MassArms, MassJournal, default_mass_root
+
+        ws = Path(getattr(self.context.settings, "workspace_dir", "."))
+        root = default_mass_root(ws)
+        svc = {"arms": MassArms(root / "arms.json"),
+               "journal": MassJournal(root / "journal.jsonl")}
+        self._relay_svc = svc
+        return svc
+
+    def _control_relay(self, tail: str, message: Any = None) -> str:
+        """Cross-platform relay with attribution (census §6 #2).
+
+        /relay <chat> [| <chat> ...] [| live|dry] — as a reply to the
+        message to relay; or /relay from <chat> <message_id> |
+        <chat> [| ...] [| live].  One message forwarded to WhatsApp
+        groups + Telegram channels + her channels at once: targets
+        on the source's platform ride the native forward verb (the
+        platform's own forwarded mark), targets on another platform
+        get the message re-posted with an attribution header naming
+        the source platform and chat, text verbatim, media carried
+        when the source row has it on local disk.
+        /relay arm|disarm|status|runs|pacing <seconds>
+
+        Owner-only (control dispatch never reaches non-operators).
+        A run dry-runs unless you say ``| live``, and a live run
+        refuses until the tool is ARMED (its warning is shown
+        then).  Pacing is per target, floor 3s, and every run —
+        live, dry, refused — lands in the journal complete.  A
+        live run BLOCKS this chat's turn for its paced duration —
+        the pacing is the safety control, and the reply when it
+        lands IS the run report (the design's deliverable shape).
+        Sources are personal surfaces only (WhatsApp / Telegram):
+        a forward acts as him, and the bot surface has no
+        as-him forward verb.
+        """
+        from ...social.chat.group_broadcast import broadcast_targets
+        from ...social.cross_relay import (
+            DEFAULT_PACE_S,
+            PACE_FLOOR_S,
+            RELAY_WARN_TEXT,
+            RelayRefused,
+            RelaySource,
+            RelayTarget,
+            plan_relay,
+            preview_relay,
+            run_relay,
+        )
+        from ...social.mass_actions import MassRefusal
+
+        tool = "relay"
+        svc = self._relay_service()
+        arms, journal = svc["arms"], svc["journal"]
+        raw = str(tail or "").strip()
+        segments = [s.strip() for s in raw.split("|")]
+        head = segments[0] if segments else ""
+        words = head.split()
+        meta = words[0].lower() if words else ""
+
+        def _journal_row(**extra: Any) -> dict[str, Any]:
+            row = {"tool": tool,
+                   "run_id": f"re-{int(time.time())}",
+                   "ts": time.time()}
+            row.update(extra)
+            return journal.append(row)
+
+        if meta == "arm":
+            arms.arm(tool)
+            return (f"{RELAY_WARN_TEXT}\n\n✅ /relay is "
+                    "ARMED. Live runs are possible now; a run still "
+                    "dry-runs unless you say “| live”. Disarm any "
+                    "time: /relay disarm")
+        if meta == "disarm":
+            arms.disarm(tool)
+            return ("⏸️ /relay disarmed — live runs refuse "
+                    "until you arm it again.")
+        if meta == "pacing":
+            if len(words) < 2:
+                return (f"/relay pacing is "
+                        f"{arms.pacing(tool, floor=PACE_FLOOR_S, default=DEFAULT_PACE_S):.0f}s "
+                        "between targets. Raise it: "
+                        "/relay pacing <seconds>")
+            try:
+                value = arms.set_pacing(
+                    tool, float(words[1]), floor=PACE_FLOOR_S,
+                    unit="targets")
+            except (MassRefusal, ValueError) as exc:
+                return f"⚠️ {exc}"
+            return f"⏱️ /relay pacing set to {value:.0f}s."
+        if meta == "status":
+            st = arms.state(tool, pacing_default=DEFAULT_PACE_S)
+            targets = broadcast_targets(self._group_surface())
+            total = len(targets["groups"]) + len(targets["channels"])
+            return "\n".join([
+                f"🎛️ /relay: "
+                f"{'ARMED' if st.get('armed') else 'disarmed'} · "
+                f"pacing {arms.pacing(tool, floor=PACE_FLOOR_S, default=DEFAULT_PACE_S):.0f}s · "
+                f"{int(st.get('live_runs') or 0)} live run(s) so far",
+                f"rooms: {len(targets['groups'])} groups · "
+                f"{len(targets['channels'])} channels "
+                f"({total} total, claimed rooms only)",
+                RELAY_WARN_TEXT if not st.get("armed") else
+                "armed — the platform-risk warning was shown "
+                "at arm time and stands."])
+        if meta == "runs":
+            rows = journal.tail(5, tool=tool)
+            if not rows:
+                return "no /relay runs journaled yet."
+            lines = ["📓 recent /relay runs:"]
+            for row in rows:
+                mode = "dry" if row.get("dry_run") else (
+                    "refused" if row.get("refused") else "live")
+                src = row.get("source") or {}
+                lines.append(
+                    f"  {row.get('run_id', '?')} · {mode} "
+                    f"· {row.get('sent', 0)}/{row.get('targets', 0)} "
+                    f"sent · “{(src.get('text') or '')[:60]}”")
+            return "\n".join(lines)
+        if message is None:
+            return ("/relay needs a live chat to act on — run it "
+                    "from the surface it belongs to.")
+        if not head:
+            targets = broadcast_targets(self._group_surface())
+            lines = [
+                "usage: /relay <chat> [| <chat> …] [| live|dry] "
+                "— as a reply to the message — or /relay from "
+                "<chat> <message_id> | <chat> [| …] [| live] · "
+                "/relay arm|status|runs|pacing <s>",
+                "",
+                "rooms it would reach right now "
+                f"({len(targets['groups'])} groups · "
+                f"{len(targets['channels'])} channels):"]
+            for row in targets["groups"] + targets["channels"]:
+                lines.append(f"  · {row['title']} ({row['key']})")
+            if not targets["groups"] and not targets["channels"]:
+                lines.append("  (none — claim a room first)")
+            return "\n".join(lines)
+
+        # ── source: reply form, or an explicit `from` ref ──
+        from ...social.chat.chatops import kind_for_chat_key
+
+        src_chat = getattr(message, "chat", None)
+        if src_chat is None:
+            return "run it in a chat — the relay needs a home."
+        if meta == "from":
+            rest = head[len("from"):].strip()
+            ref_raw, sep, mid = rest.rpartition(" ")
+            if not sep or not ref_raw.strip() or not mid.strip():
+                return ("usage: /relay from <chat> <message_id> | "
+                        "<target> [| <target> …] [| live] — the "
+                        "message to relay, then where it lands.")
+            ref, _adapter, error = self._chatops_target(
+                message, ref_raw.strip())
+            if error:
+                return error
+            src_key = str(getattr(ref, "key", "") or "")
+            src_platform = str(getattr(ref, "platform", "") or "")
+            src_title = str(getattr(ref, "title", "") or "")
+            mid = mid.strip()
+            target_segments = segments[1:]
+        else:
+            mid = self._chatops_reply_target(message)
+            if not mid:
+                return ("reply to the message with /relay <chat> "
+                        "[| <chat> …] [| live] — it lands there as "
+                        "a forward, from you.")
+            src_key = str(getattr(src_chat, "key", "") or "")
+            src_platform = str(getattr(src_chat, "platform", "") or "")
+            src_title = str(getattr(src_chat, "title", "") or "")
+            target_segments = segments
+        if src_platform not in ("whatsapp", "telegram"):
+            return (f"{src_platform} has no message-forward verb "
+                    f"on this surface — relay from your WhatsApp "
+                    f"or Telegram chat.")
+        _svc, _rec, error = self._chatops_gated_account(
+            src_platform, "relay")
+        if error:
+            return error
+        src_adapter = self._adapter_for(src_platform)
+        if src_adapter is None:
+            return f"no live {src_platform} surface here."
+        src_kind = kind_for_chat_key(src_key)
+        text = ""
+        media: list = []
+        row = self._chatops_history_row(
+            src_adapter,
+            getattr(message, "chat", None) if meta != "from" else ref,
+            mid)
+        if row is not None:
+            text = str(getattr(row, "text", "") or "")
+            media = list(getattr(row, "media", None) or [])
+        source = RelaySource(platform=src_platform, chat_key=src_key,
+                             chat_title=src_title, chat_kind=src_kind,
+                             message_id=mid, text=text,
+                             media=tuple(media))
+
+        # ── targets: named chats and/or claimed-room scopes ──
+        claimed = broadcast_targets(self._group_surface())
+        by_scope = {"all": claimed["groups"] + claimed["channels"],
+                    "groups": claimed["groups"],
+                    "channels": claimed["channels"]}
+        live = False
+        targets: list[RelayTarget] = []
+        for seg in target_segments:
+            low = seg.lower()
+            if low == "live":
+                live = True
+            elif low in ("dry", "dry-run", "dryrun"):
+                live = False
+            elif low in by_scope:
+                for item in by_scope[low]:
+                    targets.append(RelayTarget(
+                        platform=item["platform"], key=item["key"],
+                        title=item["title"], kind=item["kind"]))
+            elif seg:
+                ref, _adapter, error = self._chatops_target(
+                    message, seg)
+                if error:
+                    return error
+                targets.append(RelayTarget(
+                    platform=str(getattr(ref, "platform", "") or ""),
+                    key=str(getattr(ref, "key", "") or ""),
+                    title=str(getattr(ref, "title", "") or ""),
+                    kind=kind_for_chat_key(
+                        str(getattr(ref, "key", "") or ""))))
+        try:
+            stopped = self._relay_stopped_platforms()
+        except Exception as exc:  # noqa: BLE001 - a stop that
+            # cannot be verified fails a live run closed; a dry
+            # run previews without it and says so.
+            if live:
+                return (f"couldn't verify your standing stop just "
+                        f"now, so nothing runs blind: {exc}")
+            stopped = frozenset()
+            stop_note = ("(standing stops unverified — the live "
+                         "run re-checks them)")
+        else:
+            stop_note = ""
+        try:
+            plan = plan_relay(
+                source, targets,
+                pace_seconds=arms.pacing(
+                    tool, floor=PACE_FLOOR_S, default=DEFAULT_PACE_S),
+                stopped_platforms=stopped)
+        except RelayRefused as exc:
+            return f"⚠️ {exc}"
+        if not live:
+            _journal_row(live=False, dry_run=True, source={
+                "platform": source.platform, "chat_key": source.chat_key,
+                "chat_title": source.chat_title,
+                "message_id": source.message_id, "text": source.text},
+                targets=len(plan.targets) + len(plan.skipped),
+                sent=0, failed=0, aborted=False, results=[])
+            lines = [preview_relay(plan)]
+            if stop_note:
+                lines.append(stop_note)
+            return "\n".join(lines)
+        if not arms.armed(tool):
+            _journal_row(live=False, dry_run=False,
+                         source={"platform": source.platform,
+                                 "chat_key": source.chat_key,
+                                 "chat_title": source.chat_title,
+                                 "message_id": source.message_id,
+                                 "text": source.text},
+                         targets=0, sent=0, failed=0,
+                         refused="disarmed", results=[])
+            return (f"{RELAY_WARN_TEXT}\nArm it with: "
+                    "/relay arm")
+        adapters = {}
+        for platform in {source.platform} | {t.platform
+                                            for t in plan.targets}:
+            adapters[platform] = self._adapter_for(platform)
+        record = run_relay(
+            plan=plan, adapters=adapters,
+            pace_seconds=arms.pacing(
+                tool, floor=PACE_FLOOR_S, default=DEFAULT_PACE_S))
+        arms.note_live_run(tool)
+        _journal_row(live=True, dry_run=False, source=record["source"],
+                     targets=len(record["targets"])
+                     + len(record["skipped"]),
+                     sent=record["sent"], failed=record["failed"],
+                     aborted=record["aborted"],
+                     results=record["results"])
+        lines = [f"📣 relay live: sent {record['sent']} of "
+                 f"{len(record['targets'])} rooms."]
+        for item in record["results"]:
+            if item.get("ok"):
+                lines.append(f"  ✓ {item.get('title') or item.get('target')} "
+                             f"— {item.get('mode')}")
+            else:
+                lines.append(f"  ✗ {item.get('title') or item.get('target')}: "
+                             f"{item.get('error') or 'failed'}")
+        for item in record["skipped"]:
+            lines.append(f"  – {item.get('title') or item.get('key')}: "
+                         f"held — {item.get('reason')}")
+        return "\n".join(lines)
+
+    def _relay_stopped_platforms(self) -> frozenset:
+        """Platforms under the owner's standing stop right now."""
+        svc = self._pairing_personal()
+        registry = svc["registry"]
+        return frozenset(
+            p for p in ("whatsapp", "telegram", "telegram-bot")
+            if registry.owner_stopped(p))
+
     def _control_obroadcast(self, tail: str) -> str:
         """/obroadcast — the owner speaks through Devon to all
         claimed groups/channels at once (DESIGN §20b).

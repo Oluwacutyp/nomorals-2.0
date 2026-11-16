@@ -7665,6 +7665,11 @@ class PartnerRuntime(
             # §20b owner broadcast — owner-only like the mass tools.
             return self._control_obroadcast(command.tail)
 
+        if kind == "relay":
+            # Cross-platform relay (§6 #2) — owner-only like the
+            # mass tools; needs the message for the source.
+            return self._control_relay(command.tail, message)
+
         if kind == "rules":
             return self._control_rules(message)
 
