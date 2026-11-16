@@ -3935,6 +3935,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "swarm board tick job not registered: %s", exc)
+                # Continual update (audit gap R2-32): one durable
+                # "continual update tick" job (every 24h) driving the
+                # confined continual-update loop — fresh ledger pairs
+                # into the durable replay buffer, one adapter-only
+                # update against the frozen eval harness when due.
+                # Idempotent; best-effort.
+                try:
+                    from ...training.continual_driver import ensure_continual_update_job
+
+                    ensure_continual_update_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "continual update tick job not registered: %s", exc)
                 # Community orchestration (AA-18): one durable
                 # "community orchestration tick" job (every 1m)
                 # heartbeating this device into the fleet session

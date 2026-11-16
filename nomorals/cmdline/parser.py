@@ -3823,6 +3823,10 @@ def _parser() -> argparse.ArgumentParser:
                        help="list training backends with honest machine availability")
     train.add_argument("--run", action="store_true",
                        help="kick off one pipeline run (collect->train->evaluate->promote)")
+    train.add_argument("--continual", action="store_true",
+                       help="run one confined continual update (ledger pairs -> replay buffer -> adapter-only update vs the frozen eval harness)")
+    train.add_argument("--force", action="store_true",
+                       help="with --continual: run the update even when the daily interval has not elapsed")
     train.add_argument("--backend", default="",
                        help="override the training backend for this run")
     train.add_argument("--base-model", default="",

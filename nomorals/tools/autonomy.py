@@ -787,6 +787,23 @@ def register(registry: Any) -> None:
                     "error": f"swarm board tick failed: {exc}"}
 
     @registry.register(
+        "__continual_update_tick__",
+        description="Run one continual-update tick: harvest fresh owner-correction pairs from the representation ledger into the durable replay buffer and, when due (every ~24h), run one confined adapter-only update against the frozen eval harness. An accepted candidate is saved as the live preference adapter and the owner is told once; a rejection leaves the previous adapter in place. Scheduler-internal; runs every ~24h. Routine and silent — a not-due or deferred tick pings nobody.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _continual_update_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..training.continual_driver import run_continual_update_once
+
+        try:
+            return run_continual_update_once(
+                _context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"continual update tick failed: {exc}"}
+
+    @registry.register(
         "__show_schedule_tick__",
         description="Run one show-schedule tick: compose a DRAFT "
         "episode for every show whose schedule is due, from the "

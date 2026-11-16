@@ -44,6 +44,15 @@ from .continual import (
     ContinualUpdater, FixedEvalHarness, ReplayBuffer, confined_update,
     due_for_update,
 )
+from .continual_driver import (
+    CONTINUAL_JOB,
+    CONTINUAL_SPEC,
+    CONTINUAL_TOOL,
+    ContinualStore,
+    ensure_continual_update_job,
+    load_saved_adapter,
+    run_continual_update_once,
+)
 from .distillation import (
     DistillationPair, DistillationStore, capture, capture_owner_kept,
     capture_owner_passed, judge_and_capture, periodic_distill,
@@ -61,7 +70,11 @@ from .trainer import (
 
 __all__ = [
     "BPETokenizer",
+    "CONTINUAL_JOB",
+    "CONTINUAL_SPEC",
+    "CONTINUAL_TOOL",
     "CleanStats",
+    "ContinualStore",
     "ContinualUpdater",
     "Dataset",
     "DatasetRegistry",
@@ -98,6 +111,7 @@ __all__ = [
     "dedupe",
     "due_for_update",
     "encode_batch",
+    "ensure_continual_update_job",
     "evaluate_on_held_out",
     "example_stats",
     "file_checksum",
@@ -107,6 +121,7 @@ __all__ = [
     "hamming",
     "judge_and_capture",
     "lr_factor",
+    "load_saved_adapter",
     "periodic_distill",
     "prepare",
     "production_gate",
@@ -118,6 +133,7 @@ __all__ = [
     "render_gate_report",
     "render_policy_card",
     "render_run_card",
+    "run_continual_update_once",
     "simhash",
     "sparkline",
     "split",

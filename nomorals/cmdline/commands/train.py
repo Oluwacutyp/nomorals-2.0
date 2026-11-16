@@ -23,6 +23,33 @@ def _cmd_train(args, context):
         _emit(args, {"configured": configured, "backends": rows}, "\n".join(lines))
         return 0
 
+    if getattr(args, "continual", False):
+        from ...training.continual_driver import run_continual_update_once
+
+        result = run_continual_update_once(
+            context, force=bool(getattr(args, "force", False)))
+        status = str(result.get("status") or "failed")
+        if status == "accepted":
+            before = result.get("before") or {}
+            after = result.get("after") or {}
+            text = (f"continual update accepted — fixed harness "
+                    f"{before.get('accuracy')} → {after.get('accuracy')} "
+                    f"({result.get('buffer')} replay pairs, "
+                    f"adapter covers {result.get('pair_count')} pairs)")
+        elif status == "rejected":
+            text = (f"continual update rejected — "
+                    f"{result.get('reason') or 'fixed-harness regression'} "
+                    f"(previous adapter kept)")
+        elif status == "not_due":
+            text = "continual update not due yet — daily interval not elapsed"
+        elif status == "deferred":
+            text = f"continual update deferred — {result.get('reason') or ''}"
+        else:
+            text = (f"continual update failed — "
+                    f"{result.get('error') or result.get('reason') or status}")
+        _emit(args, result, text)
+        return 0 if result.get("ok") else 1
+
     if not getattr(args, "run", False):
         _emit(args, {"started": False},
               "nothing to do — pass --backends to see engines or --run to train")

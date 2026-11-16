@@ -1144,6 +1144,22 @@ def brain_for(context: Any) -> Brain:
         brain = Brain(
             router=router,
             guardrails=Guardrails.from_settings(settings))
+        # Serving seam for the continual-update loop (audit gap R2-32):
+        # a saved live preference adapter is served for owner-directed
+        # work. Absent or unreadable means no tuned adapter is active
+        # — the base model serves alone, exactly as before. The driver
+        # live-sets the cached brain when a new candidate lands, so
+        # this load only matters for a fresh process.
+        try:
+            from ..training.continual_driver import load_saved_adapter
+
+            home = getattr(settings, "home", None)
+            adapter = load_saved_adapter(home) if home else None
+            if adapter is not None:
+                brain.set_preference_adapter(adapter)
+        except Exception:  # noqa: BLE001 - serving the adapter is a bonus
+            _log.debug("saved preference adapter not loaded",
+                       exc_info=True)
         try:
             context._brain_for_ctx = brain  # type: ignore[attr-defined]
         except Exception:  # noqa: BLE001 — caching is a bonus
