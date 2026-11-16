@@ -34,6 +34,34 @@ from nomorals.agents.partner_runtime import PartnerRuntime
 from nomorals.core.config import PartnerSettings, load_settings
 from nomorals.social.chat.base import ChatAdapter, ChatKind, ChatMessage, ChatRef, SendResult
 from nomorals.social.chat.gateway import ChatGateway
+from tests.frozen_clock import MIDDAY_TS
+
+# Clock policy (batch H30): every seed below is MIDDAY_TS (noon
+# 2026-10-14, tests.frozen_clock), except the pulse-marker seed,
+# which is grandfathered (see the comment at its site). Traced
+# before freezing, per read:
+# * _wait deadline pair: wait-loop elapsed time -> time.monotonic()
+#   (strictly correct for a deadline; not counted by the meta-test).
+# * _msg ts + the two inline message ts: the runtime's only
+#   message.ts read on the driven path is the stale_replay log line
+#   (runtime.py:1380), gated on adapter-stamped meta these
+#   directly-constructed messages lack; the other repo-wide reads
+#   are _control_tax (runtime_group.py:16725, /tax path, not driven
+#   here) and gateway.py:811/816 (provenance only, never compares).
+#   Reply-claim arbitration keys on message identity
+#   (reply_claim_key, message_id + chat only) — H11/H15/H23.
+# * Briefing generated_at seed: latest_briefing queries by date
+#   (morning_briefing.py:1979, WHERE date=? ORDER BY generated_at
+#   DESC); generated_at only orders within the date (H10 precedent).
+#   check_catchup suppresses on latest_briefing presence by date,
+#   so the frozen value suppresses exactly like a real one.
+# * Pulse-marker seed: GRANDFATHERED — start() runs
+#   check_all_catchup (runtime.py:3259–3261) and a slot is
+#   suppressed only when its marker ts >= today's slot time on the
+#   real clock (morning_pulse.py:1899–1923); a frozen MIDDAY marker
+#   fires the catch-up on start() (proven: "pulse/midnight:
+#   catch-up firing", ~10.6s of real delivery work). Same shape as
+#   H10/H18/H23/H25.
 
 OWNER = "2348012345678"  # the pairing suites' standing fake
 
@@ -118,8 +146,8 @@ class _ReadOnlyAdapter(ChatAdapter):
 
 
 def _wait(predicate, timeout: float = 8.0) -> bool:
-    end = time.time() + timeout
-    while time.time() < end:
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
         if predicate():
             return True
         time.sleep(0.02)
@@ -132,7 +160,7 @@ def _msg(platform: str, chat_id: str, text: str, *,
     return ChatMessage(
         chat=ChatRef(platform=platform, chat_id=chat_id, kind=kind),
         incoming=True, text=text, sender=sender, media=[],
-        reply_to=reply_to, mentioned=False, ts=time.time(),
+        reply_to=reply_to, mentioned=False, ts=MIDDAY_TS,
         message_id=message_id)
 
 
@@ -228,6 +256,20 @@ class _RuntimeRig(unittest.TestCase):
                        "pulse_last_run_evening.json",
                        "pulse_last_run_midnight.json"):
             (ws / marker).write_text(
+                # Grandfathered (batch H30): stays on the real clock.
+                # start() runs check_all_catchup (runtime.py:3259–
+                # 3261), and check_slot_catchup suppresses a slot
+                # only when its marker's ts >= today's slot time on
+                # the REAL clock (morning_pulse.py:1899–1923). A
+                # frozen MIDDAY marker is ~32 days before any slot
+                # time, so the catch-up FIRES on start() — proven:
+                # with the marker frozen, test_dm_reaction fires
+                # "pulse/midnight: catch-up firing" and spends
+                # ~10.6s on a real pulse delivery attempt. The
+                # seed's job is to pin the pulse quiet; freezing it
+                # defeats that job and makes the test's runtime
+                # depend on the real hour (which slots fire).
+                # Same shape as H10/H18/H23/H25.
                 json.dumps({"ts": time.time(), "delivered_text": True}),
                 encoding="utf-8")
         from nomorals.agents.morning_briefing import _today_str
@@ -235,7 +277,7 @@ class _RuntimeRig(unittest.TestCase):
             "INSERT OR REPLACE INTO briefings"
             " (id, date, sections_json, generated_at)"
             " VALUES (?, ?, '[]', ?)",
-            ("test-seed", _today_str(self.context), time.time()))
+            ("test-seed", _today_str(self.context), MIDDAY_TS))
 
     def tearDown(self) -> None:
         import contextlib
@@ -288,7 +330,7 @@ class ReceiptHookTests(_RuntimeRig):
         runtime.on_message(ChatMessage(
             chat=chat, incoming=True,
             text="thanks, that was sweet", sender="someone",
-            message_id="m1", ts=time.time()))
+            message_id="m1", ts=MIDDAY_TS))
         self.assertTrue(_wait(lambda: len(adapter.reactions) == 1),
                         "no receipt reaction landed")
         # pick_reaction on the thanks context — her vocabulary,
@@ -304,7 +346,7 @@ class ReceiptHookTests(_RuntimeRig):
         # test_unmatched_message_gets_read_not_reaction.)
         runtime.on_message(ChatMessage(
             chat=chat, incoming=True, text="we won the jackpot!!",
-            sender="someone", message_id="m2", ts=time.time()))
+            sender="someone", message_id="m2", ts=MIDDAY_TS))
         self.assertTrue(_wait(lambda: len(adapter.reactions) == 2))
         time.sleep(0.3)
         self.assertEqual(

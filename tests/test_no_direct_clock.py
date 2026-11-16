@@ -335,6 +335,24 @@ BASELINE: dict[str, int] = {
     # The file's other reads (wait loops, briefing generated_at) are
     # converted: monotonic deadlines, frozen generated_at.
     "tests/test_presence.py": 1,
+    # Grandfathered (batch H30): the pulse-marker ts must be stamped
+    # on the real clock — check_slot_catchup suppresses a slot only
+    # when its marker's ts >= today's slot time on the real clock
+    # (morning_pulse.py:1899–1923), and start() runs check_all_catchup
+    # (runtime.py:3259–3261), so a frozen MIDDAY marker fires the
+    # catch-up on start() — proven: with the marker frozen,
+    # test_dm_reaction fires "pulse/midnight: catch-up firing" and
+    # spends ~10.6s on a real pulse delivery attempt. The seed's job
+    # is to pin the pulse quiet; freezing it defeats that job and
+    # makes the test's runtime depend on the real hour (which slots
+    # fire). Same shape as H10/H18/H23/H25. The file's other 6 reads
+    # are converted: monotonic wait-loop deadlines, frozen _msg /
+    # inline message ts (the runtime's only message.ts read on the
+    # driven path is the stale_replay log line, gated on
+    # adapter-stamped meta these directly-constructed messages lack),
+    # and frozen briefing generated_at (latest_briefing queries by
+    # date; generated_at only orders within the date).
+    "tests/test_presentation_ack.py": 1,
     "tests/test_proactive_delivery.py": 3,
     "tests/test_property_sweep.py": 2,
     "tests/test_proxylab_stream1.py": 9,
