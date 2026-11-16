@@ -1166,6 +1166,22 @@ class RuntimeGroupMixin:
                         surface, key, message, user_id=user_id,
                         username=str(member.get("username") or ""),
                         name=str(member.get("name") or ""))
+                    # Presence watch (census §6 #4): the same
+                    # admitted arrival, once per group + second.
+                    # Guarded: a slim host (this mixin only) has
+                    # no reach mixin, so no watch organ — the
+                    # sensor is a no-op there, never a crash.
+                    watch_event = getattr(
+                        self, "_presence_watch_event", None)
+                    if watch_event is not None:
+                        watch_event(
+                            message.chat.platform, "join",
+                            user_id=user_id,
+                            username=str(member.get("username") or ""),
+                            name=str(member.get("name") or ""),
+                            episode_id=(f"{key}:{int(time.time())}"),
+                            group=str(message.chat.title or ""),
+                            ts=time.time())
                     continue
                 facts = self._acceptance_facts(member)
                 has_photo = member.get("has_photo")
@@ -1205,6 +1221,22 @@ class RuntimeGroupMixin:
                         surface, key, message, user_id=user_id,
                         username=facts["username"],
                         name=facts["name"], held=held)
+                    # Presence watch (census §6 #4): admitted
+                    # arrivals only — a declined/kicked arrival
+                    # never reaches here, and neither does the
+                    # watch.  Same episode key as the inert path.
+                    # Guarded: a slim host has no reach mixin.
+                    watch_event = getattr(
+                        self, "_presence_watch_event", None)
+                    if watch_event is not None:
+                        watch_event(
+                            message.chat.platform, "join",
+                            user_id=user_id,
+                            username=facts["username"],
+                            name=facts["name"],
+                            episode_id=(f"{key}:{int(time.time())}"),
+                            group=str(message.chat.title or ""),
+                            ts=time.time())
             if welcomed and self._system_send_ok(
                     surface, key, message, "welcome"):
                 if surface.rhythm_silent(key):

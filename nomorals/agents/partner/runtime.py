@@ -1022,6 +1022,21 @@ class PartnerRuntime(
             platform, user_id,
             username=str(meta.get("username") or ""),
             name=str(meta.get("name") or ""))
+        # Presence watch (census §6 #4): a UserUpdate that carries a
+        # presence transition (Telegram only — WhatsApp never forwards
+        # contact presence) runs the watch check for this contact.
+        # Silent like the fan-out above: the check never raises, and
+        # a delivered alert goes to the owner's DM via the notifier.
+        # Guarded: a slim host has no reach mixin.
+        presence = str(meta.get("online") or "")
+        if presence in ("online", "offline"):
+            watch_event = getattr(self, "_presence_watch_event", None)
+            if watch_event is not None:
+                watch_event(
+                    platform, "online", user_id=user_id,
+                    username=str(meta.get("username") or ""),
+                    name=str(meta.get("name") or ""),
+                    online=(presence == "online"))
 
     def _passes_games_only(self, message: ChatMessage) -> bool:
         """Does this message pass a games-only chat? Game moves were
@@ -9222,6 +9237,8 @@ class PartnerRuntime(
             return self._control_legacy(command.tail or arg, chat_key=chat_key)
         if kind == "family":
             return self._control_family(command.tail or arg, chat_key=chat_key)
+        if kind == "presence":
+            return self._control_presence(command.tail or arg, chat_key=chat_key)
         if kind == "publicface":
             return self._control_publicface(command.tail or arg, chat_key=chat_key)
         if kind == "backup":

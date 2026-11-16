@@ -440,7 +440,7 @@ def test_adapter_user_update_facts_from_event():
         id=7, username="ada_ng", first_name="Ada", last_name="N."))
     facts = TelegramAdapter._user_update_facts(event)
     assert facts == {"user_id": "7", "username": "ada_ng",
-                     "name": "Ada N."}
+                     "name": "Ada N.", "online": ""}
 
 
 def test_adapter_user_update_facts_none_when_no_user():

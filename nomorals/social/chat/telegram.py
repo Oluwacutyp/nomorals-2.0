@@ -1916,6 +1916,7 @@ class TelegramAdapter(ChatAdapter):
                                   "user_id": facts["user_id"],
                                   "username": facts["username"],
                                   "name": facts["name"],
+                                  "online": facts["online"],
                                   "envelope": None}))
                 else:
                     _log.warning("telegram: Telethon has no "
@@ -5323,9 +5324,19 @@ class TelegramAdapter(ChatAdapter):
     @staticmethod
     def _user_update_facts(event: Any) -> dict[str, str] | None:
         """The identity facts out of a Telethon UserUpdate event:
-        user id, username, display name.  None when the event
+        user id, username, display name, plus the presence
+        transition the event carries ("online" when the user just
+        came online, "offline" when they just went offline, "" when
+        the update is not a presence transition — a rename, a
+        typing pulse, anything else).  None when the event
         carries no attributable user — an unattributable update
         journals against nothing, never a guess."""
+        if getattr(event, "online", None) is True:
+            online = "online"
+        elif getattr(event, "offline", None) is True:
+            online = "offline"
+        else:
+            online = ""
         user = getattr(event, "user", None)
         if user is not None:
             uid = getattr(user, "id", None)
@@ -5345,7 +5356,7 @@ class TelegramAdapter(ChatAdapter):
         if not uid:
             return None
         return {"user_id": str(uid), "username": username,
-                "name": name}
+                "name": name, "online": online}
 
     def message_sender(self, chat: ChatRef, message_id: str
                        ) -> dict[str, Any] | None:

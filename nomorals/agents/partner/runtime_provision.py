@@ -1753,10 +1753,27 @@ class RuntimeProvisionMixin:
         # file — no restart (live-attach).
         self._sync_telegram_surface()
         try:
-            svc["personal"].cycle_stories("telegram")
+            new_stories = svc["personal"].cycle_stories("telegram") or []
         except Exception as e:  # noqa: BLE001
             record_failure(
                 "runtime_provision.story_cycle", e)
+            new_stories = []
+        # Presence watch (census §6 #4): the sweep returns only the
+        # newly saved stories, each carrying its poster and story
+        # id — a Telegram story watch fires on those.  Stories
+        # Devon does not preserve (status saving off) have nothing
+        # to point at, and the /presence status reply says so.
+        # Guarded: a slim host has no reach mixin.
+        watch_event = getattr(self, "_presence_watch_event", None)
+        if watch_event is not None:
+            for story in new_stories:
+                watch_event(
+                    "telegram", "status",
+                    user_id=str(story.get("counterpart_id") or ""),
+                    username="",
+                    name=str(story.get("poster_name") or ""),
+                    episode_id=str(story.get("source_id") or ""),
+                    ts=float(story.get("ts") or 0.0))
         # Same beat: the WhatsApp channel sweep (channel
         # stories build) — followed channels' new posts saved /
         # marked viewed per the account's status toggles.
@@ -1892,6 +1909,21 @@ class RuntimeProvisionMixin:
                 media_missing=bool(
                     meta.get("status_media_missing")),
                 ts=ts)
+            # Presence watch (census §6 #4): the same post, the
+            # same source id — the organ dedupes replays, so the
+            # sweep below can never double-alert.  Guarded: a
+            # slim host has no reach mixin.
+            watch_event = getattr(self, "_presence_watch_event", None)
+            if watch_event is not None:
+                watch_event(
+                    platform, "status",
+                    user_id=str(getattr(message, "sender_id", "")
+                                or counterpart),
+                    username="",
+                    name=str(getattr(message, "sender", "") or ""),
+                    episode_id=str(getattr(message, "message_id", "")
+                                   or ""),
+                    ts=ts)
             return True
         if service == "delete":
             if kind != "dm":

@@ -2170,6 +2170,170 @@ class RuntimeReachMixin:
         except (ValueError, KeyError, PermissionError, LookupError) as exc:
             return str(exc)
 
+    def _presence_watch_store(self) -> Any:
+        """PresenceWatchStore on the durable home path."""
+        from ...social.presence_watch import PresenceWatchStore
+
+        path = (self.context.settings.home_path / "data"
+                / "presence_watch.json")
+        return PresenceWatchStore(path)
+
+    def _presence_watch_event(self, platform: str, signal: str, *,
+                              user_id: str, username: str = "",
+                              name: str = "", episode_id: str = "",
+                              group: str = "", ts: float | None = None,
+                              online: bool | None = None
+                              ) -> list[dict[str, Any]]:
+        """One observed presence event: check the watches, deliver
+        any alert through the notifier, return the alerts delivered.
+
+        A sensor, not a command: it never raises and never replies
+        in the room — a failed delivery is ledgered by the
+        notifier, never retried into a storm.  With no watch file
+        at all it returns before touching the disk.  ``online``
+        carries a Telegram presence transition (True = came online,
+        False = went offline); for any other signal it is ignored.
+        """
+        try:
+            from ...social.presence_watch import render_alert
+            from ..notifier import notify
+        except Exception:  # noqa: BLE001 - a sensor must not break intake
+            return []
+        try:
+            store = self._presence_watch_store()
+            if not store.path.exists():
+                return []
+            if signal == "online" and online is False:
+                store.note_offline(platform, user_id=user_id,
+                                   username=username, name=name)
+                return []
+            alert = store.check(
+                platform, signal, user_id=user_id, username=username,
+                name=name, episode_id=episode_id, group=group, ts=ts)
+            if alert is None:
+                return []
+            title, body = render_alert(alert)
+            notify(self.context, "presence_watch", title, body,
+                   alert_subject=str(alert.get("label") or ""))
+            return [alert]
+        except Exception:  # noqa: BLE001 - a sensor must not break intake
+            return []
+
+    def _control_presence(self, tail: str, *, chat_key: str = "") -> str:
+        """Presence watch: /presence watch <contact> [signals] | unwatch
+        <contact> [signals] | list | status.
+
+        Census §6 superhuman #4: alert the owner when a named contact
+        posts a status, comes online, or joins a channel she follows.
+        Owner-only: the kind is absent from PUBLIC_COMMANDS, so
+        caller_may_run denies non-owners before this runs.  The
+        contact may carry an explicit platform prefix (wa: / tg:);
+        without one it is the platform the command arrived on.
+        Signals default to every signal the platform supports —
+        never an unobservable one.  A WhatsApp online watch is
+        refused at add time with the wall named: neither bridge
+        forwards contact presence, so it could never fire.
+        """
+        from ...social.presence_watch import (
+            PLATFORM_SIGNALS,
+            SIGNALS,
+            platform_label,
+            unsupported_reason,
+        )
+
+        usage = ("usage: /presence watch <contact> [status|online|join ...]"
+                 " | unwatch <contact> [status|online|join ...] | list"
+                 " | status — watch a contact: wa:234... / tg:@name / a"
+                 " name on this surface. Signals default to all the"
+                 " platform supports.")
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1] if len(parts) > 1 else ""
+        if verb not in ("watch", "unwatch", "list", "status"):
+            return usage
+        arrival = str(chat_key or "").split(":", 1)[0].lower() or "telegram"
+        if verb == "list":
+            store = self._presence_watch_store()
+            watches = store.list_watches()
+            if not watches:
+                return ("no presence watches. /presence watch <contact>"
+                        " [status|online|join ...] to add one.")
+            lines = [f"watching {len(watches)} contact(s):"]
+            for watch in watches:
+                signals = ", ".join(watch.get("signals") or [])
+                lines.append(
+                    f"• {watch.get('contact')} "
+                    f"({platform_label(str(watch.get('platform') or ''))})"
+                    f": {signals}")
+            if store.corrupted is not None:
+                lines.append(
+                    "note: the watch list was reset — a corrupt file "
+                    f"was quarantined at {store.corrupted}.")
+            lines.append(
+                "Telegram story watches fire when status saving is on"
+                " (the toggle that preserves stories).")
+            return "\n".join(lines)
+        if verb == "status":
+            lines = ["presence watch — what can fire where:"]
+            for platform in ("whatsapp", "telegram"):
+                live = ", ".join(PLATFORM_SIGNALS[platform])
+                lines.append(
+                    f"• {platform_label(platform)}: {live}")
+            lines.append(
+                "WhatsApp online can't be watched: "
+                + unsupported_reason("whatsapp", "online"))
+            lines.append(
+                "Telegram story watches fire when status saving is on.")
+            store = self._presence_watch_store()
+            lines.append(
+                f"{len(store.list_watches())} watch(es) stored.")
+            if store.corrupted is not None:
+                lines.append(
+                    "note: the watch list was reset — a corrupt file "
+                    f"was quarantined at {store.corrupted}.")
+            return "\n".join(lines)
+        tokens = (rest or "").strip().split()
+        if not tokens:
+            return usage
+        contact = tokens[0]
+        platform = arrival
+        for prefix, name in (("wa:", "whatsapp"), ("tg:", "telegram"),
+                             ("whatsapp:", "whatsapp"),
+                             ("telegram:", "telegram")):
+            if contact.lower().startswith(prefix):
+                platform = name
+                contact = contact[len(prefix):]
+                break
+        if not contact:
+            return usage
+        signals = [str(t).lower() for t in tokens[1:]]
+        unknown = [s for s in signals if s not in SIGNALS]
+        if unknown:
+            return ("unknown signal(s): " + ", ".join(unknown)
+                    + " — signals are " + ", ".join(SIGNALS) + ".")
+        store = self._presence_watch_store()
+        if verb == "watch":
+            watch, refused = store.add_watch(platform, contact, signals)
+            if watch is None:
+                reasons = "; ".join(
+                    f"{sig}: {reason}" for sig, reason in refused)
+                return f"can't watch {contact}: {reasons}"
+            out = (f"watching {watch['contact']} on "
+                   f"{platform_label(platform)} for "
+                   f"{', '.join(watch['signals'])}.")
+            for sig, reason in refused:
+                out += f"\n{sig} not watched: {reason}"
+            return out
+        removed = store.remove_watch(platform, contact,
+                                     signals or None)
+        if not removed:
+            return f"no watch for {contact} on {platform_label(platform)}."
+        if signals:
+            return (f"stopped watching {contact} for "
+                    f"{', '.join(signals)} on {platform_label(platform)}.")
+        return (f"stopped watching {contact} on "
+                f"{platform_label(platform)}.")
+
     def _publicface_store(self) -> Any:
         """PublicPageStore on the durable home path (E-6 public-face wiring)."""
         from ...publicface.publish import PublicPageStore
