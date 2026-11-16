@@ -54,6 +54,7 @@ from nomorals.social.chat.base import (
     SendResult,
 )
 from nomorals.social.chat.gateway import ChatGateway
+from tests.frozen_clock import MIDDAY_TS
 
 _TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
 
@@ -143,12 +144,12 @@ def _context(home: str):
                    "pulse_last_run_evening.json",
                    "pulse_last_run_midnight.json"):
         (ws / marker).write_text(
-            json.dumps({"ts": time.time(), "delivered_text": True}),
+            json.dumps({"ts": MIDDAY_TS, "delivered_text": True}),
             encoding="utf-8")
     context.db.execute(
         "INSERT OR REPLACE INTO briefings (id, date, sections_json,"
         " generated_at) VALUES (?, ?, '[]', ?)",
-        ("dupfix4", "2000-01-01", time.time()))
+        ("dupfix4", "2000-01-01", MIDDAY_TS))
     return context
 
 
@@ -387,7 +388,9 @@ def test_group_plain_text_defers_when_claim_unavailable(
         kind=ChatKind.GROUP))
     assert _texts(ad_b["telegram"]) == []
     assert rt_b._peer_deferral().pending_count() == 0
-    rt_b._sweep_peer_deferrals(now=time.time() + 60)
+    # Pending is empty (the peer post resolved it), so expire()
+    # returns [] for any now — the frozen now is inert here.
+    rt_b._sweep_peer_deferrals(now=MIDDAY_TS + 60)
     assert _texts(ad_b["telegram"]) == []
 
 
@@ -405,10 +408,15 @@ def test_group_plain_text_failover_answers_once(
                                    sender_id=MEMBER_ID))
     assert _texts(ad_b["telegram"]) == []
     assert rt_b._peer_deferral().pending_count() == 1
+    # Grandfathered (batch H14): the failover sweep must fire on a
+    # deferral registered at the real clock — register() stamps
+    # created_at/deadline from time.time() (peer_deferral.py) and
+    # expire() fires only when deadline <= now, so a frozen now
+    # (Oct 14, ~32 days before the deadline) never expires it.
     rt_b._sweep_peer_deferrals(now=time.time() + 60)
-    deadline = time.time() + 10.0
+    deadline = time.monotonic() + 10.0
     while (len(_texts(ad_b["telegram"])) == 0
-           and time.time() < deadline):
+           and time.monotonic() < deadline):
         time.sleep(0.05)
     assert len(_texts(ad_b["telegram"])) == 1, \
         _texts(ad_b["telegram"])
@@ -440,10 +448,13 @@ def test_group_plain_text_duplicate_stands_down_and_answers_once(
                                    sender_id=MEMBER_ID))
     assert _texts(ad_b["telegram"]) == [], _texts(ad_b["telegram"])
     assert rt_b._peer_deferral().pending_count() == 1
+    # Grandfathered (batch H14): same failover shape as above —
+    # the duplicate's sweep must fire on a deferral registered
+    # at the real clock; a frozen now never expires it.
     rt_b._sweep_peer_deferrals(now=time.time() + 60)
-    deadline = time.time() + 10.0
+    deadline = time.monotonic() + 10.0
     while (len(_texts(ad_b["telegram"])) == 0
-           and time.time() < deadline):
+           and time.monotonic() < deadline):
         time.sleep(0.05)
     assert len(_texts(ad_b["telegram"])) == 1, \
         _texts(ad_b["telegram"])
@@ -562,7 +573,9 @@ def test_dm_command_ack_observed_without_registry(
                sender_id=str(PERSONAL_BOT_ID))
     rt_b._process_inner(ack)
     assert rt_b._peer_deferral().pending_count() == 0
-    rt_b._sweep_peer_deferrals(now=time.time() + 60)
+    # Pending is empty (the echo never defers), so expire()
+    # returns [] for any now — the frozen now is inert here.
+    rt_b._sweep_peer_deferrals(now=MIDDAY_TS + 60)
     assert _texts(ad_b["telegram"]) == []
 
 
@@ -577,7 +590,9 @@ def test_dm_command_sweep_stands_down_when_bot_claimed(split_homes):
     assert len(_texts(ad_a["telegram-personal"])) == 1
     rt_b._process_inner(_echo_copy("/ping", "880", stamped=False))
     assert rt_b._peer_deferral().pending_count() == 0
-    rt_b._sweep_peer_deferrals(now=time.time() + 60)
+    # Pending is empty (the echo never defers), so expire()
+    # returns [] for any now — the frozen now is inert here.
+    rt_b._sweep_peer_deferrals(now=MIDDAY_TS + 60)
     assert _texts(ad_b["telegram"]) == []
 
 
@@ -626,7 +641,10 @@ def test_shared_claims_db_retries_after_transient_failure(
     # its parent becomes a real directory, so the path opens.
     os.unlink(info["blocker"])
     os.makedirs(info["blocker"], exist_ok=True)
-    rt_b._shared_claims_db_failed_at = time.time() - 61.0
+    # The retry fires when real-now minus failed_at >= 60s
+    # (runtime.py: _SHARED_CLAIMS_RETRY_S); a frozen stamp ~32
+    # days in the past still clears the window.
+    rt_b._shared_claims_db_failed_at = MIDDAY_TS - 61.0
     assert rt_b._shared_claims_db() is not None
     assert rt_b._claims_are_shared() is True
     assert rt_b._command_claims_obj is None
@@ -682,8 +700,8 @@ def test_play_download_bg_stands_down_when_sibling_claims(split_homes):
     rt_b._play_download_bg(chat, "telegram:4242", "⏳ test track",
                            _produce, title="d4-skip-a",
                            claim_key=key)
-    deadline = time.time() + 10.0
-    while time.time() < deadline:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
         done = [s for s in shared_registry().list()
                 if (s.get("labels") or {}).get("title") == "d4-skip-a"
                 and s.get("status") == "done"]
@@ -704,8 +722,8 @@ def test_play_download_bg_stands_down_when_sibling_claims(split_homes):
     rt_b._play_download_bg(chat, "telegram:4242", "⏳ test track",
                            _produce_b, title="d4-skip-b",
                            claim_key=key_b)
-    deadline = time.time() + 10.0
-    while time.time() < deadline:
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
         done = [s for s in shared_registry().list()
                 if (s.get("labels") or {}).get("title") == "d4-skip-b"
                 and s.get("status") == "done"]

@@ -78,6 +78,14 @@ BASELINE: dict[str, int] = {
     "tests/test_digital_twin.py": 15,
     "tests/test_dj_live.py": 1,
     "tests/test_drift.py": 25,
+    # Grandfathered (batch H14): the two failover sweeps must fire
+    # on deferrals registered at the real clock — register()
+    # stamps created_at/deadline from time.time()
+    # (peer_deferral.py) and expire() fires only when deadline
+    # <= now, so a frozen now (~32 days before the deadline)
+    # never expires them. The file's other reads (wait loops,
+    # seeds, empty-pending sweeps, retry stamp) are frozen.
+    "tests/test_dupfix4_group.py": 2,
     "tests/test_email_triage.py": 4,
     "tests/test_error_godtier.py": 2,
     "tests/test_finance_ledger.py": 1,
@@ -103,6 +111,17 @@ BASELINE: dict[str, int] = {
     # refuses a drop whose expires (open + 900s) has passed, so
     # the open must stay on the real clock.
     "tests/test_group_conflict.py": 1,
+    # Grandfathered (batch H14): the coincident-window sweeps,
+    # the role-stagger expire() calls and the both-unknown
+    # sweeps are proofs about real-clock-relative windows —
+    # the deferrals register at the real clock (register()
+    # stamps created_at/deadline from time.time(),
+    # peer_deferral.py) and expire() fires only when deadline
+    # <= now, so a frozen now (~32 days before the deadlines)
+    # expires nothing and the failover claim never runs. The
+    # file's other reads (seeds, the empty-pending sweep) are
+    # frozen.
+    "tests/test_groupdup2_followups.py": 7,
     # Grandfathered (batch H8): the daily-streak test's first
     # claim goes through the runtime control (real clock) and
     # the second must be the consecutive real day; the rob test's

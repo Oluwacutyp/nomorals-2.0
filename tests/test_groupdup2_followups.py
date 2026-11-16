@@ -92,6 +92,7 @@ from nomorals.social.chat.base import (
 )
 from nomorals.social.chat.gateway import ChatGateway
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
 
 _TEST_TMPDIR = os.environ.get("NM_TEST_TMPDIR") or None
 
@@ -164,12 +165,12 @@ def _context(home: str):
                    "pulse_last_run_evening.json",
                    "pulse_last_run_midnight.json"):
         (ws / marker).write_text(
-            json.dumps({"ts": time.time(), "delivered_text": True}),
+            json.dumps({"ts": MIDDAY_TS, "delivered_text": True}),
             encoding="utf-8")
     context.db.execute(
         "INSERT OR REPLACE INTO briefings (id, date, sections_json,"
         " generated_at) VALUES (?, ?, '[]', ?)",
-        ("groupdup2", "2000-01-01", time.time()))
+        ("groupdup2", "2000-01-01", MIDDAY_TS))
     return context
 
 
@@ -445,6 +446,13 @@ def test_coincident_windows_shared_store_exactly_one_reply(
         is_owner=False))
     assert _texts(ad_a["whatsapp"])[baseline_a:] == []
     assert _texts(ad_b["whatsapp"])[baseline_b:] == []
+    # Grandfathered (batch H14): the coincident-window proof —
+    # both deferrals registered at the real clock (register()
+    # stamps created_at/deadline from time.time(),
+    # peer_deferral.py) and expire() fires only when deadline
+    # <= now, so a frozen now (Oct 14, ~32 days before the
+    # deadlines) expires neither side and the shared failover
+    # claim never runs.
     rt_a._sweep_peer_deferrals(now=time.time() + 4.0)
     rt_b._sweep_peer_deferrals(now=time.time() + 4.0)
     replies = (_texts(ad_a["whatsapp"])[baseline_a:]
@@ -495,12 +503,20 @@ def test_both_unknown_game_defers_with_role_stagger(
     assert rt_a._peer_deferral().pending_count() == 1
     assert rt_b._peer_deferral().pending_count() == 1
     # At +4s the bot side is due; the owner side is not.
+    # Grandfathered (batch H14): the role stagger is a proof
+    # about real-clock-relative windows — the bot deferral's
+    # deadline is real-now + 3s, the owner's real-now + 8s
+    # (register() stamps from time.time(), peer_deferral.py),
+    # so only a now inside (real+3, real+8) separates them; a
+    # frozen now sits ~32 days before both deadlines.
     assert len(rt_a._peer_deferral().expire(
         now=time.time() + 4.0)) == 1
     assert rt_b._peer_deferral().expire(
         now=time.time() + 4.0) == []
     assert rt_b._peer_deferral().pending_count() == 1
     # At +9s the owner side is due (failover, bot down).
+    # Same grandfathering: only a real-clock-relative now in
+    # (real+8, ...) expires the owner deferral.
     assert len(rt_b._peer_deferral().expire(
         now=time.time() + 9.0)) == 1
 
@@ -523,6 +539,10 @@ def test_both_unknown_game_exactly_one_reply(
     assert _texts(ad_b["whatsapp"])[baseline_b:] == []
     # Both sweepers fire at +4s — before the fix the owner side
     # failed over here too and answered a second list.
+    # Grandfathered (batch H14): the bot failover at +4s must
+    # fire on a deferral registered at the real clock, and the
+    # owner sweep at +4s must NOT fire (its 8s window is still
+    # open) — both comparisons need a real-clock-relative now.
     rt_a._sweep_peer_deferrals(now=time.time() + 4.0)
     bot_replies = _texts(ad_a["whatsapp"])[baseline_a:]
     assert len(bot_replies) == 1, bot_replies
@@ -538,7 +558,9 @@ def test_both_unknown_game_exactly_one_reply(
         bot_replies[0], "g2", sender_id=BOT_JID))
     assert _texts(ad_b["whatsapp"])[baseline_b:] == []
     assert rt_b._peer_deferral().pending_count() == 0
-    rt_b._sweep_peer_deferrals(now=time.time() + 60)
+    # Pending is empty (the peer post resolved it), so expire()
+    # returns [] for any now — the frozen now is inert here.
+    rt_b._sweep_peer_deferrals(now=MIDDAY_TS + 60)
     assert _texts(ad_b["whatsapp"])[baseline_b:] == []
 
 
