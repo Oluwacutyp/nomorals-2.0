@@ -36,6 +36,37 @@ from nomorals.missions.mission import (
     MissionStore,
 )
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
+
+# Clock reads in this file are frozen to MIDDAY_TS (tests.frozen_clock).
+# Every seed below was traced against the production clock reads on
+# its driven path before freezing; no asserted verdict changes:
+# - _mission's created_at/updated_at: the PENDING-stale leg compares
+#   sweep-now (real clock, sweep() takes no now here) minus updated_at
+#   against 24h; a frozen seed is ~32 days old, still stalled for the
+#   age_s=90000 seeds, and no PENDING age_s=0 mission exists in this
+#   file; the RUNNING leg reads only mission_liveness and the FAILED
+#   leg only state strings, never created_at/updated_at; collect()
+#   uses the age only in a summary string.
+# - Dead heartbeats: mission_liveness (missions/mission.py:111) reads
+#   the real clock with no now seam, but the dead verdict needs only
+#   age > 900s; a frozen heartbeat is ~32 days old, still dead.
+# - Live heartbeat: the frozen "at" is ~32 days old, so the
+#   heartbeat-age leg alone would read dead — but the verdict stays
+#   alive because the heartbeat carries the live test process's own
+#   pid (os.getpid()), and mission_liveness is alive when the process
+#   is alive OR the heartbeat is fresh (mission.py:111-118); no
+#   assertion in this file reads heartbeat_age_s.
+# - job.ended_at: JobsAdapter.discover compares sweep-now minus
+#   ended_at against 600s; a frozen end is ~32 days old, still
+#   orphaned; the steward never calls registry.sweep() (its terminal
+#   TTL drop is forbidden to the steward, pinned by
+#   MechanismsUntouchedTests), so the frozen record is never swept
+#   mid-test; collect() reads status/late_result only.
+# - job.last_heartbeat_at: reap() compares silence against the real
+#   clock; frozen silence is ~32 days, so the dead-man's switch fires
+#   on the first iteration; the heartbeat thread's refresh race is
+#   unchanged in shape (the loop re-backdates each iteration).
 
 DEAD_PID = 999999
 
@@ -48,7 +79,7 @@ def _db() -> Database:
 
 def _mission(store: MissionStore, *, status: str, state=None,
              age_s: float = 0.0, goal: str = "do the thing") -> Mission:
-    now = time.time()
+    now = MIDDAY_TS
     mission = Mission(
         goal=goal, status=status, state=dict(state or {}),
         created_at=now - age_s, updated_at=now - age_s)
@@ -56,7 +87,7 @@ def _mission(store: MissionStore, *, status: str, state=None,
 
 
 def _dead_heartbeat(age_s: float = 100000.0) -> dict:
-    return {"heartbeat": {"at": time.time() - age_s, "pid": DEAD_PID}}
+    return {"heartbeat": {"at": MIDDAY_TS - age_s, "pid": DEAD_PID}}
 
 
 def _liveness_failed(store: MissionStore) -> Mission:
@@ -182,7 +213,7 @@ class DiscoveryTests(unittest.TestCase):
     def test_orphaned_running_mission_discovered_live_one_not(self):
         _mission(self.missions, status=MissionStatus.RUNNING,
                  state=_dead_heartbeat(), goal="orphaned work")
-        live_state = {"heartbeat": {"at": time.time(), "pid": os.getpid()}}
+        live_state = {"heartbeat": {"at": MIDDAY_TS, "pid": os.getpid()}}
         _mission(self.missions, status=MissionStatus.RUNNING,
                  state=live_state, goal="healthy work")
         report = self.steward.sweep()
@@ -219,7 +250,7 @@ class StewardRunTests(unittest.TestCase):
         job = self.registry.submit(lambda: {"report": "ok"},
                                    tool="render")
         self.registry.collect(job.id, timeout=10)
-        job.ended_at = time.time() - 700.0
+        job.ended_at = MIDDAY_TS - 700.0
         return job
 
     def _presumed_dead_job(self, fn):
@@ -229,7 +260,7 @@ class StewardRunTests(unittest.TestCase):
         # while the worker lives; backdate + reap until the
         # dead-man's switch wins a tick.
         for _ in range(100):
-            job.last_heartbeat_at = time.time() - 100.0
+            job.last_heartbeat_at = MIDDAY_TS - 100.0
             self.registry.reap()
             if job.status == "presumed-dead":
                 break
@@ -356,7 +387,7 @@ class MechanismsUntouchedTests(unittest.TestCase):
                  state=_dead_heartbeat(), goal="observe only")
         job = registry.submit(lambda: 1, tool="render")
         registry.collect(job.id, timeout=10)
-        job.ended_at = time.time() - 700.0
+        job.ended_at = MIDDAY_TS - 700.0
 
         def forbidden(name):
             def _raise(*a, **kw):
