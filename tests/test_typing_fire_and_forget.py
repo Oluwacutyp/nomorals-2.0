@@ -16,6 +16,11 @@ from nomorals.social.chat.base import ChatKind, ChatRef
 from nomorals.social.chat.discord import DiscordAdapter
 from nomorals.social.chat.telegram import TelegramAdapter, TelegramBotAdapter
 
+# Clock policy (batch H34): the duration pairs below use
+# time.monotonic(), not time.time() — elapsed time only, immune to
+# wall-clock jumps, and the no-direct-clock ratchet explicitly
+# does not count monotonic.
+
 
 def _loop_thread():
     loop = asyncio.new_event_loop()
@@ -32,10 +37,10 @@ class BotApiTypingTests(unittest.TestCase):
             {"method": method, **kw}) or {"ok": True}  # noqa: SLF001
         chat = ChatRef(platform="telegram-bot", chat_id="123",
                        kind=ChatKind.DM)
-        started = time.time()
+        started = time.monotonic()
         self.assertTrue(adapter.typing(chat, seconds=45.0,
                                        action="recording"))
-        self.assertLess(time.time() - started, 2.0)
+        self.assertLess(time.monotonic() - started, 2.0)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["action"], "record_voice")
 
@@ -68,10 +73,10 @@ class TelethonTypingTests(unittest.TestCase):
         adapter._loop = loop  # noqa: SLF001
         adapter._input_entity_cache.set("123", object())  # noqa: SLF001
         chat = ChatRef(platform="telegram", chat_id="123", kind=ChatKind.DM)
-        started = time.time()
+        started = time.monotonic()
         self.assertTrue(adapter.typing(chat, seconds=30.0))
         # the caller is NOT held for the action, let alone the window
-        self.assertLess(time.time() - started, 2.0)
+        self.assertLess(time.monotonic() - started, 2.0)
         loop.call_soon_threadsafe(loop.stop)
 
     def test_no_client_no_typing(self):
@@ -97,9 +102,9 @@ class DiscordTypingTests(unittest.TestCase):
         adapter._channel = _channel  # noqa: SLF001
         adapter._loop = loop  # noqa: SLF001
         chat = ChatRef(platform="discord", chat_id="123", kind=ChatKind.DM)
-        started = time.time()
+        started = time.monotonic()
         self.assertTrue(adapter.typing(chat, seconds=30.0))
-        self.assertLess(time.time() - started, 2.0)
+        self.assertLess(time.monotonic() - started, 2.0)
         loop.call_soon_threadsafe(loop.stop)
 
     def test_no_loop_no_typing(self):
