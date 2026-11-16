@@ -29,9 +29,11 @@ Tiers:
 
 from __future__ import annotations
 
+import json
 import re
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
@@ -259,3 +261,105 @@ def render_digest(digest: dict[str, Any], *, platform: str = "telegram") -> str:
         return "\n".join(lines)
     except Exception:  # noqa: BLE001
         return f"triage digest: {digest.get('total', 0)} messages"
+
+
+#: Durable triage-log format version.
+STORE_VERSION = 1
+
+
+class TriageLogStore:
+    """The durable triage log: one JSON file under the home's data/
+    directory, written atomically; a corrupt file is quarantined
+    and the store starts empty rather than taking intake down
+    with it.  Mirrors ``PresenceWatchStore`` (same house pattern:
+    missing file → fresh, corrupt → quarantine, tmp+replace save).
+
+    The in-memory ``TriageLog`` stays pure (no I/O); this store
+    owns one and persists its entries on every record, so the
+    morning digest survives restarts.
+    """
+
+    def __init__(self, path: str | Path, *, max_entries: int = 500) -> None:
+        self.path = Path(path)
+        self.max_entries = max_entries
+        #: Quarantined file name when the store was corrupt on load.
+        self.corrupted: str | None = None
+        self._log = TriageLog(max_entries=max_entries)
+        self._loaded = False
+
+    # ── persistence ──────────────────────────────────────────────
+
+    def _fresh(self) -> dict[str, Any]:
+        return {"version": STORE_VERSION, "entries": []}
+
+    def load(self) -> TriageLog:
+        """The log, rehydrated from disk (missing → fresh)."""
+        if self._loaded:
+            return self._log
+        self._loaded = True
+        if not self.path.exists():
+            return self._log
+        try:
+            raw = json.loads(self.path.read_text(encoding="utf-8"))
+        except (ValueError, OSError):
+            raw = None
+        if not isinstance(raw, dict) or not isinstance(
+                raw.get("entries"), list):
+            stamp = time.strftime("%Y%m%d-%H%M%S", time.localtime())
+            dest = self.path.with_name(
+                f"{self.path.name}.corrupt-{stamp}")
+            try:
+                self.path.replace(dest)
+            except OSError:
+                dest = self.path
+            self.corrupted = str(dest)
+            return self._log
+        # A half-written entries list must not take the store down:
+        # keep only well-formed rows.
+        entries = [
+            e for e in (raw.get("entries") or [])
+            if isinstance(e, dict)
+            and isinstance(e.get("tier"), str)
+            and isinstance(e.get("score"), (int, float))
+            and isinstance(e.get("ts"), (int, float))
+        ]
+        for e in entries[-self.max_entries:]:
+            self._log._entries.append({
+                "chat_key": str(e.get("chat_key") or ""),
+                "tier": str(e.get("tier")),
+                "score": round(float(e.get("score")), 3),
+                "sender": str(e.get("sender") or ""),
+                "ts": float(e.get("ts")),
+            })
+        return self._log
+
+    def _save(self) -> None:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = self.path.with_name(f"{self.path.name}.tmp")
+        tmp.write_text(
+            json.dumps(
+                {"version": STORE_VERSION,
+                 "entries": list(self._log._entries)},
+                indent=2, sort_keys=True) + "\n",
+            encoding="utf-8")
+        tmp.replace(self.path)
+
+    # ── log ──────────────────────────────────────────────────────
+
+    def record(self, chat_key: str, tier: str, score: float,
+               sender: str = "") -> None:
+        """Score one message into the durable log."""
+        log = self.load()
+        log.record(chat_key, tier, score, sender=sender)
+        self._save()
+
+    def digest(self, since_hours: float = 24.0) -> dict[str, Any]:
+        """The log's digest window (see ``TriageLog.digest``)."""
+        return self.load().digest(since_hours=since_hours)
+
+    def escalate(self, *, unanswered_hours: float = 6.0,
+                 escalated: set[str] | None = None) -> list[dict[str, Any]]:
+        """Unanswered important+ messages past the window (see
+        ``TriageLog.escalate``)."""
+        return self.load().escalate(unanswered_hours=unanswered_hours,
+                                    escalated=escalated)

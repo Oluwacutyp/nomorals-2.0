@@ -1468,6 +1468,19 @@ class PartnerRuntime(
                 return
         except Exception:  # noqa: BLE001 - intake never breaks chat
             _log.exception("login intake consume failed")
+        # Smart notification triage (audit gap R1-3): every message
+        # that flows on to an answer is scored — closeness from
+        # the relationship tracker, durable log for the morning
+        # digest, a buzz only when the scorer says so. A sensor:
+        # it never replies in the room. Guarded: a slim host has
+        # no reach mixin. Failure-isolated like every intake beat.
+        try:
+            triage = getattr(self, "_triage_inbound", None)
+            if triage is not None:
+                triage(message)
+        except Exception as e:  # noqa: BLE001
+            record_failure(
+                "runtime.PartnerRuntime._process_inner:triage", e)
         # Receipt acknowledgment (presentation Phase 1): everything
         # above has OBSERVED this message — housekeeping, the
         # personal-surface hooks, the stale / channel / group-surface

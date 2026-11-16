@@ -2456,6 +2456,120 @@ class RuntimeReachMixin:
         except Exception:  # noqa: BLE001 - a sensor must not break intake
             return []
 
+    def _triage_store(self) -> Any:
+        """TriageLogStore on the durable home path."""
+        from ...social.triage import TriageLogStore
+
+        path = (self.context.settings.home_path / "data"
+                / "triage.json")
+        return TriageLogStore(path)
+
+    def _triage_tracker(self) -> Any:
+        """RelationshipTracker on the durable home path (cached
+        on the host: the tracker loads its JSON once and saves
+        on every note, so one instance stays current)."""
+        tracker = getattr(self, "_triage_tracker_obj", None)
+        if tracker is None:
+            from ...social.relationships import RelationshipTracker
+
+            tracker = RelationshipTracker(
+                path=str(self.context.settings.home_path / "data"
+                         / "social_relationships.json"))
+            self._triage_tracker_obj = tracker
+        return tracker
+
+    def _triage_inbound(self, message: Any) -> dict[str, Any] | None:
+        """Score one inbound message, record it durably, buzz
+        when the scorer says so (audit gap R1-3).
+
+        A sensor, not a command: it never raises and never
+        replies in the room — a failed delivery is ledgered by
+        the notifier, never retried into a storm.  The owner's
+        own messages are never triaged (his own words don't page
+        him); neither are service events, which never reach this
+        beat.  Closeness comes from the relationship tracker —
+        and the hook feeds it: ``note_inbound`` has no other
+        production caller, so a read-only lookup would score
+        everyone 0 forever and the "who" signal would be dead.
+        A burst refusal from the notifier is the notifier's own
+        dedupe/gate, same as presence watch — never worked
+        around here.
+        """
+        try:
+            from ...social.triage import triage_message
+            from ..notifier import notify
+        except Exception:  # noqa: BLE001 - a sensor must not break intake
+            return None
+        try:
+            platform = str(getattr(message.chat, "platform", "") or "")
+            sender_id = str(getattr(message, "sender_id", "") or "")
+            sender_name = str(getattr(message, "sender", "") or "")
+            meta = getattr(message, "meta", None) or {}
+            if meta.get("own_message"):
+                return None
+            if sender_id:
+                try:
+                    if self._owner_registry().is_owner(platform,
+                                                       sender_id):
+                        return None
+                except Exception:  # noqa: BLE001 - registry fault:
+                    # fall through; an unprovable sender is triaged
+                    # like a stranger, never skipped silently
+                    pass
+            kind = str(getattr(message.chat, "kind", "") or "")
+            chat_kind = {"group": "group",
+                         "channel": "channel"}.get(kind, "dm")
+            # Closeness from the relationship tracker (see the
+            # docstring: the hook feeds it, or everyone scores 0).
+            closeness = 0.0
+            if sender_id:
+                try:
+                    tracker = self._triage_tracker()
+                    person_id = (f"{platform}:{sender_id}"
+                                 if platform else sender_id)
+                    tracker.note_inbound(person_id,
+                                         display_name=sender_name)
+                    rel = tracker.get(person_id)
+                    if rel is not None:
+                        closeness = float(
+                            getattr(rel, "closeness", 0.0) or 0.0)
+                except Exception:  # noqa: BLE001 - tracker fault:
+                    # triage degrades to the message alone; the
+                    # record below still lands
+                    closeness = 0.0
+            score = triage_message(
+                message, is_owner=False, closeness=closeness,
+                kind=chat_kind,
+                mentioned=bool(getattr(message, "mentioned", False)),
+                # In a 1:1 DM a reply from the peer answers the
+                # owner-or-Devon thread; in a group the replied-to
+                # message is unprovable without a ledger lookup,
+                # so only DMs claim it.
+                reply_to_owner=bool(
+                    getattr(message, "reply_to", "")
+                    and chat_kind == "dm"),
+            )
+            store = self._triage_store()
+            store.record(
+                str(getattr(message.chat, "key", "") or ""),
+                score.tier, score.score,
+                sender=sender_name or sender_id)
+            if score.buzz:
+                who = sender_name or sender_id or "someone"
+                snippet = " ".join(
+                    (getattr(message, "text", "") or "").split())
+                if len(snippet) > 60:
+                    snippet = snippet[:57] + "..."
+                title = f"{who}: {snippet}" if snippet else who
+                body = (f"{score.tier} ({score.score:.0%}) in "
+                        f"{chat_kind} — "
+                        + "; ".join(score.reasons))
+                notify(self.context, "triage", title, body,
+                       alert_subject=who)
+            return score.to_dict()
+        except Exception:  # noqa: BLE001 - a sensor must not break intake
+            return None
+
     def _control_presence(self, tail: str, *, chat_key: str = "") -> str:
         """Presence watch: /presence watch <contact> [signals] | unwatch
         <contact> [signals] | list | status.
