@@ -710,6 +710,13 @@ class WhatsAppAdapter(ChatAdapter):
         #: stashed per send so the buttons journal names the
         #: form THIS send rode ("" when the bridge reported none).
         self._last_send_buttons_form: str = ""
+        #: Re-entrancy guard for the table/diff → PNG render (see
+        #: :meth:`_send_rendered_image`): the media send's keyboard
+        #: follow-up re-enters :meth:`send` with the caption as its
+        #: body, and without the guard the same table would render
+        #: again and loop. Thread-local: sends run on the adapter
+        #: thread and the outbox-flush thread.
+        self._render_local = threading.local()
         # The form evidence above is persisted beside the outbox
         # and restored here (buttons completion repair, 2026-11-11):
         # it used to live only in these two attributes, so every
@@ -1250,6 +1257,21 @@ class WhatsAppAdapter(ChatAdapter):
                 record_failure('whatsapp.WhatsAppAdapter._deliver_entry', exc)
             reply_to = str(entry.get("reply_to") or "")
             entry_buttons = entry.get("buttons") or None
+            # Tables / diffs queued during an outage render the same
+            # way as the live path (audit gap R1-2) — otherwise the
+            # outage case stays mangled. A rendered image resolves
+            # like any media send: ok, or a definitive refusal, marks
+            # the outcome known; an unconfirmed dispatch leaves the
+            # stamp for reconcile, which resolves media rows to held
+            # (never re-sent).
+            rendered = self._send_rendered_image(
+                chat, text, buttons=entry_buttons,
+                reply_to=reply_to,
+                mentions=entry.get("mentions") or None)
+            if rendered is not None:
+                if rendered.ok or rendered.error != UNCONFIRMED_SEND_ERROR:
+                    entry["_outcome_known"] = True
+                return bool(rendered.ok)
             chunks = _split_text(text)
             if chunks:
                 # The first chunk is what a later reconciliation looks
@@ -2125,6 +2147,74 @@ class WhatsAppAdapter(ChatAdapter):
             mentions=mentions, fresh=fresh)
         return result
 
+    def _send_rendered_image(self, chat: ChatRef, text: str, *,
+                             buttons: Any = None,
+                             reply_to: str = "",
+                             mentions: Any = None) -> SendResult | None:
+        """Send a table/diff as a PNG image instead of mangled text.
+
+        Returns ``None`` when the text needs no image render — or the
+        send cannot ride the media door (a reply, or a mention, has
+        no media-door form) — so the caller falls through to the
+        plain-text path. Otherwise returns the media send's result
+        when the image is out (or its dispatch is unconfirmed — the
+        image may already be live, so the caller must NOT fall back
+        to text and double-send). A render failure, or a DEFINITIVE
+        media refusal, also returns ``None``: the text still goes
+        out as text, never dropped. Never raises.
+        """
+        if reply_to or mentions:
+            return None
+        if getattr(self._render_local, "active", False):
+            return None
+        try:
+            from .whatsapp_render import needs_image_render, render_for_whatsapp
+        except Exception as exc:  # noqa: BLE001 - render is garnish
+            record_failure(
+                "whatsapp.WhatsAppAdapter._send_rendered_image", exc)
+            return None
+        if not needs_image_render(text):
+            return None
+        try:
+            # Stable path per (chat, text): the media send-once guard
+            # keys on (jid, path, caption), so a retry of the same
+            # table re-renders the same file and the guard holds the
+            # repeat instead of double-sending the image.
+            digest = hashlib.sha256(
+                f"{self._jid(chat)}\x00{text}".encode()
+            ).hexdigest()[:16]
+            out_dir = os.path.join(self.media_dir, "renders")
+            kind, png = render_for_whatsapp(
+                text, out_dir, stem=f"wa-render-{digest}")
+            if kind != "image":
+                return None
+            # The media send's keyboard follow-up re-enters send()
+            # with the caption as its body; the guard keeps that
+            # re-entry on the plain-text path, or the same table
+            # would render again and loop.
+            self._render_local.active = True
+            try:
+                result = self.send_media(
+                    chat, MediaRef(path=png, kind="image"),
+                    caption=text, buttons=buttons)
+            finally:
+                self._render_local.active = False
+            if result.ok or result.error == UNCONFIRMED_SEND_ERROR:
+                return result
+            # Definitive refusal (nothing was dispatched) — fall
+            # through to the plain-text path below.
+            _log.warning(
+                "whatsapp: table/diff image send refused (%s); "
+                "sending as text", result.error or "bridge error")
+            return None
+        except Exception as exc:  # noqa: BLE001 - text fallback
+            record_failure(
+                "whatsapp.WhatsAppAdapter._send_rendered_image", exc)
+            _log.warning(
+                "whatsapp: table/diff render failed (%s); sending as text",
+                exc)
+            return None
+
     def send(self, chat: ChatRef, text: str, *,
              reply_to: str = "",
              buttons: list[list[tuple[str, str]]] | None = None,
@@ -2184,6 +2274,23 @@ class WhatsAppAdapter(ChatAdapter):
             text = format_for_platform(text, "whatsapp")
         except Exception as exc:  # noqa: BLE001
             record_failure('whatsapp.WhatsAppAdapter.send', exc)
+        # Tables / diffs would arrive as a mangled wall of reflowed
+        # monospace — render to PNG and send the image with the text
+        # as caption (audit gap R1-2). A reply or a mention cannot
+        # ride the media door, so those stay text; a render failure
+        # or a definitive media refusal falls back to text inside
+        # the helper, never drops the message.
+        rendered = self._send_rendered_image(
+            chat, text, buttons=buttons, reply_to=reply_to,
+            mentions=mentions)
+        if rendered is not None:
+            if rendered.ok:
+                self._journal_buttons(
+                    direction="send", chat=chat, buttons=buttons,
+                    declared=declared, derived=derived,
+                    output_kind=output_kind,
+                    form=getattr(self, "_last_buttons_form", ""))
+            return rendered
         # WhatsApp caps a text message well above this; split long sends so
         # one giant alert doesn't get silently truncated by the bridge.
         chunks = _split_text(text)
