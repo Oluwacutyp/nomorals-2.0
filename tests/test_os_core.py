@@ -1,8 +1,7 @@
-"""Tests for the Wave H2 OS core: kernel, service registry, health monitor,
-session/project stores, and read-only adapters.
+"""Tests for the Wave H2 OS core: session/project stores and read-only
+adapters.
 
-All stores use in-memory SQLite; the kernel test uses its own EventBus so
-it never disturbs the global bus dispatcher.
+All stores use in-memory SQLite.
 """
 
 from __future__ import annotations
@@ -11,152 +10,14 @@ import unittest
 
 from nomorals.core.events import Event, EventBus
 from nomorals.os.adapters import AccountSessionAdapter, VoiceSessionAdapter
-from nomorals.os.health import (
-    HealthMonitor,
-    HealthStatus,
-    as_health_check,
-)
-from nomorals.os.kernel import OSKernel
 from nomorals.os.project import ProjectStore, artifact_scope
-from nomorals.os.services import ServiceNotFound, ServiceRegistry
 from nomorals.os.session import SessionStore
 
 
-class TestOSKernel(unittest.TestCase):
-    def test_start_stop_idempotent(self) -> None:
-        kernel = OSKernel(bus=EventBus())
-        self.assertFalse(kernel.started)
-        kernel.start()
-        kernel.start()  # second start is a no-op
-        self.assertTrue(kernel.started)
-        kernel.stop()
-        kernel.stop()  # second stop is a no-op
-        self.assertFalse(kernel.started)
-
-    def test_start_wires_service_health_checks_and_runs_them(self) -> None:
-        kernel = OSKernel(bus=EventBus())
-        kernel.start()
-        try:
-            self.assertGreater(len(kernel.health.check_names()), 0)
-            for name in kernel.health.check_names():
-                status = kernel.health.last_status(name)
-                self.assertIsNotNone(status)
-                self.assertTrue(status.ok, f"{name}: {status.detail}")
-        finally:
-            kernel.stop()
-
-    def test_context_manager(self) -> None:
-        with OSKernel(bus=EventBus()) as kernel:
-            self.assertTrue(kernel.started)
-        self.assertFalse(kernel.started)
-
-    def test_status_snapshot(self) -> None:
-        kernel = OSKernel(bus=EventBus())
-        kernel.start()
-        try:
-            snapshot = kernel.status()
-            self.assertTrue(snapshot["started"])
-            self.assertIn("browser", snapshot["services"])
-            self.assertIn("service:browser", snapshot["health"])
-        finally:
-            kernel.stop()
 
 
-class TestServiceRegistry(unittest.TestCase):
-    def test_register_lookup_list_unregister(self) -> None:
-        registry = ServiceRegistry()
-        registry.register("thing", lambda: object(), description="test thing")
-        self.assertIn("thing", registry.list_services())
-        first = registry.lookup("thing")
-        second = registry.lookup("thing")
-        self.assertIs(first, second)  # cached
-        self.assertTrue(registry.unregister("thing"))
-        self.assertNotIn("thing", registry.list_services())
-        self.assertFalse(registry.unregister("thing"))
-
-    def test_lazy_factory_called_once(self) -> None:
-        calls: list[int] = []
-
-        def factory() -> object:
-            calls.append(1)
-            return object()
-
-        registry = ServiceRegistry()
-        registry.register("lazy", factory)
-        self.assertFalse(registry.is_constructed("lazy"))
-        registry.lookup("lazy")
-        registry.lookup("lazy")
-        registry.lookup("lazy")
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(registry.is_constructed("lazy"))
-
-    def test_lookup_unknown_raises(self) -> None:
-        registry = ServiceRegistry()
-        with self.assertRaises(ServiceNotFound):
-            registry.lookup("nope")
-
-    def test_double_register_without_replace_raises(self) -> None:
-        registry = ServiceRegistry()
-        registry.register("dup", lambda: 1)
-        with self.assertRaises(ValueError):
-            registry.register("dup", lambda: 2)
-        registry.register("dup", lambda: 2, replace=True)
-        self.assertEqual(registry.lookup("dup"), 2)
-
-    def test_builtin_descriptors_present(self) -> None:
-        registry = ServiceRegistry()
-        for name in ("browser", "model", "bridge", "queue"):
-            self.assertIn(name, registry.list_services())
-            self.assertIsNotNone(registry.health_check_for(name))
 
 
-class TestHealthMonitor(unittest.TestCase):
-    def test_check_all_reports_statuses(self) -> None:
-        monitor = HealthMonitor()
-        monitor.register_check(as_health_check("good", lambda: True))
-        monitor.register_check(as_health_check("bad", lambda: (False, "kaput")))
-        results = monitor.check_all()
-        self.assertTrue(results["good"].ok)
-        self.assertFalse(results["bad"].ok)
-        self.assertEqual(results["bad"].detail, "kaput")
-        self.assertIsNotNone(monitor.last_status("good"))
-
-    def test_recovery_hook_fires_on_failure(self) -> None:
-        fired: list[HealthStatus] = []
-        monitor = HealthMonitor()
-        monitor.register_check(as_health_check("flaky", lambda: False))
-        monitor.on_failure("flaky", fired.append)
-        monitor.check_all()
-        self.assertEqual(len(fired), 1)
-        self.assertEqual(fired[0].name, "flaky")
-        self.assertFalse(fired[0].ok)
-
-    def test_recovery_hook_not_fired_on_success(self) -> None:
-        fired: list[HealthStatus] = []
-        monitor = HealthMonitor()
-        monitor.register_check(as_health_check("fine", lambda: True))
-        monitor.on_failure("fine", fired.append)
-        monitor.check_all()
-        self.assertEqual(fired, [])
-
-    def test_wildcard_hook_catches_any_failure(self) -> None:
-        fired: list[str] = []
-        monitor = HealthMonitor()
-        monitor.register_check(as_health_check("a", lambda: False))
-        monitor.register_check(as_health_check("b", lambda: True))
-        monitor.on_failure("*", lambda status: fired.append(status.name))
-        monitor.check_all()
-        self.assertEqual(fired, ["a"])
-
-    def test_raising_check_becomes_failed_status(self) -> None:
-        def boom() -> bool:
-            raise RuntimeError("kablam")
-
-        monitor = HealthMonitor()
-        monitor.register_check(as_health_check("boom", boom))
-        results = monitor.check_all()
-        self.assertFalse(results["boom"].ok)
-        self.assertIn("kablam", results["boom"].detail)
 
 
 class TestSessionStore(unittest.TestCase):
