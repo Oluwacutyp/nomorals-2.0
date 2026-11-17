@@ -5894,6 +5894,11 @@ class RuntimeMediaMixin:
                 ok, line = Studio().readiness()
                 lines.append("readiness: " + line if ok
                              else f"readiness: not ready — {line}")
+                # The local render median, when any local render has
+                # been timed — the number behind the CPU-slow route.
+                timing = Studio().timing_line()
+                if timing:
+                    lines.append(timing)
                 return "\n".join(lines)
             if action == "dashboard":
                 from ...media.imggen.studio import training_dashboard

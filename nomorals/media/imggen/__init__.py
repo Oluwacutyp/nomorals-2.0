@@ -28,6 +28,10 @@ Layout:
 - :mod:`.tokenizers` — the real CLIP BPE tokenizer (vocab data is
   loaded from beside the checkpoint, never hardcoded)
 - :mod:`.studio` — the high-level API chat and CLI talk to
+- :mod:`.timing` — local render durations (atomic JSON ring) + the
+  CPU-slow route trigger: when the local median render exceeds
+  ``SLOW_LOCAL_P50_S`` the next single-image job routes to the
+  attested forwarded GPU
 - :mod:`.data` — dataset tooling (captioning, manifests)
 - :mod:`.document` — ImageDocument: non-destructive image edits as
   data (source ref + op list, rendered by replay; Echelon Wave 2)

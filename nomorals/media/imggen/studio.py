@@ -86,6 +86,26 @@ class Studio:
         #: these for local renders.
         self.last_dtype: str = ""
         self.last_quant: str = ""
+        #: Timing store override (tests inject a tmp-path store);
+        #: None means the default store beside the checkpoints.
+        #: The store records every successful local render's
+        #: duration, and the median decides the CPU-slow route.
+        self.timing_store = None
+
+    def _timing_store(self):
+        """The render-timing store: the injected one, else the default."""
+        if self.timing_store is None:
+            from .timing import default_timing_store
+
+            self.timing_store = default_timing_store()
+        return self.timing_store
+
+    def timing_line(self) -> str | None:
+        """Local render median for the checkpoints displays, or None
+        when no local render has been timed yet."""
+        from .timing import local_timing_line
+
+        return local_timing_line(self._timing_store())
 
     # -- pipeline ----------------------------------------------------
     def _resolve_entry(self) -> dict:
@@ -383,7 +403,19 @@ class Studio:
             kwargs.setdefault("height", ah)
         ready, local_reason = self._local_ready()
         batch = kwargs.get("batch_size", 1)
-        if (not ready and allow_remote
+        # CPU-slow trigger: a local box that CAN render but takes
+        # longer than the threshold on the median render routes the
+        # same way the not-ready case does — the forwarded GPU is
+        # plainly faster. No history means not slow: the box renders
+        # locally exactly as before. The slow check is skipped when
+        # local is not ready (the not-ready branch already routes).
+        from .timing import local_is_slow
+
+        slow, slow_reason = ((False, "")
+                             if not ready
+                             else local_is_slow(self._timing_store()))
+        route_reason = local_reason if not ready else slow_reason
+        if ((not ready or slow) and allow_remote
                 and (batch == 1 or batch is None)):
             if explicit:
                 raise ImgGenError(
@@ -396,12 +428,17 @@ class Studio:
             ok, _why = remote_available()
             if ok:
                 return self._generate_remote(
-                    prompt, save_to=save_to, local_reason=local_reason,
+                    prompt, save_to=save_to, local_reason=route_reason,
                     **kwargs)
         pipe = self.pipeline()
         cfg = PipelineConfig(**{k: v for k, v in kwargs.items()
                                  if k in PipelineConfig.__dataclass_fields__})
+        started = time.monotonic()
         images = pipe.generate(prompt, cfg)
+        # Only a successful local render seeds the median — a failed
+        # render's duration is not a render duration. A forwarded
+        # render never reaches here, so it never feeds the local p50.
+        self._timing_store().record(time.monotonic() - started)
         self.last_route = "local"
         self.last_warnings = list(
             getattr(pipe, "last_warnings", None) or [])

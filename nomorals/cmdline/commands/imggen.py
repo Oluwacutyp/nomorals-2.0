@@ -268,6 +268,11 @@ def _cmd_imggen_checkpoints(args: argparse.Namespace, context) -> int:
             return _err(str(exc))
         print("readiness: " + line if ok
               else f"readiness: not ready — {line}")
+        # The local render median, when any local render has been
+        # timed — the number behind the CPU-slow route trigger.
+        timing = _studio(args).timing_line()
+        if timing:
+            print(timing)
     return 0
 
 
