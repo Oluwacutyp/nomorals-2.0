@@ -49,6 +49,7 @@ AGENT_TOOL_MODULES = (
     "integrations.naija_deals",
     "investigate",
     "kg",
+    "marketdesk",
     "mission",
     "monitor",
     "morning_briefing",

@@ -3579,6 +3579,16 @@ class PartnerRuntime(
                     ensure_betdesk_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("betdesk jobs not registered: %s", exc)
+                # Markets desk: study cycle (every 30m — collect, lab,
+                # library) + signal evaluation (every 10m — timed
+                # calls off lab-confirmed hour structure only).
+                # Idempotent by name; both routine (the desk's output
+                # rides its own surfaces).
+                try:
+                    from ..marketdesk.jobs import ensure_marketdesk_jobs
+                    ensure_marketdesk_jobs(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("marketdesk jobs not registered: %s", exc)
                 # Opportunity hunt: the weekly paid-task scan
                 # (Mondays 05:30 — ahead of the 07:00 briefing) that
                 # vets the OpportunityHunter's finds for Nigerian
@@ -10214,6 +10224,8 @@ class PartnerRuntime(
             return self._control_bet(command.tail or arg, chat_key=chat_key)
         if kind == "desk":
             return self._control_desk(command.tail or arg, chat_key=chat_key)
+        if kind == "markets":
+            return self._control_markets(command.tail or arg, chat_key=chat_key)
         if kind == "apk":
             return self._control_apk(command.tail or arg, chat_key=chat_key)
         if kind == "re":

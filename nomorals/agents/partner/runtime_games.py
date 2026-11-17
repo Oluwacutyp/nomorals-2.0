@@ -3634,6 +3634,82 @@ class RuntimeGamesMixin:
             return "\n".join(lines)
         return f"unknown /desk verb {verb!r}\n{_usage()}"
 
+    # ── markets desk: /markets (BTC/stocks lab + timed signal calls) ─
+    def _control_markets(self, tail: str, chat_key: str) -> str:
+        """/markets — the markets desk (analysis only, never trades).
+
+        /markets status   — bars, verdicts, signal calibration, feeds
+        /markets study    — one full cycle: collect, lab, library
+        /markets signals  — evaluate + publish callable timed calls
+        /markets library  — per-symbol study records with evidence
+        /markets collect  — fetch daily + hourly bars per symbol
+        /markets sources  — the desk's sources on the shared registry
+        """
+        from ..marketdesk import MarketsDesk, render_collect, render_library, render_status
+
+        desk = MarketsDesk(getattr(self, "context", None))
+        parts = (tail or "").strip().split(None, 1)
+        verb = parts[0].lower() if parts else ""
+
+        def _usage() -> str:
+            return ("/markets status — bars, verdicts, signal calibration, "
+                    "feed + key state\n"
+                    "/markets study — run one full desk cycle now\n"
+                    "/markets signals — publish callable signal calls "
+                    "(>= 2m lead, lab-confirmed hour structure only)\n"
+                    "/markets library — per-symbol verdicts with evidence\n"
+                    "/markets collect — fetch daily + hourly bars\n"
+                    "/markets sources — market sources on the registry\n"
+                    "analysis only — the desk never trades")
+
+        if verb in ("", "help"):
+            return _usage()
+        if verb == "status":
+            return render_status(desk.status())
+        if verb == "library":
+            return render_library(desk.library())
+        if verb == "collect":
+            return render_collect(desk.collect())
+        if verb == "study":
+            rep = desk.study(deliver_signals=False)
+            lines = ["markets study cycle:"]
+            for symbol, v in (rep.get("verdicts") or {}).items():
+                lines.append(f"  {symbol}: {v.get('verdict')} "
+                             f"({v.get('n_daily', 0)} daily, "
+                             f"{v.get('n_hourly', 0)} hourly bars)")
+            coll = rep.get("collect") or {}
+            lines.append(f"  collect: +{coll.get('added', 0)} bars")
+            for symbol, s in sorted((coll.get("symbols") or {}).items()):
+                if not s.get("ok"):
+                    lines.append(f"  {symbol} collect: {s.get('error', '')}")
+            return "\n".join(lines)
+        if verb == "signals":
+            desk.analyze_all()
+            rep = desk.run_signals(deliver=True)
+            if rep["published"]:
+                lines = [f"published {len(rep['published'])} signal "
+                         f"call(s):"]
+                for pub in rep["published"]:
+                    c = pub["call"]
+                    lines.append(
+                        f"  {c['symbol']} window "
+                        f"{(c['window_start'] - c['published_at']) / 60:.0f}m "
+                        f"lead — {pub.get('detail', '')}")
+                return "\n".join(lines)
+            return ("no callable signals right now:\n" +
+                    "\n".join(f"  {r}" for r in rep["no_call_reasons"]))
+        if verb == "sources":
+            from ..marketdesk.sources import keyed_feed_state, market_status
+            st = market_status(desk.registry)
+            lines = []
+            for s in st["sources"]:
+                lines.append(f"{s['domain']} — {s['health']} ({s['origin']})")
+            for f in keyed_feed_state():
+                lines.append(f"key {f['env_key']}: "
+                             f"{'present' if f['key_present'] else f['status']}")
+            return "\n".join(lines) if lines else "no market sources yet"
+        return f"unknown /markets verb {verb!r}\n{_usage()}"
+
     # ── ApkForge: /apk (A1 dissect + A2 workbench) ─────────────────
     def _control_apk(self, tail: str, chat_key: str = "") -> str:
         """/apk — ApkForge, the APK workbench.

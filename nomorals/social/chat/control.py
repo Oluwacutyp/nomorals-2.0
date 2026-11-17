@@ -876,6 +876,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "voices": (0, 0),      # /voices — list every voice, cloned vs built-in
     "bet": (0, None),        # /bet analyze <home> vs <away> [odds…] | bankroll | backtest
     "desk": (0, None),       # /desk status|study|signals|library|collect|sources|provision — the betting desk (crash lab + signal calls)
+    "markets": (0, None),    # /markets status|study|signals|library|collect|sources — the markets desk (BTC/stocks lab + signal calls)
     "apk": (0, None),        # /apk add|list|status|show|dissect|teach|diff|bisect|signatures|hexpatch|artifacts|send — ApkForge: APK intake, dissection, editing/building (A2), version bisect + signature growth + native patching (A3)
     "re": (0, None),         # /re status|inspect <path>|evidence [id]|unknowns|close <id> [observed|derived] <resolution>|audit|provision|graph|mission <q> -- <targets>|missions|mstatus|mresume — the RE organ: evidence-led static inspection (Evidence records + residual unknowns; spine + provisioned deep rungs + firmware/traffic + Pass 4 missions/reconstruction)
     "pump": (0, None),       # /pump status|watch|study|dossier <mint>|calls|wallet <addr>|graph|attention <mint>|learn|shelf <q>|sources|watch|provision — the pump.fun intelligence desk (signals only)
@@ -4203,7 +4204,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "desk": {"what": "the betting desk: a standing study organ over crash games (Aviator, Stake Crash, bustabit and the likes). It collects timestamped rounds, runs a pattern lab (time-of-day, inter-round timing, autocorrelation, streaks — the time hypothesis, tested), keeps a per-game library of verdicts with evidence, and issues signal calls with at least 2 minutes of lead only off lab-confirmed time structure. Analysis only — it never places bets and never opens book accounts.",
             "usage": "/desk status | /desk study | /desk signals | /desk library | /desk collect | /desk sources | /desk provision",
             "example": "/desk status",
-            "related": "/bet"},
+            "related": "/bet /markets"},
+    "markets": {"what": "the markets desk: a standing study organ over BTCUSD and US-major stocks. It collects daily + hourly bars, runs a pattern lab (trend, momentum, volatility regime, levels, mean reversion, autocorrelation, streaks, hour-of-day effect — tested, Bonferroni-corrected, split-half confirmed), keeps a per-symbol library of verdicts with evidence, and issues signal calls with at least 2 minutes of lead only off lab-confirmed hour structure. Analysis only — it never trades; GoldenSwing / Devon trading remain the execution arms.",
+                "usage": "/markets status | /markets study | /markets signals | /markets library | /markets collect | /markets sources",
+                "example": "/markets status",
+                "related": "/desk /bet"},
     "apk": {"what": "ApkForge, the APK workbench: lands APKs and bundle containers (upload or URL) with full provenance, dissects them statically with androguard + APKiD (manifest anatomy, permissions in plain language, components and what their exported flags expose, dex census, embedded SDKs/trackers, certificate, native libs, packer verdict), teaches from the actual dossier, and diffs two versions component by component (permissions, classes by structural hash, certificate, endpoints). A2 added the editor/builder workbench (journaled edits, fail-closed patches, rebuild + vault-key signing); A3 added version bisect (the exact version where a property flipped, with the transition diff), tracker-signature growth from dissection evidence, native .so hex patching, and the Museum artifact census.",
             "usage": "/apk add <path-or-url> | /apk list | /apk status | /apk show <project> | /apk dissect <project> | /apk teach <project> [topic] | /apk diff <project> <other> | /apk bisect <p1,p2,…> <predicate> | /apk signatures | /apk hexpatch <project> <json> | /apk artifacts | /apk send <artifact> <platform> <chat>",
             "example": "/apk add https://example.com/app.apk",
@@ -4763,7 +4768,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
-                            "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
+                            "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
                            "exness", "stripe", "content", "drafts", "day",
                            "calendar", "repurpose", "engage", "cases", "runs", "craft", "glossary", "read",
                            "tempmail", "checkmail", "vnumber", "checksms",
@@ -5092,7 +5097,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
-      "monitor", "investigate", "bet", "desk", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
+      "monitor", "investigate", "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "worldmodel", "glossary", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
@@ -5457,6 +5462,7 @@ LIST_ONELINERS: dict[str, str] = {
     "speak": "neural voice note of your text",
     "bet": "sports bet analyst: ensemble ML odds analysis + Kelly stakes",
     "desk": "betting desk: crash pattern lab, verdicts library, timed signal calls",
+    "markets": "markets desk: BTC/stocks pattern lab, verdicts library, timed signal calls",
     "apk": "ApkForge: land, dissect, learn from and diff APKs",
     "re": "Reverse engineering: evidence-led static inspection of binaries",
     "pump": "pump.fun intelligence desk: dossiers, de-rug gate, self-graded signal calls",

@@ -320,6 +320,7 @@ def _collect_ensure_bindings(ctx, sched):
         ensure_pulse_job, ensure_pulse_jobs)
     from nomorals.agents.news_jobs import ensure_news_jobs
     from nomorals.agents.betdesk.jobs import ensure_betdesk_jobs
+    from nomorals.agents.marketdesk.jobs import ensure_marketdesk_jobs
     from nomorals.agents.afternoon_pulse import ensure_afternoon_pulse_job
     from nomorals.agents.evening_pulse import ensure_evening_pulse_job
     from nomorals.agents.offline_host import ensure_offline_sync_job
@@ -379,6 +380,7 @@ def _collect_ensure_bindings(ctx, sched):
         ("news jobs", lambda: ensure_news_jobs(sched)),
         ("motivation jobs", lambda: ensure_motivation_jobs(ctx)),
         ("betdesk jobs", lambda: ensure_betdesk_jobs(sched)),
+        ("marketdesk jobs", lambda: ensure_marketdesk_jobs(sched)),
         ("download source health", lambda: ensure_source_health_jobs(sched)),
         ("day derivation", lambda: ensure_day_derivation_job(sched)),
         ("outcome steward sweep",

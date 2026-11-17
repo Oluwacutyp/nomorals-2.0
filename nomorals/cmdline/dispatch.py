@@ -24,6 +24,7 @@ from .commands.apk import _cmd_apk
 from .commands.re import _cmd_re
 from .commands.repair import _cmd_repair
 from .commands.desk import _cmd_desk
+from .commands.markets import _cmd_markets
 from .commands.pump import _cmd_pump
 from .commands.book import _cmd_book
 from .commands.account import _cmd_account
@@ -516,6 +517,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "apk": _CommandSpec(_cmd_apk),
     "re": _CommandSpec(_cmd_re),
     "desk": _CommandSpec(_cmd_desk),
+    "markets": _CommandSpec(_cmd_markets),
     "pump": _CommandSpec(_cmd_pump),
     "build": _CommandSpec(_cmd_build),
     "weather": _CommandSpec(_cmd_weather),

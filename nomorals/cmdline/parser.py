@@ -53,6 +53,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "apk": [],
     "re": [],
     "desk": [],
+    "markets": [],
     "pump": [],
     "book": ["bk"],
     "books": ["library", "lib"],
@@ -2432,6 +2433,25 @@ def _parser() -> argparse.ArgumentParser:
     d_imp.add_argument("--path", required=True)
     desk_sub.add_parser("sources", help="betting sources on the registry")
     desk_sub.add_parser("provision", help="desk API key state (drive from chat: /desk provision <service>)")
+
+    markets_p = sub.add_parser("markets", aliases=CLI_ALIASES["markets"],
+        help="markets desk: BTC/stocks pattern lab, verdicts library, timed signal calls (analysis only)",
+        description=("nm markets status\\n"
+                     "nm markets study\\n"
+                     "nm markets signals [--no-deliver]\\n"
+                     "nm markets library\\n"
+                     "nm markets collect\\n"
+                     "nm markets sources\\n"),
+    )
+    markets_sub = markets_p.add_subparsers(dest="markets_action", required=True)
+    markets_sub.add_parser("status", help="bars, verdicts, calibration, feeds")
+    markets_sub.add_parser("study", help="one full desk cycle")
+    m_sig = markets_sub.add_parser("signals", help="evaluate + publish calls")
+    m_sig.add_argument("--no-deliver", action="store_true",
+                       help="log calls without pushing them")
+    markets_sub.add_parser("library", help="per-symbol study records")
+    markets_sub.add_parser("collect", help="fetch daily + hourly bars")
+    markets_sub.add_parser("sources", help="market sources on the registry")
 
     pump_p = sub.add_parser("pump", aliases=CLI_ALIASES["pump"],
         help="pump.fun intelligence desk: dossiers, de-rug gate, graded signal calls (signals only — never trades)",
