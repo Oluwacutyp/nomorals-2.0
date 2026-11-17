@@ -17,6 +17,12 @@ the SQLite fossil — the passthrough refuses those queries loudly).
     nm analytics histogram <table> <column> [--bins N] [--json]
     nm analytics profile "<sql>" [--json]
                                      EXPLAIN ANALYZE (DuckDB) / QUERY PLAN
+    nm analytics export <table> [--format csv|parquet] [--out <path>]
+                                     whole table to a file (default
+                                     <home>/exports/analytics-<table>-<ts>.<ext>)
+    nm analytics export query "<sql>" [--format csv|parquet] [--out <path>] [--limit N]
+                                     query rows to a file, capped at --limit
+                                     (default 100, max 1000)
 
 ``query`` / ``describe`` / ``sample`` / ``histogram`` / ``profile`` sync
 the SQL's referenced tables into DuckDB first (``load_table``); on the
@@ -29,18 +35,16 @@ honest refusal (exit 1), never invented data. Empty results print
 from __future__ import annotations
 
 import json
-import re
 import sys
+from pathlib import Path
 from typing import Any
 
-from ...storage.analytics import analytics_source_rows, open_analytics
-
-#: FROM/JOIN table references in analytical SQL — the same shape as
-#: ``storage/analytics.py::_SQL_TABLE_REF_RE`` (which stays private):
-#: only used to decide which tables to sync into DuckDB before a query,
-#: never to rewrite anyone's SQL.
-_TABLE_REF_RE = re.compile(
-    r"\b(?:FROM|JOIN)\s+\"?([A-Za-z_][A-Za-z0-9_]*)\"?", re.IGNORECASE)
+from ...storage.analytics import (
+    analytics_source_rows,
+    default_export_path,
+    open_analytics,
+    referenced_tables,
+)
 
 _DEFAULT_LIMIT = 100
 _MAX_LIMIT = 1000
@@ -53,7 +57,9 @@ def _usage() -> int:
           "       nm analytics describe <table> [--json]\\n"
           "       nm analytics sample <table> [--rows N] [--json]\\n"
           "       nm analytics histogram <table> <column> [--bins N] [--json]\\n"
-          "       nm analytics profile \"<select sql>\" [--json]",
+          "       nm analytics profile \"<select sql>\" [--json]\\n"
+          "       nm analytics export <table> [--format csv|parquet] [--out <path>]\\n"
+          "       nm analytics export query \"<select sql>\" [--format csv|parquet] [--out <path>] [--limit N]",
           file=sys.stderr)
     return 2
 
@@ -79,6 +85,8 @@ def _cmd_analytics(args: Any, context: Any) -> int:
             return _analytics_histogram(args, context, words[1:])
         if verb == "profile":
             return _analytics_profile(args, context, words[1:])
+        if verb == "export":
+            return _analytics_export(args, context, words[1:])
     except Exception as exc:  # noqa: BLE001 - fail fast with the real error
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
@@ -97,14 +105,15 @@ def _db(context: Any) -> Any:
     return db
 
 
+def _home(context: Any) -> str:
+    settings = getattr(context, "settings", None)
+    home = getattr(settings, "home", None) if settings is not None else None
+    return str(home or "~/.nomorals")
+
+
 def _refs(sql: str) -> list[str]:
-    """Table names a query touches, in first-seen order, deduplicated."""
-    seen: list[str] = []
-    for match in _TABLE_REF_RE.finditer(sql or ""):
-        name = match.group(1)
-        if name not in seen:
-            seen.append(name)
-    return seen
+    """Table names a query touches — the shared engine helper."""
+    return referenced_tables(sql)
 
 
 def _ensure_loaded(engine: Any, db: Any, tables: list[str]) -> None:
@@ -261,3 +270,73 @@ def _analytics_profile(args: Any, context: Any, rest: list[str]) -> int:
     engine = open_analytics(db)
     _ensure_loaded(engine, db, _refs(sql))
     return _print_rows(engine.profile(sql), args, title="profile")
+
+
+def _analytics_export(args: Any, context: Any, rest: list[str]) -> int:
+    """Export a whole table, or a read-only query's rows, to a file.
+
+    Table exports are whole-table (the existing ``to_parquet`` /
+    ``to_csv`` contract); query exports inherit the query verb's caps
+    — SELECT/WITH only, rows capped at ``--limit`` (default 100, max
+    1000) — and the output states the cap when it bites. Parquet
+    needs the DuckDB backend and refuses honestly on the SQLite
+    passthrough, naming the backend, never silently writing a CSV
+    with a .parquet name.
+    """
+    if not rest:
+        print("usage: nm analytics export <table> [--format csv|parquet] [--out <path>]\n"
+              "       nm analytics export query \"<select sql>\" [--format csv|parquet] [--out <path>] [--limit N]",
+              file=sys.stderr)
+        return 2
+    fmt = str(getattr(args, "format", "csv") or "csv").lower()
+    if fmt not in ("csv", "parquet"):
+        print(f"unknown export format: {fmt} (csv|parquet)", file=sys.stderr)
+        return 2
+    db = _db(context)
+    engine = open_analytics(db)
+    if fmt == "parquet" and getattr(engine, "name", "") != "duckdb":
+        print("parquet export needs the duckdb backend — this install "
+              "runs the sqlite passthrough; use --format csv",
+              file=sys.stderr)
+        return 1
+    out = str(getattr(args, "out", "") or "")
+    if rest[0].lower() == "query":
+        if len(rest) < 2:
+            print("usage: nm analytics export query \"<select sql>\" [--format csv|parquet] [--out <path>] [--limit N]",
+                  file=sys.stderr)
+            return 2
+        sql = " ".join(rest[1:])
+        _ensure_loaded(engine, db, _refs(sql))
+        limit = _limit(args)
+        target = (Path(out).expanduser() if out
+                  else default_export_path(_home(context), "query", fmt))
+        rows = engine.export_query(sql, target, format=fmt, limit=limit)
+        capped = rows >= limit
+        label = "query"
+    else:
+        table = rest[0]
+        _ensure_loaded(engine, db, [table])
+        target = (Path(out).expanduser() if out
+                  else default_export_path(_home(context), table, fmt))
+        if fmt == "parquet":
+            engine.to_parquet(table, target)
+        else:
+            engine.to_csv(table, target)
+        seam = analytics_source_rows(db, table)
+        if seam is not None:
+            rows = len(seam)
+        else:
+            count = engine.query(f'SELECT COUNT(*) AS n FROM "{table}"')
+            rows = int(count[0]["n"]) if count else 0
+        capped = False
+        label = table
+    size = target.stat().st_size if target.is_file() else 0
+    if _as_json(args):
+        print(json.dumps({"format": fmt, "path": str(target), "rows": rows,
+                          "capped": capped, "label": label,
+                          "bytes": size}, indent=2, default=str))
+        return 0
+    print(f"exported {rows} rows from {label} to {target} ({size} bytes)"
+          + (f" — capped at {limit} rows; use --limit 1000 or narrow the query for the rest"
+             if capped else ""))
+    return 0

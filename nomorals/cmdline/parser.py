@@ -4774,14 +4774,16 @@ def _parser() -> argparse.ArgumentParser:
     # R3-59: analytical queries over the live store (storage/analytics.py:
     # DuckDB when installed, the SQLite passthrough otherwise).
     analytics = sub.add_parser("analytics", aliases=CLI_ALIASES["analytics"],
-        help="analytical queries over the store: status, tables, query, describe, sample, histogram, profile",
+        help="analytical queries over the store: status, tables, query, describe, sample, histogram, profile, export",
         description=("nm analytics status [--json]\n"
                      "nm analytics tables [--json]\n"
                      "nm analytics query \"<select sql>\" [--limit N] [--json]\n"
                      "nm analytics describe <table> [--json]\n"
                      "nm analytics sample <table> [--rows N] [--json]\n"
                      "nm analytics histogram <table> <column> [--bins N] [--json]\n"
-                     "nm analytics profile \"<select sql>\" [--json]"),
+                     "nm analytics profile \"<select sql>\" [--json]\n"
+                     "nm analytics export <table> [--format csv|parquet] [--out <path>]\n"
+                     "nm analytics export query \"<select sql>\" [--format csv|parquet] [--out <path>] [--limit N]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     analytics.add_argument("task", nargs="*", default=[],
@@ -4792,6 +4794,10 @@ def _parser() -> argparse.ArgumentParser:
                            help="sample: rows to sample (default 100)")
     analytics.add_argument("--bins", type=int, default=20,
                            help="histogram: number of bins (default 20)")
+    analytics.add_argument("--format", default="csv",
+                           help="export: file format (csv|parquet)")
+    analytics.add_argument("--out", default="",
+                           help="export: output path (default <home>/exports/...)")
     analytics.add_argument("--json", action="store_true", help="Output as JSON")
 
     completion = sub.add_parser(

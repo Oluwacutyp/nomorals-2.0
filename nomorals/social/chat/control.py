@@ -394,6 +394,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "computer": (0, None),  # /computer [status|open|close|view|watch|unwatch|takeover|handback|stop|resume] — Devon's own desktop: persistent sessions she drives herself; owner watch (live stream) + takeover; sticky owner stop. Owner-only.
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
     "museum": (0, 2),  # /museum | /museum send <id> — the Museum census over every system (audit R3-73, owner-only)
+    "analytics": (0, None),  # /analytics [status | tables | query "<select sql>" | export <table> [csv|parquet] | export query "<select sql>" [csv|parquet]] — analytical queries + exports over the live store (R3-59; owner-only)
     "arena-research": (0, 2),  # /arena-research [status | tick | survey | proposals | ensure | enable | disable] — Devon researching herself (owner phase 2026-10-21 item 2, owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
@@ -2331,6 +2332,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "museum": {"what": "the Museum census over every system — ApkForge builds, library books/digests/sources, characters' learned state, TrendOps renders — as browsable cards (id/title/kind/shelf/path/sendable). Read-only: the same census the brain's museum_census tool returns, on demand instead of volunteered. A failing shelf reports a named error and never kills the other shelves. /museum <shelf> shows only that shelf's cards — same card lines, filtered; an unknown shelf name is refused in words naming the shelves that hold cards. /museum send <id> delivers one sendable card back to this chat through the file-send path (exact id or unique prefix); exhibit-only cards — digests, sources — are refused in words, never shipped as their store file. Owner-only.",
              "usage": "/museum | /museum <shelf> | /museum send <id>", "example": "/museum library-books   ·   /museum send library-book:<slug>",
              "related": "/apk /books"},
+    "analytics": {"what": "analytical queries + exports over the live store — the chat twin of `nm analytics` (audit R3-59): /analytics shows the backend + stats, /analytics tables lists every live table with row counts, /analytics query runs a read-only query (SELECT/WITH only, 100 rows shown), /analytics export writes a whole table or a query's rows to a file under <home>/exports/ and sends it back to this chat (CSV on any backend; Parquet needs DuckDB and refuses honestly on the SQLite passthrough, naming the backend — never a CSV with a .parquet name). A query export is capped at 1000 rows and says so when the cap bites. Read-only throughout — nothing here writes the store. Owner-only.",
+             "usage": "/analytics | /analytics tables | /analytics query \"<select sql>\" | /analytics export <table> [csv|parquet] | /analytics export query \"<select sql>\" [csv|parquet]", "example": "/analytics   ·   /analytics tables   ·   /analytics query \"SELECT kind, COUNT(*) AS n FROM memories GROUP BY kind\"   ·   /analytics export memories   ·   /analytics export query \"SELECT * FROM memories\" parquet",
+             "related": "/db /decisions"},
     "arena-research": {"what": "Devon researching herself — the arena researcher surveys the live system (organs, wiring, dead/decorative paths, weak spots) with file:line evidence, mines state of the art per organ through the research pipeline, and files RANKED improvement proposals into the upgrade queue for the owner's word. Never auto-approved, never auto-applied: the owner decides, the organ proposes. /arena-research shows the status (job, gates, last run, pending proposals); tick runs one cycle now; survey lists the current ranked findings without filing; proposals lists what this organ filed. Owner-only.",
              "usage": "/arena-research | /arena-research tick | /arena-research survey | /arena-research proposals | /arena-research ensure | /arena-research enable | /arena-research disable", "example": "/arena-research   ·   /arena-research tick   ·   /arena-research proposals",
              "related": "/research /proposals"},
@@ -5016,7 +5020,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
      ["status", "ping", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
-      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "arena-research", "profile", "mind",
+      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "analytics", "arena-research", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
       "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",

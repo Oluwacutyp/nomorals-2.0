@@ -257,6 +257,165 @@ class RuntimeMetaMixin:
         return (f"📎 sent {card.get('title')} [{card.get('id')}] — "
                 f"{name} ({size_kb} KB)")
 
+    def _control_analytics(self, tail: str, message: Any = None) -> str:
+        """The /analytics reply: analytical queries + exports over the
+        live store, on demand. A thin dispatch to the same engine the
+        ``nm analytics`` CLI uses (storage/analytics.py: DuckDB when
+        installed, the SQLite passthrough otherwise) — no engine
+        construction duplicated here, so chat and console answer from
+        the same data.
+
+        ``/analytics`` shows the backend + stats; ``tables`` lists
+        every live table with row counts; ``query "<select sql>"`` runs
+        a read-only query (SELECT/WITH only, 100 rows shown);
+        ``export <table> [csv|parquet]`` / ``export query "<select
+        sql>" [csv|parquet]`` writes a file under <home>/exports/ and
+        sends it back to this chat through the same ``file_send`` tool
+        ``/museum send`` uses. Parquet needs the DuckDB backend and
+        refuses honestly on the SQLite passthrough, naming the backend,
+        never silently writing a CSV with a .parquet name. A query
+        export is capped at 1000 rows and says so when the cap bites.
+        Owner-only; read-only throughout — nothing here writes the
+        store. A tool failure is an honest refusal in words, never
+        silence and never a fake export."""
+        from ...storage.analytics import (
+            analytics_source_rows,
+            default_export_path,
+            open_analytics,
+            referenced_tables,
+        )
+
+        words = (tail or "").split()
+        verb = words[0].lower() if words else "status"
+        if verb not in ("status", "tables", "query", "export"):
+            return ("usage: /analytics [status | tables | query "
+                    "\"<select sql>\" | export <table> [csv|parquet] | "
+                    "export query \"<select sql>\" [csv|parquet]]")
+        db = getattr(self.context, "db", None)
+        if db is None:
+            return ("analytics needs a database — none is attached "
+                    "to this session.")
+        try:
+            engine = open_analytics(db)
+        except Exception as exc:  # noqa: BLE001 - honest refusal
+            return f"analytics unavailable: {exc}"
+        if verb == "status":
+            try:
+                return str(engine.format_stats())
+            except Exception as exc:  # noqa: BLE001 - status never crashes chat
+                return f"analytics status failed: {exc}"
+        if verb == "tables":
+            rows: list[tuple[str, int]] = []
+            for name in db.tables():
+                try:
+                    seam = analytics_source_rows(db, name)
+                    count = len(seam) if seam is not None else db.row_count(name)
+                except Exception:  # noqa: BLE001 - one bad table must not kill the listing
+                    count = -1
+                rows.append((name, count))
+            rows.sort(key=lambda r: -r[1])
+            lines = [f"tables ({len(rows)}):"]
+            for name, count in rows[:100]:
+                lines.append(
+                    f"  {name} — {'?' if count < 0 else count} rows")
+            return "\n".join(lines)
+        if verb == "query":
+            _, _, sql = (tail or "").partition(" ")
+            sql = sql.strip()
+            if not sql:
+                return ("usage: /analytics query \"<select sql>\" — "
+                        "read-only (SELECT/WITH)")
+            try:
+                if getattr(engine, "name", "") == "duckdb":
+                    for table in referenced_tables(sql):
+                        engine.load_table(db, table)
+                result = engine.query(sql)
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"analytics query failed: {exc}"
+            shown = result[:100]
+            lines = [f"{len(result)} rows"
+                     + (f" (showing {len(shown)})"
+                        if len(shown) < len(result) else "") + ":"]
+            for row in shown:
+                lines.append("  " + ", ".join(
+                    f"{k}={v}" for k, v in row.items()))
+            return "\n".join(lines)
+        # verb == "export"
+        rest = words[1:]
+        if not rest:
+            return ("usage: /analytics export <table> [csv|parquet] | "
+                    "/analytics export query \"<select sql>\" [csv|parquet]")
+        fmt = "csv"
+        if rest[-1].lower() in ("csv", "parquet"):
+            fmt = rest[-1].lower()
+            rest = rest[:-1]
+            if not rest:
+                return ("usage: /analytics export <table> [csv|parquet] | "
+                        "/analytics export query \"<select sql>\" [csv|parquet]")
+        if fmt == "parquet" and getattr(engine, "name", "") != "duckdb":
+            return ("parquet export needs the duckdb backend — this "
+                    "install runs the sqlite passthrough; use csv")
+        if message is None:
+            return ("export needs a live chat — run /analytics export "
+                    "from a chat, not the console")
+        settings = getattr(self.context, "settings", None)
+        home = getattr(settings, "home", None) if settings is not None else None
+        home = str(home or "~/.nomorals")
+        try:
+            if rest[0].lower() == "query":
+                sql = " ".join(rest[1:])
+                if not sql:
+                    return ("usage: /analytics export query "
+                            "\"<select sql>\" [csv|parquet]")
+                if getattr(engine, "name", "") == "duckdb":
+                    for table in referenced_tables(sql):
+                        engine.load_table(db, table)
+                target = default_export_path(home, "query", fmt)
+                rows = engine.export_query(sql, target, format=fmt,
+                                           limit=1000)
+                capped = rows >= 1000
+                label = "query"
+            else:
+                table = rest[0]
+                if getattr(engine, "name", "") == "duckdb":
+                    engine.load_table(db, table)
+                target = default_export_path(home, table, fmt)
+                if fmt == "parquet":
+                    engine.to_parquet(table, target)
+                else:
+                    engine.to_csv(table, target)
+                seam = analytics_source_rows(db, table)
+                if seam is not None:
+                    rows = len(seam)
+                else:
+                    count = engine.query(
+                        f'SELECT COUNT(*) AS n FROM "{table}"')
+                    rows = int(count[0]["n"]) if count else 0
+                capped = False
+                label = table
+        except Exception as exc:  # noqa: BLE001 - honest refusal
+            return f"analytics export failed: {exc}"
+        size = target.stat().st_size if target.is_file() else 0
+        summary = (f"📊 exported {rows} rows from {label} to "
+                   f"{target.name} ({size} bytes)"
+                   + (" — capped at 1000 rows; narrow the query "
+                      "for the rest" if capped else ""))
+        tools = getattr(self.context, "tools", None)
+        if tools is None:
+            return (f"{summary} The file is built at {target}, but "
+                    "this session has no file-send tool.")
+        chat = message.chat
+        outcome = tools.call(
+            "file_send",
+            platform=str(getattr(chat, "platform", "") or ""),
+            chat_id=str(getattr(chat, "chat_id", "") or ""),
+            path=str(target), caption=summary)
+        if not outcome.ok:
+            return (f"{summary} Sending the file failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)} "
+                    f"(it is kept at {target}.)")
+        return summary
+
     def _control_arena_research(self, tail: str,
                                  message: Any = None) -> str:
         """The /arena-research reply: Devon researching herself, on

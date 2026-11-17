@@ -41,6 +41,7 @@ passthrough SQL over a seam-served table.
 
 from __future__ import annotations
 
+import csv
 import re
 import threading
 import time as _time
@@ -59,7 +60,9 @@ __all__ = [
     "DuckDBAnalytics",
     "SQLiteAnalytics",
     "analytics_source_rows",
+    "default_export_path",
     "open_analytics",
+    "referenced_tables",
     "table_row_counts",
 ]
 
@@ -138,6 +141,58 @@ def analytics_source_rows(db: Database, table: str) -> list[dict[str, Any]] | No
 #: silently read a fossil), never to rewrite anyone's query.
 _SQL_TABLE_REF_RE = re.compile(
     r"\b(?:FROM|JOIN)\s+\"?([A-Za-z_][A-Za-z0-9_]*)\"?", re.IGNORECASE)
+
+
+def referenced_tables(sql: str) -> list[str]:
+    """Table names a query touches, in first-seen order, deduplicated.
+
+    The CLI and the chat verb use it to decide which tables to sync
+    into DuckDB before a query — never to rewrite anyone's SQL.
+    """
+    seen: list[str] = []
+    for match in _SQL_TABLE_REF_RE.finditer(sql or ""):
+        name = match.group(1)
+        if name not in seen:
+            seen.append(name)
+    return seen
+
+
+def _seam_served_refs(db: Database, sql: str) -> set[str]:
+    """Seam-served tables a query touches — the fossil trap, named.
+
+    Empty on every install without an attached document store.
+    """
+    seam_tables = _seam_served_tables(db)
+    if not seam_tables:
+        return set()
+    return {m.group(1) for m in _SQL_TABLE_REF_RE.finditer(sql)} & seam_tables
+
+
+def _capped_query(sql: str, limit: int) -> str:
+    """A read-only query wrapped with a row cap (the export bound)."""
+    return (f"SELECT * FROM ({sql.strip().rstrip(';')}) AS _export_q "
+            f"LIMIT {max(1, int(limit))}")
+
+
+def default_export_path(home: str | Path, stem: str, format: str) -> Path:
+    """Where an analytics export lands by default.
+
+    ``<home>/exports/analytics-<stem>-<YYYYMMDD-HHMMSS>.<ext>`` — a
+    file the owner can open. A colliding name gains a -2/-3 suffix
+    instead of overwriting an earlier export. The directory itself is
+    created by the export call, not here.
+    """
+    safe = "".join(c if c.isalnum() or c in "-_" else "_"
+                   for c in str(stem)) or "export"
+    ext = "parquet" if format == "parquet" else "csv"
+    base = Path(home).expanduser() / "exports"
+    stamp = _time.strftime("%Y%m%d-%H%M%S")
+    candidate = base / f"analytics-{safe}-{stamp}.{ext}"
+    n = 2
+    while candidate.exists():
+        candidate = base / f"analytics-{safe}-{stamp}-{n}.{ext}"
+        n += 1
+    return candidate
 
 
 def _count_rows_with_where(db: Database, table: str,
@@ -515,6 +570,37 @@ class DuckDBAnalytics:
             )
         return target
 
+    def export_query(self, sql: str, path: str | Path, *,
+                     format: str = "csv", limit: int = 1000) -> int:
+        """Export an arbitrary read-only query's rows to CSV or Parquet.
+
+        The same SELECT/WITH-only rule as :meth:`query`, and the same
+        row cap as the query verb's display limit — the caller states
+        the cap when it bites. Returns rows written.
+        """
+        lowered = sql.lstrip().upper()
+        if not lowered.startswith("SELECT") and not lowered.startswith("WITH"):
+            raise StorageError("analytics backend is read-only: only SELECT/WITH allowed")
+        if format not in ("csv", "parquet"):
+            raise StorageError(f"unknown export format {format!r} (csv|parquet)")
+        target = Path(path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        capped = _capped_query(sql, limit)
+        escaped = str(target).replace("'", "''")
+        with self._lock:
+            count_row = self._conn.execute(
+                f"SELECT COUNT(*) AS n FROM ({capped}) AS _export_c"
+            ).fetchone()
+            rows = int(count_row[0]) if count_row else 0
+            if format == "parquet":
+                self._conn.execute(
+                    f"COPY ({capped}) TO '{escaped}' (FORMAT PARQUET)")
+            else:
+                self._conn.execute(
+                    f"COPY ({capped}) TO '{escaped}' (FORMAT CSV, HEADER)")
+        self.stats["queries"] += 1
+        return rows
+
     def iter_query(
         self, sql: str, params: Sequence[Any] = (),
         *, batch: int = 10_000,
@@ -615,20 +701,15 @@ class SQLiteAnalytics:
         # SQLite file. Over a seam-served table that file is a fossil
         # on a Mongo install — refuse loudly and name the
         # backend-aware route instead of returning stale rows.
-        seam_tables = _seam_served_tables(self.db)
-        if seam_tables:
-            referenced = {
-                m.group(1)
-                for m in _SQL_TABLE_REF_RE.finditer(sql)
-            } & seam_tables
-            if referenced:
-                raise StorageError(
-                    "analytics: table(s) "
-                    + ", ".join(sorted(referenced))
-                    + " are served by the document store on this install; "
-                    "the SQLite passthrough would read stale data. Use "
-                    "DuckDBAnalytics.load_table (backend-aware sync) or "
-                    "analytics_source_rows for these tables.")
+        referenced = _seam_served_refs(self.db, sql)
+        if referenced:
+            raise StorageError(
+                "analytics: table(s) "
+                + ", ".join(sorted(referenced))
+                + " are served by the document store on this install; "
+                "the SQLite passthrough would read stale data. Use "
+                "DuckDBAnalytics.load_table (backend-aware sync) or "
+                "analytics_source_rows for these tables.")
         rows = self.db.query(sql, params)
         self.stats["queries"] += 1
         return rows
@@ -639,6 +720,96 @@ class SQLiteAnalytics:
     def clear(self) -> None:
         # No synced copies exist; nothing to drop.
         return None
+
+    # ── export (same API as the DuckDB backend) ───────────────────────
+
+    def to_csv(self, table: str, path: str | Path) -> Path:
+        """Export a table to CSV — the SQLite twin of DuckDB's COPY.
+
+        Backend-aware: on an install where the table is seam-served,
+        the live seam rows are written, never the SQLite fossil.
+        """
+        target = Path(path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        seam_rows = analytics_source_rows(self.db, table)
+        if seam_rows is not None:
+            with target.open("w", newline="", encoding="utf-8") as fh:
+                if not seam_rows:
+                    # Header from the table schema, so an empty export
+                    # still names its columns.
+                    names = [c["name"] for c in self.db.table_info(table)]
+                    csv.DictWriter(fh, fieldnames=names).writeheader()
+                else:
+                    writer = csv.DictWriter(
+                        fh, fieldnames=list(seam_rows[0].keys()))
+                    writer.writeheader()
+                    writer.writerows(seam_rows)
+            return target
+        cursor = self.db.execute(f'SELECT * FROM "{table}"')
+        try:
+            names = [d[0] for d in cursor.description or []]
+            with target.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=names)
+                writer.writeheader()
+                while True:
+                    batch = cursor.fetchmany(_SYNC_BATCH)
+                    if not batch:
+                        break
+                    for row in batch:
+                        writer.writerow(dict(row))
+        finally:
+            cursor.close()
+        return target
+
+    def export_query(self, sql: str, path: str | Path, *,
+                     format: str = "csv", limit: int = 1000) -> int:
+        """Export an arbitrary read-only query's rows to CSV.
+
+        Parquet needs the DuckDB backend — the passthrough refuses it
+        in words naming the backend, never silently writes a CSV with
+        a .parquet name. Rows are capped at ``limit`` (same cap as the
+        query verb's display limit); the caller states the cap when it
+        bites. Returns rows written.
+        """
+        if format == "parquet":
+            raise StorageError(
+                "parquet export needs the duckdb backend — this install "
+                "runs the sqlite passthrough; install duckdb or use "
+                "--format csv")
+        if format != "csv":
+            raise StorageError(f"unknown export format {format!r} (csv|parquet)")
+        lowered = sql.lstrip().upper()
+        if not lowered.startswith("SELECT") and not lowered.startswith("WITH"):
+            raise StorageError("analytics backend is read-only: only SELECT/WITH allowed")
+        referenced = _seam_served_refs(self.db, sql)
+        if referenced:
+            raise StorageError(
+                "analytics: table(s) "
+                + ", ".join(sorted(referenced))
+                + " are served by the document store on this install; "
+                "the SQLite passthrough would read stale data. Use "
+                "DuckDBAnalytics.load_table (backend-aware sync) or "
+                "analytics_source_rows for these tables.")
+        capped = _capped_query(sql, limit)
+        target = Path(path).expanduser()
+        target.parent.mkdir(parents=True, exist_ok=True)
+        cursor = self.db.execute(capped)
+        rows = 0
+        try:
+            names = [d[0] for d in cursor.description or []]
+            with target.open("w", newline="", encoding="utf-8") as fh:
+                writer = csv.DictWriter(fh, fieldnames=names)
+                writer.writeheader()
+                while True:
+                    batch = cursor.fetchmany(_SYNC_BATCH)
+                    if not batch:
+                        break
+                    for row in batch:
+                        writer.writerow(dict(row))
+                        rows += 1
+        finally:
+            cursor.close()
+        return rows
 
     # ── analytical helpers (same API as the DuckDB backend) ────────────
 
