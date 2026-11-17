@@ -8041,6 +8041,8 @@ class PartnerRuntime(
             return self._control_ghealth(command.tail, message)
         if kind == "digest":
             return self._control_digest(command.tail, message)
+        if kind == "museum":
+            return self._control_museum(command.tail, message)
         if kind == "community":
             return self._control_community(command.tail, message)
         if kind == "gbackup":

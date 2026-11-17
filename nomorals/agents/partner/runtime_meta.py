@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import time
+from typing import Any
+
 from ...core.logging_setup import get_logger
 from ...storage.kv import KVStore
 from .approvals import _key_set
@@ -171,6 +173,21 @@ class RuntimeMetaMixin:
         if failure_count():
             card.block_lines(format_failures(limit=5).splitlines())
         return card_text(card)
+
+    def _control_museum(self, tail: str, message: Any = None) -> str:
+        """The /museum reply: the Museum census over every system, on
+        demand. A thin dispatch to the same ``museum_census`` tool the
+        brain uses (audit R3-73) — no Museum construction duplicated
+        here, so the command's output is byte-identical to the tool's.
+        Read-only (FS_READ); a failing shelf reports a named error
+        inside the census, never here. A tool failure is an honest
+        refusal in words, never silence and never a fake census."""
+        outcome = self.context.tools.call("museum_census")
+        if not outcome.ok:
+            return ("museum census failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        value = outcome.value or {}
+        return str(value.get("card_text") or "museum is empty")
 
     def _control_ping(self, message: Any = None) -> str:
         """The life of the /ping message itself, stage by stage.
