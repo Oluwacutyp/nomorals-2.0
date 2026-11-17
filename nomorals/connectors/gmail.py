@@ -388,6 +388,7 @@ class GmailConnector(Connector, GoogleOAuth):
                 outcome="success",
                 metadata={
                     "action_class": "send",
+                    "counterparty": payload.get("to", ""),
                     "to": payload.get("to", ""),
                     "subject": payload.get("subject", ""),
                     "message_id": data.get("id", ""),

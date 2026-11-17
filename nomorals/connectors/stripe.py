@@ -642,6 +642,7 @@ class StripeConnector(Connector):
                 description += f" via {label}"
             metadata: dict[str, Any] = {
                 "action_class": "purchase",
+                "counterparty": intent.get("customer", ""),
                 "op": "confirm_payment_intent",
                 "intent_id": intent_id,
                 "amount": amount,
@@ -703,6 +704,7 @@ class StripeConnector(Connector):
                 description += f" via {label}"
             metadata: dict[str, Any] = {
                 "action_class": "purchase",
+                "counterparty": inv.get("customer", ""),
                 "op": "finalize_invoice",
                 "invoice_id": invoice_id,
                 "amount_due": amount_due,
@@ -766,6 +768,7 @@ class StripeConnector(Connector):
             transfer_id = res.get("id", "")
             metadata: dict[str, Any] = {
                 "action_class": "transfer",
+                "counterparty": destination,
                 "op": "create_transfer",
                 "transfer_id": transfer_id,
                 "amount": amount / 100,
@@ -837,6 +840,7 @@ class StripeConnector(Connector):
             description += f" ({payout_id})"
             metadata: dict[str, Any] = {
                 "action_class": "transfer",
+                "counterparty": dest_id,
                 "op": "create_payout",
                 "payout_id": payout_id,
                 "amount": amount / 100,

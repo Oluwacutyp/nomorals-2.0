@@ -243,6 +243,7 @@ class TwilioConnector(Connector):
                 "message", f"SMS sent to {to}: {body[:80]}",
                 outcome="success",
                 metadata={"to": to, "sid": sid,
+                          "counterparty": to,
                           "segments": (len(body) // 160) + 1})
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass

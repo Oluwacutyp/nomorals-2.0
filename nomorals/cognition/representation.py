@@ -700,9 +700,47 @@ def log_representation_action(
     metadata: dict[str, Any] | None = None,
 ) -> str:
     """One-line hook for autonomous-action sites.  Never raises — returns
-    the action id ("" when logging failed)."""
+    the action id ("" when logging failed).
+
+    Records through the extended ledger
+    (:meth:`ExtendedRepresentationLedger.record_autonomous_action
+    <nomorals.cognition.ledger_ext.ExtendedRepresentationLedger.
+    record_autonomous_action>`), so every hooked action carries its
+    extended class, stakes and counterparty in metadata — the fields
+    the /review stakes-weighted section and counterparty memory read.
+    ``metadata`` may already carry ``action_class`` (the Gmail/Stripe/
+    Duffel sites do), ``stakes``, ``counterparty``, ``owner_feedback``
+    and ``predicted_confidence``; anything else passes through
+    untouched.  An unrecognized class/outcome or bad stakes falls back
+    to the base ``log_action`` with the original metadata, so the
+    record is never lost for a vocabulary miss.
+    """
     try:
-        rec = _ledger_for(settings).log_action(
+        ledger = _ledger_for(settings)
+        meta = dict(metadata or {})
+        action_class = meta.pop("action_class", None) or action_type
+        stakes = meta.pop("stakes", None)
+        counterparty = meta.pop("counterparty", "") or ""
+        owner_feedback = meta.pop("owner_feedback", None)
+        predicted_confidence = meta.pop("predicted_confidence", None)
+        record_fn = getattr(ledger, "record_autonomous_action", None)
+        if record_fn is not None:
+            try:
+                rec = record_fn(
+                    action_class,
+                    stakes=stakes,
+                    counterparty=counterparty,
+                    outcome=outcome or "unknown",
+                    owner_feedback=owner_feedback,
+                    description=description,
+                    predicted_confidence=predicted_confidence,
+                    metadata=meta,
+                )
+                return rec.id
+            except ValueError:
+                # Unknown class/outcome/stakes: base log keeps the record.
+                pass
+        rec = ledger.log_action(
             action_type, description, outcome=outcome, metadata=metadata)
         return rec.id
     except Exception as exc:  # noqa: BLE001
