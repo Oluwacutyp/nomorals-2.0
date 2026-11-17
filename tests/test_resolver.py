@@ -198,11 +198,22 @@ def test_ytdlp_youtube_url_becomes_youtube_kind(monkeypatch):
 
 
 def test_youtube_search_via_ytdlp(monkeypatch):
+    from nomorals.media import sources as _src
     from nomorals.media.playback import PlaybackEngine
 
+    # Earlier-chain web sources must not leak live results into this
+    # unit test — YouTube is the intended winner here.  mp3pm went
+    # live with the 2026-11-17 search-page fix, so it is stubbed
+    # alongside the rest (mp3juice beside it: same chain position).
+    for _cls in ("MP3PMSource", "MP3JuiceSource"):
+        monkeypatch.setattr(getattr(_src, _cls), "search",
+                            lambda self, q, limit=8: [])
+    # The production call passes prefix="ytsearch" — the fake must
+    # accept it (it didn't, so the patched search raised TypeError
+    # and the chain fell through to the next live source).
     monkeypatch.setattr(
         PlaybackEngine, "_youtube_search_id",
-        classmethod(lambda cls, q: "dQw4w9WgXcQ"))
+        classmethod(lambda cls, q, prefix="ytsearch": "dQw4w9WgXcQ"))
     out = SourceResolver(_ctx("/nonexistent-ws")).resolve(
         "never gonna give you up")
     assert out.ok
@@ -257,6 +268,7 @@ def test_unknown_title_fails_all_strategies_honestly(monkeypatch, tmp_path):
     # unit test — the query is supposed to match nothing.
     from nomorals.media import sources as _src
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
+                 "MP3PMSource", "MP3JuiceSource",
                  "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
                  "DeezerSource", "BoomplaySource", "MdundoSource",
@@ -291,6 +303,7 @@ def test_spotify_search_only_when_linked(monkeypatch):
     # unit test — Spotify (unlinked) is the strategy under test.
     from nomorals.media import sources as _src
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
+                 "MP3PMSource", "MP3JuiceSource",
                  "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
                  "DeezerSource", "BoomplaySource", "MdundoSource",
@@ -320,6 +333,7 @@ def test_spotify_search_works_when_linked(monkeypatch, tmp_path):
     # unit test — Spotify is the intended winner here.
     from nomorals.media import sources as _src
     for _cls in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
+                 "MP3PMSource", "MP3JuiceSource",
                  "BandcampSource", "ArchiveOrgSource", "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
                  "DeezerSource", "BoomplaySource", "MdundoSource",

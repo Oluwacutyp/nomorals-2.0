@@ -356,6 +356,8 @@ def test_search_candidates_detailed_reports_all_sources():
             mock.patch.object(r, "_bandcamp_search_many", return_value=[]), \
             mock.patch.object(r, "_notjustok_search_many", return_value=[]), \
             mock.patch.object(r, "_tooxclusive_search_many", return_value=[]), \
+            mock.patch.object(r, "_mp3pm_search_many", return_value=[]), \
+            mock.patch.object(r, "_mp3juice_search_many", return_value=[]), \
             mock.patch.object(r, "_archiveorg_search_many", return_value=[]), \
             mock.patch.object(r, "_jamendo_search_many", return_value=[]), \
             mock.patch.object(r, "_fma_search_many", return_value=[]), \
@@ -399,6 +401,8 @@ def test_search_candidates_still_returns_candidates_only():
             mock.patch.object(r, "_bandcamp_search_many", return_value=[]), \
             mock.patch.object(r, "_notjustok_search_many", return_value=[]), \
             mock.patch.object(r, "_tooxclusive_search_many", return_value=[]), \
+            mock.patch.object(r, "_mp3pm_search_many", return_value=[]), \
+            mock.patch.object(r, "_mp3juice_search_many", return_value=[]), \
             mock.patch.object(r, "_archiveorg_search_many", return_value=[]), \
             mock.patch.object(r, "_mdundo_search_many", return_value=[]), \
             mock.patch.object(r, "_jamendo_search_many", return_value=[]), \

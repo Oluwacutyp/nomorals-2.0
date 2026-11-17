@@ -716,7 +716,8 @@ def test_candidate_sweep_isolates_a_dying_source():
     resolver = SourceResolver(None)
     # Every method in the sweep, in sweep order: an unmocked source
     # runs live, and Mdundo did (filling the candidates before YouTube).
-    names = ("netnaija", "notjustok", "tooxclusive", "mdundo", "soundcloud",
+    names = ("netnaija", "notjustok", "tooxclusive", "mp3pm", "mp3juice",
+             "mdundo", "soundcloud",
              "bandcamp", "youtube", "youtube_music", "archiveorg",
              "jamendo", "fma", "jiosaavn",
              "musicbrainz", "openverse", "wikimedia", "itunes", "deezer")

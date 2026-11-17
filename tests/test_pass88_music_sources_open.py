@@ -99,7 +99,7 @@ def _cand(source, title="Song", artist="Singer", url="", direct_url=""):
 #: "no results" — the chain then walks its full length.
 _SEARCH_CLASSES = (
     "NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
-    "MdundoSource",
+    "MP3PMSource", "MP3JuiceSource", "MdundoSource",
     "BandcampSource", "ArchiveOrgSource", "JamendoSource",
     "FMASource", "JioSaavnSource", "MusicBrainzSource",
     "OpenverseSource", "WikimediaSource", "ITunesSource",

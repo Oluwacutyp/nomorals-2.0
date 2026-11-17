@@ -568,7 +568,13 @@ class SourceResolver:
             for desc in self._grown_music(reg):
                 items.append((
                     f"grown:{desc.domain}",
-                    lambda d=desc: self._grown_search_many(d, q, limit),
+                    # The sweep calls every fn as fn(q, limit) — the
+                    # lambda must accept both (Pass #88 shipped it
+                    # taking 0-1 args, so every grown source died
+                    # with "takes from 0 to 1 positional arguments
+                    # but 2 were given" on every detailed sweep).
+                    lambda q, limit, d=desc: self._grown_search_many(
+                        d, q, limit),
                     desc))
             items = self._order_music(reg, items)
             fns = [(name, fn) for name, fn, _d in items]

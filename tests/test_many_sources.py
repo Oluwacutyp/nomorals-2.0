@@ -82,6 +82,10 @@ class PlayManySourcesTests(unittest.TestCase):
                         return_value=[]), \
              mock.patch("nomorals.media.sources.TooXclusiveSource.search",
                         return_value=[]), \
+             mock.patch("nomorals.media.sources.MP3PMSource.search",
+                        return_value=[]), \
+             mock.patch("nomorals.media.sources.MP3JuiceSource.search",
+                        return_value=[]), \
              mock.patch("nomorals.media.sources.MdundoSource.search",
                         return_value=[]):
             out = SourceResolver(ctx, soundcloud=fake_sc).resolve("goodbye")

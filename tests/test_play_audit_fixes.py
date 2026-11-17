@@ -63,7 +63,8 @@ def _chain_ctx(monkeypatch):
     from nomorals.media import sources as _src
     from nomorals.media import playback as _pb
     for name in ("NetNaijaSource", "NotJustOkSource", "TooXclusiveSource",
-                 "MdundoSource", "BandcampSource", "ArchiveOrgSource",
+                 "MP3PMSource", "MP3JuiceSource", "MdundoSource",
+                 "BandcampSource", "ArchiveOrgSource",
                  "JamendoSource", "FMASource", "JioSaavnSource",
                  "MusicBrainzSource",
                  "OpenverseSource", "WikimediaSource", "ITunesSource",
@@ -379,6 +380,8 @@ def test_search_candidates_excludes_nondownloadable():
             mock.patch.object(r, "_netnaija_search_many", return_value=[]), \
             mock.patch.object(r, "_notjustok_search_many", return_value=[]), \
             mock.patch.object(r, "_tooxclusive_search_many", return_value=[]), \
+            mock.patch.object(r, "_mp3pm_search_many", return_value=[]), \
+            mock.patch.object(r, "_mp3juice_search_many", return_value=[]), \
             mock.patch.object(r, "_mdundo_search_many", return_value=[]), \
             mock.patch.object(r, "_soundcloud_search_many", return_value=[]), \
             mock.patch.object(r, "_bandcamp_search_many", return_value=[]), \

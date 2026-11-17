@@ -168,6 +168,8 @@ def test_sweep_excludes_previews_keeps_full_and_attempts():
             mock.patch.object(r, "_notjustok_search_many", return_value=[]), \
             mock.patch.object(r, "_tooxclusive_search_many",
                               return_value=[]), \
+            mock.patch.object(r, "_mp3pm_search_many", return_value=[]), \
+            mock.patch.object(r, "_mp3juice_search_many", return_value=[]), \
             mock.patch.object(r, "_mdundo_search_many", return_value=[]), \
             mock.patch.object(r, "_soundcloud_search_many",
                               return_value=[]), \

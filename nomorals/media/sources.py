@@ -400,25 +400,51 @@ class NetNaijaSource(BaseScrapeSource):
             return ""
             
 
-class MP3PMSource(BaseScrapeSource):
-    """MP3.pm — mobile-first MP3 archive.  Server-rendered charts and
-    per-song pages carrying a direct file; search is XHR-only, so the
-    JSON endpoint is read directly.
+# ── MP3.pm server-rendered search rows ──────────────────────────────
+#
+# A search page row is <li class="cplayer-sound-item" data-sound-url
+# data-download-url> with the title/artist in <b>/<i> elements and
+# the song-page anchor inside.  These are the only three shapes the
+# row parser needs; keep them here so the class stays readable.
 
-    PINNED-BY-PROBE: ``_SEARCH_API`` is the shape
-    ``tools/probe_new_sources.py`` finds.  If every probe template
-    misses, copy the XHR from DevTools and fix the constant here —
-    do not invent a schema.
+_MP3PM_ROW_RE = re.compile(r"<li([^>]*)>(.*?)</li>", re.S)
+
+
+def _mp3pm_attr(attr: str, attrs: str) -> str:
+    m = re.search(rf'{attr}="([^"]+)"', attrs or "")
+    return m.group(1) if m else ""
+
+
+def _mp3pm_text(cls: str, body: str) -> str:
+    m = re.search(rf'class="{cls}">([^<]+)<', body or "")
+    return m.group(1).strip() if m else ""
+
+
+
+class MP3PMSource(BaseScrapeSource):
+    """MP3.pm — mobile-first MP3 archive.  The search results page is
+    server-rendered: every row carries the title, the artist, a
+    direct listen MP3 (``data-sound-url``) and a direct download MP3
+    (``data-download-url``).  Search reads that page.
+
+    PROBE 2026-11-17 (owner live report — ``/api/search?q=`` 404s):
+    the old ``_SEARCH_API`` never existed.  Its "PINNED-BY-PROBE"
+    claim was wrong — no probe tool in the repo ever validated it;
+    bac87ee4 invented the shape.  The site's real search XHR is
+    ``POST /public/api.search.php`` and it returns only a redirect
+    URL (``https://mp3.pm/search?q=...``), never song JSON — so the
+    page itself is the source of truth.  The JSON branch below is
+    kept only defensively, for a response that ever is JSON.
     """
 
     name = "mp3pm"
     _BASE = "https://mp3.pm"
-    _SEARCH_API = "https://mp3.pm/api/search?q={q}"
+    _SEARCH_PAGE = "https://mp3.pm/search?q={q}"
 
     def search(self, query: str, limit: int = 5) -> list[SourceCandidate]:
         out: list[SourceCandidate] = []
         try:
-            raw = self._get(self._SEARCH_API.format(
+            raw = self._get(self._SEARCH_PAGE.format(
                 q=urllib.parse.quote_plus(query)))
         except Exception as exc:  # noqa: BLE001 — never raises
             _log.info("mp3pm: search failed: %s", exc)
@@ -426,17 +452,7 @@ class MP3PMSource(BaseScrapeSource):
         if not raw:
             return out
 
-        rows: list[dict[str, Any]] = []
-        try:
-            data = json.loads(raw)
-            seq = data.get("songs") or data.get("results") or data
-            if isinstance(seq, list):
-                rows = [r if isinstance(r, dict) else {"url": r} for r in seq]
-        except (json.JSONDecodeError, AttributeError):
-            # HTML shell fallback: scrape song anchors, invent nothing
-            for href in re.findall(
-                    r'https://[a-z0-9\-]+\.mp3\.pm/song/[^"\']+', raw):
-                rows.append({"url": href})
+        rows = self._rows_from_response(raw)
 
         seen: set[str] = set()
         for row in rows:
@@ -451,10 +467,70 @@ class MP3PMSource(BaseScrapeSource):
                                   or slug.replace("-", " ")),
                 artist=self._clean(str(row.get("artist") or "")),
                 url=url,
+                direct_url=str(row.get("direct_url") or ""),
+                duration=float(row.get("duration") or 0.0),
                 extra={"page": url}))
             if len(out) >= limit:
                 break
         return out
+
+    @staticmethod
+    def _rows_from_response(raw: str) -> list[dict[str, Any]]:
+        """Song rows from a search response — JSON first, then the
+        server-rendered rows, then bare song anchors.  Invents
+        nothing: a response with no rows yields no rows."""
+        rows: list[dict[str, Any]] = []
+        try:
+            data = json.loads(raw)
+            seq = data.get("songs") or data.get("results") or data
+            if isinstance(seq, list):
+                rows = [r if isinstance(r, dict) else {"url": r}
+                        for r in seq]
+                if rows:
+                    return rows
+        except (json.JSONDecodeError, AttributeError):
+            pass
+        rows = MP3PMSource._parse_rows(raw)
+        if rows:
+            return rows
+        for href in re.findall(
+                r'https://[a-z0-9\-]+\.mp3\.pm/song/[^"\'\s]+', raw):
+            rows.append({"url": href})
+        return rows
+
+    @staticmethod
+    def _parse_rows(html: str) -> list[dict[str, Any]]:
+        """One dict per ``cplayer-sound-item`` row: title, artist,
+        song-page URL, direct listen URL, direct download URL,
+        duration in seconds.  A row missing its title still yields
+        its URL — the caller names it from the slug."""
+        rows: list[dict[str, Any]] = []
+        for m in _MP3PM_ROW_RE.finditer(html or ""):
+            attrs, body = m.group(1), m.group(2)
+            if "cplayer-sound-item" not in attrs:
+                continue
+            listen = _mp3pm_attr("data-sound-url", attrs)
+            download = _mp3pm_attr("data-download-url", attrs)
+            title = _mp3pm_text("cplayer-data-sound-title", body)
+            artist = _mp3pm_text("cplayer-data-sound-author", body)
+            href = re.search(
+                r'href="(https?://[^"]*mp3\.pm/song/[^"]+)"', body)
+            url = href.group(1) if href else ""
+            duration = 0.0
+            tm = re.search(
+                r'class="cplayer-data-sound-time">(\d+):(\d+)<', body)
+            if tm:
+                duration = float(int(tm.group(1)) * 60 + int(tm.group(2)))
+            if not url and not listen and not download:
+                continue
+            rows.append({
+                "title": title,
+                "artist": artist,
+                "url": url or listen or download,
+                "direct_url": listen or download,
+                "duration": duration,
+            })
+        return rows
 
     def download_url(self, candidate: SourceCandidate) -> str:
         if candidate.direct_url:
@@ -474,25 +550,16 @@ class MP3PMSource(BaseScrapeSource):
     # be instantiable; the live path is the custom search() above,
     # these are the same row shapes through the framework interface.
     def search_url(self, query: str) -> str:
-        """The JSON search endpoint — the site's search URL."""
-        return self._SEARCH_API.format(
+        """The server-rendered search page — the site's search URL."""
+        return self._SEARCH_PAGE.format(
             q=urllib.parse.quote_plus(query))
 
     def parse_search(self, html: str) -> list[tuple[str, str]]:
         """[(title, post_url)] from a search response — JSON first,
-        then the HTML-shell anchor fallback. Same row shape search()
-        reads, without the per-row artist enrichment."""
-        rows: list[dict[str, Any]] = []
-        try:
-            data = json.loads(html)
-            seq = data.get("songs") or data.get("results") or data
-            if isinstance(seq, list):
-                rows = [r if isinstance(r, dict) else {"url": r}
-                        for r in seq]
-        except (json.JSONDecodeError, AttributeError):
-            for href in re.findall(
-                    r'https://[a-z0-9\-]+\.mp3\.pm/song/[^"\']+', html):
-                rows.append({"url": href})
+        then the server-rendered rows, then the anchor fallback.
+        Same row shape search() reads, without the per-row artist
+        enrichment."""
+        rows = self._rows_from_response(html)
         out: list[tuple[str, str]] = []
         seen: set[str] = set()
         for row in rows:
