@@ -341,6 +341,13 @@ class DownloadReport:
                     head += (f"\n  archive: extracted "
                              f"{self.archive.get('extracted', 0)} file(s) "
                              f"to {self.archive.get('dest', '')}")
+                    av = self.archive.get("av") or {}
+                    if av:
+                        head += (f" — member scan: "
+                                 f"{av.get('verdict', 'unknown')}")
+                        if (av.get("verdict") == "unknown"
+                                and av.get("detail")):
+                            head += f" ({av['detail']})"
             return head
         from ..core.text import strip_ansi
         lines = [f"download failed: {self.url or '(no url)'}"]
@@ -618,6 +625,103 @@ def _scan_intake(report: DownloadReport, context: Any) -> None:
                  f"{verdict.engine or 'antivirus'} scan — "
                  f"quarantine failed ({verdict.detail}); the file "
                  "was left in place and is NOT being delivered")
+    report.stages.append(StageLog(
+        stage="antivirus", url=report.url, ok=False,
+        error_class=FailureKind.SITE_ERROR.value, error=cause))
+    report.ok = False
+    report.failure = FailureKind.SITE_ERROR
+    report.likely_cause = cause
+    report.hint = ("the file was flagged by the antivirus scan; "
+                   "see `nm av quarantine` for what was moved, or "
+                   "`nm av scan <path>` to re-check it")
+    report.path = ""
+
+
+def _scan_extracted_members(report: DownloadReport,
+                            result: dict[str, Any],
+                            context: Any) -> None:
+    """Scan every file an archive unpacked, at intake.
+
+    Runs in ``_unpack_archive`` right after a successful extraction.
+    The container itself was already scanned by ``_scan_intake``
+    before the unpack, but the members inside it were never scanned —
+    only the daily sweep re-scanned them, up to 24 hours later. This
+    closes that window: every extracted file (nested members included
+    — the Archivist recurses, and the scan walks the whole ``dest``
+    tree) is scanned here, with the same verdicts as the container
+    scan:
+
+    * ``clean`` — the download flows on; the verdict rides
+      ``report.archive["av"]``.
+    * ``unknown`` — fail-open: the download flows on, the reason in
+      ``report.archive["av"]["detail"]``.
+    * ``infected`` — the infected member is quarantined by the scan
+      itself and the download is reported blocked, exactly like an
+      infected container: ``ok`` False, the threat and the member
+      named in ``likely_cause``, ``path`` cleared so nothing hands
+      the archive to the owner.
+
+    The scan cap is the Archivist's own extraction cap
+    (``archives._MAX_EXTRACT_FILES``): the unpack can land at most
+    that many files, so every extracted file is scanned — no member
+    hides past a smaller cap. A scan failure is data, never a crash:
+    fail-open with the reason recorded.
+    """
+    dest = result.get("dest") or ""
+    root = Path(dest) if dest else None
+    if root is None or not root.is_dir():
+        result["av"] = {"verdict": "unknown", "engine": "",
+                        "threat": "", "path": str(dest),
+                        "detail": "no extracted directory to scan",
+                        "results": []}
+        return
+    try:
+        from ..archives import _MAX_EXTRACT_FILES
+        from ..core.antivirus import quarantine_dir_for, scan_path
+
+        verdict = scan_path(
+            root, quarantine_dir=quarantine_dir_for(context),
+            max_files=_MAX_EXTRACT_FILES)
+    except Exception as exc:  # noqa: BLE001 - a scan failure is data
+        result["av"] = {"verdict": "unknown", "engine": "",
+                        "threat": "", "path": str(root),
+                        "detail": f"member scan failed: {exc}",
+                        "results": []}
+        record_failure("download._scan_extracted_members", exc)
+        return
+    av = verdict.to_dict()
+    # The report is a summary surface: keep the verdict, the count,
+    # and every non-clean member; drop the clean per-file entries.
+    av["results"] = [r for r in av.get("results", [])
+                     if r.get("verdict") != "clean"]
+    if verdict.verdict == "unknown":
+        # The aggregate detail only counts files — carry the reason
+        # the members were unknown, or the fail-open is unexplained.
+        reasons = sorted({r.get("detail", "")
+                          for r in av["results"]
+                          if r.get("verdict") == "unknown"
+                          and r.get("detail")})
+        if reasons:
+            av["detail"] += f" — {reasons[0]}"
+    result["av"] = av
+    if verdict.verdict != "infected":
+        return
+    infected = [r for r in verdict.results
+                if r.get("verdict") == "infected"]
+    first = infected[0] if infected else {}
+    threat = verdict.threat or "malware"
+    member = first.get("path") or str(root)
+    if first.get("quarantined_to"):
+        cause = (f"download blocked: {threat} found by the "
+                 f"{verdict.engine or 'antivirus'} scan in archive "
+                 f"member {member} — file quarantined to "
+                 f"{first['quarantined_to']}")
+    else:
+        cause = (f"download blocked: {threat} found by the "
+                 f"{verdict.engine or 'antivirus'} scan in archive "
+                 f"member {member} — quarantine failed "
+                 f"({first.get('detail') or verdict.detail}); the "
+                 "file was left in place and is NOT being delivered")
     report.stages.append(StageLog(
         stage="antivirus", url=report.url, ok=False,
         error_class=FailureKind.SITE_ERROR.value, error=cause))
@@ -1387,6 +1491,12 @@ class MediaDownloader:
             _log.info("download archive extracted %s → %s (%s files)",
                       report.path, result.get("dest", ""),
                       result.get("extracted", 0))
+            # Antivirus member scan (AV archive gap): the container
+            # was scanned before the unpack, but its members never
+            # were — scan every extracted file now, at intake, so a
+            # bad file inside an archive is blocked here instead of
+            # waiting for the daily sweep.
+            _scan_extracted_members(report, result, self.context)
 
     # ── public API ────────────────────────────────────────────────────
 
