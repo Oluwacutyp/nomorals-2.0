@@ -8406,13 +8406,26 @@ class TelegramBotAdapter(ChatAdapter):
                 out = self._api("deleteMyCommands",
                                 scope=json.dumps(scope))
             else:
+                # Telegram refuses a scope list over 100 commands
+                # (BOT_COMMANDS_TOO_MUCH). The retry in
+                # personal_commands.push_with_too_much_retry halves
+                # before reaching here, so this is a backstop for
+                # direct callers — priority head only, never a
+                # silent middle cut.
+                if len(commands) > 100:
+                    _log.warning(
+                        "telegram-bot %s: scope list of %d commands "
+                        "truncated to 100 (priority head)",
+                        self.name, len(commands))
+                    commands = list(commands)[:100]
                 out = self._api(
                     "setMyCommands",
                     commands=json.dumps(
                         [{"command": name, "description": desc}
                          for name, desc in commands]),
                     scope=json.dumps(scope))
-            return {"ok": True, "result": out}
+            return {"ok": True, "result": out,
+                    "pushed": 0 if commands is None else len(commands)}
         except Exception as exc:  # noqa: BLE001 - honest error
             return {"ok": False, "error": str(exc)[:200]}
 
@@ -8463,6 +8476,16 @@ class TelegramBotAdapter(ChatAdapter):
         only performs the setMyCommands push."""
         return self._set_command_scope({"type": "default"}, commands)
 
+    def get_default_commands(self) -> list[dict[str, Any]]:
+        """Live default-scope list via getMyCommands (read-only).
+
+        Raises on API failure — callers treat that as unreachable,
+        never as an empty list.
+        """
+        out = self._api("getMyCommands",
+                        scope=json.dumps({"type": "default"}))
+        return list(out or [])
+
     def clear_default_commands(self) -> dict[str, Any]:
         """Drop the default scope (deleteMyCommands) — the "/" picker
         falls back to whatever BotFather holds, if anything."""
@@ -8488,8 +8511,10 @@ class TelegramBotAdapter(ChatAdapter):
             return None
         if out.get("ok"):
             _log.info("telegram-bot %s: menu synced (%d commands, %d past "
-                      "the BotFather cap stay available in /list)",
-                      self.name, out.get("pushed", 0), out.get("skipped", 0))
+                      "the BotFather cap stay available in /list)%s",
+                      self.name, out.get("pushed", 0), out.get("skipped", 0),
+                      (f" — retried (attempts {out.get('attempts')})"
+                       if out.get("retried") else ""))
         else:
             _log.warning("telegram-bot %s: menu sync refused: %s",
                          self.name, "; ".join(out.get("problems") or ["?"]))

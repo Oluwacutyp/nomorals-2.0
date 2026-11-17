@@ -23,6 +23,7 @@ the leading slash, description at most 256 chars.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 __all__ = [
@@ -35,6 +36,8 @@ __all__ = [
     "render_gated_botfather_text",
     "validate_gated_botfather_commands",
     "sync_bot_commands",
+    "push_with_too_much_retry",
+    "menu_scope_state",
 ]
 
 #: Public commands in BotFather priority order: the 19 named public
@@ -79,6 +82,82 @@ PERSONAL_OWNER_COMMANDS: tuple[str, ...] = (
 #: Max BotFather commands / description chars (Bot API limits).
 BOTFATHER_MAX_COMMANDS = 100
 BOTFATHER_MAX_DESCRIPTION = 256
+
+#: Telegram's command-name rule (Bot API): 1-32 chars, lowercase
+#: letters, digits, underscores. The validators enforce it so a bad
+#: name is a refused push naming the name, never an API round-trip.
+_COMMAND_NAME_RE = re.compile(r"^[a-z0-9_]{1,32}$")
+
+#: Retry floor for a BOT_COMMANDS_TOO_MUCH refusal: halve the list
+#: until Telegram accepts or the list reaches this size. Below it a
+#: refusal means something other than the count is wrong.
+_MENU_SYNC_RETRY_FLOOR = 25
+
+
+def _is_too_much(error: str) -> bool:
+    """True when a push failure is Telegram's TOO_MUCH refusal."""
+    return "BOT_COMMANDS_TOO_MUCH" in (error or "")
+
+
+def _retry_order(entries: list[tuple[str, str]],
+                 *, owner_only: bool) -> list[tuple[str, str]]:
+    """The order a truncated retry pushes in.
+
+    The gated list is already priority order. The personal list is
+    public-fill first, owner after — but the 48 owner commands are
+    non-negotiable ("all 48 always fit"), so a retry keeps every
+    owner command first, then the public fill in priority order.
+    A retry therefore never drops the owner's own surface to make
+    room for public commands.
+    """
+    if not owner_only:
+        return list(entries)
+    by_kind = dict(entries)
+    owner = [(kind, by_kind[kind]) for kind in PERSONAL_OWNER_COMMANDS
+             if kind in by_kind]
+    public = [(kind, desc) for kind, desc in entries
+              if kind not in PERSONAL_OWNER_COMMANDS]
+    return owner + public
+
+
+def push_with_too_much_retry(
+        push: Any, entries: list[tuple[str, str]],
+        *, first: list[tuple[str, str]] | None = None,
+        floor: int = _MENU_SYNC_RETRY_FLOOR) -> dict[str, Any]:
+    """Push a command list, halving on BOT_COMMANDS_TOO_MUCH.
+
+    ``push(entries_slice)`` is the adapter call — it returns an
+    ``{"ok": bool, "error": str}`` dict or raises; either shape is
+    read the same way. The first attempt pushes ``first`` (the full
+    list in display order); each retry pushes the priority head of
+    ``entries`` halved toward ``floor`` (100 -> 50 -> 25). Any other
+    failure refuses at once — a retry can never fix it. Returns
+    ``{"ok", "pushed", "attempts", "error"}`` where ``attempts`` is
+    the list of sizes tried, so the caller can report exactly what
+    landed and what did not.
+    """
+    first_list = list(first) if first is not None else list(entries)
+    retry_entries = list(entries)
+    attempts: list[int] = []
+    attempt_list = first_list
+    n = len(attempt_list)
+    while True:
+        attempts.append(n)
+        try:
+            out = push(attempt_list)
+        except Exception as exc:  # noqa: BLE001 - an API failure is a refusal
+            out = {"ok": False, "error": str(exc)}
+        if isinstance(out, dict) and out.get("ok"):
+            return {"ok": True, "pushed": n, "attempts": attempts,
+                    "error": ""}
+        error = ""
+        if isinstance(out, dict):
+            error = str(out.get("error") or "")
+        if not _is_too_much(error) or n <= floor:
+            return {"ok": False, "pushed": 0, "attempts": attempts,
+                    "error": error}
+        n = max(floor, n // 2)
+        attempt_list = retry_entries[:n]
 
 
 def _description(kind: str) -> str:
@@ -204,6 +283,10 @@ def validate_botfather_commands() -> list[str]:
             )
         if " - " in kind or " " in kind:
             problems.append(f"command contains spaces: {kind!r}")
+        if not _COMMAND_NAME_RE.fullmatch(kind):
+            problems.append(
+                f"bad command name: {kind!r} (must match "
+                "^[a-z0-9_]{1,32}$)")
     # Owner commands are all small enough to fit by design and every
     # one must be listed; public commands beyond the cap are excluded
     # by design (they stay in the public catalog, menus and /list), so
@@ -248,12 +331,75 @@ def validate_gated_botfather_commands() -> list[str]:
             )
         if " - " in kind or " " in kind:
             problems.append(f"command contains spaces: {kind!r}")
+        if not _COMMAND_NAME_RE.fullmatch(kind):
+            problems.append(
+                f"bad command name: {kind!r} (must match "
+                "^[a-z0-9_]{1,32}$)")
     head = _public_priority()[: len(entries)]
     missing_head = [kind for kind in head if kind not in seen]
     if missing_head:
         problems.append(
             f"missing higher-priority public commands: {missing_head}")
     return problems
+
+
+def _skipped_for(pushed_kinds: list[str], *, owner_only: bool) -> int:
+    """Commands past the cap that stay available via /list: every
+    catalog command not on the picker. For the full 100-command push
+    this is the old count (gated 163, personal 211); after a TOO_MUCH
+    retry it grows by exactly the commands the smaller list dropped.
+    """
+    from .control import PUBLIC_COMMANDS
+
+    public_pushed = sum(1 for kind in pushed_kinds
+                        if kind in PUBLIC_COMMANDS)
+    owner_pushed = len(pushed_kinds) - public_pushed
+    skipped = len(_public_priority()) - public_pushed
+    if owner_only:
+        skipped += len(PERSONAL_OWNER_COMMANDS) - owner_pushed
+    return max(0, skipped)
+
+
+def menu_scope_state(adapter: Any, *, dry_run: bool = False,
+                     scope_size: int | None = None) -> dict[str, Any]:
+    """Scope-state diagnostic for ``nm menu sync`` (dry-run-safe).
+
+    Reports what the builders produce (default-scope sizes for both
+    bots, §16 scope size when the caller passes it — this module is
+    L4 and must not import the L5 runtime that owns the §16 kinds)
+    and, when the API is reachable, the live default-scope count for
+    this bot — so the next EC2 run can show whether a scoped list is
+    eating the budget. Never raises: offline / unreachable / a
+    malformed reply is reported, not thrown. In dry-run mode the live
+    query is skipped entirely — a dry run never calls the API.
+    """
+    state: dict[str, Any] = {
+        "bot": str(getattr(adapter, "name", "") or "telegram-bot"),
+        "builders": {
+            "gated_default": len(gated_botfather_commands()),
+            "personal_default": len(personal_botfather_commands()),
+            "scope": scope_size,
+        },
+        "live": {"default": None, "note": ""},
+    }
+    if dry_run:
+        state["live"]["note"] = "not queried (dry run)"
+        return state
+    fetch = getattr(adapter, "get_default_commands", None)
+    if not callable(fetch):
+        state["live"]["note"] = "adapter cannot read live commands"
+        return state
+    try:
+        live = fetch()
+    except Exception as exc:  # noqa: BLE001 - offline is a report
+        state["live"]["note"] = f"unreachable: {str(exc)[:120]}"
+        return state
+    try:
+        state["live"]["default"] = len(list(live or []))
+        state["live"]["note"] = "live default scope"
+    except Exception:  # noqa: BLE001 - a malformed reply is a report
+        state["live"]["note"] = "unreadable live reply"
+    return state
 
 
 def sync_bot_commands(adapter: Any, *, dry_run: bool = False) -> dict[str, Any]:
@@ -270,9 +416,11 @@ def sync_bot_commands(adapter: Any, *, dry_run: bool = False) -> dict[str, Any]:
     ``dry_run`` builds and validates the list without calling the API.
     Never raises for a bad adapter shape — a missing
     ``set_default_commands`` is a refusal, not a crash. Returns
-    ``{"ok", "bot", "pushed", "skipped", "problems", ...}`` where
-    ``skipped`` counts the public commands past the BotFather cap that
-    stay available everywhere except the "/" picker.
+    ``{"ok", "bot", "pushed", "skipped", "problems", "retried",
+    "attempts", ...}`` where ``skipped`` counts the public commands
+    past the BotFather cap that stay available everywhere except the
+    "/" picker, and ``retried``/``attempts`` record a TOO_MUCH retry
+    (the sizes tried, so the caller can report exactly what landed).
     """
     from .telegram_menu import validate_menu
 
@@ -284,6 +432,8 @@ def sync_bot_commands(adapter: Any, *, dry_run: bool = False) -> dict[str, Any]:
         "pushed": 0,
         "skipped": 0,
         "problems": [],
+        "retried": False,
+        "attempts": [],
     }
     ok, problems = validate_menu()
     if not ok:
@@ -292,41 +442,45 @@ def sync_bot_commands(adapter: Any, *, dry_run: bool = False) -> dict[str, Any]:
     if owner_only:
         entries = personal_botfather_commands()
         list_problems = validate_botfather_commands()
-        skipped = max(0, len(_public_priority())
-                      - (BOTFATHER_MAX_COMMANDS
-                         - len(PERSONAL_OWNER_COMMANDS)))
     else:
         entries = gated_botfather_commands()
         list_problems = validate_gated_botfather_commands()
-        skipped = max(0, len(_public_priority()) - len(entries))
     if list_problems:
         result["problems"] = list(list_problems)
         return result
-    result["skipped"] = skipped
     if dry_run:
         result["ok"] = True
         result["commands"] = [kind for kind, _ in entries]
+        result["skipped"] = _skipped_for(result["commands"],
+                                         owner_only=owner_only)
         return result
     push = getattr(adapter, "set_default_commands", None)
     if not callable(push):
         result["problems"] = [
             f"{bot} cannot push commands (no set_default_commands)"]
         return result
-    try:
-        out = push(entries)
-    except Exception as exc:  # noqa: BLE001 - an API failure is a refusal
-        result["problems"] = [f"setMyCommands failed: {exc}"]
-        return result
-    if not isinstance(out, dict) or not out.get("ok"):
-        error = ""
-        if isinstance(out, dict):
-            error = str(out.get("error") or "")
+    # A 100-command push can be refused server-side as
+    # BOT_COMMANDS_TOO_MUCH (seen live at the 2026-11-17 boot on both
+    # bots) even though the payload is exactly 100 valid commands.
+    # Retry with the priority head halved until Telegram accepts, so
+    # the "/" picker lands instead of failing outright.
+    retry_entries = _retry_order(entries, owner_only=owner_only)
+    pushed = push_with_too_much_retry(push, retry_entries, first=entries)
+    result["attempts"] = pushed["attempts"]
+    result["retried"] = len(pushed["attempts"]) > 1
+    if not pushed["ok"]:
         result["problems"] = [
-            f"setMyCommands failed: {error or 'unknown error'}"]
+            f"setMyCommands failed: "
+            f"{pushed['error'] or 'unknown error'} "
+            f"(attempted sizes {pushed['attempts']})"]
         return result
+    n = pushed["pushed"]
+    landed = (retry_entries if result["retried"] else entries)[:n]
     result["ok"] = True
-    result["pushed"] = len(entries)
-    result["commands"] = [kind for kind, _ in entries]
+    result["pushed"] = n
+    result["commands"] = [kind for kind, _ in landed]
+    result["skipped"] = _skipped_for(result["commands"],
+                                     owner_only=owner_only)
     return result
 
 

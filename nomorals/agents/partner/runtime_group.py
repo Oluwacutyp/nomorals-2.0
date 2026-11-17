@@ -11460,6 +11460,7 @@ class RuntimeGroupMixin:
         the catalog's own words — the first clause of each
         kind's "what", capped to the API's description size."""
         from ...social.chat.control import COMMAND_DETAILS
+        from ...social.chat.personal_commands import BOTFATHER_MAX_COMMANDS
 
         out = []
         for kind in self._P5_SCOPE_KINDS:
@@ -11467,7 +11468,11 @@ class RuntimeGroupMixin:
             what = str(detail.get("what") or kind)
             desc = what.split(":")[0].split(".")[0].strip()
             out.append((kind, (desc or kind)[:100]))
-        return out
+        # Telegram caps a scope list at 100 commands; the kinds
+        # tuple is 34 today, so this is a guard against future
+        # growth — priority head (tuple order), never a silent
+        # middle cut.
+        return out[:BOTFATHER_MAX_COMMANDS]
 
     def _p5_scope_sync(self, surface, key, *, chat, platform,  # type: ignore[no-untyped-def]
                        clear=False):
@@ -11499,6 +11504,7 @@ class RuntimeGroupMixin:
                           for a in res.get("administrators") or []
                           if str(a.get("id") or "")]
         commands = self._p5_scope_commands()
+        from ...social.chat.personal_commands import push_with_too_much_retry
         calls = []
         if clear:
             clear_member = getattr(
@@ -11512,12 +11518,15 @@ class RuntimeGroupMixin:
                 calls.append(clear_admin(chat))
         else:
             if callable(set_admin):
-                calls.append(set_admin(chat, commands))
+                calls.append(push_with_too_much_retry(
+                    lambda cmds: set_admin(chat, cmds), commands))
             set_member = getattr(
                 adapter, "admin_set_member_commands", None)
             if callable(set_member):
                 for uid in admins:
-                    calls.append(set_member(chat, uid, commands))
+                    calls.append(push_with_too_much_retry(
+                        lambda cmds, uid=uid: set_member(chat, uid, cmds),
+                        commands))
         ok = sum(1 for c in calls
                  if isinstance(c, dict) and c.get("ok"))
         return ok, len(calls), ""

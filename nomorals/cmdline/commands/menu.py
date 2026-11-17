@@ -8,6 +8,17 @@ from typing import Any
 _BOT_NAMES = {"gated": "telegram-bot", "personal": "telegram-personal"}
 
 
+def _scope_size() -> int | None:
+    """The §16 scope list size (runtime_group owns the kinds)."""
+    try:
+        from ...agents.partner.runtime_group import RuntimeGroupMixin
+
+        kinds = getattr(RuntimeGroupMixin, "_P5_SCOPE_KINDS", ()) or ()
+        return len(kinds)
+    except Exception:  # noqa: BLE001 - the diagnostic reports, never raises
+        return None
+
+
 def _cmd_menu(args: Any, context: Any) -> int:
     """Route ``nm menu sync``.
 
@@ -15,7 +26,10 @@ def _cmd_menu(args: Any, context: Any) -> int:
     registry-derived "/" list via setMyCommands (the same sync the
     adapter runs at startup). ``--dry-run`` builds and validates the
     list without calling the API. A bot with no token / disabled is an
-    honest refusal naming the bot, never a silent skip.
+    honest refusal naming the bot, never a silent skip. After the
+    sync, a scope-state diagnostic is printed per bot (builder sizes
+    + live default-scope count when the API is reachable; dry-run
+    never queries the API).
     """
     words = list(getattr(args, "task", None) or [])
     if not words or words[0] != "sync":
@@ -33,9 +47,10 @@ def _cmd_menu(args: Any, context: Any) -> int:
                 else [_BOT_NAMES[bot_sel]])
     settings = getattr(context, "settings", None)
     from ...social.chat import build_adapter
-    from ...social.chat.personal_commands import sync_bot_commands
+    from ...social.chat.personal_commands import menu_scope_state, sync_bot_commands
 
     results: dict[str, Any] = {}
+    adapters: dict[str, Any] = {}
     rc = 0
     for name in selected:
         try:
@@ -54,10 +69,14 @@ def _cmd_menu(args: Any, context: Any) -> int:
             }
             rc = 1
             continue
+        adapters[name] = adapter
         out = sync_bot_commands(adapter, dry_run=dry_run)
         results[name] = out
         if not out.get("ok"):
             rc = 1
+    for name, adapter in adapters.items():
+        results[name]["diagnostic"] = menu_scope_state(
+            adapter, dry_run=dry_run, scope_size=_scope_size())
     if as_json:
         print(json.dumps(results, indent=2, default=str))
         return rc
@@ -75,4 +94,19 @@ def _cmd_menu(args: Any, context: Any) -> int:
         else:
             print(f"{name}: refused — "
                   f"{'; '.join(out.get('problems') or ['?'])}")
+        diag = out.get("diagnostic") or {}
+        if diag:
+            builders = diag.get("builders") or {}
+            live = diag.get("live") or {}
+            if live.get("default") is not None:
+                live_text = (f"live default scope: "
+                             f"{live['default']} commands")
+            else:
+                live_text = (f"live default scope: "
+                             f"{live.get('note') or 'unknown'}")
+            print(f"{name}: menu state — builders: default "
+                  f"{builders.get('gated_default', '?')}/"
+                  f"{builders.get('personal_default', '?')}, "
+                  f"scope {builders.get('scope') if builders.get('scope') is not None else '?'}; "
+                  f"{live_text}")
     return rc
