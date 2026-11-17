@@ -1479,7 +1479,22 @@ class RuntimeReachMixin:
             except (KeyError, ValueError) as exc:
                 return str(exc)
             total = format_duration(s.elapsed())
-            return f"stopped ({s.label or 'untitled'}) — {total} focused."
+            reply = f"stopped ({s.label or 'untitled'}) — {total} focused."
+            # R3-55 remainder: the hold lifts with the session — a
+            # held alert arrives now, not at the next tick.  The
+            # flush never blocks the stop reply (it never raises;
+            # a failure just leaves the rows held for the tick).
+            try:
+                from ..notifier import Notifier
+
+                flushed = Notifier(
+                    self.context, self.gateway).flush_held_focus()
+                if flushed.get("sent"):
+                    reply += (f"\n{flushed['sent']} held alert(s) "
+                              "delivered.")
+            except Exception:  # noqa: BLE001 - stop reply stands alone
+                pass
+            return reply
         if verb == "today":
             import datetime as _dt
 

@@ -127,8 +127,13 @@ STATE_HELD_BRAIN = "held-brain-degraded"
 #: Focus gate (audit R3-55): a publish that would otherwise page
 #: now, held because a focus session is in progress and the
 #: interruption policy says it is not worth interrupting for.
-#: Stored, visible on /notify like every other held state, never
-#: redelivered stale — the owner reads it on the digest.
+#: Stored, visible on /notify like every other held state.  The
+#: hold lifts when the session ends — :meth:`flush_held_focus`
+#: (called by the ``/focus stop`` verb) and the redelivery tick
+#: both release held rows then — but "never redelivered stale"
+#: still holds: every release passes the Pass-3 freshness
+#: recheck first, so a superseded fact retires unsent and a
+#: moot-deadline action demotes instead of paging.
 STATE_HELD_FOCUS = "held-focus"
 STATE_DISABLED = "disabled"        # proactive master/kind switch off
 STATE_MUTED = "muted"              # feature flag ``notifier`` off
@@ -1787,7 +1792,7 @@ class Notifier:
                 n = int(row.get("n") or 0)
                 if state in RETRYABLE_STATES:
                     out["retryable"] += n
-                elif state == STATE_HELD_QUIET:
+                elif state in (STATE_HELD_QUIET, STATE_HELD_FOCUS):
                     out["held"] += n
                 elif state == STATE_DEAD:
                     out["dead"] += n
@@ -1799,7 +1804,10 @@ class Notifier:
     def _due_redeliveries(self, limit: int) -> list[dict[str, Any]]:
         """Rows the retry queue should attempt right now: retryable rows
         whose backoff has elapsed, plus quiet-hour holds (re-checked, not
-        re-attempted)."""
+        re-attempted), plus focus holds whose session has ended (the
+        release branch re-checks that first — a live session keeps
+        holding, so a row only reaches the send path once the hold has
+        lifted)."""
         if self.db is None:
             return []
         now = time.time()
@@ -1811,15 +1819,20 @@ class Notifier:
                 "UNION ALL "
                 "SELECT * FROM notifications WHERE delivered = 0 "
                 "AND delivery_state = ? AND next_retry_at <= ? "
+                "UNION ALL "
+                "SELECT * FROM notifications WHERE delivered = 0 "
+                "AND delivery_state = ? AND next_retry_at <= ? "
                 "ORDER BY created_at ASC LIMIT ?",
                 (STATE_PENDING, STATE_FAILED, now, DELIVERY_MAX_ATTEMPTS,
-                 STATE_HELD_QUIET, now, max(1, int(limit))),
+                 STATE_HELD_QUIET, now, STATE_HELD_FOCUS, now,
+                 max(1, int(limit))),
             )
         except Exception:  # noqa: BLE001 - pre-migration 83: no backoff cols
             try:
                 return [r for r in self.pending()
                         if (r.get("delivery_state") or "") in
-                        (*RETRYABLE_STATES, STATE_HELD_QUIET)][:max(1, int(limit))]
+                        (*RETRYABLE_STATES, STATE_HELD_QUIET,
+                         STATE_HELD_FOCUS)][:max(1, int(limit))]
             except Exception as exc:  # noqa: BLE001
                 record_failure("notifier._due_redeliveries.fallback", exc)
                 return []
@@ -2101,6 +2114,123 @@ class Notifier:
                 pass
         return bool(reached)
 
+    # ── focus-hold release (R3-55 remainder) ───────────────────────
+
+    def _focus_session_active(self) -> bool:
+        """True when a focus session is currently running.
+
+        The hold applies while one runs, so the redelivery tick
+        must not release held-focus rows until this is False.  No
+        home path means no session can exist (the same reasoning
+        as :meth:`_focus_gate`).  Any failure reading the timer
+        fails CLOSED — assume a session is active and keep
+        holding: a delayed release is recoverable at the next
+        stop/tick, an interrupted focus session is not.
+        Never raises.
+        """
+        try:
+            home = getattr(self.settings, "home_path", None)
+            if home is None:
+                return False
+            from ..focus.sessions import FocusTimer
+
+            timer = FocusTimer(str(Path(home) / "data" / "focus.json"))
+            return timer.active() is not None
+        except Exception as exc:  # noqa: BLE001 - keep holding on doubt
+            record_failure("notifier.focus_session_active", exc)
+            return True
+
+    def _release_held_focus_row(self, row: dict[str, Any],
+                                now: float) -> str:
+        """Release one held-focus row whose session has ended.
+
+        Returns ``"sent"`` / ``"held"`` / ``"retired"``.  The
+        release is a fresh decision, not a replay of the held
+        text: the Pass-3 freshness recheck runs first (superseded
+        facts retire unsent, moot-deadline actions demote), then
+        the gates publish would apply right now are re-checked —
+        the owner switching the kind off parks the row disabled,
+        quiet hours keep it held (quiet-exempt kinds excepted),
+        a degraded brain keeps proactive kinds held — and only a
+        row that passes everything is sent, through the normal
+        redelivery path with the decision's recorded channels.
+        A failed send leaves the row held-focus (a hold consumes
+        no retry attempt); the next stop or tick retries it.
+        Never raises.
+        """
+        try:
+            fresh = self._release_freshness(row, now)
+            if fresh["action"] != "deliver":
+                self._retire_release(row, fresh)
+                return "retired"
+            kind = str(row.get("kind") or "")
+            if proactive_gate(self.context, kind) == STATE_DISABLED:
+                # The owner turned this kind (or proactive
+                # entirely) off while the row was held: honour the
+                # switch — park the row in the terminal "disabled"
+                # state instead of sending it (same shape as the
+                # held-quiet branch of redeliver()).
+                try:
+                    with self.db.transaction():
+                        self.db.execute(
+                            "UPDATE notifications SET "
+                            "delivery_state = ? WHERE id = ?",
+                            (STATE_DISABLED, row["id"]),
+                        )
+                except Exception:  # noqa: BLE001 - bookkeeping only
+                    _log.debug("notifier: could not park held-focus row "
+                               "as disabled", exc_info=True)
+                return "retired"
+            if (_in_quiet_hours_now(self.context)
+                    and kind not in QUIET_HOURS_EXEMPT):
+                return "held"
+            if kind in PROACTIVE_KIND_SETTINGS:
+                brain_gate = resolve_brain_gate(self.context)
+                if brain_gate is not None and brain_gate.hold_unsolicited(
+                        platform="notifier",
+                        chat_key=f"proactive:{kind}",
+                        note="held-focus release", personal=True):
+                    return "held"
+            if self._redeliver_row(
+                    row, now, consume_attempt=False,
+                    channels=fresh["channels"]):
+                self._record_release_outcome(row, fresh)
+                return "sent"
+            return "held"
+        except Exception:  # noqa: BLE001 - one bad row must not stop the queue
+            _log.debug("notifier: held-focus release row errored",
+                       exc_info=True)
+            return "held"
+
+    def flush_held_focus(self, *, now: float | None = None
+                         ) -> dict[str, int]:
+        """Release held-focus rows now that the session has ended.
+
+        Called by the ``/focus stop`` verb right after the session
+        stops, so a held alert arrives at once instead of waiting
+        for the redelivery tick.  The stop is an owner action, so
+        the flush retries rows a failed tick attempt backed off —
+        it does not consult ``next_retry_at``.  Returns the
+        release counts (``sent`` / ``held`` / ``retired``).
+        Never raises.
+        """
+        out = {"sent": 0, "held": 0, "retired": 0}
+        if self.db is None:
+            return out
+        now_f = time.time() if now is None else float(now)
+        try:
+            rows = self.db.query(
+                "SELECT * FROM notifications WHERE delivered = 0 "
+                "AND delivery_state = ? ORDER BY created_at ASC",
+                (STATE_HELD_FOCUS,),
+            )
+        except Exception as exc:  # noqa: BLE001 - no rows is a fact
+            record_failure("notifier.flush_held_focus.query", exc)
+            return out
+        for row in rows:
+            out[self._release_held_focus_row(row, now_f)] += 1
+        return out
+
     def redeliver(self, *, limit: int = 20) -> int:
         """Re-send due pending alerts (call after a platform hot-starts, or
         let the scheduler tick drive it periodically).
@@ -2109,7 +2239,10 @@ class Notifier:
         channel backs off (60s → 2m → 4m → … → 6h) instead of being
         hammered every tick.  Rows held for quiet hours are re-checked
         first — they only go out once quiet hours end, and the hold
-        doesn't consume a retry attempt.  Rows that exhaust
+        doesn't consume a retry attempt.  Rows held for focus are
+        released the same way once no session is active (the
+        ``/focus stop`` verb flushes them at once; this tick is the
+        safety net for rows the stop could not release).  Rows that exhaust
         :data:`DELIVERY_MAX_ATTEMPTS` are dead-lettered
         (``delivery_state = "dead"``) instead of retried forever.
         Never raises.
@@ -2128,6 +2261,19 @@ class Notifier:
         for row in self._due_redeliveries(limit=limit):
             state = (row.get("delivery_state") or "")
             try:
+                if state == STATE_HELD_FOCUS:
+                    # The hold lifts only when the session ends:
+                    # while one runs, the row stays held even on
+                    # the tick (the /focus stop verb flushes at
+                    # once via flush_held_focus; the tick is the
+                    # safety net for rows the stop could not
+                    # release — quiet hours, a degraded brain, a
+                    # failed send at stop time).
+                    if self._focus_session_active():
+                        continue  # session still running — keep holding
+                    if self._release_held_focus_row(row, now) == "sent":
+                        sent += 1
+                    continue
                 if state == STATE_HELD_QUIET:
                     # The hold is a *clock* decision, not a per-kind
                     # gate decision: rows land here from any producer
