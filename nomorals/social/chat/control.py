@@ -5020,7 +5020,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["code", "py", "devon", "swarm", "task", "gen", "data", "evolve",
       "upgrade", "arena", "trial", "identity", "book", "exec", "apps", "fix", "structure",
       "deliver", "checkpoint", "checkpoints", "rewind", "novel", "books",
-      "skills", "delegate", "workflow", "computer"]),
+      "skills", "delegate", "workflow", "plan", "computer"]),
     ("media system — music · playback · video · podcast",
      ["music", "play", "video", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
