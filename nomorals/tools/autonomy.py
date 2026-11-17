@@ -879,6 +879,23 @@ def register(registry: Any) -> None:
                     "error": f"continual update tick failed: {exc}"}
 
     @registry.register(
+        "__distill_tick__",
+        description="Run one distillation tick: harvest kept cloud turns from the conversation log into the durable distillation store and, when enough pairs exist (32+), train the local adapter and run it through the TrainingRegistry promotion gate. A promoted adapter notifies the owner once; a failed gate means the candidate never lands. Scheduler-internal; runs every ~24h. Routine and silent — a deferred or not-due tick pings nobody.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _distill_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..training.distill_driver import run_distill_once
+
+        try:
+            return run_distill_once(
+                _context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"distill tick failed: {exc}"}
+
+    @registry.register(
         "__render_tick__",
         description="Run one render tick: every non-terminal render-tagged "
         "mission advances exactly one stage (proxy, then full) through "

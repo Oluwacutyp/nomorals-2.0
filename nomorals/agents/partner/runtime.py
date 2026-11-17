@@ -4129,6 +4129,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "continual update tick job not registered: %s", exc)
+                # Periodic distillation (scout 17, A6): one durable
+                # "distill tick" job (every 24h) driving the distillation
+                # loop — kept cloud turns from the conversation log into
+                # the durable pair store, one local-adapter train through
+                # the TrainingRegistry gate when enough pairs exist.
+                # Idempotent; best-effort.
+                try:
+                    from ...training.distill_driver import ensure_distill_job
+
+                    ensure_distill_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "distill tick job not registered: %s", exc)
                 # Mission render queue (audit gap R2-33): one durable
                 # "render tick" job (every 5m) advancing non-terminal
                 # render-tagged missions one stage (proxy, then full)

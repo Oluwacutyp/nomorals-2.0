@@ -4116,8 +4116,10 @@ def _parser() -> argparse.ArgumentParser:
                        help="kick off one pipeline run (collect->train->evaluate->promote)")
     train.add_argument("--continual", action="store_true",
                        help="run one confined continual update (ledger pairs -> replay buffer -> adapter-only update vs the frozen eval harness)")
+    train.add_argument("--distill", action="store_true",
+                       help="run one distillation tick (kept cloud turns -> pair store -> local adapter train through the promotion gate)")
     train.add_argument("--force", action="store_true",
-                       help="with --continual: run the update even when the daily interval has not elapsed")
+                       help="with --continual/--distill: run even when the daily interval has not elapsed")
     train.add_argument("--quick", action="store_true",
                        help="run the one-command phone training demo "
                             "(seed + collected pairs, 3 epochs, artifact saved)")

@@ -158,6 +158,29 @@ def _cmd_train(args, context):
                     f"{result.get('error') or result.get('reason') or status}")
         _emit(args, result, text)
         return 0 if result.get("ok") else 1
+    if getattr(args, "distill", False):
+        from ...training.distill_driver import run_distill_once
+
+        result = run_distill_once(
+            context, force=bool(getattr(args, "force", False)))
+        status = str(result.get("status") or "failed")
+        if status == "trained" and result.get("promoted"):
+            text = (f"distill trained and promoted — "
+                    f"{result.get('pairs')} kept pairs, "
+                    f"checkpoint {result.get('checkpoint')}")
+        elif status == "trained":
+            text = (f"distill trained but the gate refused it — "
+                    f"candidate never lands "
+                    f"({result.get('pairs')} kept pairs)")
+        elif status == "deferred":
+            text = f"distill deferred — {result.get('reason') or ''}"
+        elif status == "not_due":
+            text = "distill not due yet — daily interval not elapsed"
+        else:
+            text = (f"distill failed — "
+                    f"{result.get('error') or result.get('reason') or status}")
+        _emit(args, result, text)
+        return 0 if result.get("ok") else 1
     if getattr(args, "quick", False):
         # The one-command demo: seed + collected pairs, 3 epochs, artifact
         # saved. Different job from --run (the full pipeline); --quick
