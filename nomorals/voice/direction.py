@@ -2,13 +2,13 @@
 
 A :class:`VoiceDirectionTrack` is a sidecar, never an edit of the
 dialogue: the dialogue text stays exactly as written, and the track
-carries the *performance* — prosody (pitch/rate/volume), emotion, and
-timing (pauses, emphasis) — anchored to word ranges. TTS consumes the
-pair ``(dialogue, track)``: :func:`segments` splits the dialogue into
-(text, cue) pairs by word anchor, and :func:`render_for_tts` renders
-each segment through the director with the cue's emotion, so the
-backend hears the direction without the dialogue ever being rewritten
-to carry it.
+carries the *performance* — prosody (pitch/rate/volume), emotion,
+accent, delivery, pace, and timing (pauses, emphasis) — anchored to
+word ranges. TTS consumes the pair ``(dialogue, track)``:
+:func:`segments` splits the dialogue into (text, cue) pairs by word
+anchor, and :func:`render_for_tts` renders each segment through the
+director with the cue's emotion, so the backend hears the direction
+without the dialogue ever being rewritten to carry it.
 
 Anchor model: a cue covers ``word_start`` (inclusive) to ``word_end``
 (exclusive) in the dialogue's whitespace-split words. ``word_start`` /
@@ -34,12 +34,22 @@ __all__ = [
     "segments",
     "render_for_tts",
     "synthesize_with_direction",
+    "track_from_segments",
+    "track_from_text",
 ]
 
 
 @dataclass
 class DirectionCue:
-    """One directed span: word range + how to perform it."""
+    """One directed span: word range + how to perform it.
+
+    ``accent`` / ``delivery`` / ``pace`` are the per-word direction
+    TagProcessor parses out of inline tags (``[said angrily in
+    British accent]`` → emotion ``angry``, accent ``british``) — they
+    ride the cue so a track can carry them, even though no render
+    tier realizes accent yet (same as the flat mood path, which parses
+    accent and never uses it — see the survey for the remainder).
+    """
 
     word_start: int | None = None
     word_end: int | None = None
@@ -48,6 +58,9 @@ class DirectionCue:
     pause_before_s: float = 0.0
     pause_after_s: float = 0.0
     emphasis: bool = False
+    accent: str = ""
+    delivery: str = ""
+    pace: str = ""
 
     def __post_init__(self) -> None:
         if self.word_start is not None and self.word_start < 0:
@@ -69,13 +82,17 @@ class DirectionCue:
         if self.pause_before_s < 0 or self.pause_after_s < 0:
             raise ValidationError("cue pauses must be >= 0")
         self.emotion = str(self.emotion or "").strip().lower()
+        self.accent = str(self.accent or "").strip().lower()
+        self.delivery = str(self.delivery or "").strip().lower()
+        self.pace = str(self.pace or "").strip().lower()
 
     def to_dict(self) -> dict[str, Any]:
         return {"word_start": self.word_start, "word_end": self.word_end,
                 "emotion": self.emotion, "prosody": dict(self.prosody),
                 "pause_before_s": self.pause_before_s,
                 "pause_after_s": self.pause_after_s,
-                "emphasis": self.emphasis}
+                "emphasis": self.emphasis, "accent": self.accent,
+                "delivery": self.delivery, "pace": self.pace}
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "DirectionCue":
@@ -87,7 +104,10 @@ class DirectionCue:
                      dict(data.get("prosody") or {}).items()},
             pause_before_s=float(data.get("pause_before_s", 0.0)),
             pause_after_s=float(data.get("pause_after_s", 0.0)),
-            emphasis=bool(data.get("emphasis", False)))
+            emphasis=bool(data.get("emphasis", False)),
+            accent=str(data.get("accent", "") or ""),
+            delivery=str(data.get("delivery", "") or ""),
+            pace=str(data.get("pace", "") or ""))
 
 
 @dataclass
@@ -166,7 +186,10 @@ def segments(dialogue: str, track: VoiceDirectionTrack) -> list[dict[str, Any]]:
                                else dict(track.default_prosody),
                     "pause_before_s": cue.pause_before_s if cue else 0.0,
                     "pause_after_s": cue.pause_after_s if cue else 0.0,
-                    "emphasis": bool(cue.emphasis) if cue else False})
+                    "emphasis": bool(cue.emphasis) if cue else False,
+                    "accent": cue.accent if cue else "",
+                    "delivery": cue.delivery if cue else "",
+                    "pace": cue.pace if cue else ""})
         i = j
     return out
 
@@ -208,3 +231,132 @@ def synthesize_with_direction(dialogue: str, track: VoiceDirectionTrack, *,
         raise ValidationError("synthesize_with_direction needs a tts_fn callable")
     return tts_fn(rendered_segments=render_for_tts(dialogue, track, backend=backend),
                    dialogue=dialogue, track=track.to_dict(), **tts_kwargs)
+
+
+#: Tags TagProcessor emits for delivery (how something is said) rather
+#: than emotion (what is felt). Mirrors the delivery verbs
+#: nl_director parses, restricted to the spellings TagProcessor can
+#: actually produce (its NL path emits ``Direction.delivery`` verbatim;
+#: its strict path emits EMOTION_TAGS members).
+_DELIVERY_TAGS = {
+    "whisper", "whispers", "whispering",
+    "shout", "shouts", "shouting",
+    "scream", "screams", "screaming",
+    "sing", "sings", "singing",
+    "mutter", "mutters", "muttering",
+    "chant", "chants", "chanting",
+}
+
+
+def _field(source: Any, name: str) -> str:
+    """One direction field off a Direction-like object or a dict."""
+    if source is None:
+        return ""
+    value = (source.get(name, "") if isinstance(source, dict)
+             else getattr(source, name, ""))
+    return str(value or "").strip().lower()
+
+
+def _cue_fields_from_tags(tags: Any,
+                          default: Any = None) -> tuple[str, str, str, str]:
+    """A segment's flat tags → (emotion, accent, delivery, pace).
+
+    TagProcessor flattens a parsed direction into strings: the emotion
+    word bare (``angry``), the accent as ``accent:british``, the pace
+    as ``pace:fast``, the delivery verb bare (``whispers``). Fields a
+    segment's own tags don't name fall back to ``default`` (the
+    whole-line direction) per field. ``_sound_`` / ``_ambient_``
+    markers carry no direction and are ignored here.
+    """
+    emotion = accent = delivery = pace = ""
+    for tag in tags or []:
+        tag = str(tag or "").strip().lower()
+        if tag.startswith("accent:"):
+            if not accent:
+                accent = tag[len("accent:"):].strip()
+        elif tag.startswith("pace:"):
+            if not pace:
+                pace = tag[len("pace:"):].strip()
+        elif tag in _DELIVERY_TAGS:
+            if not delivery:
+                delivery = tag
+        elif tag.startswith("_"):
+            continue
+        elif not emotion:
+            emotion = tag
+    if default is not None:
+        emotion = emotion or _field(default, "emotion")
+        accent = accent or _field(default, "accent")
+        delivery = delivery or _field(default, "delivery")
+        pace = pace or _field(default, "pace")
+    return emotion, accent, delivery, pace
+
+
+def track_from_segments(segments: Any,
+                        default: Any = None
+                        ) -> tuple[str, VoiceDirectionTrack | None]:
+    """Build a track from TagProcessor segments.
+
+    Cues anchor to word ranges over the spoken dialogue, following the
+    segments' own boundaries: each spoken segment consumes its words
+    in order, so a direction change mid-line lands on exactly the
+    words after the tag. ``_sound_`` / ``_ambient_`` segments are not
+    dialogue words — they stay out of the track (the render path
+    still renders them, in order, with an empty direction).
+
+    Returns ``(dialogue, track)`` where ``dialogue`` is the spoken
+    words joined with single spaces. ``track`` is None when no segment
+    carries its own direction — an untagged line has no track and
+    renders on the flat path, byte-identical to before. A malformed
+    tag degrades exactly the way :meth:`TagProcessor.parse` degrades
+    it (ignored, surrounding direction persists): the builder consumes
+    parse output, it never re-parses a tag.
+    """
+    dialogue_words: list[str] = []
+    cues: list[DirectionCue] = []
+    word_index = 0
+    any_own_direction = False
+    for seg in segments or []:
+        tags = list(getattr(seg, "tags", []) or [])
+        if tags in (["_sound_"], ["_ambient_"]):
+            continue
+        words = (getattr(seg, "text", "") or "").split()
+        if not words:
+            continue
+        emotion, accent, delivery, pace = _cue_fields_from_tags(tags)
+        own = bool(emotion or accent or delivery or pace)
+        any_own_direction = any_own_direction or own
+        if own or default is not None:
+            emotion, accent, delivery, pace = _cue_fields_from_tags(
+                tags, default=default)
+            if emotion or accent or delivery or pace:
+                cues.append(DirectionCue(
+                    word_start=word_index,
+                    word_end=word_index + len(words),
+                    emotion=emotion, accent=accent, delivery=delivery,
+                    pace=pace,
+                    pause_after_s=max(
+                        0.0, (getattr(seg, "pause_after_ms", 0) or 0)
+                        / 1000.0)))
+        dialogue_words.extend(words)
+        word_index += len(words)
+    dialogue = " ".join(dialogue_words)
+    if not any_own_direction:
+        return dialogue, None
+    return dialogue, VoiceDirectionTrack(cues=cues)
+
+
+def track_from_text(raw_text: str,
+                    default: Any = None
+                    ) -> tuple[str, VoiceDirectionTrack | None]:
+    """Parse inline direction tags into ``(dialogue, track)``.
+
+    Convenience wrapper over :func:`track_from_segments` — the parse
+    is TagProcessor's, so the track's boundaries are the renderer's
+    boundaries. The import is lazy: tts imports this module's
+    neighbours lazily too, and the builder must never create a cycle.
+    """
+    from .tts import TagProcessor
+
+    return track_from_segments(TagProcessor().parse(raw_text or ""),
+                               default=default)
