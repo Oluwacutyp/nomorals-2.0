@@ -827,6 +827,29 @@ def register(registry: Any) -> None:
                     "error": f"render tick failed: {exc}"}
 
     @registry.register(
+        "__offline_sync_tick__",
+        description="Run one offline sync tick: drain the durable offline queue through the sync engine (FIFO, conflicts flagged, failed actions retried), pump the gateway outbox's queued replies, and publish any new sync conflict once. Scheduler-internal; runs every ~5m. Routine and silent — a tick with nothing queued pings nobody.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _offline_sync_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..agents.offline_host import (
+            get_offline_host,
+            run_offline_sync_tick_once,
+        )
+
+        try:
+            extras = getattr(_context, "extras", None) or {}
+            gateway = extras.get("gateway") if isinstance(extras, dict) else None
+            return run_offline_sync_tick_once(
+                _context, host=get_offline_host(), gateway=gateway,
+                notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"offline sync tick failed: {exc}"}
+
+    @registry.register(
         "__show_schedule_tick__",
         description="Run one show-schedule tick: compose a DRAFT "
         "episode for every show whose schedule is due, from the "

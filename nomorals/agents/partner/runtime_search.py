@@ -120,6 +120,9 @@ class RuntimeSearchMixin:
 
         if not feature_enabled(self.context, "search"):
             return "search is off. turn it on: /features search on"
+        refusal = self._offline_feature_refusal("web_search")
+        if refusal:
+            return refusal
         query = (tail or "").strip()
         if not query:
             return "usage: /search <what to research>"
@@ -179,6 +182,9 @@ class RuntimeSearchMixin:
 
         if not feature_enabled(self.context, "search"):
             return "search is off. turn it on: /features search on"
+        refusal = self._offline_feature_refusal("web_search")
+        if refusal:
+            return refusal
         try:
             leads = SearchEngine(self.context).leads()
         except Exception as exc:  # noqa: BLE001

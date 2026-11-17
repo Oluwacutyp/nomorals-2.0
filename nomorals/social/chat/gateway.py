@@ -51,7 +51,7 @@ from .chunking import (
     utf16_len,
 )
 from .failures import record_failure
-from .outbox import Outbox
+from .outbox import OUTBOX_TOPIC_PREFIX, Outbox
 from .platform_limits import for_platform
 from .send_retry import send_with_retry
 
@@ -1041,6 +1041,41 @@ class ChatGateway:
             fresh=bool(payload.get("fresh"))
             and int(payload.get("_attempts") or 0) <= 1,
         )
+
+    def drain_queued(self) -> dict[str, Any]:
+        """Reconnect pump: drain every queued outbox topic, in order.
+
+        The durable outbox already persists failed chat replies — the
+        missing piece was a pump. Rows only drained when the next send
+        to the SAME chat happened, so a chat whose owner went quiet
+        after a failed send kept its queued replies indefinitely. This
+        drains every topic with live rows through the normal per-chat
+        drain, so a reconnect flushes queued replies even when the
+        owner stays quiet. One bad topic never blocks the rest.
+        """
+        if self.outbox is None:
+            return {"ok": False, "error": "no outbox"}
+        try:
+            rows = self.outbox.queue.topics()
+        except Exception as exc:  # noqa: BLE001 - listing is best-effort
+            return {"ok": False,
+                    "error": f"cannot list outbox topics: {exc}"}
+        pumped: dict[str, Any] = {}
+        for row in rows:
+            topic = str(row.get("topic") or "")
+            if str(row.get("status")) not in ("ready", "leased"):
+                continue
+            parts = topic.split(":", 2)
+            if len(parts) != 3 or parts[0] != OUTBOX_TOPIC_PREFIX:
+                continue
+            _, platform, chat_key = parts
+            try:
+                pumped[topic] = self.outbox.deliver_chat(
+                    chat_key, platform, self._deliver_outbox_payload)
+            except Exception as exc:  # noqa: BLE001 - one bad topic never blocks the rest
+                _log.warning("outbox pump failed for %s: %s", topic, exc)
+                pumped[topic] = {"ok": False, "error": str(exc)}
+        return {"ok": True, "topics": pumped}
 
     def _chunked(self, chat: ChatRef, text: str, *,
                  formatted: bool = False) -> list[str]:

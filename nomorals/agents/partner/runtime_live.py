@@ -1989,6 +1989,9 @@ class RuntimeLiveMixin:
 
         if not feature_enabled(self.context, "news"):
             return "news is off. /features news on"
+        refusal = self._offline_feature_refusal("news")
+        if refusal:
+            return refusal
         # The command reply IS the delivery — NewsAgent is constructed
         # with NO notifier on purpose. NewsAgent.run() publishes through
         # a notifier when given one, and attaching it here pushed the

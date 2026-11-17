@@ -459,12 +459,22 @@ class DraftQueue:
         return True
 
     def send(self, gmail: Any, draft_id: str, *,
-             confirmed: bool = False) -> dict[str, Any]:
+             confirmed: bool = False,
+             host: Any | None = None) -> dict[str, Any]:
         """Send one draft.  Requires approved status or explicit ``confirmed``.
 
         Fail-closed: pending drafts without confirmation raise, they never
         send.  The connector's own ``confirm_or_checkpoint`` is the second
         lock — ``confirmed=True`` here means the owner already approved.
+
+        Transport failure (a ``GmailError`` with no status code — the
+        request never completed) does NOT raise: the exact approved
+        payload is queued on the offline host for the reconnect drain
+        and ``{"queued_offline": True, "action_id": ...}`` is returned.
+        The draft stays ``approved`` — the send never landed. API
+        rejections (401/403/429/5xx, which carry a status code) still
+        raise: waiting for a reconnect will never fix a revoked token
+        or a bad request.
         """
         d = self._drafts.get(draft_id)
         if d is None:
@@ -477,13 +487,46 @@ class DraftQueue:
             raise PermissionError(
                 f"draft {draft_id!r} is not approved — approve it first, "
                 "or the owner says 'send it' (explicit override)")
-        result = gmail.send_message(
-            d.to, d.subject, d.body, confirmed=True)
+        from ..connectors import GmailError
+
+        try:
+            result = gmail.send_message(
+                d.to, d.subject, d.body, confirmed=True)
+        except GmailError as exc:
+            if getattr(exc, "status_code", 0) != 0:
+                raise
+            if host is None:
+                from .offline_host import get_offline_host
+
+                host = get_offline_host()
+            action = host.enqueue_failed(
+                "email_send",
+                {"draft_id": draft_id, "to": d.to, "subject": d.subject,
+                 "body": d.body},
+                entity=f"email_draft:{draft_id}")
+            host.note_send_failure(str(exc))
+            return {"queued_offline": True, "action_id": action.id}
         d.status = "sent"
         if d.thread_id:
             self._thread_activity[d.thread_id] = time.time()
         self._save()
         return result
+
+    def mark_sent(self, draft_id: str) -> bool:
+        """Flip a draft to ``sent`` (the offline drain's receipt).
+
+        Returns False when the draft is missing or already sent — the
+        applier must never raise after a successful send, or the next
+        drain would send the same email again.
+        """
+        d = self._drafts.get(draft_id)
+        if d is None or d.status == "sent":
+            return False
+        d.status = "sent"
+        if d.thread_id:
+            self._thread_activity[d.thread_id] = time.time()
+        self._save()
+        return True
 
     # -- thread activity ------------------------------------------------------
     def note_owner_action(self, thread_id: str, ts: float | None = None) -> None:
@@ -735,7 +778,8 @@ async def ensure_email_triage_job(scheduler: Any, context: Any) -> bool:
 
 # ── explicit-override in the NL path ─────────────────────────────────────────
 
-def check_explicit_send(text: str, context: Any) -> str | None:
+def check_explicit_send(text: str, context: Any,
+                        host: Any | None = None) -> str | None:
     """Owner said "send it" in chat → send the armed draft, no reconfirm.
 
     Returns the reply, or None when there's nothing to do (not an
@@ -757,9 +801,12 @@ def check_explicit_send(text: str, context: Any) -> str | None:
     try:
         # The owner already saw the exact payload and said "send it":
         # confirmed=True is the explicit override, not a bypass.
-        queue.send(gmail, draft_id, confirmed=True)
+        result = queue.send(gmail, draft_id, confirmed=True, host=host)
     except Exception as exc:  # noqa: BLE001
         return f"📧 couldn't send: {exc}"
+    if isinstance(result, dict) and result.get("queued_offline"):
+        return ("📧 you're offline — queued, it'll send when you're back "
+                f"(draft {draft_id})")
     return f"📧 sent to {draft.to} — {draft.subject[:60]}"
 
 

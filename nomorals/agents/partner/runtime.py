@@ -591,6 +591,13 @@ class PartnerRuntime(
         #: Competence gate state (brain_gate): degraded-episode
         #: bookkeeping for personal-surface reply holds.
         self._brain_gate = BrainGate()
+        #: Offline fallback host (audit gap R2-42): one shared host for
+        #: the process — this runtime's send observations, the email
+        #: seam's enqueue, and the reconnect tick all share its queue
+        #: file and offline flag.
+        from ..offline_host import get_offline_host
+
+        self._offline_host = get_offline_host()
         self._owner_chats = _key_set(partner_cfg.owner_chats)
         # Sender-id allowlist (NM_PARTNER_OWNER_SENDER_IDS): the owner's
         # Telegram user id. The chat-key test above fails when the owner
@@ -2958,6 +2965,7 @@ class PartnerRuntime(
         _log.info("_send_reply: %d part(s), typing_on=%s, chat=%s", 
                   len(parts), typing_on, message.chat.key)
         try:
+            send_failed = False
             for i, part in enumerate(parts):
                 if i and typing_on:
                     # Between parts: a breath, a re-think, thumbs back on the
@@ -3013,9 +3021,68 @@ class PartnerRuntime(
                 )
                 _log.info("_send_reply: send part %d/%d, ok=%s", i+1, len(parts), result.ok)
                 if not result.ok:
+                    send_failed = True
                     _log.warning("send failed on %s: %s", message.chat.platform, result.error)
+                    self._note_offline_send_failure(result.error or "")
+            if not send_failed:
+                # First fully-successful send after a failure is the
+                # reconnect signal: clear the offline observation and
+                # flush anything the offline host queued (fast path —
+                # the 5-minute tick is the backstop, not the driver).
+                self._note_offline_send_success()
         except Exception as exc:  # noqa: BLE001
             _log.exception("send loop failed: %s", exc)
+            self._note_offline_send_failure(str(exc))
+
+    def _note_offline_send_failure(self, error: str) -> None:
+        """Feed a send failure to the offline host's observation.
+
+        Never raises — an observation must never break a send.
+        """
+        try:
+            host = getattr(self, "_offline_host", None)
+            if host is not None:
+                host.note_send_failure(error)
+        except Exception:  # noqa: BLE001 - observation is best-effort
+            pass
+
+    def _note_offline_send_success(self) -> None:
+        """Feed a fully-successful send loop to the offline host.
+
+        Clears the offline observation and, when the host has queued
+        work, drains it now (the reconnect fast path). Never raises.
+        """
+        try:
+            host = getattr(self, "_offline_host", None)
+            if host is None or not host.is_offline:
+                return
+            host.note_send_success()
+            if host.queue.count_pending():
+                from ..notifier import Notifier
+
+                host.drain(gateway=self.gateway,
+                           notifier=Notifier(self.context, self.gateway))
+        except Exception as exc:  # noqa: BLE001 - the fast path is best-effort
+            _log.debug("offline fast-path drain skipped: %s", exc)
+
+    def _offline_feature_refusal(self, matrix_feature: str) -> str | None:
+        """Honest refusal for an offline-blocked feature, or None.
+
+        The matrix consult behind the ``/search`` / ``/news`` gates:
+        when the host has observed the transport down and the matrix
+        says ``matrix_feature`` is ``unavailable`` offline, the reply
+        says so instead of running the feature into a dead network.
+        Degraded features (email) return None — they queue, they do
+        not refuse.
+        """
+        host = getattr(self, "_offline_host", None)
+        if host is None:
+            return None
+        status = host.feature_status(matrix_feature)
+        if not status["offline"] or status["allowed"]:
+            return None
+        note = status.get("note") or "needs the network."
+        return f"offline — {matrix_feature} is unavailable: {note}"
 
     # ── lifecycle ────────────────────────────────────────────────────────────
     def start(self) -> list[str]:
@@ -3962,6 +4029,20 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "render tick job not registered: %s", exc)
+                # Offline fallback host (audit gap R2-42): one durable
+                # "offline sync tick" job (every 5m) draining the
+                # offline queue through the sync engine on reconnect
+                # and pumping the gateway outbox — before this wiring
+                # the offline package had zero production callers and
+                # a failed send lost the action.
+                # Idempotent; best-effort.
+                try:
+                    from ...agents.offline_host import ensure_offline_sync_job
+
+                    ensure_offline_sync_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "offline sync tick job not registered: %s", exc)
                 # Community orchestration (AA-18): one durable
                 # "community orchestration tick" job (every 1m)
                 # heartbeating this device into the fleet session
