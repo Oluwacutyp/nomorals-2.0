@@ -475,6 +475,10 @@ class RuntimeMemoryMixin:
         /health costs          typical Nigerian private-hospital costs (approximate)
         /health prep [symptoms] pre-visit packet: timeline + questions + what to bring
         /health visited <notes> post-visit recap: what the doctor said, structured
+        /health exercise <kind> field=value; ... structured CBT exercise
+        (thought_record, behavioral_activation, cognitive_restructuring,
+        sleep_routine, activity_routine, relapse_prevention, session_prep)
+        /health exercise list [kind] | show <id> | complete <id> | kinds
 
         Devon is not a doctor. This records what the user reports;
         it never interprets medically.
@@ -500,6 +504,10 @@ class RuntimeMemoryMixin:
                     "       /health prep [symptoms] — pre-visit packet\n"
                     "       /health visited <notes> — post-visit recap\n"
                     "       /health meal [photo path] — photo meal logging (2 questions)\n"
+                    "       /health exercise <kind> field=value; ... — "
+                    "structured CBT exercise\n"
+                    "       /health exercise list [kind] | show <id> | "
+                    "complete <id> | kinds\n"
                     "tracking only — I'm not a doctor; show the log to "
                     "yours for medical guidance.")
         verb, _, rest = raw.partition(" ")
@@ -613,12 +621,27 @@ class RuntimeMemoryMixin:
             if verb == "patterns":
                 from ...health.patterns import detect_patterns, format_patterns
                 return format_patterns(detect_patterns(tl, days=30))
+            if verb == "exercise":
+                # The exercise logic lives in the health organ itself
+                # (health.interventions.control_interventions) — this
+                # method only routes, keeping the organ's own gates
+                # on the verb path.
+                from ...health.interventions import (
+                    InterventionStore,
+                    control_interventions,
+                )
+                store = getattr(self, "_intervention_store", None)
+                if store is None:
+                    store = InterventionStore()
+                    self._intervention_store = store
+                return control_interventions(rest, store=store)
             return ("usage: /health log <text> | /health timeline | "
                     "/health summary [days] | /health ask <question> | "
                     "/health readiness | /health week | "
                     "/health route <symptoms> | "
                     "/health costs | /health prep [symptoms] | "
-                    "/health visited <notes>")
+                    "/health visited <notes> | "
+                    "/health exercise <kind> field=value; ...")
         finally:
             tl.close()
 

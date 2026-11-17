@@ -47,6 +47,7 @@ __all__ = [
     "diagnostic_scan",
     "render_intervention",
     "default_interventions_path",
+    "control_interventions",
 ]
 
 
@@ -340,3 +341,149 @@ class InterventionStore:
         if row is None:
             return [f"no intervention record {record_id!r}"]
         return validate_intervention(row["kind"], row["fields"])
+
+
+_INTERVENTION_USAGE = (
+    "usage: /health exercise <kind> field=value; field=value; ...\n"
+    "       /health exercise list [kind] | show <id> | "
+    "complete <id> | kinds\n"
+    "       kinds: " + ", ".join(sorted(INTERVENTION_KINDS))
+)
+
+
+def _coerce_field(shape: str, raw: str) -> Any:
+    """One chat-supplied value against its shape — numbers coerce,
+    everything else stays text for the validator to judge.  A value
+    that will not parse is left as text so validation refuses it
+    honestly instead of the parser inventing a number."""
+    if shape in ("score", "number"):
+        text = raw.strip()
+        try:
+            return int(text) if "." not in text else float(text)
+        except ValueError:
+            return raw
+    if shape == "list":
+        return [v.strip() for v in raw.split(",") if v.strip()]
+    return raw
+
+
+def _parse_fields(kind: str, rest: str) -> dict[str, Any]:
+    """``field=value; field=value`` into a record's fields.  Each
+    part splits on the FIRST ``=`` (values may contain ``=``); an
+    unknown field is kept as-is so validation names it."""
+    schema = INTERVENTION_KINDS[kind]
+    known = {**schema["required"], **schema["optional"]}
+    fields: dict[str, Any] = {}
+    for part in (rest or "").split(";"):
+        part = part.strip()
+        if not part:
+            continue
+        name, sep, value = part.partition("=")
+        name = name.strip()
+        if not sep or name not in known:
+            fields[name] = value.strip()
+            continue
+        fields[name] = _coerce_field(known[name], value.strip())
+    return fields
+
+
+def _create(store: InterventionStore, kind: str,
+            rest: str) -> str:
+    """One exercise, the pilot cell's sequence: store (schema gate),
+    re-render, scan; guard language blocks delivery, never storage."""
+    fields = _parse_fields(kind, rest)
+    try:
+        record = store.record(kind, fields)
+    except InterventionError as exc:
+        return f"couldn't store that {kind} record: {exc}"
+    hits = diagnostic_scan(render_intervention(kind, fields))
+    if hits:
+        store.set_status(record["id"], "blocked")
+        return (
+            f"stored as blocked — the record carries guard language "
+            f"({', '.join(repr(h) for h in hits)}), so it is kept "
+            f"but not shown as a clean exercise: {record['id']}")
+    return (f"recorded 🧠 {kind.replace('_', ' ')} "
+            f"({record['id']}):\n{render_intervention(kind, fields)}")
+
+
+def _list(store: InterventionStore, kind: str) -> str:
+    rows = store.list(kind=kind, limit=10)
+    if not rows:
+        return ("no intervention records yet — /health exercise "
+                "<kind> field=value; ... to start.")
+    lines = [f"🧠 intervention records ({len(rows)}):"]
+    for row in rows:
+        lines.append(f"• {row['id']} · {row['kind']} · "
+                     f"{row['status']}")
+    return "\n".join(lines)
+
+
+def _show(store: InterventionStore, record_id: str) -> str:
+    row = store.get(record_id)
+    if row is None:
+        return f"no intervention record {record_id!r}."
+    return (f"🧠 {row['kind'].replace('_', ' ')} ({row['id']}) · "
+            f"{row['status']}:\n"
+            f"{render_intervention(row['kind'], row['fields'])}")
+
+
+def _complete(store: InterventionStore, record_id: str) -> str:
+    row = store.get(record_id)
+    if row is None:
+        return f"no intervention record {record_id!r}."
+    store.set_status(record_id, "completed")
+    return (f"completed 🧠 {row['kind'].replace('_', ' ')} "
+            f"({record_id}).")
+
+
+def _kinds() -> str:
+    lines = ["🧠 intervention kinds:"]
+    for kind in sorted(INTERVENTION_KINDS):
+        required = ", ".join(INTERVENTION_KINDS[kind]["required"])
+        lines.append(f"• {kind}: {required}")
+    return "\n".join(lines)
+
+
+def control_interventions(tail: str, *,
+                          store: InterventionStore | None = None
+                          ) -> str:
+    """Chat entry: /health exercise. Owner-only at the dispatch
+    layer. Never raises.
+
+    /health exercise <kind> field=value; ... — one exercise record
+    /health exercise list [kind] — newest first
+    /health exercise show <id> — the rendered record
+    /health exercise complete <id> — mark it done
+    /health exercise kinds — the kinds and their required fields
+    """
+    try:
+        raw = (tail or "").strip()
+        st = store or InterventionStore()
+        if not raw or raw.split()[0] in ("help", "?"):
+            return _INTERVENTION_USAGE
+        verb, _, rest = raw.partition(" ")
+        verb = verb.lower()
+        if verb == "list":
+            kind = rest.strip().lower()
+            if kind and kind not in INTERVENTION_KINDS:
+                return (f"unknown intervention kind {kind!r} — "
+                        "kinds are: "
+                        + ", ".join(sorted(INTERVENTION_KINDS)))
+            return _list(st, kind)
+        if verb == "show":
+            if not rest.strip():
+                return "usage: /health exercise show <id>"
+            return _show(st, rest.strip().split()[0])
+        if verb == "complete":
+            if not rest.strip():
+                return "usage: /health exercise complete <id>"
+            return _complete(st, rest.strip().split()[0])
+        if verb == "kinds":
+            return _kinds()
+        if verb in INTERVENTION_KINDS:
+            return _create(st, verb, rest)
+        return (f"unknown intervention kind {verb!r} — kinds are: "
+                + ", ".join(sorted(INTERVENTION_KINDS)))
+    except Exception as exc:  # noqa: BLE001 - chat entry never raises
+        return f"couldn't do that: {exc}"
