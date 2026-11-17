@@ -5568,6 +5568,82 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"evidence failed: {exc}"
 
+    def _control_consensus(self, tail: str) -> str:
+        """What the literature agrees on (Consensus meter).
+
+        Public. /consensus <yes/no research question> asks the open
+        scholarly corpus (OpenAlex, Semantic Scholar, arXiv), then
+        classifies each paper's finding as yes / no / possibly /
+        mixed, weighs the papers by quality (citations, recency,
+        study design — never count alone) and reports the
+        distribution as a meter with the dissent named by name and
+        what would change it computed from the meter's own weights.
+        A question that is not yes/no gets prose instead of a meter;
+        a question with no papers is refused honestly — nothing is
+        ever invented. /consensus list shows past reviews;
+        /consensus show <id> re-renders one; /consensus meter <id>
+        re-renders just the meter. "deep" (or --deep) asks for the
+        deeper set (25 papers instead of 10). Never raises: bad
+        input returns usage.
+        """
+        from ...research.consensus import (
+            answer_consensus,
+            format_consensus_reply,
+            open_consensus_store,
+        )
+
+        tail = (tail or "").strip()
+        usage = ("usage: /consensus <yes/no research question> "
+                 "[deep] | list | show <id> | meter <id>")
+        if not tail:
+            return usage
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — default home then
+                home = None
+            store = open_consensus_store(home)
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb in {"help", "--help"}:
+                return usage
+            if verb == "list":
+                reviews = store.list()
+                if not reviews:
+                    return "no consensus reviews yet — ask me a research " \
+                           "question with /consensus <does X …?>"
+                lines = ["consensus reviews:"]
+                for review in reviews[:10]:
+                    meter = review.get("meter") or {}
+                    lines.append(
+                        f"  {review['id']} — {review['question']} "
+                        f"({meter.get('strength', '')}, "
+                        f"{meter.get('n', 0)} papers)")
+                return "\n".join(lines)
+            if verb in {"show", "meter"}:
+                if not rest:
+                    return f"usage: /consensus {verb} <id>"
+                review = store.get(rest)
+                if review is None:
+                    return f"no consensus review “{rest}”"
+                return format_consensus_reply({**review, "ok": True})
+            depth = "quick"
+            question = tail
+            if verb == "deep":
+                depth = "deep"
+                question = rest
+            elif tail.lower().endswith(" --deep"):
+                depth = "deep"
+                question = tail[:-len(" --deep")].strip()
+            if not question:
+                return usage
+            return format_consensus_reply(
+                answer_consensus(home, question, store=store, depth=depth))
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"consensus failed: {exc}"
+
     def _control_soundscape(self, tail: str, message: Any = None) -> str:
         """Soundscape machine: compose, tune and play ambient sound.
 

@@ -206,7 +206,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: pins the two together — a wave that adds a kind here must add its
 #: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "map-route", "headline", "teardown",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
@@ -429,6 +429,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "soundtrack": (1, None),  # /soundtrack <show|film> [S1E2] | song <track> | clip <path> | add ... | vote ... — what song plays in a scene
     "soundscape": (0, None),  # /soundscape <rain|forest|cafe|brown noise|sleep|…> | list | mixes | save <name> | tune <stem|band> <dB> | tone <freq> | calibrate <band Hz> <gain dB> — compose and play ambient soundscapes
     "evidence": (1, None),  # /evidence <research question> | list | show <id> | table <id> — research answers from real papers (Elicit core)
+    "consensus": (1, None),  # /consensus <yes/no research question> [deep] | list | show <id> | meter <id> — what the literature agrees on (Consensus meter)
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
     "searchleads": (0, 0),   # legit paid-task platform report
     "money": (0, None),      # money opportunities hunter: scan|list|new|profile
@@ -2457,6 +2458,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/evidence <research question> | list | show <id> | table <id>",
                 "example": "/evidence does vitamin D reduce respiratory infections?",
                 "related": "/search · /searchdeep"},
+    "consensus": {"what": "What the literature agrees on: ask a yes/no research question and get a meter over real papers from open scholarly sources (OpenAlex, Semantic Scholar, arXiv) — each paper's finding classified yes / no / possibly / mixed, weighed by quality (citations, recency, study design — never count alone), with the dissent named by name and what would change it computed from the meter's own weights. A question that is not yes/no gets prose instead of a meter; a question with no papers is refused honestly — nothing here is invented.",
+                "usage": "/consensus <yes/no research question> [deep] | list | show <id> | meter <id>",
+                "example": "/consensus does vitamin D reduce respiratory infections?",
+                "related": "/evidence · /searchdeep"},
     "searchdeep": {"what": "deep multi-query research with synthesis (power mode).",
                    "usage": "/searchdeep <query>", "example": "/searchdeep eBPF rootkit detection",
                    "related": "/search /searchhist"},
@@ -4855,7 +4860,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "audit", "whois", "ports",
-                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence"]),
+                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus"]),
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
@@ -5140,7 +5145,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
-      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence"]),
+      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus"]),
     ("wisdom keeper — corpus · history · practice",
      ["wisdom", "wis"]),
     ("building for real — code & missions",
@@ -5337,6 +5342,7 @@ LIST_ONELINERS: dict[str, str] = {
     "soundtrack": "what song plays in a film or TV scene — song, artist, scene, and the /play command that hears it",
     "soundscape": "compose and play ambient soundscapes — noise colours, binaural beats, layered scenes, ten sliders, named mixes",
     "evidence": "research answers from real papers — cited extraction table plus what agrees, disagrees and stays unanswered",
+    "consensus": "what the literature agrees on — a quality-weighted stance meter over real papers, dissent named by name",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",
     "books": "story reader + continuer: /books read <url|slug> | part <slug> | contents <slug> | export <slug> [pdf|epub|html] | continue <slug> [n] | sources",

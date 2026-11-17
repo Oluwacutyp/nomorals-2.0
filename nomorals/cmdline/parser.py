@@ -55,6 +55,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "airports": [],
     "compute": [],
     "evidence": [],
+    "consensus": [],
     "soundtrack": [],
     "soundscape": [],
     "flight": [],
@@ -3672,6 +3673,33 @@ def _parser() -> argparse.ArgumentParser:
                             help="max papers in the set")
     evidence_p.add_argument("--json", action="store_true",
                             help="Output as JSON")
+
+    consensus_p = sub.add_parser(
+        "consensus", aliases=CLI_ALIASES["consensus"],
+        help="what the literature agrees on — quality-weighted stance meter",
+        description=("nm consensus <yes/no research question> [--deep]\\\\n"
+                     "nm consensus list\\\\n"
+                     "nm consensus show <id>\\\\n"
+                     "nm consensus meter <id>\\\\n"
+                     "The consensus organ: the question is asked of the "
+                     "open scholarly corpus (OpenAlex, Semantic Scholar, "
+                     "arXiv), each paper's finding is classified yes / "
+                     "no / possibly / mixed and weighed by quality "
+                     "(citations, recency, study design — never count "
+                     "alone), and the answer is a meter with the "
+                     "dissent named by name and what would change it "
+                     "computed from the meter's own weights. A question "
+                     "that is not yes/no gets prose instead of a meter; "
+                     "a question with no papers is refused honestly, "
+                     "never invented."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    consensus_p.add_argument("consensus_query", nargs="*", default=[],
+                             help="yes/no research question, or list|show|meter …")
+    consensus_p.add_argument("--deep", action="store_true",
+                             help="deeper set: 25 papers instead of 10")
+    consensus_p.add_argument("--json", action="store_true",
+                             help="Output as JSON")
 
     soundscape_p = sub.add_parser(
         "soundscape", aliases=CLI_ALIASES["soundscape"],

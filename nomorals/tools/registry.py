@@ -627,6 +627,7 @@ class ToolRegistry:
             "soundscape",  # soundscape machine (MyNoise core)
             "burn_note",  # burn-after-reading notes (Privnote build-new)
             "evidence",  # research answers from real papers (Elicit core)
+            "consensus",  # research consensus — stance meter over the evidence organ
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",

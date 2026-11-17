@@ -412,7 +412,7 @@ class RegistrationTests(unittest.TestCase):
         self.assertEqual(grouped.count("soundscape"), 1)
         self.assertIn("/soundscape", COMMAND_DETAILS["soundscape"]["usage"])
         self.assertIn("soundscape", PUBLIC_COMMANDS)
-        self.assertEqual(271, len(PUBLIC_COMMANDS))
+        self.assertEqual(272, len(PUBLIC_COMMANDS))
         self.assertTrue(caller_may_run("soundscape", False))
         self.assertIn("/soundscape", list_catalog())
         cmd = parse_control("/soundscape rain")
