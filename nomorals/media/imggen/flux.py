@@ -1163,6 +1163,189 @@ def _map_bfl_transformer(state):
 
 
 # ---------------------------------------------------------------------------
+# Diffusers transformer key map
+# ---------------------------------------------------------------------------
+
+def _map_diffusers_transformer(state):
+    """Diffusers transformer keys -> FluxTransformer state dict.
+
+    Traced from the live diffusers source
+    (``models/transformers/transformer_flux.py``,
+    ``models/embeddings.py``, ``models/normalization.py``,
+    ``models/attention.py``, ``models/activations.py``), against the
+    in-repo BFL module's own parameter names:
+
+    - top level: ``x_embedder.in_proj`` -> ``img_in``,
+      ``context_embedder.in_proj`` -> ``txt_in``,
+      ``time_text_embed.timestep_embedder.linear_1/2`` -> ``time_in``,
+      ``time_text_embed.text_embedder.linear_1/2`` -> ``vector_in``,
+      ``time_text_embed.guidance_embedder.linear_1/2`` ->
+      ``guidance_in``, ``proj_out`` -> ``final_layer.linear``.
+    - ``norm_out.linear`` -> ``final_layer.adaLN_modulation.1`` with
+      the two halves SWAPPED: diffusers AdaLayerNormContinuous
+      chunks ``(scale, shift)``; BFL LastLayer chunks
+      ``(shift, scale)``.
+    - double block: ``norm1.linear`` -> ``img_mod.lin``,
+      ``norm1_context.linear`` -> ``txt_mod.lin`` (chunk order
+      identical), ``attn.to_q/to_k/to_v`` concatenated (q, k, v) ->
+      ``img_attn.qkv``, ``attn.add_q_proj/add_k_proj/add_v_proj`` ->
+      ``txt_attn.qkv``, ``attn.norm_q/k.weight`` ->
+      ``img_attn.norm.query/key_norm.scale``, ``attn.norm_added_q/k``
+      -> the txt norms, ``attn.to_out.0`` -> ``img_attn.proj``,
+      ``attn.to_add_out`` -> ``txt_attn.proj``, ``ff.net.0.proj`` /
+      ``ff.net.2`` -> ``img_mlp.0`` / ``img_mlp.2`` (``net.1`` is
+      dropout, no weights), ``ff_context`` -> ``txt_mlp``.
+    - single block: ``attn.to_q/to_k/to_v`` + ``proj_mlp``
+      concatenated in that order -> ``linear1`` (BFL splits it back
+      as ``[3 * hidden, mlp_hidden]``), ``attn.norm_q/k.weight`` ->
+      ``norm.query/key_norm.scale``, ``norm.linear`` ->
+      ``modulation.lin``, ``proj_out`` -> ``linear2`` (exact — the
+      diffusers single block is ``pre_only``, so there is no
+      ``to_out`` to fold).
+
+    An optional ``model.diffusion_model.`` prefix is accepted,
+    mirroring the BFL mapper. Completeness is enforced both ways,
+    same as the BFL map: an unfilled target parameter or an
+    unconsumed diffusers key raises naming the key. A schnell
+    checkpoint (no ``guidance_embedder`` keys) fails honestly here
+    — the loader is FLUX.1-dev, same as the BFL path.
+    """
+    prefix = ""
+    if any(k.startswith("model.diffusion_model.transformer_blocks.")
+           or k.startswith(
+               "model.diffusion_model.single_transformer_blocks.")
+           for k in state):
+        prefix = "model.diffusion_model."
+    with torch.device("meta"):
+        probe = FluxTransformer()
+    want = set(probe.state_dict())
+    mapped = {}
+    consumed = set()
+
+    def put(src, dst):
+        if src in state:
+            mapped[dst] = state[src]
+            consumed.add(src)
+
+    def cat(srcs, dst):
+        # A partially-present fold leaves the target unfilled
+        # (named by the missing check below), never a wrong shape.
+        if all(s in state for s in srcs):
+            mapped[dst] = torch.cat([state[s] for s in srcs], dim=0)
+            consumed.update(srcs)
+
+    def swap(src, dst):
+        # Diffusers rows [first half; second half] land reversed.
+        if src in state:
+            t = state[src]
+            half = t.shape[0] // 2
+            mapped[dst] = torch.cat([t[half:], t[:half]], dim=0)
+            consumed.add(src)
+
+    put(prefix + "x_embedder.in_proj.weight", "img_in.weight")
+    put(prefix + "x_embedder.in_proj.bias", "img_in.bias")
+    put(prefix + "context_embedder.in_proj.weight", "txt_in.weight")
+    put(prefix + "context_embedder.in_proj.bias", "txt_in.bias")
+    for src_mod, dst_mod in (
+            ("timestep_embedder", "time_in"),
+            ("text_embedder", "vector_in"),
+            ("guidance_embedder", "guidance_in")):
+        src = prefix + "time_text_embed." + src_mod + "."
+        put(src + "linear_1.weight", dst_mod + ".in_layer.weight")
+        put(src + "linear_1.bias", dst_mod + ".in_layer.bias")
+        put(src + "linear_2.weight", dst_mod + ".out_layer.weight")
+        put(src + "linear_2.bias", dst_mod + ".out_layer.bias")
+    swap(prefix + "norm_out.linear.weight",
+         "final_layer.adaLN_modulation.1.weight")
+    swap(prefix + "norm_out.linear.bias",
+         "final_layer.adaLN_modulation.1.bias")
+    put(prefix + "proj_out.weight", "final_layer.linear.weight")
+    put(prefix + "proj_out.bias", "final_layer.linear.bias")
+
+    double_idx = sorted({int(k.split(".")[1]) for k in want
+                         if k.startswith("double_blocks.")})
+    single_idx = sorted({int(k.split(".")[1]) for k in want
+                         if k.startswith("single_blocks.")})
+    for i in double_idx:
+        src = prefix + "transformer_blocks." + str(i) + "."
+        dst = "double_blocks." + str(i) + "."
+        put(src + "norm1.linear.weight", dst + "img_mod.lin.weight")
+        put(src + "norm1.linear.bias", dst + "img_mod.lin.bias")
+        put(src + "norm1_context.linear.weight",
+            dst + "txt_mod.lin.weight")
+        put(src + "norm1_context.linear.bias",
+            dst + "txt_mod.lin.bias")
+        cat([src + "attn.to_q.weight", src + "attn.to_k.weight",
+             src + "attn.to_v.weight"], dst + "img_attn.qkv.weight")
+        cat([src + "attn.to_q.bias", src + "attn.to_k.bias",
+             src + "attn.to_v.bias"], dst + "img_attn.qkv.bias")
+        cat([src + "attn.add_q_proj.weight",
+             src + "attn.add_k_proj.weight",
+             src + "attn.add_v_proj.weight"],
+            dst + "txt_attn.qkv.weight")
+        cat([src + "attn.add_q_proj.bias",
+             src + "attn.add_k_proj.bias",
+             src + "attn.add_v_proj.bias"],
+            dst + "txt_attn.qkv.bias")
+        put(src + "attn.norm_q.weight",
+            dst + "img_attn.norm.query_norm.scale")
+        put(src + "attn.norm_k.weight",
+            dst + "img_attn.norm.key_norm.scale")
+        put(src + "attn.norm_added_q.weight",
+            dst + "txt_attn.norm.query_norm.scale")
+        put(src + "attn.norm_added_k.weight",
+            dst + "txt_attn.norm.key_norm.scale")
+        put(src + "attn.to_out.0.weight", dst + "img_attn.proj.weight")
+        put(src + "attn.to_out.0.bias", dst + "img_attn.proj.bias")
+        put(src + "attn.to_add_out.weight", dst + "txt_attn.proj.weight")
+        put(src + "attn.to_add_out.bias", dst + "txt_attn.proj.bias")
+        put(src + "ff.net.0.proj.weight", dst + "img_mlp.0.weight")
+        put(src + "ff.net.0.proj.bias", dst + "img_mlp.0.bias")
+        put(src + "ff.net.2.weight", dst + "img_mlp.2.weight")
+        put(src + "ff.net.2.bias", dst + "img_mlp.2.bias")
+        put(src + "ff_context.net.0.proj.weight",
+            dst + "txt_mlp.0.weight")
+        put(src + "ff_context.net.0.proj.bias",
+            dst + "txt_mlp.0.bias")
+        put(src + "ff_context.net.2.weight",
+            dst + "txt_mlp.2.weight")
+        put(src + "ff_context.net.2.bias",
+            dst + "txt_mlp.2.bias")
+    for i in single_idx:
+        src = prefix + "single_transformer_blocks." + str(i) + "."
+        dst = "single_blocks." + str(i) + "."
+        cat([src + "attn.to_q.weight", src + "attn.to_k.weight",
+             src + "attn.to_v.weight", src + "proj_mlp.weight"],
+            dst + "linear1.weight")
+        cat([src + "attn.to_q.bias", src + "attn.to_k.bias",
+             src + "attn.to_v.bias", src + "proj_mlp.bias"],
+            dst + "linear1.bias")
+        put(src + "attn.norm_q.weight", dst + "norm.query_norm.scale")
+        put(src + "attn.norm_k.weight", dst + "norm.key_norm.scale")
+        put(src + "norm.linear.weight", dst + "modulation.lin.weight")
+        put(src + "norm.linear.bias", dst + "modulation.lin.bias")
+        put(src + "proj_out.weight", dst + "linear2.weight")
+        put(src + "proj_out.bias", dst + "linear2.bias")
+
+    missing = sorted(want - set(mapped))
+    if missing:
+        raise ImgGenError(
+            f"FLUX transformer: {len(missing)} parameters unfilled "
+            f"(e.g. {missing[0]}) — the checkpoint is not a complete "
+            f"diffusers transformer for FLUX.1-dev")
+    for src_prefix in (prefix + "transformer_blocks.",
+                       prefix + "single_transformer_blocks.",
+                       prefix + "x_embedder.",
+                       prefix + "context_embedder.",
+                       prefix + "time_text_embed.",
+                       prefix + "norm_out.",
+                       prefix + "proj_out."):
+        _check_section(state, src_prefix, consumed,
+                       "FLUX transformer")
+    return mapped, consumed
+
+
+# ---------------------------------------------------------------------------
 # Companion resolution
 # ---------------------------------------------------------------------------
 
@@ -1259,7 +1442,8 @@ class FLUXPipeline:
     def from_safetensors(cls, path, device="", *, t5_path=None,
                          clip_path=None, vae_path=None, dtype="",
                          quant=""):
-        """Load a FLUX .safetensors checkpoint (BFL single-file layout).
+        """Load a FLUX .safetensors checkpoint (BFL single-file layout
+        or diffusers transformer layout).
 
         ``dtype`` ("fp32"/"fp16"/"bf16", "" = profile default) is
         cast into each module *before* its weights load;
@@ -1296,16 +1480,15 @@ class FLUXPipeline:
         has_diffusers = any(
             k.startswith("transformer_blocks.")
             or k.startswith("single_transformer_blocks.")
+            or k.startswith("model.diffusion_model.transformer_blocks.")
+            or k.startswith(
+                "model.diffusion_model.single_transformer_blocks.")
             for k in keys)
         if has_diffusers and not has_bfl:
-            raise ImgGenError(
-                "FLUX checkpoint in diffusers transformer layout — "
-                "the loader speaks the BFL single-file layout "
-                "(double_blocks/single_blocks); convert the "
-                "transformer to a single BFL .safetensors first "
-                "(diffusers-to-BFL key map is a named follow-up, "
-                "not this pass)")
-        if not has_bfl:
+            use_diffusers = True
+        elif has_bfl:
+            use_diffusers = False
+        else:
             if any("label_emb" in k for k in keys):
                 raise ImgGenError(
                     f"{path} looks like an SDXL checkpoint "
@@ -1334,7 +1517,10 @@ class FLUXPipeline:
         if not vae_state:
             vae_source = _find_companion(path, VAE_FILE_NAMES, vae_path)
             vae_state = load_safetensors(vae_source)
-        mapped, _consumed = _map_bfl_transformer(state)
+        if use_diffusers:
+            mapped, _consumed = _map_diffusers_transformer(state)
+        else:
+            mapped, _consumed = _map_bfl_transformer(state)
         transformer = FluxTransformer()
         cast_module(transformer, want_dtype)
         transformer.load_state_dict(mapped, strict=True)

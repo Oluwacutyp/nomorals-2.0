@@ -155,13 +155,16 @@ def test_registry_classifies_flux_variants(model_roots):
     _write_safetensors(ckpt / "flux-diffusers.safetensors",
                        FLUX_DIFFUSERS_KEYS)
     by_name = {e["name"]: e for e in list_models()}
-    # Pass B: FLUX in the BFL single-file layout is loadable now; the
-    # diffusers transformer layout still needs a convert.
+    # Pass B: FLUX in the BFL single-file layout is loadable; the
+    # diffusers transformer layout loads too since the key map
+    # landed (see tests/test_gapfix_flux_keymap.py).
     assert by_name["flux-bfl"]["model_class"] == "flux"
     assert by_name["flux-bfl"]["loadable"] is True
     assert by_name["flux-bfl"]["loadable_reason"] == ""
     assert by_name["flux-diffusers"]["model_class"] == "flux"
     assert by_name["flux-diffusers"]["format"] == "diffusers-safetensors"
+    assert by_name["flux-diffusers"]["loadable"] is True
+    assert by_name["flux-diffusers"]["loadable_reason"] == ""
 
 
 def test_registry_diffusers_sd15_is_sd15_but_not_loadable(model_roots):

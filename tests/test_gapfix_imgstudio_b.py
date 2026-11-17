@@ -1,9 +1,10 @@
 """Pass B tests: the FLUX loader — Devon's own FLUX implementation.
 
 Covers the imggen registry (FLUX in the BFL single-file layout now
-loadable; the diffusers transformer layout still honestly refused
-with a convert message), the MMDiT transformer (key-map completeness
-proven on meta-device modules, same discipline as A1/A2), the T5
+loadable, and the diffusers transformer layout too since the key
+map landed — see tests/test_gapfix_flux_keymap.py), the MMDiT
+transformer (key-map completeness proven on meta-device modules,
+same discipline as A1/A2), the T5
 text encoder (v1.1 gated-gelu feed-forward, NOT relu), the
 diffusers-layout VAE (split I/O convs, encoder norm_out, two resnets
 per decoder level — the sdcompat VAE grows exactly those, defaults
@@ -116,8 +117,9 @@ def needs_mem(kb, why):
 
 
 # ---------------------------------------------------------------------------
-# Registry: FLUX BFL single-file loads now; diffusers layout still
-# refused honestly (same stance as A2's SDXL diffusers refusal)
+# Registry: FLUX BFL single-file loads; diffusers transformer layout
+# loads too since the key map landed (same stance as A2's SDXL
+# diffusers refusal, now resolved for FLUX)
 # ---------------------------------------------------------------------------
 
 def test_registry_classifies_flux_bfl_loadable(model_roots):
@@ -145,8 +147,7 @@ def test_registry_classifies_flux_bfl_flat_loadable(model_roots):
     assert fmt == "ldm-safetensors"
 
 
-def test_registry_flux_diffusers_not_loadable_names_convert(
-        model_roots):
+def test_registry_flux_diffusers_loadable(model_roots):
     from nomorals.media.imggen.registry import _entry_for_safetensors
 
     ckpt, _home = model_roots
@@ -155,9 +156,8 @@ def test_registry_flux_diffusers_not_loadable_names_convert(
     entry = _entry_for_safetensors(path)
     assert entry["model_class"] == "flux"
     assert entry["format"] == "diffusers-safetensors"
-    assert entry["loadable"] is False
-    assert "BFL" in entry["loadable_reason"]
-    assert "convert" in entry["loadable_reason"].lower()
+    assert entry["loadable"] is True
+    assert entry["loadable_reason"] == ""
 
 
 def test_registry_flux_resolve_prefers_loadable(model_roots):
@@ -170,7 +170,7 @@ def test_registry_flux_resolve_prefers_loadable(model_roots):
     names = [e["name"] for e in list_models()]
     assert names.index("flux-dev") < names.index("flux-diffusers")
     assert resolve("flux-dev")["loadable"] is True
-    assert resolve("flux-diffusers")["loadable"] is False
+    assert resolve("flux-diffusers")["loadable"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -644,12 +644,16 @@ def test_flux_pipeline_generate_plumbing():
 def test_flux_pipeline_refuses_other_formats(tmp_path):
     from nomorals.media.imggen.flux import FLUXPipeline
 
-    # Diffusers-layout FLUX keys → convert message, same as A2.
+    # Diffusers-layout FLUX keys now load through the key map — a
+    # bare toy pair fails downstream (missing companions, then
+    # unfilled parameters), never on a convert refusal (see
+    # test_gapfix_flux_keymap.py for the full diffusers load).
     diff = {"transformer_blocks.0.attn.to_q.weight": torch.zeros(1),
             "single_transformer_blocks.0.attn.to_q.weight":
             torch.zeros(1)}
-    with pytest.raises(ImgGenError, match="convert"):
+    with pytest.raises(ImgGenError) as exc:
         FLUXPipeline._from_state(diff, "fake.safetensors")
+    assert "convert" not in str(exc.value)
     # SDXL keys → named refusal, not a silent misread.
     sdxl = {"model.diffusion_model.input_blocks.0.0.weight":
             torch.zeros(1),

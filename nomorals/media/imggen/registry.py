@@ -19,10 +19,11 @@ length-prefixed JSON block; reading it loads no tensors):
 - anything else → ``unknown``
 
 Classification is metadata; *loadability* is a separate, honest flag.
-Devon's native checkpoints and LDM-format SD1.5, SDXL AND FLUX
-safetensors can actually load. A diffusers-layout checkpoint of any
-of the three classes is listed not-loadable with a reason naming the
-one-time convert, never silently omitted and never pretended runnable.
+Devon's native checkpoints, LDM-format SD1.5, SDXL and FLUX
+safetensors, AND diffusers-layout FLUX transformer checkpoints can
+actually load. A diffusers-layout SD1.5 or SDXL checkpoint is listed
+not-loadable with a reason naming the one-time convert, never
+silently omitted and never pretended runnable.
 """
 
 from __future__ import annotations
@@ -87,9 +88,10 @@ def _classify_keys(keys: set[str]) -> tuple[str, str]:
         # BFL single-file layout, with or without the
         # model.diffusion_model. wrapper — the loader speaks both.
         return "flux", _FORMAT_LDM
-    if any(k.startswith("transformer_blocks.")
-           or k.startswith("single_transformer_blocks.")
-           for k in keys):
+    if any("transformer_blocks." in k for k in keys):
+        # Diffusers transformer layout, bare or under the
+        # model.diffusion_model. wrapper (single_transformer_blocks
+        # carries the same substring) — the loader maps both.
         return "flux", _FORMAT_DIFFUSERS
     if any(k.startswith("model.diffusion_model.") for k in keys):
         return "sd15", _FORMAT_LDM
@@ -112,8 +114,10 @@ def _entry_for_safetensors(path: str) -> dict:
                                "from this file",
         }
     model_class, fmt = _classify_keys(keys)
-    loadable = model_class in ("sd15", "sdxl", "flux") \
-        and fmt == _FORMAT_LDM
+    loadable = (model_class in ("sd15", "sdxl")
+                and fmt == _FORMAT_LDM) \
+        or (model_class == "flux"
+            and fmt in (_FORMAT_LDM, _FORMAT_DIFFUSERS))
     if loadable:
         reason = ""
     elif model_class == "sd15":
@@ -124,11 +128,6 @@ def _entry_for_safetensors(path: str) -> dict:
         reason = ("SDXL checkpoint in diffusers layout — the loader "
                   "speaks compvis LDM format; convert the checkpoint "
                   "to a single LDM .safetensors first")
-    elif model_class == "flux":
-        reason = ("FLUX checkpoint in diffusers transformer layout "
-                  "— the loader speaks the BFL single-file layout "
-                  "(double_blocks/single_blocks); convert the "
-                  "transformer to a single BFL .safetensors first")
     else:
         reason = _NOT_LOADABLE_REASONS[model_class]
     return {
