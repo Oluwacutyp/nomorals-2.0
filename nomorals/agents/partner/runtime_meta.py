@@ -181,13 +181,67 @@ class RuntimeMetaMixin:
         here, so the command's output is byte-identical to the tool's.
         Read-only (FS_READ); a failing shelf reports a named error
         inside the census, never here. A tool failure is an honest
-        refusal in words, never silence and never a fake census."""
-        outcome = self.context.tools.call("museum_census")
+        refusal in words, never silence and never a fake census.
+
+        ``/museum send <id>`` (the R3-73 remainder) delivers one
+        sendable card through the same ``file_send`` tool ``/file``
+        and ``/artifact send`` use: the ``museum_find`` tool resolves
+        the id (exact or unique prefix), a non-sendable card is
+        refused in words — never the store file behind it — and the
+        file goes back to the chat the command came from. The
+        census-time ``sendable`` is a fact about then; the send
+        re-checks the file exists now, in case it raced away."""
+        words = (tail or "").split()
+        if not words:
+            outcome = self.context.tools.call("museum_census")
+            if not outcome.ok:
+                return ("museum census failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            value = outcome.value or {}
+            return str(value.get("card_text") or "museum is empty")
+        if words[0].lower() != "send":
+            return (f"unknown museum verb {words[0]!r} — /museum lists "
+                    "the census, /museum send <id> sends one card "
+                    "from it")
+        if len(words) < 2:
+            return ("usage: /museum send <id> — /museum lists the "
+                    "cards and their ids")
+        if message is None:
+            return ("send needs a live chat — run /museum send from "
+                    "a chat, not the console")
+        ref = words[1]
+        outcome = self.context.tools.call("museum_find", ref=ref)
         if not outcome.ok:
-            return ("museum census failed: "
+            return ("museum find failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        card = (outcome.value or {}).get("card")
+        if not card:
+            return (f"no single card matches {ref!r} — /museum lists "
+                    "them, use the full id")
+        if not card.get("sendable"):
+            return (f"that's exhibit-only — {card.get('title')} "
+                    f"[{card.get('id')}] has no file to send "
+                    f"({card.get('kind')} cards point at their owning "
+                    "store, they never ship it)")
+        path = str(card.get("path") or "")
+        if not os.path.isfile(path):
+            return (f"the file for {card.get('title')} "
+                    f"[{card.get('id')}] is gone from the museum — "
+                    "nothing left to send")
+        chat = message.chat
+        outcome = self.context.tools.call(
+            "file_send",
+            platform=str(getattr(chat, "platform", "") or ""),
+            chat_id=str(getattr(chat, "chat_id", "") or ""),
+            path=path, caption=f"🏛️ {card.get('title')}")
+        if not outcome.ok:
+            return ("file send failed: "
                     f"{getattr(outcome.error, 'message', outcome.error)}")
         value = outcome.value or {}
-        return str(value.get("card_text") or "museum is empty")
+        size_kb = int(value.get("bytes") or 0) // 1024
+        name = os.path.basename(str(value.get("path") or path))
+        return (f"📎 sent {card.get('title')} [{card.get('id')}] — "
+                f"{name} ({size_kb} KB)")
 
     def _control_ping(self, message: Any = None) -> str:
         """The life of the /ping message itself, stage by stage.

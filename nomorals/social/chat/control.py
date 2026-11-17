@@ -393,7 +393,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "plan": (0, None),      # /plan <task> | list | show <id> | status [<id>] — survey-first planning: the code graph is surveyed before anything is planned, the Implementation Plan is saved durably and shown in chat, and its delegation runs are spawned at once. No review-before-run gate (owner order 2026-11-16). Owner-only.
     "computer": (0, None),  # /computer [status|open|close|view|watch|unwatch|takeover|handback|stop|resume] — Devon's own desktop: persistent sessions she drives herself; owner watch (live stream) + takeover; sticky owner stop. Owner-only.
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
-    "museum": (0, 0),  # /museum — the Museum census over every system (audit R3-73, owner-only)
+    "museum": (0, 2),  # /museum | /museum send <id> — the Museum census over every system (audit R3-73, owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
     # /say is ONE command with three forms (single registry entry — a
@@ -2326,8 +2326,8 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "doctor": {"what": "system health — the Telegram twin of nm doctor: registry (every command dispatched + documented), config (ignored keys must be 0), stores (chat-modes + style-overrides + database), adapters (running state + real error), providers (LLM chain keys present). Each check passes or fails with the real cause. Owner-only.",
              "usage": "/doctor", "example": "/doctor",
              "related": "/status /chatmode"},
-    "museum": {"what": "the Museum census over every system — ApkForge builds, library books/digests/sources, characters' learned state, TrendOps renders — as browsable cards (id/title/kind/shelf/path/sendable). Read-only: the same census the brain's museum_census tool returns, on demand instead of volunteered. A failing shelf reports a named error and never kills the other shelves. Owner-only.",
-             "usage": "/museum", "example": "/museum",
+    "museum": {"what": "the Museum census over every system — ApkForge builds, library books/digests/sources, characters' learned state, TrendOps renders — as browsable cards (id/title/kind/shelf/path/sendable). Read-only: the same census the brain's museum_census tool returns, on demand instead of volunteered. A failing shelf reports a named error and never kills the other shelves. /museum send <id> delivers one sendable card back to this chat through the file-send path (exact id or unique prefix); exhibit-only cards — digests, sources — are refused in words, never shipped as their store file. Owner-only.",
+             "usage": "/museum | /museum send <id>", "example": "/museum send library-book:<slug>",
              "related": "/apk /books"},
     "style": {"what": "inspect + tune the mined style profile for this chat — the numbers Devon replies with (emoji budget, length target, sections/lists/markup), measured from YOUR own messages, never other people's. /style shows the live profile + any overrides + where each override came from; /style <field> <value> sets an override delta (emoji_cap 0..3, target_chars, max_chars, sections/lists/markup on|off); /style reset clears this chat's overrides; /style list shows every chat with overrides. Owner-only.",
              "usage": "/style  ·  /style <emoji_cap|target_chars|max_chars|sections|lists|markup> <value> [target]  ·  /style reset [target]  ·  /style list  ·  a target is a chat name, a phone number, or a full key (platform:chat_id)",

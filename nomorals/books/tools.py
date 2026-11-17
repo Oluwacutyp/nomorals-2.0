@@ -1982,6 +1982,22 @@ def register(registry: Any) -> None:
         raise ValueError(
             f"unknown vectors action {action!r} — status | backfill")
 
+    def _museum(apk_root: str = "") -> Any:
+        """The one Museum construction site: every museum tool builds
+        from the same roots, so the census and the find can never
+        disagree about what exists."""
+        from ..agents.apkforge.project import apkforge_dir
+        from ..characters.learn import LearnStore
+        from ..characters.store import CharacterStore
+        from ..media.trendops.editor import DEFAULT_ROOT as _trendops_root
+        from ..museum import Museum
+
+        root = apk_root.strip() or str(apkforge_dir(context))
+        return Museum(apk_root=root, library=_library(),
+                      char_store=CharacterStore(),
+                      learn_store=LearnStore(),
+                      trendops_root=_trendops_root)
+
     @registry.register(
         "museum_census",
         description=(
@@ -1998,16 +2014,24 @@ def register(registry: Any) -> None:
         },
     )
     def museum_census(apk_root: str = "") -> dict[str, Any]:
-        from ..agents.apkforge.project import apkforge_dir
-        from ..characters.learn import LearnStore
-        from ..characters.store import CharacterStore
-        from ..media.trendops.editor import DEFAULT_ROOT as _trendops_root
-        from ..museum import Museum
-
-        root = apk_root.strip() or str(apkforge_dir(context))
-        museum = Museum(apk_root=root, library=_library(),
-                        char_store=CharacterStore(),
-                        learn_store=LearnStore(),
-                        trendops_root=_trendops_root)
+        museum = _museum(apk_root)
         res = museum.census()
         return {**res, "card_text": museum.render(res)}
+
+    @registry.register(
+        "museum_find",
+        description=(
+            "Find one Museum card by id (exact) or unique id prefix — "
+            "the same census the museum_census tool returns, one card. "
+            "Returns {\"card\": ...}, or {\"card\": null} when no single "
+            "card matches (unknown id, or a prefix shared by several "
+            "cards). Read-only; the card carries its sendable flag."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "ref": "str — card id, or a unique id prefix",
+            "apk_root": "str (optional) — ApkForge root, else resolved",
+        },
+    )
+    def museum_find(ref: str, apk_root: str = "") -> dict[str, Any]:
+        return {"card": _museum(apk_root).find(ref)}

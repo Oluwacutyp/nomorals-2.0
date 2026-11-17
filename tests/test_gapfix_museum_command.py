@@ -87,7 +87,9 @@ class MuseumRegistrationTest(unittest.TestCase):
         self.assertIsNotNone(cmd)
         assert cmd is not None
         self.assertEqual(cmd.kind, "museum")
-        extra = parse_control("/museum shelf")
+        # Three words still exceed the arity (bare + send <id> only);
+        # a one-word tail parses and the handler refuses it in words.
+        extra = parse_control("/museum a b c")
         self.assertIsNotNone(extra)
         assert extra is not None
         self.assertEqual(extra.kind, "error")
