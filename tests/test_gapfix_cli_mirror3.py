@@ -284,7 +284,14 @@ class CommunityCliTests(unittest.TestCase):
                                ("sync", ["g1"]),
                                ("arm", []),
                                ("disarm", []),
-                               ("member", ["list", "g1"])):
+                               ("member", ["add", "g1", "Eve"]),
+                               ("member", ["link", "g1", "m1",
+                                           "telegram", "eve"]),
+                               ("member", ["unlink", "g1", "m1",
+                                           "telegram"])):
+                # NOTE: ("member", ["list", "g1"]) was refused here
+                # until the member-list lane made the roster read a
+                # console verb — see test_gapfix_cli_member_list.py.
                 rc, out, _ = _run(_cmd_community,
                                   _ns(community_action=verb,
                                       community_rest=rest), _ctx(home))

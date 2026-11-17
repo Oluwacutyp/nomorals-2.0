@@ -3484,19 +3484,20 @@ def _parser() -> argparse.ArgumentParser:
                           help="Output as JSON")
 
     community_p = sub.add_parser("community", aliases=CLI_ALIASES["community"],
-        help="the community board: list, show, status (post/mirror stay chat-only)",
+        help="the community board: list, show, status, member list (post/mirror stay chat-only)",
         description=("nm community [list]\\n"
                      "nm community show <id|name>\\n"
                      "nm community status\\n"
+                     "nm community member list <g1|key>\\n"
                      "The read half of chat /community, over the same "
                      "communities index and arms store; post, mirror, "
-                     "arm, disarm, link, unlink, sync and member stay "
-                     "chat-only — nm community mirror is deliberately "
-                     "not built."),
+                     "arm, disarm, link, unlink, sync and member "
+                     "add/link/unlink stay chat-only — nm community "
+                     "mirror is deliberately not built."),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     community_p.add_argument("community_action", nargs="?", default=None,
-                             help="list, show, or status")
+                             help="list, show, status, or member list")
     community_p.add_argument("community_rest", nargs="*", default=[],
                              help="action arguments (community id/name)")
     community_p.add_argument("--json", action="store_true",
