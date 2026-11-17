@@ -228,21 +228,3 @@ def convert_accent(text: str, tts: Any, accent: str, voice_name: str = "",
     return {"ok": True, "path": path, "tier": tier, "accent": accent_key,
             "native_language": native_lang,
             "note": "accent render without identity transfer"}
-
-    # Identity transfer: keep the accent, swap the speaker.
-    model_name = rvc_model or voice_name
-    if model_name:
-        try:
-            probe = rvc_bridge.detect_rvc()
-            models = rvc_bridge.list_models()
-            model = next((m for m in models if m.name == model_name), None)
-            if not probe["ok"] or model is None:
-                raise rvc_bridge.RVCUnavailable("no RVC path")
-            conv = rvc_bridge.convert(path, model)
-            return {"ok": True, "path": conv["path"], "tier": "neural",
-                    "accent": accent_key, "model": model.name}
-        except Exception as exc:  # noqa: BLE001 — honest downgrade
-            _log.info("accent: RVC unavailable, accent-only: %s", exc)
-
-    return {"ok": True, "path": path, "tier": tier, "accent": accent_key,
-            "note": "accent render without identity transfer"}
