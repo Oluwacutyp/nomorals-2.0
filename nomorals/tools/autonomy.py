@@ -362,6 +362,7 @@ def register(registry: Any) -> None:
         # includes autonomous — a bare engine would tick nothing.
         from ..agents.modes import (
             AgentModes,
+            _home_from_settings,
             file_initiative_proposal,
             with_production_sources,
         )
@@ -377,10 +378,15 @@ def register(registry: Any) -> None:
                 ws = getattr(getattr(_context, "settings", None),
                              "workspace_dir", None) or "."
                 db = workspace_db(ws)
+                # The home is the settings home, NOT the workspace
+                # dir (``<home>/workspace``): the engine must learn
+                # into the same <home>/data store the boot uses.
                 modes = with_production_sources(
                     AgentModes(),
                     proposal_sink=lambda init, spec, ctx: (
-                        file_initiative_proposal(db, init, spec, ctx)))
+                        file_initiative_proposal(db, init, spec, ctx)),
+                    home=_home_from_settings(
+                        getattr(_context, "settings", None)))
             except Exception as exc:  # noqa: BLE001 - never crash the tick
                 return {"ok": False, "error": f"no agent modes: {exc}"}
         try:

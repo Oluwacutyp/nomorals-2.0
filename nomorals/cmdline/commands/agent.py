@@ -52,6 +52,7 @@ def _cmd_agent(args: argparse.Namespace, context: Any) -> int:
     """
     from ...agents.modes import (
         AgentModes,
+        _home_from_settings,
         file_initiative_proposal,
         with_production_sources,
     )
@@ -59,7 +60,11 @@ def _cmd_agent(args: argparse.Namespace, context: Any) -> int:
     agent = with_production_sources(
         AgentModes(),
         proposal_sink=lambda init, spec, ctx: file_initiative_proposal(
-            context.db, init, spec, ctx))
+            context.db, init, spec, ctx),
+        # The settings home, best-effort: the engine then learns into
+        # the same <home>/data store the runtime boot uses. A context
+        # without settings stays memory-only, exactly as before.
+        home=_home_from_settings(getattr(context, "settings", None)))
     chat_key = getattr(args, "chat", "") or "cli"
     tail = " ".join(getattr(args, "mode_args", []) or [])
     print(agent.apply_command(tail, chat_key))

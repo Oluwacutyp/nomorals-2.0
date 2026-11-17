@@ -1123,8 +1123,26 @@ def file_initiative_proposal(db: Any, initiative: Initiative,
     return initiative.id
 
 
+def _home_from_settings(settings: Any) -> Any:
+    """Best-effort Devon home from a settings object (or None).
+
+    Mirrors the runtime boot's resolution (``home_path`` first, then
+    the raw ``home`` string): the durable stores live under the home,
+    not under ``workspace_dir`` (which is ``<home>/workspace`` — a
+    home built from it would strand a second patterns file next to
+    the boot's). Never raises — a missing home just means
+    memory-only learning.
+    """
+    try:
+        return (getattr(settings, "home_path", None)
+                or getattr(settings, "home", None))
+    except Exception:  # noqa: BLE001 - home resolution never breaks a tick
+        return None
+
+
 def with_production_sources(modes: AgentModes, *,
-                            proposal_sink: Any = None) -> AgentModes:
+                            proposal_sink: Any = None,
+                            home: Any = None) -> AgentModes:
     """Attach the production autonomous sources to an engine built
     outside the runtime (the ``nm agent tick`` CLI, the scheduler
     tick-tool fallback).
@@ -1136,6 +1154,10 @@ def with_production_sources(modes: AgentModes, *,
     ``ProactiveEngine`` suggestion generators, plus a proposal sink
     when one is given (a sink-less engine still ticks, but anything
     needing approval fails closed).  Idempotent by source name.
+
+    ``home`` is the Devon home the proactive engine learns durably
+    under (``<home>/data/proactive_patterns.json``, the same store
+    the runtime boot uses); None keeps the old memory-only engine.
     """
     if (proposal_sink is not None
             and modes.autonomous.proposal_sink is None):
@@ -1145,10 +1167,14 @@ def with_production_sources(modes: AgentModes, *,
 
         # One engine, retained on the modes engine: the bridge reads
         # its suggestions and the approval path feeds decisions back
-        # into it. No home here — the CLI / scheduler fallback tick
-        # learns in-process only; the durable store is wired at the
-        # runtime boot, which passes the real home.
-        engine = ProactiveEngine()
+        # into it. With a home the engine loads/saves the same
+        # durable patterns store the runtime boot uses, so a CLI tick
+        # or a scheduler-fallback tick learns durably; without one
+        # it stays memory-only, exactly as before. (The no-arg call
+        # is kept for the home=None case: it is the same engine the
+        # real constructor builds for home=None.)
+        engine = (ProactiveEngine(home=home) if home is not None
+                  else ProactiveEngine())
         modes.autonomous.add_source(
             "proactive", proactive_source(engine, "owner"))
         modes.autonomous.proactive_engine = engine
