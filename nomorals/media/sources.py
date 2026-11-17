@@ -55,6 +55,8 @@ __all__ = [
     "JamendoSource",
     "FMASource",
     "MdundoSource",
+    "mp3pm-search",
+    "mp3juice-search",
     "BandcampSource",
     "NotJustOkSource",
     "TooXclusiveSource",
