@@ -706,6 +706,28 @@ def register(registry: Any) -> None:
                     "error": f"weekly review tick failed: {exc}"}
 
     @registry.register(
+        "__av_sweep_tick__",
+        description="Run one antivirus sweep tick (AV wiring bundle): "
+        "scan the media dir, quarantine hits, publish through the "
+        "Notifier only when something was found (infected or unknown "
+        "files), and write durable last-sweep state. Scheduler-"
+        "internal; runs daily 03:00 local. Routine and silent — a "
+        "clean sweep publishes nothing.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _av_sweep_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..security.av_sweep import run_av_sweep_tick_once
+
+        try:
+            return run_av_sweep_tick_once(
+                context=_context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"av sweep tick failed: {exc}"}
+
+    @registry.register(
         "__group_ritual_tick__",
         description="Run one group ritual tick (audit gap R2-29): "
         "every themed community group with a ritual due within a "

@@ -15,6 +15,7 @@ from ..core.logging_setup import RedactionFilter, get_logger, setup_logging
 from . import style as _style
 from .commands.agent import _cmd_agent, _cmd_ask, _cmd_run
 from .commands.autonomy import _cmd_autonomy
+from .commands.av import _cmd_av
 from .commands.backup import _cmd_backup
 from .commands.benchmark import _cmd_benchmark
 from .commands.bet import _cmd_bet
@@ -542,6 +543,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "outcomes": _CommandSpec(_cmd_outcomes),
     "notify": _CommandSpec(_cmd_notify),
     "offline": _CommandSpec(_cmd_offline),
+    "av": _CommandSpec(_cmd_av),
     "benchmark": _CommandSpec(_cmd_benchmark),
 }
 

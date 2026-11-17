@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from .agent import _cmd_ask, _cmd_run
 from .autonomy import _cmd_autonomy, _set_daily_call_cap
+from .av import _cmd_av
 from .backup import _cmd_backup
 from .benchmark import _BuildersBuildBackend, _cmd_benchmark
 from .bet import _cmd_bet
@@ -159,6 +160,7 @@ __all__ = [
     "_cmd_bench",
     "_cmd_consent",
     "_cmd_organs",
+    "_cmd_av",
     "_cmd_data",
     "_cmd_decisions",
     "_cmd_brain",

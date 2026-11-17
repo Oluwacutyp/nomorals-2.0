@@ -11,28 +11,16 @@ malware scanning.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
 
 def _quarantine_dir(context: Any) -> Path | None:
-    """Where infected files go. Env override first, then the Devon
-    home's ``quarantine/`` dir, then the tool workspace's. None means
-    report-only: hits are reported, never moved."""
-    override = (os.environ.get("NM_AV_QUARANTINE") or "").strip()
-    if override:
-        return Path(os.path.expanduser(override))
-    settings = getattr(context, "settings", None)
-    if settings is not None:
-        try:
-            return settings.resolve("quarantine")
-        except Exception:  # noqa: BLE001 - fall through to workspace
-            pass
-    workspace = getattr(context, "workspace", None)
-    if workspace:
-        return Path(workspace) / "quarantine"
-    return None
+    """Where infected files go — the organ's answer, shared with the
+    intake scan and the sweep (one implementation, not three)."""
+    from ..core.antivirus import quarantine_dir_for
+
+    return quarantine_dir_for(context)
 
 
 def register(registry: Any) -> None:

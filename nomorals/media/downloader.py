@@ -294,6 +294,11 @@ class DownloadReport:
     #: at ``path`` either way — extraction is additive, never a
     #: replacement (see ``MediaDownloader._unpack_archive``).
     archive: dict[str, Any] | None = None
+    #: Antivirus intake verdict for the landed file (``core.antivirus``
+    #: ``ScanVerdict.to_dict()``), set by ``_scan_intake`` in
+    #: ``_succeed``. None when the file was never scanned (no path, or
+    #: the download failed before landing).
+    av: dict[str, Any] | None = None
     #: Structured block class when the failure is one the site
     #: itself classified (the resolver's vocabulary: preview / drm
     #: / region / login / private) — ``"login"`` when the
@@ -565,6 +570,64 @@ def _accepts_progress(fn: Any) -> bool:
 #: payloads in this pipeline, not bundles.
 _ARCHIVE_CONTAINER_FORMATS = ("zip", "tar", "tar.gz", "tar.bz2",
                               "tar.xz", "7z", "rar")
+
+
+def _scan_intake(report: DownloadReport, context: Any) -> None:
+    """Scan a landed download before anyone hands it to the owner.
+
+    Runs in ``_succeed`` — the single funnel every landed download
+    passes through — after the extension fix, before the ledger /
+    artifact registration / archive unpack. The verdict is recorded
+    on ``report.av`` either way:
+
+    * ``clean`` — the download flows on unchanged.
+    * ``unknown`` — fail-open: the download flows on, the reason in
+      ``report.av["detail"]`` (no engine, engine error, scan failure).
+    * ``infected`` — the file is quarantined by the scan itself and
+      the download is reported blocked: ``ok`` False, the threat named
+      in ``likely_cause``, ``path`` cleared so nothing hands the file
+      to the owner. A quarantine that itself fails still blocks — the
+      file stays where it was, but the report no longer points at it.
+    """
+    if not report.ok or not report.path:
+        return
+    target = Path(report.path)
+    if not target.is_file():
+        return
+    try:
+        from ..core.antivirus import quarantine_dir_for, scan_file
+
+        verdict = scan_file(target,
+                            quarantine_dir=quarantine_dir_for(context))
+    except Exception as exc:  # noqa: BLE001 - a scan failure is data
+        report.av = {"verdict": "unknown", "engine": "",
+                     "threat": "", "path": str(target),
+                     "detail": f"intake scan failed: {exc}"}
+        record_failure("download._scan_intake", exc)
+        return
+    report.av = verdict.to_dict()
+    if verdict.verdict != "infected":
+        return
+    threat = verdict.threat or "malware"
+    if verdict.quarantined_to:
+        cause = (f"download blocked: {threat} found by the "
+                 f"{verdict.engine or 'antivirus'} scan — file "
+                 f"quarantined to {verdict.quarantined_to}")
+    else:
+        cause = (f"download blocked: {threat} found by the "
+                 f"{verdict.engine or 'antivirus'} scan — "
+                 f"quarantine failed ({verdict.detail}); the file "
+                 "was left in place and is NOT being delivered")
+    report.stages.append(StageLog(
+        stage="antivirus", url=report.url, ok=False,
+        error_class=FailureKind.SITE_ERROR.value, error=cause))
+    report.ok = False
+    report.failure = FailureKind.SITE_ERROR
+    report.likely_cause = cause
+    report.hint = ("the file was flagged by the antivirus scan; "
+                   "see `nm av quarantine` for what was moved, or "
+                   "`nm av scan <path>` to re-check it")
+    report.path = ""
 
 
 class MediaDownloader:
@@ -1226,6 +1289,16 @@ class MediaDownloader:
             except Exception as e:  # noqa: BLE001 — repair never
                 # turns a real download into a failure
                 record_failure("download._succeed.rename", e)
+        # Antivirus intake scan (AV wiring bundle): the landed file is
+        # scanned before the ledger, the artifact registration, or the
+        # archive unpack. An infected file is quarantined here and the
+        # download is reported blocked — it never reaches the owner.
+        _scan_intake(report, self.context)
+        if report.av is not None and report.av.get("verdict") == "infected":
+            # The intake scan quarantined the file and blocked the
+            # download — nothing below (ledger, artifact, unpack) may
+            # run against a file that is no longer there.
+            return self._finish(report, started)
         tracker = self._tracker()
         if tracker is not None:
             from ..core.progress_events import VERIFYING

@@ -3458,6 +3458,16 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("weekly review job not registered: %s",
                                  exc)
+                # Security: the daily antivirus sweep (03:00 local —
+                # the media dir, quarantining hits; silent when clean).
+                # Idempotent by name; a stale spec is replaced.
+                try:
+                    from ...security.av_sweep import ensure_av_sweep_job
+
+                    ensure_av_sweep_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("av sweep job not registered: %s",
+                                 exc)
                 # Social measurement spine (WS3 P1): posted rows get
                 # their real metrics refreshed every 6h, so posting
                 # windows and brief outcomes learn from measured data

@@ -73,6 +73,7 @@ __all__ = [
     "AntivirusInfo",
     "ScanVerdict",
     "detect_antivirus",
+    "quarantine_dir_for",
     "quarantine_file",
     "scan_file",
     "scan_path",
@@ -260,6 +261,25 @@ def detect_antivirus(*, pin: str | None = None,
     if pin is None:
         _AV_CACHE = info
     return info
+
+
+def quarantine_dir_for(context: Any) -> Path | None:
+    """Where infected files go. Env override first, then the Devon
+    home's ``quarantine/`` dir, then the tool workspace's. None means
+    report-only: hits are reported, never moved."""
+    override = (os.environ.get(AV_QUARANTINE_ENV) or "").strip()
+    if override:
+        return Path(os.path.expanduser(override))
+    settings = getattr(context, "settings", None)
+    if settings is not None:
+        try:
+            return settings.resolve("quarantine")
+        except Exception:  # noqa: BLE001 - fall through to workspace
+            pass
+    workspace = getattr(context, "workspace", None)
+    if workspace:
+        return Path(workspace) / "quarantine"
+    return None
 
 
 # ── scanning ─────────────────────────────────────────────────────

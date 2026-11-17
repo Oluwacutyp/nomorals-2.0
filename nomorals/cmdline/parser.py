@@ -51,6 +51,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "arena": ["ar"],
     "arena-research": [],
     "autonomy": ["auto"],
+    "av": [],
     "bet": ["bt"],
     "apk": [],
     "re": [],
@@ -3364,6 +3365,29 @@ def _parser() -> argparse.ArgumentParser:
                            help="Action to perform")
     offline_p.add_argument("--json", action="store_true",
                            help="Output as JSON")
+
+    av_p = sub.add_parser("av", aliases=CLI_ALIASES["av"],
+        help="antivirus: engine, last sweep, quarantine, scan on demand",
+        description=("nm av [status]\\n"
+                     "nm av scan <path> [--no-quarantine]\\n"
+                     "nm av sweep\\n"
+                     "nm av quarantine\\n"
+                     "The scanner (Windows Defender, ClamAV, or the "
+                     "built-in EICAR-only check) as a console command: "
+                     "status names the engine and the last daily sweep, "
+                     "scan checks one path now, sweep runs the daily "
+                     "sweep tick on demand."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    av_p.add_argument("av_action", nargs="?", default="status",
+                      choices=["status", "scan", "sweep", "quarantine"],
+                      help="Action to perform")
+    av_p.add_argument("av_rest", nargs="*", default=[],
+                      help="action arguments (scan path)")
+    av_p.add_argument("--json", action="store_true",
+                      help="Output as JSON")
+    av_p.add_argument("--no-quarantine", action="store_true",
+                      help="scan without quarantining hits")
 
     timeline = sub.add_parser("timeline", aliases=CLI_ALIASES["timeline"],
                               help="event timeline: what happened, newest first")
