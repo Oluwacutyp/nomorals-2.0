@@ -212,7 +212,7 @@ class RegistryCoverageTests(unittest.TestCase):
             # lines mention <code>/command</code> generically.
             if line.startswith("  <code>/") and "&lt;" not in line:
                 self.assertRegex(
-                    line, r"<code>/[a-z0-9_]+</code> — .+",
+                    line, r"<code>/[a-z0-9_-]+</code> — .+",
                     f"unscannable /list line: {line!r}")
 
     def test_help_text_covers_every_command(self):
