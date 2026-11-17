@@ -338,6 +338,18 @@ def backup_result_doc(result: Mapping[str, Any]) -> Doc:
                 f"uploaded {len((result.get('s3') or {}).get('objects', []))} objects"))
         elif "s3_error" in result:
             rows.append(KV("S3 copy", f"failed: {result['s3_error']}"))
+        # The WhatsApp session row appears only when a sealed copy
+        # was actually written — a skipped seal leaves the report
+        # byte-identical to before. The row names the destination,
+        # never the passphrase.
+        written = ((result.get("whatsapp_session") or {}).get("written")
+                   or [])
+        if written:
+            rows.append(KV(
+                "WhatsApp session",
+                "sealed copy: " + ", ".join(
+                    str(w.get("path") or "") for w in written
+                    if w.get("path"))))
         return Doc(title=f"backup shipped: {backup_id}", tone="ok",
                    summary=(f"Backup {backup_id} shipped to GitHub "
                             "Releases."),
@@ -414,6 +426,14 @@ def backup_queued_doc(result: Mapping[str, Any]) -> Doc:
     def _build() -> Doc:
         rows = [KV("Backup", backup_id, mono=True),
                 KV("Reason", str(result.get("reason", "network down")))]
+        written = ((result.get("whatsapp_session") or {}).get("written")
+                   or [])
+        if written:
+            rows.append(KV(
+                "WhatsApp session",
+                "sealed copy: " + ", ".join(
+                    str(w.get("path") or "") for w in written
+                    if w.get("path"))))
         return Doc(
             title=f"backup queued (offline): {backup_id}", tone="warn",
             summary=(f"Backup {backup_id} snapshotted + encrypted "

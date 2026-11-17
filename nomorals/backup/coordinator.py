@@ -139,6 +139,64 @@ class BackupCoordinator:
     notifier: Any = None  # Notifier or context (report target)
     s3_store: Any = None  # optional 4th copy (S3-compatible blob store)
     repo_name: str = REPO_NAME
+    #: Workspace dir for the WhatsApp session seal (settings
+    #: ``workspace_dir`` — the pairing registry + session dirs live
+    #: under it). None skips the session step: the coordinator
+    #: predates the wiring, and a caller that cannot name a
+    #: workspace must not gain a guessed one.
+    session_workspace_dir: str | Path | None = None
+
+    def _backup_whatsapp_session(self) -> dict[str, Any]:
+        """Seal the linked WhatsApp session(s) for this generation.
+
+        Fail-open by design: the session copy is additive — a run
+        with no WhatsApp at all, no passphrase in the vault, or an
+        unreadable registry still ships its snapshot. The outcome
+        (written rows, or the skip reason) rides the result dict so
+        the report line appears only when a copy was actually
+        written, and the skip reason is in the log, never silent.
+        """
+        from ..social.chat.baileys_guard import seal_whatsapp_sessions
+        from ..social.pairing import read_registry_snapshot, registry_path_for
+        from .protect import load_session_passphrase
+
+        workspace = self.session_workspace_dir
+        if workspace is None:
+            return {"skipped": [{"account": "",
+                                 "reason": "no session workspace "
+                                           "configured"}]}
+        if self.vault is None:
+            return {"skipped": [{"account": "",
+                                 "reason": "no vault configured — the "
+                                           "session passphrase lives "
+                                           "in the vault"}]}
+        try:
+            passphrase = load_session_passphrase(self.vault)
+        except Exception as exc:  # noqa: BLE001 - skip, with the reason
+            _log.warning("WhatsApp session seal skipped: %s", exc)
+            return {"skipped": [{"account": "", "reason": str(exc)[:300]}]}
+        try:
+            snapshot = read_registry_snapshot(
+                registry_path_for(workspace))
+        except Exception as exc:  # noqa: BLE001 - skip, with the reason
+            _log.warning("WhatsApp session seal skipped: %s", exc)
+            return {"skipped": [{"account": "", "reason": str(exc)[:300]}]}
+        if snapshot.error:
+            _log.warning("WhatsApp session seal skipped: %s",
+                         snapshot.error)
+            return {"skipped": [{"account": "",
+                                 "reason": snapshot.error[:300]}]}
+        try:
+            sealed = seal_whatsapp_sessions(
+                snapshot.records("whatsapp"), passphrase)
+        except Exception as exc:  # noqa: BLE001 - skip, with the reason
+            _log.warning("WhatsApp session seal failed: %s", exc)
+            return {"skipped": [{"account": "", "reason": str(exc)[:300]}]}
+        if not sealed["written"] and not sealed["skipped"]:
+            sealed["skipped"] = [{
+                "account": "",
+                "reason": "no WhatsApp accounts are paired"}]
+        return sealed
 
     def _key(self) -> bytes:
         if self.vault is None:
@@ -174,6 +232,10 @@ class BackupCoordinator:
                 "shipped": False, "queued": False,
                 "manifest_pushed": False,
             }
+            # The sealed WhatsApp session copy rides this generation:
+            # refreshed in place every run, reported only when one
+            # was actually written. A skip never fails the run.
+            result["whatsapp_session"] = self._backup_whatsapp_session()
             # Drain the outbox first: older generations ship before newer.
             if self.connector is not None:
                 outbox = Outbox(Path(self.work_dir) / "outbox")

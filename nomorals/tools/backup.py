@@ -65,6 +65,11 @@ def _build_coordinator(context: Any) -> Any:
         root=settings.home_path, work_dir=settings.backup_dir,
         vault=vault, connector=connector, notifier=Notifier(context),
         s3_store=open_s3_store(),
+        # getattr, not a hard read: a settings object that cannot
+        # name a workspace skips the session seal (the coordinator
+        # treats None as "no session step") instead of failing a
+        # tick that was building fine before the wiring.
+        session_workspace_dir=getattr(settings, "workspace_dir", None),
     )
 
 

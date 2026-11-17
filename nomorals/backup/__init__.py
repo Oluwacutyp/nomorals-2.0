@@ -44,7 +44,9 @@ from .policy import KEEP_DAILY, KEEP_LAST, KEEP_MONTHLY, select_keepers
 from .protect import (
     generate_backup_key,
     load_backup_key,
+    load_session_passphrase,
     store_backup_key,
+    store_session_passphrase,
 )
 from .ship import Outbox, check_token_scopes, ensure_repo
 from .snapshot import take_snapshot
@@ -78,6 +80,7 @@ __all__ = [
     "generate_backup_key",
     "load_backup_key",
     "load_manifest",
+    "load_session_passphrase",
     "register_jobs",
     "render_restore_recipe",
     "run_monthly_drill",
@@ -86,6 +89,7 @@ __all__ = [
     "schedule_specs",
     "select_keepers",
     "store_backup_key",
+    "store_session_passphrase",
     "take_snapshot",
     "write_manifest",
 ]

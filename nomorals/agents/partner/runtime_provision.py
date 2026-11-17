@@ -849,6 +849,140 @@ class RuntimeProvisionMixin:
             _time.sleep(0.1)
         return None
 
+    def _pair_session(self, args: list) -> str:
+        """The sealed WhatsApp session copy (R1-4 remainder).
+
+        /pair session — sealed-copy state per linked WhatsApp account.
+        /pair session backup [id] — seal the session dir(s) now with
+        the vault passphrase and report where the sealed copy landed.
+        /pair session restore [id] — restore the newest sealed copy
+        into the account's auth dir; REFUSES while the bridge is
+        running (restoring over a live session is a corruption
+        vector — stop it first with /pair stop <id>).
+
+        The passphrase comes from the vault, like every other
+        credential — never a chat argument, never logged, never in
+        a reply. Restore is deliberately NOT automatic at boot: a
+        stale sealed copy must never silently replace a live session.
+        Owner-only by construction (/pair is).
+        """
+        import time as _time
+
+        from ...accounts.vault import VaultLockedError, open_vault
+        from ...backup.errors import BackupKeyError
+        from ...backup.protect import load_session_passphrase
+        from ...social.chat.baileys_guard import (
+            backup_status,
+            newest_session_backup,
+            restore_session_encrypted,
+            seal_whatsapp_sessions,
+        )
+
+        sup = self._pairing_supervisor()
+        words = [str(a or "").strip() for a in args]
+        verb = (words[0].lower() if words else "")
+        ref = words[1] if len(words) > 1 else ""
+        records = [r for r in sup.registry.all()
+                   if str(getattr(r, "platform", "")).lower() == "whatsapp"]
+        if verb not in ("", "backup", "restore"):
+            return ("📟 /pair session [backup|restore [id]] — "
+                    "backup seals the session now, restore brings the "
+                    "newest sealed copy back; bare /pair session shows "
+                    "the sealed-copy state.")
+        if verb == "":
+            rows = backup_status(records)
+            if not rows:
+                return ("📟 no WhatsApp accounts are paired — nothing "
+                        "to seal.")
+            lines = ["📟 WhatsApp session — sealed copies"]
+            for row in rows:
+                if not row["creds_present"]:
+                    lines.append(
+                        f"  {row['account']}: no session on disk — "
+                        "nothing to seal")
+                elif row["sealed"]:
+                    when = _time.strftime(
+                        "%d %b %H:%M",
+                        _time.localtime(float(row["sealed_mtime"] or 0)))
+                    lines.append(
+                        f"  {row['account']}: sealed copy at "
+                        f"{row['sealed_path']} ({when}, "
+                        f"{row['sealed_bytes']} bytes)")
+                else:
+                    lines.append(
+                        f"  {row['account']}: no sealed copy yet — "
+                        "/pair session backup writes one")
+            return "\n".join(lines)
+        if ref:
+            rec = self._pair_find(sup, ref)
+            if rec is None or str(
+                    getattr(rec, "platform", "")).lower() != "whatsapp":
+                return (f"📟 no WhatsApp account matches {ref!r} — "
+                        "/pair lists the accounts.")
+            targets = [rec]
+        else:
+            targets = records
+        if not targets:
+            return ("📟 no WhatsApp accounts are paired — nothing to "
+                    f"{verb}.")
+        if verb == "restore" and len(targets) > 1:
+            names = ", ".join(r.id for r in targets)
+            return ("📟 several WhatsApp accounts are paired — say "
+                    "which one to restore: /pair session restore <id> "
+                    f"({names}).")
+        if verb == "backup":
+            try:
+                vault = open_vault(
+                    getattr(self.context, "db", None),
+                    context=self.context, actor="pair")
+                passphrase = load_session_passphrase(vault)
+            except VaultLockedError as exc:
+                return f"📟 the vault could not be opened: {exc}"
+            except BackupKeyError as exc:
+                return f"📟 {exc}"
+            try:
+                sealed = seal_whatsapp_sessions(targets, passphrase)
+            except ValueError as exc:
+                return f"📟 the session could not be sealed: {exc}"
+            lines = []
+            for row in sealed["written"]:
+                lines.append(
+                    f"🔐 sealed {row['account']} → {row['path']} "
+                    f"({row['bytes']} bytes)")
+            for row in sealed["skipped"]:
+                lines.append(f"  {row['account']}: {row['reason']}")
+            if not sealed["written"]:
+                lines.append("no sealed copy was written.")
+            return "\n".join(lines)
+        # verb == "restore"
+        rec = targets[0]
+        if sup.is_running(rec.id):
+            return (f"📟 the bridge for {rec.id} is still running — "
+                    "restoring over a live session would corrupt it. "
+                    f"Stop it first with /pair stop {rec.id}, then "
+                    "/pair session restore.")
+        try:
+            vault = open_vault(
+                getattr(self.context, "db", None),
+                context=self.context, actor="pair")
+            passphrase = load_session_passphrase(vault)
+        except VaultLockedError as exc:
+            return f"📟 the vault could not be opened: {exc}"
+        except BackupKeyError as exc:
+            return f"📟 {exc}"
+        sealed = newest_session_backup(rec.creds_dir)
+        if sealed is None:
+            return (f"📟 no sealed copy exists for {rec.id} — run "
+                    "/pair session backup first.")
+        try:
+            dest = restore_session_encrypted(
+                sealed, rec.creds_dir, passphrase)
+        except ValueError as exc:
+            return (f"📟 the sealed copy could not be restored: {exc}")
+        return (f"🔐 restored {rec.id} from the sealed copy at "
+                f"{sealed} into {dest}. Start the bridge again with "
+                f"/pair start {rec.id}.")
+
     def _pairing_personal(self) -> dict[str, Any]:
         """The §15 slices 2–3 service bundle: registry + bridge
         supervisor (slice 1), the Telegram pairer, the personal
@@ -2243,6 +2377,15 @@ class RuntimeProvisionMixin:
                                            WhatsApp warning has
                                            latched the stop;
                                            "clear" lifts the latch
+        /pair session [backup|restore [id]]  the sealed WhatsApp
+                                           session copy: bare shows
+                                           the sealed-copy state;
+                                           backup seals the session
+                                           now with the vault
+                                           passphrase; restore
+                                           brings the newest sealed
+                                           copy back — refusing
+                                           while the bridge runs
         /pair page                         the pairing page (same
                                            state, in a browser)
 
@@ -2901,6 +3044,8 @@ class RuntimeProvisionMixin:
             return self._pair_buttons(parts[1:])
         if sub == "guard":
             return self._pair_guard(parts[1:])
+        if sub == "session":
+            return self._pair_session(parts[1:])
         if sub == "page":
             # The web rungs, best first: Devon's own pairing page
             # in PHP (served by Devon on loopback when a PHP

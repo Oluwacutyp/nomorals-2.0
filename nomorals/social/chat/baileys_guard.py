@@ -38,7 +38,7 @@ import tarfile
 import tempfile
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 __all__ = [
     "WARMUP_SCHEDULE",
@@ -48,6 +48,10 @@ __all__ = [
     "is_warning",
     "backup_session_encrypted",
     "restore_session_encrypted",
+    "session_backup_path",
+    "newest_session_backup",
+    "backup_status",
+    "seal_whatsapp_sessions",
 ]
 
 #: Warm-up: day index (0-based) → max sends that day. Ramps ×2 to steady.
@@ -275,3 +279,112 @@ def restore_session_encrypted(backup: str | os.PathLike[str],
             else:
                 shutil.copy2(item, target)
     return dest
+
+#: Sealed-copy filename suffix: the sealed copy sits beside the live
+#: session dir (``wa-<digits>-session-backup.json`` next to
+#: ``wa-<digits>/``), the same sibling convention the bridge's
+#: ``-media`` dir already uses. It never sits INSIDE the creds dir:
+#: sealing would tar its own previous copy.
+SESSION_BACKUP_SUFFIX = "-session-backup.json"
+
+
+def session_backup_path(creds_dir: str | os.PathLike[str]) -> Path:
+    """Default sealed-copy location for one WhatsApp account.
+
+    The location derives from the account's live session dir — the
+    context the copy belongs to — so one account can never seal over
+    another's copy, and a sealed copy is always found next to the
+    session it seals. Under the home dir via the workspace's
+    ``whatsapp_sessions`` root, never in the repo, never in chat.
+    """
+    creds = Path(creds_dir)
+    return creds.parent / (creds.name + SESSION_BACKUP_SUFFIX)
+
+
+def newest_session_backup(creds_dir: str | os.PathLike[str]) -> Path | None:
+    """The newest sealed copy for one account, or None.
+
+    The canonical file is the one the daily run and ``/pair session
+    backup`` write; dated siblings (``-session-backup-*.json``) are
+    honoured too, newest by mtime, so a hand-kept copy is never
+    ignored in favour of an older canonical one.
+    """
+    creds = Path(creds_dir)
+    pattern = creds.name + "-session-backup*.json"
+    candidates = [p for p in creds.parent.glob(pattern) if p.is_file()]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda p: p.stat().st_mtime)
+
+
+def backup_status(records: Any) -> list[dict[str, Any]]:
+    """Sealed-copy state, one row per linked WhatsApp account.
+
+    ``records`` are pairing records (duck-typed: ``id`` /
+    ``platform`` / ``identity`` / ``creds_dir``) — the live registry
+    in chat, the registry snapshot in the backup run. Never raises
+    for a missing file: absence is a state, not an error.
+    """
+    rows: list[dict[str, Any]] = []
+    for rec in records or []:
+        if str(getattr(rec, "platform", "")).lower() != "whatsapp":
+            continue
+        creds = Path(str(getattr(rec, "creds_dir", "") or ""))
+        sealed = session_backup_path(creds)
+        row: dict[str, Any] = {
+            "account": str(getattr(rec, "id", "")),
+            "identity": str(getattr(rec, "identity", "")),
+            "creds_dir": str(creds),
+            "creds_present": creds.is_dir(),
+            "sealed_path": str(sealed),
+            "sealed": sealed.is_file(),
+            "sealed_mtime": None,
+            "sealed_bytes": None,
+        }
+        if sealed.is_file():
+            try:
+                st = sealed.stat()
+                row["sealed_mtime"] = st.st_mtime
+                row["sealed_bytes"] = st.st_size
+            except OSError:
+                pass
+        rows.append(row)
+    return rows
+
+
+def seal_whatsapp_sessions(records: Any,
+                           passphrase: str) -> dict[str, Any]:
+    """Seal every linked WhatsApp session dir that exists on disk.
+
+    Returns ``{"written": [...], "skipped": [...]}`` — written rows
+    carry ``account`` / ``identity`` / ``path`` / ``bytes``; skipped
+    rows carry ``account`` / ``reason``. An account whose auth dir
+    is absent is skipped, never an error: Devon runs without
+    WhatsApp on some profiles, and one missing session must not
+    fail the backup (or the verb) for the others. The passphrase
+    itself is never returned, never logged, never in a message.
+    """
+    if not passphrase:
+        raise ValueError("sealing needs a non-empty passphrase")
+    written: list[dict[str, Any]] = []
+    skipped: list[dict[str, Any]] = []
+    for rec in records or []:
+        if str(getattr(rec, "platform", "")).lower() != "whatsapp":
+            continue
+        account = str(getattr(rec, "id", ""))
+        creds = Path(str(getattr(rec, "creds_dir", "") or ""))
+        if not creds.is_dir():
+            skipped.append({
+                "account": account,
+                "reason": ("no Baileys auth dir on disk "
+                           f"({creds}) — nothing to seal")})
+            continue
+        dest = session_backup_path(creds)
+        out = backup_session_encrypted(creds, dest, passphrase)
+        written.append({
+            "account": account,
+            "identity": str(getattr(rec, "identity", "")),
+            "path": str(out),
+            "bytes": out.stat().st_size,
+        })
+    return {"written": written, "skipped": skipped}

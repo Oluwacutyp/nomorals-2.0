@@ -79,13 +79,20 @@ def report_backup_result(
                    f"objects.")
     elif "s3_error" in result:
         s3_note = f" S3 copy failed: {result['s3_error']}."
+    session_note = ""
+    written = ((result.get("whatsapp_session") or {}).get("written") or [])
+    if written:
+        paths = ", ".join(str(w.get("path") or "") for w in written
+                          if w.get("path"))
+        session_note = (f" WhatsApp session: sealed copy written to "
+                        f"{paths}.")
     body = (
         f"Backup {backup_id} shipped to GitHub Releases "
         f"({result.get('assets', []) and len(result['assets'])} assets, "
         f"{result.get('total_encrypted_bytes', 0)} encrypted bytes). "
         f"Release: {result.get('tag', '')}. "
         f"Manifest committed: {result.get('manifest_pushed', False)}."
-        f"{s3_note}"
+        f"{s3_note}{session_note}"
     )
     from ..agents.alert_templates import backup_result_doc
 
@@ -140,10 +147,18 @@ def report_queued(target: Any, result: dict[str, Any]) -> dict[str, Any]:
     """Report a snapshot queued in the outbox (network down, etc.)."""
     backup_id = result.get("backup_id", "unknown")
     title = f"backup queued (offline): {backup_id}"
+    session_note = ""
+    written = ((result.get("whatsapp_session") or {}).get("written") or [])
+    if written:
+        paths = ", ".join(str(w.get("path") or "") for w in written
+                          if w.get("path"))
+        session_note = (f" WhatsApp session: sealed copy written to "
+                        f"{paths}.")
     body = (
         f"Backup {backup_id} snapshotted + encrypted locally but NOT "
         f"shipped: {result.get('reason', 'network down')}. It waits in the "
         "local outbox and retries with backoff — this is not a silent skip."
+        f"{session_note}"
     )
     from ..agents.alert_templates import backup_queued_doc
 

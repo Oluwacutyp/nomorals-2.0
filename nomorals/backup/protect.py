@@ -35,10 +35,14 @@ from .errors import BackupKeyError, ChecksumMismatchError, DiskFullError
 __all__ = [
     "VAULT_SERVICE",
     "VAULT_USERNAME",
+    "SESSION_VAULT_SERVICE",
+    "SESSION_VAULT_USERNAME",
     "ProtectedFile",
     "generate_backup_key",
     "store_backup_key",
     "load_backup_key",
+    "store_session_passphrase",
+    "load_session_passphrase",
     "key_from_base64",
     "sha256_file",
     "sha256_bytes",
@@ -56,6 +60,16 @@ _log = get_logger(__name__)
 
 VAULT_SERVICE = "github-backup"
 VAULT_USERNAME = "backup-key"
+
+#: The vault credential that seals WhatsApp session backups
+#: (:func:`nomorals.social.chat.baileys_guard.backup_session_encrypted`).
+#: A dedicated passphrase, deliberately NOT the backup key: the sealed
+#: copy is refreshed daily, but older generations of the daily backup
+#: hold older sealed copies — rotating the backup key must not orphan
+#: them. Stored once at setup, like the backup key; never a chat
+#: argument, never logged, never in a message.
+SESSION_VAULT_SERVICE = "whatsapp-session"
+SESSION_VAULT_USERNAME = "session-backup"
 
 #: GitHub Release assets cap at 2GB each; 100MB blocks keep uploads
 #: resumable-ish, Termux-friendly, and far under the cap.
@@ -127,6 +141,47 @@ def load_backup_key(vault: Any) -> bytes:
             f"and keep the offline copy: {exc}"
         ) from exc
     return key_from_base64(cred.password)
+
+
+def store_session_passphrase(vault: Any, passphrase: str) -> None:
+    """Store the WhatsApp session-backup passphrase in the vault.
+
+    Stored once at setup, like the backup key. The passphrase itself
+    is never logged here or by any caller.
+    """
+    if not passphrase:
+        raise BackupKeyError(
+            "session passphrase must be non-empty — it seals the "
+            "WhatsApp session backup")
+    vault.store(
+        SESSION_VAULT_SERVICE, SESSION_VAULT_USERNAME,
+        passphrase,
+        credential_type="api_key",
+        tags=["backup", "whatsapp-session"],
+        metadata={"purpose": "whatsapp session backup passphrase"},
+    )
+    _log.info("session passphrase stored in vault (%s/%s)",
+              SESSION_VAULT_SERVICE, SESSION_VAULT_USERNAME)
+
+
+def load_session_passphrase(vault: Any) -> str:
+    """Load the session-backup passphrase. Raises BackupKeyError if absent."""
+    try:
+        cred = vault.get(SESSION_VAULT_SERVICE, SESSION_VAULT_USERNAME,
+                         mark_used=False)
+    except Exception as exc:
+        raise BackupKeyError(
+            f"no session passphrase in vault ({SESSION_VAULT_SERVICE}/"
+            f"{SESSION_VAULT_USERNAME}) — store one with "
+            "store_session_passphrase at setup; the sealed WhatsApp "
+            f"session copy is skipped until then: {exc}"
+        ) from exc
+    if not cred.password:
+        raise BackupKeyError(
+            f"empty session passphrase in vault ({SESSION_VAULT_SERVICE}/"
+            f"{SESSION_VAULT_USERNAME}) — store a non-empty one with "
+            "store_session_passphrase")
+    return str(cred.password)
 
 
 def sha256_bytes(data: bytes) -> str:
