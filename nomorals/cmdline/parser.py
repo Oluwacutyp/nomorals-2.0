@@ -126,6 +126,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     # R14 CLI mirrors of the /schedule and /db chat commands.
     "schedule": ["sched"],
     "db": ["database"],
+    "analytics": [],
 
     # Tier 0 wiring: CLI mirrors of the /learn and /legal chat commands.
     "learn": [],
@@ -4495,6 +4496,29 @@ def _parser() -> argparse.ArgumentParser:
     db.add_argument("--top", type=int, default=12,
                     help="counts: number of largest tables to show")
     db.add_argument("--json", action="store_true", help="Output as JSON")
+
+    # R3-59: analytical queries over the live store (storage/analytics.py:
+    # DuckDB when installed, the SQLite passthrough otherwise).
+    analytics = sub.add_parser("analytics", aliases=CLI_ALIASES["analytics"],
+        help="analytical queries over the store: status, tables, query, describe, sample, histogram, profile",
+        description=("nm analytics status [--json]\n"
+                     "nm analytics tables [--json]\n"
+                     "nm analytics query \"<select sql>\" [--limit N] [--json]\n"
+                     "nm analytics describe <table> [--json]\n"
+                     "nm analytics sample <table> [--rows N] [--json]\n"
+                     "nm analytics histogram <table> <column> [--bins N] [--json]\n"
+                     "nm analytics profile \"<select sql>\" [--json]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    analytics.add_argument("task", nargs="*", default=[],
+                           help="verb and arguments")
+    analytics.add_argument("--limit", type=int, default=100,
+                           help="query: max rows shown (default 100, max 1000)")
+    analytics.add_argument("--rows", type=int, default=100,
+                           help="sample: rows to sample (default 100)")
+    analytics.add_argument("--bins", type=int, default=20,
+                           help="histogram: number of bins (default 20)")
+    analytics.add_argument("--json", action="store_true", help="Output as JSON")
 
     completion = sub.add_parser(
         "completion", aliases=CLI_ALIASES["completion"],

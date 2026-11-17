@@ -40,6 +40,7 @@ from .commands.trace import _cmd_trace
 from .commands.prompt import _cmd_prompt
 from .commands.doc import _cmd_doc
 from .commands.data import _cmd_data
+from .commands.analytics import _cmd_analytics
 from .commands.datasci import _cmd_datasci
 from .commands.doctor import _cmd_doctor, _cmd_models, _cmd_setup
 from .commands.brain import _cmd_brain
@@ -403,6 +404,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "trigger": _CommandSpec(_cmd_trigger),
     "schedule": _CommandSpec(_cmd_schedule),
     "db": _CommandSpec(_cmd_db),
+    "analytics": _CommandSpec(_cmd_analytics),
     "search": _CommandSpec(_cmd_search),
     "browse": _CommandSpec(_cmd_browse),
     "repo": _CommandSpec(_cmd_repo),
