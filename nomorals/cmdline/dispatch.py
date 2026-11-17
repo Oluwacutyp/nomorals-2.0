@@ -31,6 +31,9 @@ from .commands.focus import _cmd_focus
 from .commands.workflow import _cmd_workflow
 from .commands.plan import _cmd_plan
 from .commands.museum import _cmd_museum
+from .commands.community import _cmd_community
+from .commands.groups import _cmd_groups
+from .commands.digest import _cmd_digest
 from .commands.markets import _cmd_markets
 from .commands.pump import _cmd_pump
 from .commands.book import _cmd_book
@@ -531,6 +534,9 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "workflow": _CommandSpec(_cmd_workflow),
     "plan": _CommandSpec(_cmd_plan),
     "museum": _CommandSpec(_cmd_museum),
+    "community": _CommandSpec(_cmd_community),
+    "groups": _CommandSpec(_cmd_groups),
+    "digest": _CommandSpec(_cmd_digest),
     "markets": _CommandSpec(_cmd_markets),
     "pump": _CommandSpec(_cmd_pump),
     "build": _CommandSpec(_cmd_build),

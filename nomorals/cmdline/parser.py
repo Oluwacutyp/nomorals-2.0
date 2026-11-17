@@ -62,6 +62,9 @@ CLI_ALIASES: dict[str, list[str]] = {
     "workflow": [],
     "plan": [],
     "museum": [],
+    "community": [],
+    "groups": [],
+    "digest": [],
     "markets": [],
     "pump": [],
     "book": ["bk"],
@@ -3478,6 +3481,55 @@ def _parser() -> argparse.ArgumentParser:
     museum_p.add_argument("museum_rest", nargs="*", default=[],
                           help="action arguments (card id)")
     museum_p.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+
+    community_p = sub.add_parser("community", aliases=CLI_ALIASES["community"],
+        help="the community board: list, show, status (post/mirror stay chat-only)",
+        description=("nm community [list]\\n"
+                     "nm community show <id|name>\\n"
+                     "nm community status\\n"
+                     "The read half of chat /community, over the same "
+                     "communities index and arms store; post, mirror, "
+                     "arm, disarm, link, unlink, sync and member stay "
+                     "chat-only — nm community mirror is deliberately "
+                     "not built."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    community_p.add_argument("community_action", nargs="?", default=None,
+                             help="list, show, or status")
+    community_p.add_argument("community_rest", nargs="*", default=[],
+                             help="action arguments (community id/name)")
+    community_p.add_argument("--json", action="store_true",
+                             help="Output as JSON")
+
+    groups_p = sub.add_parser("groups", aliases=CLI_ALIASES["groups"],
+        help="the groups board: every group/channel, economy, waiting",
+        description=("nm groups\\n"
+                     "The same board as chat /groups, over the same "
+                     "GroupSurface — status, member count, economy "
+                     "health, pending actions — as plain text."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    groups_p.add_argument("groups_action", nargs="?", default=None,
+                          help="the board takes no arguments")
+    groups_p.add_argument("groups_rest", nargs="*", default=[],
+                          help="action arguments (unused)")
+    groups_p.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+
+    digest_p = sub.add_parser("digest", aliases=CLI_ALIASES["digest"],
+        help="group digests: the board, or one group by name",
+        description=("nm digest [name]\\n"
+                     "The read half of chat /digest, over the same "
+                     "digest builder and message log; policy sets "
+                     "state and stays chat-only."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    digest_p.add_argument("digest_action", nargs="?", default=None,
+                          help="a group name/key substring")
+    digest_p.add_argument("digest_rest", nargs="*", default=[],
+                          help="action arguments (group name words)")
+    digest_p.add_argument("--json", action="store_true",
                           help="Output as JSON")
 
     timeline = sub.add_parser("timeline", aliases=CLI_ALIASES["timeline"],

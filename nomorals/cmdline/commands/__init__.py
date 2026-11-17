@@ -31,6 +31,9 @@ from .focus import _cmd_focus
 from .workflow import _cmd_workflow
 from .plan import _cmd_plan
 from .museum import _cmd_museum
+from .community import _cmd_community
+from .groups import _cmd_groups
+from .digest import _cmd_digest
 from .doctor import _cmd_doctor, _cmd_models, _cmd_models_doctor, _cmd_setup, _env_update_home
 from .exec import _cmd_apps, _cmd_exec
 from .finance import _cmd_finance
@@ -173,6 +176,9 @@ __all__ = [
     "_cmd_workflow",
     "_cmd_plan",
     "_cmd_museum",
+    "_cmd_community",
+    "_cmd_groups",
+    "_cmd_digest",
     "_cmd_brain",
     "_cmd_doctor",
     "_env_update_home",
