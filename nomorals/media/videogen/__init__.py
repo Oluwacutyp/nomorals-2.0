@@ -10,6 +10,9 @@ are data). Two engines:
 - :mod:`codegen` — the code backend: deterministic seek(t) scene
   rendering, no model, CPU-only; :mod:`formats` holds the reusable
   format presets (``map-route``, ``headline``, ``teardown``).
+- :mod:`qc` — the variants-matrix QC organ: the same job rendered
+  across rungs/params, a contact sheet per variant, one matrix
+  sheet, and a report naming the winning variant and why.
 
 :mod:`pipeline` is the front door (capability check → neural or honest
 motion-studio fallback); :mod:`chaining` assembles multi-scene films.
@@ -28,6 +31,7 @@ from .capabilities import (
 from .pipeline import generate, request_hero_clip, capability_report, VideoResult
 from .codegen import render_code_scene
 from .formats import build_format, list_formats, render_format
+from .qc import matrix_message, plan_variants, qc_existing, render_matrix
 from .chaining import chain_scenes, ChainReport
 from .autotune import autotune_request, AUTOTUNE
 from .consistency import (
@@ -49,6 +53,10 @@ __all__ = [
     "build_format",
     "list_formats",
     "render_format",
+    "plan_variants",
+    "render_matrix",
+    "qc_existing",
+    "matrix_message",
     "chain_scenes",
     "ChainReport",
     "autotune_request",

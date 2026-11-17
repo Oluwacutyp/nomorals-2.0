@@ -238,6 +238,46 @@ def register(registry: Any) -> None:
                 "prompt": prompt}
 
     @registry.register(
+        "video_qc",
+        description=("QC a video render, or a whole variants matrix for "
+                     "a job: render the same scene/prompt across the "
+                     "studio's rungs (code, motion, diffusion when the "
+                     "hardware allows), measure every variant with the "
+                     "edit-engine QC (exposure, black frames, aesthetic, "
+                     "duration), build a contact sheet per variant and "
+                     "one matrix sheet, and name the winning variant and "
+                     "why the rest lost — so a render is seen before it "
+                     "ships. Pass path to QC one finished render file; "
+                     "pass prompt (and optionally a scene spec) to render "
+                     "the matrix. duration_s in seconds."),
+        capability=Capability.FS_WRITE,
+    )
+    def video_qc(path: str = "", *, prompt: str = "",
+                 duration_s: float = 5.0,
+                 scene: dict | None = None) -> dict[str, Any]:
+        """Variants-matrix QC (or single-render QC) via videogen."""
+        from ..media.videogen.qc import qc_existing, render_matrix
+        if (path or "").strip():
+            src = _sandbox(context, path)
+            return qc_existing(str(src))
+        if not (prompt or "").strip() and scene is None:
+            raise ValueError("video_qc needs a path, a prompt, or a scene")
+        report = render_matrix(scene=scene, prompt=prompt,
+                               duration_s=duration_s)
+        return {"winner": report["winner"],
+                "winner_reason": report["winner_reason"],
+                "matrix_sheet": report["matrix_sheet"],
+                "report_path": report["report_path"],
+                "variants": [
+                    {"name": v["name"], "backend": v.get("backend", ""),
+                     "status": v.get("status", ""),
+                     "verdict": v.get("verdict", ""),
+                     "path": v.get("path", ""),
+                     "contact_sheet": v.get("contact_sheet", ""),
+                     "reason": v.get("reason", "")}
+                    for v in report["variants"]]}
+
+    @registry.register(
         "video_animate",
         description=("Animate a still image into a video clip "
                      "(image-to-video). Ken Burns motion when neural "

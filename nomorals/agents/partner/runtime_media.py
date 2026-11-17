@@ -4961,6 +4961,7 @@ class RuntimeMediaMixin:
         Devon Studio generation lives here too (additive — the search
         paths below are untouched):
         /video gen "<prompt>" [--backend auto|ltx|wan|motion] [--seconds N]
+        /video qc <path> | /video qc "<prompt>" [--seconds N]
         /video motion lyric <audio> "<lyrics>" [--preset NAME]
         /video motion visual <audio> [--preset phonk]
         /video motion slideshow <img1,img2> [audio]
@@ -4987,7 +4988,8 @@ class RuntimeMediaMixin:
         # studio subcommands — "motion" only triggers on a known product
         # kind so searches like "/video motion graphics" still search
         _motion_kinds = ("lyric", "visual", "slideshow", "trailer")
-        if first in ("gen", "generate", "capability", "list", "chain") or (
+        if first in ("gen", "generate", "capability", "list", "chain",
+                     "qc") or (
                 first == "motion" and len(words) > 1
                 and words[1].lower() in _motion_kinds):
             return self._control_video_studio(first,
@@ -5143,6 +5145,8 @@ class RuntimeMediaMixin:
         try:
             if action in ("gen", "generate"):
                 return self._video_studio_gen(tail)
+            if action == "qc":
+                return self._video_studio_qc(tail)
             if action == "motion":
                 return self._video_studio_motion(tail)
             if action == "capability":
@@ -5321,6 +5325,50 @@ class RuntimeMediaMixin:
         res = generate(prompt, backend=backend, duration_s=seconds,
                        seed=seed, model=model, lora=loras or None)
         return res.message()
+
+    def _video_studio_qc(self, tail: str) -> str:
+        """`/video qc <path>` | `/video qc "<prompt>" [--seconds N]`.
+
+        An existing file gets the single-render QC; anything else is
+        treated as a prompt and renders the variants matrix. Never
+        raises: bad input returns usage, failures name the problem.
+        """
+        import re
+        from pathlib import Path
+
+        from ...media.videogen import VideogenError, matrix_message, qc_existing, render_matrix
+        seconds = 5.0
+        sm = re.search(r"--seconds\s+([\d.]+)", tail)
+        if sm:
+            try:
+                seconds = float(sm.group(1))
+            except ValueError:
+                seconds = 5.0
+            tail = (tail[:sm.start()] + tail[sm.end():]).strip()
+        m = re.match(r'"([^"]+)"\s*$', tail) or re.match(r"'([^']+)'\s*$",
+                                                        tail)
+        target = m.group(1) if m else tail.strip()
+        if not target:
+            return ('usage: /video qc <path-to-render> | /video qc '
+                    '"<prompt>" [--seconds N]')
+        try:
+            if Path(target).expanduser().is_file():
+                out = qc_existing(target)
+                lines = [f"🎬 QC — {target}",
+                         f"  verdict: {out['verdict'].upper()}",
+                         f"  gate ship: {out['ship']} (edit-engine gate "
+                         f"needs a document — see the visual verdict)"]
+                for reason in out["reasons"]:
+                    lines.append(f"  — {reason}")
+                lines.append(f"  contact sheet: {out['contact_sheet']}")
+                lines.append(f"  report: {out['report_path']}")
+                return "\n".join(lines)
+            report = render_matrix(prompt=target, duration_s=seconds)
+            return matrix_message(report)
+        except VideogenError as exc:
+            return f"video qc: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat surfaces as text
+            return f"video qc error: {exc}"
 
     def _video_studio_motion(self, tail: str) -> str:
         import shlex

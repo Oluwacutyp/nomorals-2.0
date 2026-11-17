@@ -11,6 +11,7 @@
     nm video motion grade --file clip.mp4 --preset cinematic
     nm video motion export --file clip.mp4 --format 9:16
     nm video chain scenes.json [--backend auto] [--style cinematic]
+    nm video qc <path|prompt> [--seconds N] [--json]
     nm video formats [list|show <name>|scaffold <name>]
     nm video capability
     nm video list [--json]
@@ -92,6 +93,40 @@ def _cmd_code(args: argparse.Namespace, context) -> int:
     except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
         return _err(str(exc))
     return _ok(res.message())
+
+
+def _cmd_qc(args: argparse.Namespace, context) -> int:
+    """``nm video qc <path|prompt>`` — single-render QC or matrix."""
+    from pathlib import Path
+
+    from ...media.videogen import VideogenError, matrix_message, qc_existing, render_matrix
+    target = (getattr(args, "target", "") or "").strip()
+    if not target:
+        return _err("usage: nm video qc <path|prompt> [--seconds N]")
+    try:
+        if Path(target).expanduser().is_file():
+            out = qc_existing(target)
+            if getattr(args, "json", False):
+                print(json.dumps(out, indent=2))
+                return 0
+            lines = [f"🎬 QC — {target}",
+                     f"  verdict: {out['verdict'].upper()}",
+                     f"  gate ship: {out['ship']}"]
+            for reason in out["reasons"]:
+                lines.append(f"  — {reason}")
+            lines.append(f"  contact sheet: {out['contact_sheet']}")
+            lines.append(f"  report: {out['report_path']}")
+            return _ok("\n".join(lines))
+        report = render_matrix(prompt=target, duration_s=args.seconds,
+                               out_dir=getattr(args, "out", "") or None)
+        if getattr(args, "json", False):
+            print(json.dumps(report, indent=2))
+            return 0
+        return _ok(matrix_message(report))
+    except VideogenError as exc:
+        return _err(str(exc))
+    except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
+        return _err(str(exc))
 
 
 def _cmd_capability(args: argparse.Namespace, context) -> int:
@@ -357,10 +392,12 @@ def cmd_video(args: argparse.Namespace, context) -> int:
         return fn(args)
     if action == "chain":
         return _cmd_chain(args, context)
+    if action == "qc":
+        return _cmd_qc(args, context)
     if action == "formats":
         return _cmd_formats(args, context)
     if action == "capability":
         return _cmd_capability(args, context)
     if action == "list":
         return _cmd_list(args, context)
-    return _err("usage: nm video generate|code|motion|chain|capability|list ...")
+    return _err("usage: nm video generate|code|motion|chain|qc|capability|list ...")

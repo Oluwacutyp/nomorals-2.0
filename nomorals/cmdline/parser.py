@@ -3055,6 +3055,7 @@ def _parser() -> argparse.ArgumentParser:
                      "nm video motion grade --file clip.mp4 --preset cinematic\n"
                      "nm video motion export --file clip.mp4 --format 9:16\n"
                      "nm video chain scenes.json [--style cinematic]\n"
+                     "nm video qc <path|prompt> [--seconds N] [--json]\n"
                      "nm video capability | nm video list"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -3164,6 +3165,13 @@ def _parser() -> argparse.ArgumentParser:
     v_ch.add_argument("--format", default="16:9")
     v_ch.add_argument("--seed", type=int, default=100)
     v_ch.add_argument("--out", default="")
+    v_qc = v_sub.add_parser(
+        "qc", help="QC one render, or a variants matrix for a prompt")
+    v_qc.add_argument("target", help="path to a finished render, or the "
+                      "prompt to render the variants matrix for")
+    v_qc.add_argument("--seconds", type=float, default=5.0)
+    v_qc.add_argument("--json", action="store_true")
+    v_qc.add_argument("--out", default="")
     v_cap = v_sub.add_parser("capability", help="what video can run here")
     v_cap.add_argument("--backend", default="auto")
     v_ls = v_sub.add_parser("list", help="recent studio renders")
