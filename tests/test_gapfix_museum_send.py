@@ -217,9 +217,13 @@ class MuseumSendCommandTest(unittest.TestCase):
         self.assertIn("usage: /museum send <id>", reply)
         self.assertEqual(self.gateway.files, [])
 
-    def test_unknown_verb_refuses(self) -> None:
+    def test_unknown_shelf_refuses(self) -> None:
+        # A shelf word is a filter attempt now, not a verb: on the
+        # empty museum it is refused as an unknown shelf, naming no
+        # shelves because none hold cards yet.
         reply = self._run("/museum shelf")
-        self.assertIn("unknown museum verb", reply)
+        self.assertIn("no shelf 'shelf'", reply)
+        self.assertIn("museum is empty", reply)
         self.assertEqual(self.gateway.files, [])
 
     def test_non_owner_denied(self) -> None:

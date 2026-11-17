@@ -183,6 +183,13 @@ class RuntimeMetaMixin:
         inside the census, never here. A tool failure is an honest
         refusal in words, never silence and never a fake census.
 
+        ``/museum <shelf>`` shows only that shelf's cards — the same
+        card lines as the full census, filtered through the tool's
+        ``shelf`` parameter, so the handler still never builds a
+        Museum itself. An unknown shelf name is refused in words,
+        naming the shelves that hold cards; the check is against the
+        live census's ``by_shelf``, never a hardcoded list.
+
         ``/museum send <id>`` (the R3-73 remainder) delivers one
         sendable card through the same ``file_send`` tool ``/file``
         and ``/artifact send`` use: the ``museum_find`` tool resolves
@@ -200,9 +207,16 @@ class RuntimeMetaMixin:
             value = outcome.value or {}
             return str(value.get("card_text") or "museum is empty")
         if words[0].lower() != "send":
-            return (f"unknown museum verb {words[0]!r} — /museum lists "
-                    "the census, /museum send <id> sends one card "
-                    "from it")
+            if len(words) > 1:
+                return ("usage: /museum <shelf> — one shelf name, or "
+                        "/museum send <id> to send one card")
+            outcome = self.context.tools.call("museum_census",
+                                              shelf=words[0])
+            if not outcome.ok:
+                return ("museum census failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            value = outcome.value or {}
+            return str(value.get("card_text") or "museum is empty")
         if len(words) < 2:
             return ("usage: /museum send <id> — /museum lists the "
                     "cards and their ids")

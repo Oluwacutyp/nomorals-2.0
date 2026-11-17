@@ -2006,17 +2006,41 @@ def register(registry: Any) -> None:
             "learned state, TrendOps renders — as cards (id/title/kind/"
             "shelf/path/hash/size/provenance/tags/sendable). Non-file "
             "exhibits are exhibit-only, never sendable. A failing shelf "
-            "reports a named error and never kills the other shelves."
+            "reports a named error and never kills the other shelves. "
+            "Pass shelf=<name> to show only that shelf's cards; an "
+            "unknown shelf name returns a refusal naming the shelves "
+            "that hold cards, never an empty census."
         ),
         capability=Capability.FS_READ,
         parameters={
             "apk_root": "str (optional) — ApkForge root, else resolved",
+            "shelf": "str (optional) — one shelf name from the census, "
+                     "e.g. library-books; empty means every shelf",
         },
     )
-    def museum_census(apk_root: str = "") -> dict[str, Any]:
+    def museum_census(apk_root: str = "", shelf: str = "") -> dict[str, Any]:
         museum = _museum(apk_root)
         res = museum.census()
-        return {**res, "card_text": museum.render(res)}
+        wanted = (shelf or "").strip().lower()
+        if not wanted:
+            return {**res, "card_text": museum.render(res)}
+        by_shelf = res.get("by_shelf") or {}
+        if wanted not in by_shelf:
+            # The honest check is against the live census's by_shelf:
+            # there is no central registry of shelf names, and a shelf
+            # that is real but currently empty holds no cards, so it is
+            # refused with the shelves that do hold cards named.
+            known = ", ".join(sorted(by_shelf))
+            text = (f"no shelf {wanted!r} in the museum"
+                    + (f" — shelves: {known}" if known
+                       else " — the museum is empty"))
+            return {**res, "card_text": text, "shelf": wanted,
+                    "unknown_shelf": True}
+        filtered = [c for c in res["artifacts"]
+                    if c.get("shelf") == wanted]
+        sub = {"artifacts": filtered, "by_shelf": {wanted: len(filtered)},
+               "count": len(filtered), "errors": {}}
+        return {**sub, "card_text": museum.render(sub), "shelf": wanted}
 
     @registry.register(
         "museum_find",
