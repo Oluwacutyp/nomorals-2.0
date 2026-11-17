@@ -55,6 +55,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "airports": [],
     "compute": [],
     "soundtrack": [],
+    "soundscape": [],
     "flight": [],
     "breach": [],
     "burn": [],
@@ -3646,6 +3647,37 @@ def _parser() -> argparse.ArgumentParser:
     soundtrack_p.add_argument("--scene", default="",
                               help="scene note for add")
     soundtrack_p.add_argument("--json", action="store_true",
+                              help="Output as JSON")
+
+    soundscape_p = sub.add_parser(
+        "soundscape", aliases=CLI_ALIASES["soundscape"],
+        help="compose and render ambient soundscapes — noise, scenes, mixes",
+        description=("nm soundscape <rain|forest|cafe|brown noise|sleep|…>\\n"
+                     "nm soundscape list\\n"
+                     "nm soundscape mixes\\n"
+                     "nm soundscape save <name> <generator>\\n"
+                     "nm soundscape tune <mix> <stem|band> <dB>\\n"
+                     "nm soundscape tone <freq>\\n"
+                     "nm soundscape calibrate <band Hz> <gain dB>\\n"
+                     "The soundscape machine: noise colours with measured "
+                     "spectra, binaural beats and drones, and layered "
+                     "scenes — every stem synthesised in code, nothing "
+                     "faked; an unknown generator is refused honestly."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    soundscape_p.add_argument("soundscape_query", nargs="*", default=[],
+                              help="soundscape name, preset, natural words, or list|mixes|save|tune|tone|calibrate …")
+    soundscape_p.add_argument("--duration", type=float, default=None,
+                              help="render length in seconds (max 300)")
+    soundscape_p.add_argument("--timer", type=float, default=None,
+                              help="sleep timer in minutes (fades out at the end)")
+    soundscape_p.add_argument("--animate", action="store_true",
+                              help="drift the sliders slowly while rendering")
+    soundscape_p.add_argument("--no-animate", action="store_true",
+                              help="hold the sliders still")
+    soundscape_p.add_argument("--fade", type=float, default=None,
+                              help="fade the tail out over N seconds")
+    soundscape_p.add_argument("--json", action="store_true",
                               help="Output as JSON")
 
     flight_p = sub.add_parser(

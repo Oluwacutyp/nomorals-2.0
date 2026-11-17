@@ -19,6 +19,7 @@ from .commands.av import _cmd_av
 from .commands.airports import _cmd_airports
 from .commands.compute import _cmd_compute
 from .commands.soundtrack import _cmd_soundtrack
+from .commands.soundscape import _cmd_soundscape
 from .commands.flight import _cmd_flight
 from .commands.breach import _cmd_breach
 from .commands.burn import _cmd_burn
@@ -569,6 +570,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "airports": _CommandSpec(_cmd_airports),
     "compute": _CommandSpec(_cmd_compute),
     "soundtrack": _CommandSpec(_cmd_soundtrack),
+    "soundscape": _CommandSpec(_cmd_soundscape),
     "flight": _CommandSpec(_cmd_flight),
     "breach": _CommandSpec(_cmd_breach),
     "burn": _CommandSpec(_cmd_burn),

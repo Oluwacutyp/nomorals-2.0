@@ -8294,6 +8294,8 @@ class PartnerRuntime(
             return self._control_airports(command.tail, message)
         if kind == "flight":
             return self._control_flight(command.tail, message)
+        if kind == "soundscape":
+            return self._control_soundscape(command.tail, message)
         if kind == "burn":
             return self._control_burn(command.tail, message)
         if kind == "arena-research":

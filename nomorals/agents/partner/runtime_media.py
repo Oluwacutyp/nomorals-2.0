@@ -5491,6 +5491,185 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"soundtrack failed: {exc}"
 
+    def _control_soundscape(self, tail: str, message: Any = None) -> str:
+        """Soundscape machine: compose, tune and play ambient sound.
+
+        Public. /soundscape <rain|forest|cafe|brown noise|sleep|…>
+        renders the soundscape and sends the WAV in chat. Natural
+        words work — “rain sounds, more thunder, less birds” — and a
+        sleep timer (“fade out in 40 minutes”) ends in silence, not
+        a cut. /soundscape list shows the generators, presets and
+        saved mixes; /soundscape save <name> keeps the last render
+        as a mix one word brings back; /soundscape mixes lists them;
+        /soundscape tune <stem|band> <+dB|-dB> re-renders the last
+        one adjusted; /soundscape tone <freq> plays a calibration
+        tone; /soundscape calibrate <band Hz> <gain dB> sets the
+        hearing profile, applied to every render after. Everything
+        is synthesised in code — no recording is ever faked — and an
+        unknown name is refused with the real list. Never raises:
+        bad input returns usage.
+        """
+        from ...audio.soundscapes.engine import BAND_FREQS, render_tone
+        from ...audio.soundscapes.generators import (
+            GENERATORS,
+            PRESETS,
+            parse_soundscape_query,
+        )
+        from ...audio.soundscapes.render import render_soundscape
+        from ...audio.soundscapes.store import open_store
+
+        tail = (tail or "").strip()
+        usage = ("usage: /soundscape <rain|forest|cafe|brown noise|sleep|…> "
+                 "[more <stem>|less <stem>] [fade out in <40 minutes>] | "
+                 "list | mixes | save <name> | tune <stem|band> <+dB|-dB> | "
+                 "tone <freq> | calibrate <band Hz> <gain dB>")
+        if not tail:
+            return usage
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — default home then
+                home = None
+            home = home or "~/.nomorals"
+            store = open_store(home)
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb in {"help", "--help"}:
+                return usage
+            if verb == "list":
+                lines = ["soundscapes — generators:"]
+                for spec in GENERATORS.values():
+                    lines.append(f"• {spec.name} ({spec.id}) — "
+                                 f"{spec.description}")
+                lines.append("presets: " + ", ".join(sorted(PRESETS)))
+                mixes = store.list_mixes()
+                if mixes:
+                    lines.append("your mixes: " + ", ".join(mixes))
+                return "\n".join(lines)
+            if verb == "mixes":
+                mixes = store.list_mixes()
+                if not mixes:
+                    return "no saved mixes yet — render one, then /soundscape save <name>."
+                lines = ["your mixes:"]
+                for name in mixes:
+                    mix = store.load_mix(name)
+                    if mix:
+                        lines.append(f"• {mix['name']} — {mix['generator']}")
+                return "\n".join(lines)
+            if verb == "save":
+                if not rest:
+                    return "usage: /soundscape save <name>"
+                last = store.last()
+                if not last or not last.get("generator"):
+                    return ("nothing rendered yet — ask for a soundscape "
+                            "first, then /soundscape save <name>.")
+                from ...audio.soundscapes.generators import resolve_generator
+
+                spec = resolve_generator(str(last["generator"]))
+                sliders = last.get("sliders") or {}
+                values = [float(sliders.get(label, 0.0))
+                          for label in spec.sliders]
+                store.save_mix(rest, spec.id, tuple(values),
+                               animate=bool(last.get("animate", False)),
+                               duration_s=float(
+                                   last.get("duration_s") or 60.0))
+                return f"saved mix “{rest}” — {spec.name}."
+            if verb == "tone":
+                try:
+                    freq = float(rest)
+                except (TypeError, ValueError):
+                    return "usage: /soundscape tone <freq Hz>"
+                path = render_tone(freq, duration_s=2.0)
+                text = f"calibration tone — {freq:g} Hz."
+                if message is not None:
+                    failed = self._scene_send_file(path, message,
+                                                   "calibration tone")
+                    if failed is not None:
+                        return text + f"\n{failed}"
+                    return text + "\nsent."
+                return text + f"\nfile: {path}"
+            if verb == "calibrate":
+                fields = rest.split()
+                if len(fields) != 2:
+                    bands = ", ".join(f"{f:g}" for f in BAND_FREQS)
+                    return ("usage: /soundscape calibrate <band Hz> <gain dB>\n"
+                            f"bands: {bands}")
+                try:
+                    band_hz = float(fields[0])
+                    gain = float(fields[1])
+                except (TypeError, ValueError):
+                    return ("usage: /soundscape calibrate <band Hz> <gain dB>")
+                if band_hz not in BAND_FREQS:
+                    bands = ", ".join(f"{f:g}" for f in BAND_FREQS)
+                    return (f"{band_hz:g} Hz is not a calibration band — "
+                            f"try: {bands}")
+                store.set_hearing_band(band_hz, gain)
+                return (f"hearing: {band_hz:g} Hz {gain:+.1f} dB — applied "
+                        f"to every render from now on.")
+            if verb == "tune":
+                # The dB is the last word; the label is everything
+                # before it, so a band ("1000 Hz") parses whole.
+                label, sep, db_text = rest.rpartition(" ")
+                if not sep or not label:
+                    return ("usage: /soundscape tune <stem|band> <+dB|-dB>")
+                last = store.last()
+                if not last or not last.get("generator"):
+                    return ("nothing rendered yet — ask for a soundscape "
+                            "first, then tune it.")
+                try:
+                    delta = float(db_text)
+                except (TypeError, ValueError):
+                    return ("usage: /soundscape tune <stem|band> <+dB|-dB>")
+                from ...audio.soundscapes.generators import resolve_generator
+
+                spec = resolve_generator(str(last["generator"]))
+                if label not in spec.sliders:
+                    return (f"“{label}” is not a slider of "
+                            f"{spec.name} — try: "
+                            + ", ".join(spec.sliders))
+                ans = render_soundscape(
+                    home, str(last["generator"]),
+                    duration_s=float(last.get("duration_s") or 60.0),
+                    animate=bool(last.get("animate", False)),
+                    sliders=dict(last.get("sliders") or {}),
+                    adjust={label: delta})
+                return self._soundscape_send(ans, message)
+            parsed = parse_soundscape_query(tail)
+            if store.load_mix(tail) is not None:
+                # The owner's own mix name wins over any preset word
+                # inside it ("deep focus" is his mix, not the "focus"
+                # preset) — render_soundscape loads the mix itself.
+                ans = render_soundscape(home, tail)
+            else:
+                target = parsed.get("generator") or tail
+                ans = render_soundscape(
+                    home, target,
+                    timer_min=parsed.get("timer_min"),
+                    animate=parsed.get("animate"),
+                    adjust=dict(parsed.get("adjust") or {}))
+            return self._soundscape_send(ans, message)
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"soundscape failed: {exc}"
+
+    def _soundscape_send(self, ans: dict[str, Any],
+                         message: Any = None) -> str:
+        """Send a rendered soundscape: reply text + the WAV file."""
+        if not ans.get("ok"):
+            return ans.get("error") or "soundscape failed."
+        text = ans.get("reply") or f"{ans.get('name')} rendered."
+        path = ans.get("path")
+        if not path:
+            return text
+        if message is not None:
+            failed = self._scene_send_file(str(path), message,
+                                           "soundscape")
+            if failed is not None:
+                return text + f"\n{failed}"
+            return text + "\nsent."
+        return text + f"\nfile: {path}"
+
     def _control_code_format(self, kind: str, tail: str) -> str:
         """Code-video format commands: /map-route, /headline, /teardown.
 
