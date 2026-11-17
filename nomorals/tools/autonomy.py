@@ -804,6 +804,29 @@ def register(registry: Any) -> None:
                     "error": f"continual update tick failed: {exc}"}
 
     @registry.register(
+        "__render_tick__",
+        description="Run one render tick: every non-terminal render-tagged "
+        "mission advances exactly one stage (proxy, then full) through "
+        "the real render engine; a stage failure is recorded on the "
+        "mission and retried next tick, three in a row fails it, and a "
+        "finished render notifies the owner once with the output path. "
+        "Scheduler-internal; runs every ~5m. Routine and silent — a "
+        "tick with nothing due pings nobody.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _render_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..missions.render_driver import run_render_tick_once
+
+        try:
+            return run_render_tick_once(
+                _context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"render tick failed: {exc}"}
+
+    @registry.register(
         "__show_schedule_tick__",
         description="Run one show-schedule tick: compose a DRAFT "
         "episode for every show whose schedule is due, from the "

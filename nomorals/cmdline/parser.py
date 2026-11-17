@@ -42,6 +42,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "outcomes": [],
     "notify": [],
     "train": ["tr"],
+    "render": [],
     "benchmark": ["bm"],
     "braineval": ["be"],
     "sandbox": ["sb"],
@@ -3835,6 +3836,29 @@ def _parser() -> argparse.ArgumentParser:
     train.add_argument("--base-model", default="",
                        help="HF base model id (required for external backends)")
     train.add_argument("--json", action="store_true", help="Output as JSON")
+    render = sub.add_parser("render", aliases=CLI_ALIASES["render"],
+                            help="mission render queue: enqueue, advance, status")
+    render.add_argument("--source", action="append", default=None,
+                        help="source media path (repeatable) to enqueue")
+    render.add_argument("--spec", default="",
+                        help="render spec as JSON, or @path/to/spec.json")
+    render.add_argument("--pack", default=None,
+                        help="pack overrides as a JSON object")
+    render.add_argument("--name", default="",
+                        help="name for the render mission")
+    render.add_argument("--budget-wall", type=float, default=0.0,
+                        help="wall-clock budget in seconds (0 = unlimited)")
+    render.add_argument("--budget-tokens", type=int, default=0,
+                        help="token budget (0 = unlimited)")
+    render.add_argument("--status", default="",
+                        help="show the status of a render mission by id")
+    render.add_argument("--list", action="store_true",
+                        help="list queued (non-terminal) render missions")
+    render.add_argument("--advance", default="",
+                        help="drive one stage of a render mission now, by id")
+    render.add_argument("--tick", action="store_true",
+                        help="drive one render tick now (one stage per queued render)")
+    render.add_argument("--json", action="store_true", help="Output as JSON")
     help_p = sub.add_parser("help", aliases=CLI_ALIASES["help"],
                             help="Show help (chat catalog, CLI command help, or topic page)")
     help_p.add_argument("topic", nargs="?", default="",

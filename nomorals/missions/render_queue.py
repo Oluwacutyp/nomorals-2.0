@@ -159,4 +159,9 @@ def render_mission_status(store: Any, mission_id: str) -> dict[str, Any]:
             "pending_stages": [s for s in RENDER_STAGES if s not in stages],
             "outputs": {s: v.get("output") for s, v in stages.items()},
             "budget_exhausted": bool(mission.budget_exhausted),
+            "spent_wall": float(mission.spent_wall or 0.0),
+            "spent_tokens": int(mission.spent_tokens or 0),
+            "budget_wall": float(mission.budget_wall or 0.0),
+            "budget_tokens": int(mission.budget_tokens or 0),
+            "wall_remaining": mission.wall_remaining,
             "done": all(s in stages for s in RENDER_STAGES)}

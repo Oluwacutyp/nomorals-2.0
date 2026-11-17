@@ -111,6 +111,7 @@ from .commands.timeline import _cmd_timeline
 from .commands.tools import _cmd_tools
 from .commands.trade import _cmd_trade
 from .commands.train import _cmd_train
+from .commands.render import _cmd_render
 from .commands.trigger import _cmd_trigger
 from .commands.schedule import _cmd_schedule
 from .commands.db import _cmd_db
@@ -357,6 +358,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "arena": _CommandSpec(_cmd_arena),
     "trial": _CommandSpec(_cmd_trial),
     "train": _CommandSpec(_cmd_train),
+    "render": _CommandSpec(_cmd_render),
     "help": _CommandSpec(_cmd_help),
     "cookies": _CommandSpec(_cmd_cookies),
     "reason": _CommandSpec(_cmd_reason),

@@ -93,6 +93,7 @@ from .timeline import _cmd_timeline, _render_timeline_row
 from .tools import _cmd_tools
 from .trade import _cmd_trade
 from .train import _cmd_train
+from .render import _cmd_render
 from .tui import _cmd_tui, _dispatch_tui_command
 from .update import _cmd_update
 from .vision import (
@@ -249,6 +250,7 @@ __all__ = [
     "_cmd_tools",
     "_cmd_trade",
     "_cmd_train",
+    "_cmd_render",
     "_cmd_tui",
     "_dispatch_tui_command",
     "_vision_tools",

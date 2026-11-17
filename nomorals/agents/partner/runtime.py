@@ -3948,6 +3948,20 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "continual update tick job not registered: %s", exc)
+                # Mission render queue (audit gap R2-33): one durable
+                # "render tick" job (every 5m) advancing non-terminal
+                # render-tagged missions one stage (proxy, then full)
+                # through the real render engine — before this wiring
+                # the mission render queue had zero production callers
+                # and render work could never flow through missions.
+                # Idempotent; best-effort.
+                try:
+                    from ...missions.render_driver import ensure_render_tick_job
+
+                    ensure_render_tick_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "render tick job not registered: %s", exc)
                 # Community orchestration (AA-18): one durable
                 # "community orchestration tick" job (every 1m)
                 # heartbeating this device into the fleet session
