@@ -276,6 +276,34 @@ def gguf_check(path: str | os.PathLike[str]) -> tuple[bool, str]:
 
 
 
+def _draft_file_problems(draft_model: str) -> tuple[list[str], list[str]]:
+    """Problems + hints for a configured draft model file ('' when fine).
+
+    Same proof as a LoRA file: it must exist on disk and be a real GGUF.
+    Used by both doctor() (diagnostics) and start() (pre-spawn gate) so
+    a bad draft is refused honestly instead of killing llama-server at
+    boot with an opaque error.
+    """
+    problems: list[str] = []
+    hints: list[str] = []
+    if not draft_model:
+        return problems, hints
+    draft_path = Path(os.path.expanduser(draft_model))
+    if not draft_path.is_file():
+        problems.append(f"draft model file not found: {draft_model}")
+        hints.append(
+            "the draft GGUF for speculative decoding must be on disk "
+            "before the local brain can load it (NM_LLM_LOCAL_DRAFT_MODEL)"
+        )
+        return problems, hints
+    magic_ok, magic_detail = gguf_check(draft_path)
+    if not magic_ok:
+        problems.append(f"draft model is NOT a valid GGUF: {magic_detail}")
+        hints.append("re-download it: `nm models --fetch <model>` "
+                     "or pick a different draft file")
+    return problems, hints
+
+
 def _list_failure_hints(error_text: str) -> list[str]:
     """Turn a list-files failure into actionable hints.
 
@@ -417,18 +445,22 @@ class GGUFServerManager:
         ]
         for lora in self.lora_files:
             args += ["--lora", lora]
-        # Speculative decoding: draft model proposes, target verifies.
-        # Only when a draft is configured AND it differs from the target
-        # (draft == target is pure overhead — emit nothing).
-        if self.draft_model and self.draft_model != model_path:
-            args += ["--draft-model", self.draft_model,
-                     "--draft-max", str(self.draft_max),
-                     "--draft-min", str(self.draft_min),
-                     "--draft-p-min", str(self.draft_p_min)]
-        # KV-cache quantization: --ctk/--ctv shrink the runtime cache, not
-        # the weights (see __init__ for why this is the phone OOM fix).
-        if self.kv_cache_quant:
-            args += ["--ctk", self.kv_cache_quant, "--ctv", self.kv_cache_quant]
+        # Speculative decoding + KV cache: ONE argv fragment built by
+        # llm/speculative.py — the draft model proposes, the target
+        # verifies.  Opt-in (no draft → KV flags only); an invalid config
+        # (draft == target, draft_p_min out of range) logs a warning and
+        # emits no draft flags — never a broken server line.
+        from .speculative import SpeculativeConfig
+
+        args += SpeculativeConfig(
+            enabled=bool(self.draft_model),
+            draft_model=self.draft_model,
+            target_model=model_path,
+            draft_max=self.draft_max,
+            draft_min=self.draft_min,
+            draft_p_min=self.draft_p_min,
+            kv_cache_quant=self.kv_cache_quant,
+        ).to_server_args()
         # Flash attention is a net win on x86, a net loss on ARM.
         if self.flash_attn is True:
             args += ["--flash-attn", "on"]
@@ -520,6 +552,9 @@ class GGUFServerManager:
                 hints.append(
                     "the LoRA GGUF from the Colab notebook must be on disk "
                     "before the local brain can load it (NM_LLM_LOCAL_LORA)")
+        draft_problems, draft_hints = _draft_file_problems(self.draft_model)
+        problems.extend(draft_problems)
+        hints.extend(draft_hints)
         if port_in_use(self.host, self.port) and self._process is None:
             state = self.health_status()
             if state in self.READY_STATES:
@@ -655,6 +690,15 @@ class GGUFServerManager:
                              "the Colab notebook must be on disk first")
                 return GGUFDiagnosis(ok=False, binary=binary, model_path=model_path,
                                      problems=problems, hints=hints)
+
+        # Draft model: same pre-spawn gate as LoRA — a bad draft refuses
+        # here with a named problem, never by killing llama-server at boot.
+        draft_problems, draft_hints = _draft_file_problems(self.draft_model)
+        if draft_problems:
+            problems.extend(draft_problems)
+            hints.extend(draft_hints)
+            return GGUFDiagnosis(ok=False, binary=binary, model_path=model_path,
+                                 problems=problems, hints=hints)
 
         if port_in_use(self.host, self.port):
             # The frozen/foreign cases were handled up front, before

@@ -879,10 +879,26 @@ def ensure_local_gguf(model_path_or_settings, **kwargs):
                 if ls.port_in_use(host, port):
                     # Port is in use, check if healthy
                     mgr = ls.GGUFServerManager(
-                        model_path=model_path,
                         port=port,
                         host=host,
+                        draft_model=getattr(
+                            model_path_or_settings.llm, "local_draft_model", ""
+                        ) or "",
+                        draft_max=getattr(
+                            model_path_or_settings.llm, "local_draft_max", 4
+                        ) or 4,
+                        draft_min=getattr(
+                            model_path_or_settings.llm, "local_draft_min", 1
+                        ) or 1,
+                        draft_p_min=getattr(
+                            model_path_or_settings.llm, "local_draft_p_min", 0.9
+                        ) or 0.9,
                     )
+                    # The manager never takes model_path in its constructor
+                    # (that kwarg raised TypeError on every auto-start
+                    # attempt); the model rides on the manager so heal()
+                    # can start it.
+                    mgr.model_path = model_path
                     if mgr._healthy():
                         # Already healthy, don't interfere
                         return None
@@ -894,10 +910,26 @@ def ensure_local_gguf(model_path_or_settings, **kwargs):
                 else:
                     # Port is free, start a new server
                     mgr = ls.GGUFServerManager(
-                        model_path=model_path,
                         port=port,
                         host=host,
+                        draft_model=getattr(
+                            model_path_or_settings.llm, "local_draft_model", ""
+                        ) or "",
+                        draft_max=getattr(
+                            model_path_or_settings.llm, "local_draft_max", 4
+                        ) or 4,
+                        draft_min=getattr(
+                            model_path_or_settings.llm, "local_draft_min", 1
+                        ) or 1,
+                        draft_p_min=getattr(
+                            model_path_or_settings.llm, "local_draft_p_min", 0.9
+                        ) or 0.9,
                     )
+                    # The manager never takes model_path in its constructor
+                    # (that kwarg raised TypeError on every auto-start
+                    # attempt); the model rides on the manager so heal()
+                    # can start it.
+                    mgr.model_path = model_path
                     diagnosis = mgr.heal()
                     if diagnosis and diagnosis.ok:
                         if hasattr(diagnosis, 'model_path'):

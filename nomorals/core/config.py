@@ -185,6 +185,12 @@ class LLMSettings:
                                     # llama-server on local_model automatically
     local_host: str = "127.0.0.1"  # NM_LLM_LOCAL_HOST
     local_port: int = 8080  # NM_LLM_LOCAL_PORT; must match llama_cpp_url
+    local_draft_model: str = ""  # NM_LLM_LOCAL_DRAFT_MODEL: small GGUF draft
+                                 # model for speculative decoding (llama-server
+                                 # --draft-model); empty = off
+    local_draft_max: int = 4  # NM_LLM_LOCAL_DRAFT_MAX: draft tokens per step
+    local_draft_min: int = 1  # NM_LLM_LOCAL_DRAFT_MIN
+    local_draft_p_min: float = 0.9  # NM_LLM_LOCAL_DRAFT_P_MIN: acceptance floor
     verify_at_startup: bool = True  # NM_LLM_VERIFY_AT_STARTUP=0: skip provider
                                    # probe at boot (faster startup, but bad
                                    # model names surface at chat time instead)
@@ -1230,6 +1236,10 @@ _ENV_MAP: dict[str, str] = {
     "NM_LLM_LOCAL_AUTO_START": "llm.local_auto_start",
     "NM_LLM_LOCAL_HOST": "llm.local_host",
     "NM_LLM_LOCAL_PORT": "llm.local_port",
+    "NM_LLM_LOCAL_DRAFT_MODEL": "llm.local_draft_model",
+    "NM_LLM_LOCAL_DRAFT_MAX": "llm.local_draft_max",
+    "NM_LLM_LOCAL_DRAFT_MIN": "llm.local_draft_min",
+    "NM_LLM_LOCAL_DRAFT_P_MIN": "llm.local_draft_p_min",
     "NM_LLM_VERIFY_AT_STARTUP": "llm.verify_at_startup",
     "NM_LLAMA_CPP_URL": "llm.llama_cpp_url",
     # Legacy alias: the setup wizard wrote this key for GGUF installs

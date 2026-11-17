@@ -118,6 +118,14 @@
 # Config key read by Devon code.
 # NM_LLM_LOCAL_PORT=
 # Config key read by Devon code.
+# NM_LLM_LOCAL_DRAFT_MODEL=
+# Config key read by Devon code.
+# NM_LLM_LOCAL_DRAFT_MAX=
+# Config key read by Devon code.
+# NM_LLM_LOCAL_DRAFT_MIN=
+# Config key read by Devon code.
+# NM_LLM_LOCAL_DRAFT_P_MIN=
+# Config key read by Devon code.
 # NM_LLM_VERIFY_AT_STARTUP=
 # Config key read by Devon code.
 # NM_LLAMA_CPP_URL=

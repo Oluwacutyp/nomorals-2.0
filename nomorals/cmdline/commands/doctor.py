@@ -287,6 +287,27 @@ def _cmd_models(args: argparse.Namespace, context: Any) -> int:
     if getattr(args, "promote_local", ""):
         path = str(args.promote_local).strip()
         lora = str(getattr(args, "lora", "") or "").strip()
+        draft = str(getattr(args, "draft", "") or "").strip()
+        # A draft that does not exist writes a boot contract the next boot
+        # cannot serve — refuse it the way the base file is refused.
+        if draft:
+            from ...llm.local_server import gguf_check
+
+            draft_path = Path(draft).expanduser()
+            if not draft_path.is_file():
+                _emit(args, {"ok": False, "local_model": path,
+                             "error": "no such draft GGUF file"},
+                      f"cannot promote {path} with draft {draft}: no GGUF file "
+                      "there — download or copy the draft model first, then "
+                      "re-run. Nothing was written.")
+                return 1
+            magic_ok, magic_detail = gguf_check(draft_path)
+            if not magic_ok:
+                _emit(args, {"ok": False, "local_model": path,
+                             "error": f"draft is not a valid GGUF: {magic_detail}"},
+                      f"cannot promote {path} with draft {draft}: {magic_detail} "
+                      "— pick a valid draft GGUF. Nothing was written.")
+                return 1
         # Promoting a path that does not exist writes a boot contract
         # the next boot cannot serve (llama_cpp primary, no server,
         # model-less chats) while reporting success — refuse it the
@@ -305,19 +326,24 @@ def _cmd_models(args: argparse.Namespace, context: Any) -> int:
         }
         if lora:
             update["NM_LLM_LOCAL_LORA"] = lora
+        if draft:
+            update["NM_LLM_LOCAL_DRAFT_MODEL"] = draft
         written = _env_update_home(context, update)
         try:
             context.settings.llm.provider = "llama_cpp"
             context.settings.llm.local_model = path
             if lora:
                 context.settings.llm.local_lora = lora
+            if draft:
+                context.settings.llm.local_draft_model = draft
         except Exception:  # noqa: BLE001 — the file is the durable truth
             pass
         payload = {"ok": True, "local_model": path, "lora": lora,
-                   "provider": "llama_cpp"}
+                   "draft": draft, "provider": "llama_cpp"}
         lora_line = f"  lora on top: {lora}\n" if lora else ""
+        draft_line = f"  draft model: {draft}\n" if draft else ""
         _emit(args, payload,
-              f"local model promoted: {path}\n" + lora_line +
+              f"local model promoted: {path}\n" + lora_line + draft_line +
               f"  provider -> llama_cpp, auto-start on — written to "
               f"{written}; the next boot runs entirely on it")
         return 0

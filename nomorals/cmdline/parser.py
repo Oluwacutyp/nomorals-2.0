@@ -247,6 +247,9 @@ def _parser() -> argparse.ArgumentParser:
     models.add_argument("--lora", default="",
                         help="with --promote-local: GGUF LoRA adapter(s) to run "
                              "on top of the base model (comma-separated)")
+    models.add_argument("--draft", default="",
+                        help="with --promote-local: small draft GGUF for "
+                             "speculative decoding (llama-server --draft-model)")
     # Broker actions (nomorals.cmdline.commands.models).  Positional and
     # optional so every pre-existing flag above keeps working unchanged.
     models.add_argument("model_action", nargs="?", default=None,
