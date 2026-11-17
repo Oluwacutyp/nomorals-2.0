@@ -40,6 +40,12 @@ from .groups import (
     merged_itinerary, control_gtrip,
     SPLIT_EQUAL, SPLIT_PERCENT, SPLIT_EXACT, compute_shares,
 )
+from .airports import (
+    airport_country_count,
+    countries_for_route,
+    country_for_iata,
+    lookup_iata,
+)
 
 __all__ = [
     "PriceWatcher", "PriceWatch", "PriceAlert", "PricePoint",
@@ -93,6 +99,13 @@ __all__ += [
     "documents_required",
     "lookup",
     "UNKNOWN_REASON",
+]
+
+__all__ += [
+    "airport_country_count",
+    "countries_for_route",
+    "country_for_iata",
+    "lookup_iata",
 ]
 
 # Tier 3: travel <-> community group impl (share + RSVP).

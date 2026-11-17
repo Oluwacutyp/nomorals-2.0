@@ -1143,6 +1143,13 @@ class RuntimeMemoryMixin:
                                advisory visa answer from the curated table
                                (ISO codes, e.g. /trip visa NG GH NG) —
                                unknown routes stay unknown, never guessed.
+        /trip visa <trip_id> <passport>
+                               same answer for a built trip: the trip's
+                               first flight's IATA codes are mapped to
+                               countries through the airports data, then
+                               answered through the same table — an
+                               airport the data does not know stays
+                               unknown, never guessed.
         """
         from ...travel.itinerary import (ItineraryBuilder,
                                          ItineraryStoreError,
@@ -1204,13 +1211,39 @@ class RuntimeMemoryMixin:
             return f"📎 {tid} vault:\n" + "\n".join(f"  • {d}" for d in docs)
         if low.startswith("visa "):
             # Advisory only: the curated table answers from explicit ISO
-            # codes. The itinerary builder itself cannot call this — its
-            # flights carry IATA airport codes and the repo has no
-            # airport→country mapping, so guessing countries from
-            # airports would break the visa layer's never-guess rule.
+            # codes, or — for a built trip — from the trip's first
+            # flight's IATA codes mapped to countries through the
+            # airports data (travel/airports.py). An airport the data
+            # does not know stays unknown, never guessed.
             from ...travel.visa import documents_required, visa_needed
 
             parts = rest[5:].split()
+            if len(parts) == 2 and parts[0].lower().startswith("trip_"):
+                trip_id, passport = parts[0], parts[1].upper()
+                answer = builder.visa_for_trip(trip_id, passport)
+                if not answer["known"]:
+                    return (f"🛂 {trip_id} ({passport} passport): "
+                            f"unknown — {answer['notes']}")
+                needed = answer["needed"]
+                verdict = ("visa / ETA / ESTA required — apply before "
+                           "travelling" if needed else "no visa needed")
+                lines = [f"🛂 {answer['origin_iata']} → "
+                         f"{answer['destination_iata']} "
+                         f"({answer['origin_country']} → "
+                         f"{answer['destination_country']}, "
+                         f"{passport} passport): {answer['status']} — "
+                         f"{verdict}."]
+                if answer["stay_days"]:
+                    lines.append(f"Stay: up to {answer['stay_days']} days.")
+                docs = documents_required(
+                    answer["origin_country"] or "",
+                    answer["destination_country"] or "", passport)
+                if docs["documents"]:
+                    lines.append("Documents: "
+                                 + ", ".join(docs["documents"]) + ".")
+                if answer["notes"]:
+                    lines.append(answer["notes"])
+                return "\n".join(lines)
             if len(parts) != 3:
                 return ("usage: /trip visa <origin> <destination> "
                         "<passport> — ISO country codes, "

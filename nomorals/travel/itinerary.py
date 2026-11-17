@@ -782,6 +782,69 @@ class ItineraryBuilder:
             _log.debug("ics export failed", exc_info=True)
             return ""
 
+    def visa_for_trip(self, trip_id: str, passport: str, *,
+                      table: Any = None) -> dict[str, Any]:
+        """Advisory visa answer for a trip's first flight, via the
+        airport→country mapping + the visa layer's ``visa_needed``.
+
+        The mapping is the only bridge between the builder's IATA
+        codes and the visa layer's ISO codes: an IATA code the
+        dataset does not know maps to nothing, and the answer is
+        honestly unknown (``needed`` None, reason naming the
+        unmapped code) — never a guessed country, never a gate.
+        Same shape as ``visa_needed``'s result, plus the mapping
+        (``origin_iata`` / ``destination_iata`` / ``origin_country``
+        / ``destination_country``). Never raises.
+        """
+        from .airports import countries_for_route
+        from .visa import visa_needed
+
+        try:
+            trip = self.get_trip(trip_id)
+        except ItineraryStoreError:
+            return {"known": False, "status": "unknown", "needed": None,
+                    "stay_days": None,
+                    "notes": "trip store unavailable right now — "
+                             "try again in a moment.",
+                    "origin_iata": "", "destination_iata": "",
+                    "origin_country": None, "destination_country": None,
+                    "passport": (passport or "").strip().upper()}
+        if trip is None:
+            return {"known": False, "status": "unknown", "needed": None,
+                    "stay_days": None,
+                    "notes": f"no such trip: {trip_id!r}.",
+                    "origin_iata": "", "destination_iata": "",
+                    "origin_country": None, "destination_country": None,
+                    "passport": (passport or "").strip().upper()}
+        flight = next((f for f in trip.flights
+                       if f.origin and f.destination), None)
+        if flight is None:
+            return {"known": False, "status": "unknown", "needed": None,
+                    "stay_days": None,
+                    "notes": "this trip has no flights to check a visa "
+                             "against — add a flight first.",
+                    "origin_iata": "", "destination_iata": "",
+                    "origin_country": None, "destination_country": None,
+                    "passport": (passport or "").strip().upper()}
+        origin_country, dest_country, unmapped = countries_for_route(
+            flight.origin, flight.destination)
+        base = {"origin_iata": flight.origin.upper(),
+                "destination_iata": flight.destination.upper(),
+                "origin_country": origin_country,
+                "destination_country": dest_country,
+                "passport": (passport or "").strip().upper()}
+        if unmapped:
+            codes = " and ".join(repr(c) for c in unmapped)
+            return {**base, "known": False, "status": "unknown",
+                    "needed": None, "stay_days": None,
+                    "notes": f"no airport with IATA code {codes} in the "
+                             "airports data — the country is unknown, "
+                             "not guessed; check the destination embassy "
+                             "/ consulate before travelling."}
+        answer = visa_needed(origin_country or "", dest_country or "",
+                             passport, table=table)
+        return {**base, **answer}
+
     def packing(self, trip_id: str) -> str:
         try:
             trip = self.get_trip(trip_id)
