@@ -9239,7 +9239,11 @@ class PartnerRuntime(
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
             from ...impossible.chat import control_impossible
-            return control_impossible(
+            tail = (command.tail or arg or "").strip()
+            if tail.lower().startswith("diagram "):
+                return self._impossible_diagram(
+                    tail[len("diagram "):].strip(), message)
+            reply = control_impossible(
                 command.tail or arg,
                 context=self.context,
                 chat=chat,
@@ -9247,6 +9251,13 @@ class PartnerRuntime(
                 sender=getattr(message, "sender", "") if message else "",
                 chat_key=chat_key,
             )
+            if tail.lower().startswith("solve "):
+                # The module's job is making structure visible: a
+                # solved problem ships its prior-art map as a diagram
+                # image in the same chat. Fail-open — the report is
+                # the answer; the diagram is additive.
+                self._maybe_send_impossible_diagram(reply, message)
+            return reply
         if kind == "immune":
             # Defensive immune system — owner-only, like /learn.
             if message is not None and not self._is_operator(message):

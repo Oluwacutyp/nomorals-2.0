@@ -8,7 +8,7 @@ from .charter import charter as _charter
 from .lattice import lattice as _lattice
 
 _HELP = ("Usage: /impossible solve <problem> [--software] [--fetch-art] | status <id> | "
-         "attempt <id> | dossier <id> | queue | charter | lattice | examples | sources [domain] | cross <problem>")
+         "attempt <id> | dossier <id> | diagram <id> | queue | charter | lattice | examples | sources [domain] | cross <problem>")
 
 
 def control_impossible(text: str, context=None, chat_key: str = "chat", **_kwargs) -> str:

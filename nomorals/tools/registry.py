@@ -615,7 +615,7 @@ class ToolRegistry:
             "prompt_compiler",
             "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
             "trace_view",
-            "sceneintel", "directed", "seer", "shell", "side_chats", "ssh_socks", "traindata", "translate", "vision", "voice_live", "web", "weather",
+            "sceneintel", "directed", "seer", "shell", "side_chats", "ssh_socks", "traindata", "translate", "vision", "visuals", "voice_live", "web", "weather",
             "security",
             "wisdom", "social", "whatsapp",
             "services",  # 28 service connectors bridged to the spine

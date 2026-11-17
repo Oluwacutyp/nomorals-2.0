@@ -163,6 +163,13 @@ LAYERS: dict[str, int] = {
     # by tools (L4). L4.
     "vision": 4,
     "workspace": 5,
+    # visuals/ is the scene-spec organ (Farza/Clicky visual surface,
+    # owner link 2026-10-31): the structured scene spec the brain
+    # composes + the renderer ladder (live HTML page, PNG snapshot,
+    # terminal text). An L5 organ beside agents — it renders through
+    # media (L4) and is consumed by the brain tool + the partner
+    # runtime (L5). Reaches only downward.
+    "visuals": 5,
     # mesh/: phone-to-cloud worker mesh (nodes/heartbeats/task dispatch).
     # L5 organ; wraps storage.queue, reaches only downward.
     "mesh": 5,
@@ -342,6 +349,11 @@ MODULE_PINS: dict[str, int] = {
     # stays L4; the full foundation-vs-composition split is T1.6.
     "nomorals.tools.autonomy": 5,
     "nomorals.tools.finance": 5,
+    # tools/visuals is the same shape: a tool *surface* over the L5
+    # visuals organ (the scene spec + renderer ladder), not an L4
+    # foundation tool. The registry loads it dynamically by dotted
+    # name, never by static import.
+    "nomorals.tools.visuals": 5,
     # tools/backup is the same shape: it composes the L5 backup organ
     # (coordinator/report) + agents (L5, notifier) + connectors (L5,
     # GitHub) into the two scheduler-internal tick tools. Pinned L5

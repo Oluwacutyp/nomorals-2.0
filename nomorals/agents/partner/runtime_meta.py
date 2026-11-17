@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from pathlib import Path
 from typing import Any
 
 from ...core.logging_setup import get_logger
@@ -478,6 +479,78 @@ class RuntimeMetaMixin:
                     f"{out.get('countries', 0)} countries, "
                     f"{out.get('dropped', 0)} rows dropped")
         return f"refresh failed: {out.get('error') or 'unknown error'}"
+
+    def _impossible_diagram(self, claim_id: str,
+                            message: Any = None) -> str:
+        """``/impossible diagram <id>``: the dossier's prior-art map
+        as a diagram image in this chat.
+
+        The scene organ renders the map; the file goes back through
+        the same ``file_send`` tool ``/analytics export`` uses. A
+        missing dossier or a failed render reports in words — never
+        silence, never a fake image.
+        """
+        from ...impossible.core import ImpossibleMadePossible
+        from ...visuals.impossible import render_dossier_png
+
+        claim_id = (claim_id or "").strip()
+        if not claim_id:
+            return "usage: /impossible diagram <id>"
+        if message is None:
+            return ("diagram needs a live chat — run "
+                    "/impossible diagram from a chat, not the console")
+        try:
+            dossier = ImpossibleMadePossible().dossier(claim_id)
+        except Exception as exc:  # noqa: BLE001 - never crashes chat
+            return f"no dossier for '{claim_id}': {exc}"
+        if not dossier:
+            return f"No claim with id '{claim_id}'."
+        settings = getattr(self.context, "settings", None)
+        home = getattr(settings, "home", None) if settings is not None else None
+        home = str(home or "~/.nomorals")
+        try:
+            target = render_dossier_png(
+                dossier, kind="prior_art",
+                out_dir=str(Path(home) / "visuals"))
+        except Exception as exc:  # noqa: BLE001 - honest refusal
+            return f"diagram failed: {exc}"
+        tools = getattr(self.context, "tools", None)
+        if tools is None:
+            return (f"prior-art map rendered to {target}, but this "
+                    "session has no file-send tool.")
+        chat = message.chat
+        outcome = tools.call(
+            "file_send",
+            platform=str(getattr(chat, "platform", "") or ""),
+            chat_id=str(getattr(chat, "chat_id", "") or ""),
+            path=str(target),
+            caption="prior-art map — what exists, what failed")
+        if not outcome.ok:
+            return (f"prior-art map rendered to {target}, but sending "
+                    f"it failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        return "prior-art map sent."
+
+    def _maybe_send_impossible_diagram(self, reply: str,
+                                       message: Any = None) -> None:
+        """After a ``/impossible solve``, send the prior-art map.
+
+        Fail-open by design: the report is the answer and is already
+        returned; anything missing here (no claim id, no chat, a
+        failed render) simply means no diagram — never an exception
+        into the reply path.
+        """
+        try:
+            claim_id = ""
+            for line in (reply or "").splitlines():
+                if line.startswith("Claim id: "):
+                    claim_id = line[len("Claim id: "):].strip()
+                    break
+            if not claim_id or message is None:
+                return
+            self._impossible_diagram(claim_id, message)
+        except Exception:  # noqa: BLE001 - diagram is additive only
+            return
 
     def _control_arena_research(self, tail: str,
                                  message: Any = None) -> str:
