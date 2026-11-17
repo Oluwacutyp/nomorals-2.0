@@ -21,6 +21,13 @@ _WISDOM_USAGE = (
     "  /wisdom practice stop                stop the running session\n"
     "  /wisdom timeline [tradition] [n]     history timeline (full summaries)\n"
     "  /wisdom compare <topic>              cross-tradition comparison\n"
+    "      (mapped positions when the topic is one of: self, liberation,\n"
+    "       divine — positions kept intact, never averaged)\n"
+    "  /wisdom lineage <name>               who taught whom / what comments\n"
+    "      on what, from the timeline (no name lists every node)\n"
+    "  /wisdom practice recall add <prompt> | <answer> | <tradition> | <work>\n"
+    "  /wisdom practice recall due | review <id> <0-5> | stats\n"
+    "      spaced-repetition recall, every item citing its source\n"
     "  /wisdom oral submit <id> [--lang L] [--pack P] [--restriction R]\n"
     "      [--granted-by NAME --scope S] — then the transcript on the next lines\n"
     "  /wisdom oral verify <id> [--notes ...] [--reject]\n"
@@ -89,6 +96,8 @@ class RuntimeWisdomMixin:
             return self._control_wisdom_timeline(keeper, rest, chat)
         if verb == "compare":
             return self._control_wisdom_compare(keeper, rest, chat)
+        if verb == "lineage":
+            return self._control_wisdom_lineage(keeper, rest, chat)
         if verb == "oral":
             return self._control_wisdom_oral(keeper, rest, chat)
         # Bare tradition: `/wisdom christian-gnostic` lists its works.
@@ -117,6 +126,14 @@ class RuntimeWisdomMixin:
                  f"{full.get('oral', {}).get('ingested', 0)} ingested draft(s)",
                  "A \"tradition\" = a family of texts + teachings that grew "
                  "together around shared scriptures and practices."]
+        comp = full.get("completeness", {}) or {}
+        if comp:
+            lines.append(f"completeness: {comp.get('done', '?')}/"
+                         f"{comp.get('total', '?')} checks done")
+            for item in comp.get("items", []):
+                if item.get("status") != "done":
+                    lines.append(f"  missing: {item.get('item')} — "
+                                 f"{item.get('evidence', '')}")
         for trad in detail:
             lines.append(f"\n{trad['label']} ({trad['tradition']}): "
                          f"{trad['ingested']}/{trad['total']} ingested")
@@ -311,6 +328,9 @@ class RuntimeWisdomMixin:
                 return (f"no active session — journal reply awaited for "
                         f"{st['journal_await']}.")
             return "no practice session is running here."
+        if subverb == "recall":
+            return self._control_wisdom_practice_recall(
+                keeper, sub[1] if len(sub) > 1 else "")
         session_id = sub[0]
         try:
             return manager.start_session(
@@ -318,6 +338,69 @@ class RuntimeWisdomMixin:
         except PracticeError as exc:
             # unknown session id — the message already lists what's available
             return f"⚠️ {exc}"
+
+    def _control_wisdom_practice_recall(self, keeper, rest: str) -> str:
+        """Spaced-repetition recall over the durable practice memory.
+
+        ``add <prompt> | <answer> | <tradition> | <work>`` stores a
+        recall item (source required — an item without its tradition +
+        work is rejected, not stored). ``due`` lists items due for
+        review, ``review <id> <0-5>`` records an SM-2 review,
+        ``stats`` reports counts.
+        """
+        parts = (rest or "").strip().split(None, 1)
+        action = parts[0].lower() if parts else ""
+        arg = parts[1].strip() if len(parts) > 1 else ""
+        mem = keeper.practice_memory
+        if action == "add":
+            fields = [f.strip() for f in arg.split("|")]
+            if len(fields) != 4 or not all(fields):
+                return ("usage: /wisdom practice recall add <prompt> | "
+                        "<answer> | <tradition> | <work>")
+            try:
+                item = mem.add_item(
+                    fields[0], fields[1],
+                    source={"tradition": fields[2], "work": fields[3]})
+            except Exception as exc:  # noqa: BLE001 - fail fast, honestly
+                return f"⚠️ recall add failed: {type(exc).__name__}: {exc}"
+            return (f"🧠 recall added: `{item.id}` — {item.prompt} "
+                    f"[{item.source.get('tradition')} / "
+                    f"{item.source.get('work')}] (due now)")
+        if action == "due":
+            due = mem.due_items()
+            if not due:
+                return "🧠 nothing due for review."
+            lines = [f"🧠 due for review ({len(due)}):"]
+            for item in due:
+                lines.append(
+                    f"  `{item.id}` — {item.prompt} "
+                    f"[{item.source.get('tradition')} / "
+                    f"{item.source.get('work')}]")
+            return "\n".join(lines)
+        if action == "review":
+            tokens = arg.split()
+            if len(tokens) != 2:
+                return ("usage: /wisdom practice recall review <id> "
+                        "<quality 0-5>")
+            try:
+                item = mem.review(tokens[0], int(tokens[1]))
+            except Exception as exc:  # noqa: BLE001 - fail fast, honestly
+                return f"⚠️ recall review failed: {type(exc).__name__}: {exc}"
+            return (f"🧠 reviewed `{item.id}`: quality {tokens[1]} — "
+                    f"due in {item.interval_days}d "
+                    f"(repetitions {item.repetitions}, "
+                    f"easiness {item.easiness:.2f})")
+        if action == "stats":
+            st = mem.stats()
+            return (f"🧠 recall: {st['items']} item(s), {st['due']} due, "
+                    f"{st['reviewed']} reviewed, {st['lapses']} lapse(s), "
+                    f"avg easiness {st['avg_easiness']}")
+        return ("usage:\n"
+                "  /wisdom practice recall add <prompt> | <answer> | "
+                "<tradition> | <work>\n"
+                "  /wisdom practice recall due\n"
+                "  /wisdom practice recall review <id> <quality 0-5>\n"
+                "  /wisdom practice recall stats")
 
     def _control_wisdom_timeline(self, keeper, rest: str, chat) -> str:
         from ...wisdom.reading import parse_timeline_args
@@ -368,6 +451,64 @@ class RuntimeWisdomMixin:
         lines.append("— timeline context —")
         for e in out["timeline_context"][:10]:
             lines.append(f"  {e['start']}: {e['title']} — {e.get('summary', '')}")
+        # Mapped positions, when the topic is one the disagreement map
+        # knows: positions kept intact side by side, never averaged.
+        # Any other topic keeps the passage+timeline output above,
+        # byte-identical to before.
+        known = {t.lower(): t for t in keeper.disagreement_topics()}
+        mapped = known.get(topic.strip().lower())
+        if mapped:
+            try:
+                disagreement = keeper.compare_positions(mapped)
+            except Exception as exc:  # noqa: BLE001 - map failure ≠ compare failure
+                lines.append("")
+                lines.append(f"⚠️ mapped positions unavailable: {exc}")
+            else:
+                lines.append("")
+                lines.append("— mapped positions (never averaged) —")
+                lines.append(disagreement.render())
+        return self._send_long_checked(
+            chat.platform, chat, "\n".join(lines).strip())
+
+    def _control_wisdom_lineage(self, keeper, rest: str, chat) -> str:
+        """Lineage from the timeline graph: nodes + their edges.
+
+        ``/wisdom lineage <name>`` matches node names (case-insensitive
+        substring); bare ``/wisdom lineage`` lists every node.
+        """
+        query = (rest or "").strip()
+        try:
+            if not query:
+                nodes = keeper.lineage_nodes()
+                lines = [f"📜 lineage — {len(nodes)} nodes from the "
+                         f"timeline (ask /wisdom lineage <name>):"]
+                for n in nodes:
+                    lines.append(f"  {n['name']} [{n['kind']}"
+                                 + (f", {n['tradition']}"
+                                    if n.get("tradition") else "")
+                                 + "]")
+                return self._send_long_checked(
+                    chat.platform, chat, "\n".join(lines))
+            found = keeper.lineage(query)
+        except Exception as exc:  # noqa: BLE001
+            return f"⚠️ lineage failed: {type(exc).__name__}: {exc}"
+        if not found:
+            return f"no lineage nodes match {query!r}."
+        lines = [f"📜 lineage — {query} ({len(found)} node(s)):"]
+        for entry in found:
+            node = entry["node"]
+            head = f"\n{node['name']} [{node['kind']}"
+            if node.get("tradition"):
+                head += f", {node['tradition']}"
+            if node.get("dates"):
+                head += f", {node['dates']}"
+            head += "]"
+            lines.append(head)
+            for nb in entry["neighbours"]:
+                edge = nb["edge"]
+                other = nb["other"]
+                lines.append(f"  {edge['relation']}: {other['name']} "
+                             f"(source: {edge['source']})")
         return self._send_long_checked(
             chat.platform, chat, "\n".join(lines).strip())
 

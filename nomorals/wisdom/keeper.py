@@ -19,6 +19,7 @@ class WisdomKeeper:
         self._history: Any = None
         self._practice: Any = None
         self._oral: Any = None
+        self._practice_memory: Any = None
 
     @property
     def history(self) -> Any:
@@ -33,6 +34,57 @@ class WisdomKeeper:
             from .practice import PracticeGuide
             self._practice = PracticeGuide(self.context)
         return self._practice
+
+    @property
+    def practice_memory(self) -> Any:
+        """Durable recall memory (SM-2, source-grounded) for practice.
+
+        Lives at ``<wisdom root>/practice_memory.json`` — the same
+        durable root as the practice log and the oral store. Lazily
+        built like history/practice/oral.
+        """
+        if self._practice_memory is None:
+            from .practice_memory import PracticeMemory
+            self._practice_memory = PracticeMemory(
+                self.corpus._wisdom_root() / "practice_memory.json")
+        return self._practice_memory
+
+    def disagreement_topics(self) -> list[str]:
+        """Topics the disagreement map can compare (never averaged)."""
+        from .disagreements import DisagreementMap
+        return DisagreementMap().topics()
+
+    def compare_positions(self, topic: str) -> Any:
+        """Cross-tradition positions on ``topic``, mapped not averaged.
+
+        Returns a :class:`Disagreement` (positions side by side +
+        convergences/divergences), grounded in corpus passages when
+        the corpus can supply them. Unknown topic raises ValueError
+        naming the known topics.
+        """
+        from .disagreements import DisagreementMap
+        return DisagreementMap().compare_with_corpus(topic,
+                                                     corpus=self.corpus)
+
+    def lineage(self, query: str) -> list[dict[str, Any]]:
+        """Lineage for ``query``: graph nodes matching the name plus
+        their edges + neighbours, built from the real timeline.
+
+        The graph is derived from the timeline events (52 events):
+        ``tradition_sequence`` edges between consecutive events of the
+        same tradition. Every edge carries its source.
+        """
+        from .lineage import LineageGraph
+        graph = LineageGraph.from_timeline(
+            self.history.timeline())
+        return graph.lineage_for(query)
+
+    def lineage_nodes(self) -> list[dict[str, Any]]:
+        """Every node of the timeline-derived lineage graph."""
+        from .lineage import LineageGraph
+        graph = LineageGraph.from_timeline(
+            self.history.timeline())
+        return [n.to_dict() for n in graph.nodes.values()]
 
     @property
     def oral(self) -> Any:
@@ -121,11 +173,13 @@ class WisdomKeeper:
 
     def status(self) -> dict[str, Any]:
         """Corpus + organ status for `nm wisdom status`."""
+        from .completeness import wisdom_completeness_report
         return {
             "corpus": self.corpus.status(),
             "practice": self.practice.stats(),
             "semantic": self.corpus.semantic_index_status(),
             "oral": self.oral_status(),
+            "completeness": wisdom_completeness_report(),
         }
 
     # ── readability: read / traditions / seeds ────────────────────────

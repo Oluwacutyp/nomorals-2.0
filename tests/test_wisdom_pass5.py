@@ -194,7 +194,10 @@ class TruncationTests(unittest.TestCase):
         keeper = SimpleNamespace(
             status=lambda: {"corpus": {"ingested": 10}},
             ask=lambda query, top=5: _long_answer(),
-            history=history)
+            history=history,
+            # The compare handler consults the disagreement map for
+            # known topics; this stub knows none (gapfix R3-69).
+            disagreement_topics=lambda: [])
         rt._control_wisdom_compare(keeper, "kingdom vs light",
                                    SimpleNamespace(platform="telegram"))
         text = captured["text"]

@@ -25,8 +25,11 @@ def _cmd_wisdom(args: Any, context: Any) -> int:
               "       nm wisdom search <query> [--limit N] [--json]\n"
               "       nm wisdom timeline [tradition] [n] [--start Y] [--end Y] [--json]\n"
               "       nm wisdom compare <topic> [--json]\n"
+              "       nm wisdom lineage <name> [--json]\n"
               "       nm wisdom practice list [--json]\n"
               "       nm wisdom practice <session-id> [--rounds N] [--chat]\n"
+              "       nm wisdom practice recall add <prompt> | <answer> | <tradition> | <work>\n"
+              "       nm wisdom practice recall due | review <id> <0-5> | stats [--json]\n"
               "       nm wisdom oral submit <id> --file <transcript> [--language L] [--pack P]\n"
               "                        [--restriction R] [--granted-by NAME --scope S]\n"
               "       nm wisdom oral verify <id> [--notes ...] [--reject]\n"
@@ -57,6 +60,8 @@ def _cmd_wisdom(args: Any, context: Any) -> int:
         return _wisdom_timeline(args, context, words[1:])
     if verb == "compare":
         return _wisdom_compare(args, context, words[1:])
+    if verb == "lineage":
+        return _wisdom_lineage(args, context, words[1:])
     if verb == "practice":
         return _wisdom_practice(args, context, words[1:])
     if verb == "oral":
@@ -98,6 +103,14 @@ def _wisdom_status(args: Any, context: Any) -> int:
     print(f"corpus: {c['ingested']}/{c['texts']} texts ingested")
     oral = full.get("oral", {})
     print(f"oral tradition: {oral.get('ingested', 0)} ingested draft(s)")
+    comp = full.get("completeness", {}) or {}
+    if comp:
+        print(f"completeness: {comp.get('done', '?')}/"
+              f"{comp.get('total', '?')} checks done")
+        for item in comp.get("items", []):
+            if item.get("status") != "done":
+                print(f"  missing: {item.get('item')} — "
+                      f"{item.get('evidence', '')}")
     print("A \"tradition\" is a family of texts + teachings that grew "
           "together around shared scriptures and practices.")
     for trad in k.corpus.traditions_detail():
@@ -404,6 +417,15 @@ def _wisdom_compare(args: Any, context: Any, rest: list[str]) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
+    # Mapped positions, when the topic is one the disagreement map
+    # knows — same rule as /wisdom compare in chat.
+    known = {t.lower(): t for t in k.disagreement_topics()}
+    mapped = known.get(" ".join(rest).strip().lower())
+    if mapped:
+        try:
+            out["mapped_positions"] = k.compare_positions(mapped).to_dict()
+        except Exception as exc:  # noqa: BLE001 - map failure ≠ compare failure
+            out["mapped_positions_error"] = str(exc)
     if _as_json(args):
         print(json.dumps(out, indent=2, default=str))
         return 0
@@ -417,11 +439,125 @@ def _wisdom_compare(args: Any, context: Any, rest: list[str]) -> int:
     print("-- timeline context --")
     for e in out["timeline_context"][:10]:
         print(f"  {e['start']}: {e['title']} — {e.get('summary', '')}")
+    if "mapped_positions" in out:
+        print("-- mapped positions (never averaged) --")
+        for p in out["mapped_positions"]["positions"]:
+            print(f"  {p['tradition']}: {p['claim']}")
     return 0
+
+
+def _wisdom_lineage(args: Any, context: Any, rest: list[str]) -> int:
+    k = _keeper(context)
+    try:
+        if not rest:
+            nodes = k.lineage_nodes()
+            if _as_json(args):
+                print(json.dumps(nodes, indent=2, default=str))
+                return 0
+            print(f"lineage — {len(nodes)} nodes from the timeline:")
+            for n in nodes:
+                print(f"  {n['name']} [{n['kind']}"
+                      + (f", {n['tradition']}" if n.get("tradition")
+                         else "") + "]")
+            return 0
+        found = k.lineage(" ".join(rest))
+    except Exception as exc:  # noqa: BLE001
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    if _as_json(args):
+        print(json.dumps(found, indent=2, default=str))
+        return 0
+    if not found:
+        print(f"no lineage nodes match {' '.join(rest)!r}")
+        return 0
+    print(f"lineage — {' '.join(rest)} ({len(found)} node(s)):")
+    for entry in found:
+        node = entry["node"]
+        head = f"\n{node['name']} [{node['kind']}"
+        if node.get("tradition"):
+            head += f", {node['tradition']}"
+        if node.get("dates"):
+            head += f", {node['dates']}"
+        print(head + "]")
+        for nb in entry["neighbours"]:
+            edge = nb["edge"]
+            print(f"  {edge['relation']}: {nb['other']['name']} "
+                  f"(source: {edge['source']})")
+    return 0
+
+
+def _wisdom_practice_recall(args: Any, context: Any,
+                            rest: list[str]) -> int:
+    """``nm wisdom practice recall <add|due|review|stats>``."""
+    k = _keeper(context)
+    mem = k.practice_memory
+    if not rest:
+        print("usage: nm wisdom practice recall add <prompt> | <answer> | "
+              "<tradition> | <work>\n"
+              "       nm wisdom practice recall due | review <id> <0-5> | "
+              "stats [--json]", file=sys.stderr)
+        return 2
+    action = rest[0].lower()
+    if action == "add":
+        fields = [f.strip() for f in " ".join(rest[1:]).split("|")]
+        if len(fields) != 4 or not all(fields):
+            print("usage: nm wisdom practice recall add <prompt> | "
+                  "<answer> | <tradition> | <work>", file=sys.stderr)
+            return 2
+        try:
+            item = mem.add_item(
+                fields[0], fields[1],
+                source={"tradition": fields[2], "work": fields[3]})
+        except Exception as exc:  # noqa: BLE001
+            print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+        print(f"recall added: {item.id} — {item.prompt}")
+        return 0
+    if action == "due":
+        due = mem.due_items()
+        if _as_json(args):
+            print(json.dumps([i.to_dict() for i in due], indent=2,
+                             default=str))
+            return 0
+        if not due:
+            print("nothing due for review.")
+            return 0
+        print(f"due for review ({len(due)}):")
+        for item in due:
+            print(f"  {item.id} — {item.prompt} "
+                  f"[{item.source.get('tradition')} / "
+                  f"{item.source.get('work')}]")
+        return 0
+    if action == "review":
+        if len(rest) != 3:
+            print("usage: nm wisdom practice recall review <id> "
+                  "<quality 0-5>", file=sys.stderr)
+            return 2
+        try:
+            item = mem.review(rest[1], int(rest[2]))
+        except Exception as exc:  # noqa: BLE001
+            print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+            return 1
+        print(f"reviewed {item.id}: quality {rest[2]} — "
+              f"due in {item.interval_days}d")
+        return 0
+    if action == "stats":
+        st = mem.stats()
+        if _as_json(args):
+            print(json.dumps(st, indent=2, default=str))
+            return 0
+        print(f"recall: {st['items']} item(s), {st['due']} due, "
+              f"{st['reviewed']} reviewed, {st['lapses']} lapse(s), "
+              f"avg easiness {st['avg_easiness']}")
+        return 0
+    print(f"unknown recall verb: {action}", file=sys.stderr)
+    return 2
 
 
 def _wisdom_practice(args: Any, context: Any, rest: list[str]) -> int:
     k = _keeper(context)
+    if rest and rest[0].lower() == "recall":
+        return _wisdom_practice_recall(args, context, rest[1:])
     if not rest or rest[0] == "list":
         sessions = k.practice.list_sessions()
         if _as_json(args):
