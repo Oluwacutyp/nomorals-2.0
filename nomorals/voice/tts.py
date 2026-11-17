@@ -3238,7 +3238,8 @@ class UniversalTTS:
               speed: float = 1.0,
               exaggeration: float | None = None,
               language: str = "",
-              auto_tags: bool = False) -> dict:
+              auto_tags: bool = False,
+              voice_map: dict[str, str] | None = None) -> dict:
         """Synthesize `tagged_text` (emotion/pause tags allowed) to a WAV.
 
         ``audience`` overrides the engine's audience for this call:
@@ -3261,13 +3262,25 @@ class UniversalTTS:
         tags are preserved, never duplicated. Off by default so existing
         tagged callers (mood, director) keep exact behavior; opt in for
         plain-text input. Auto-tag failures fall back to the raw text.
+
+        ``voice_map`` (dialogue only): speaker id or name → voice name
+        (``{"1": "zara", "Zara": "zara"}``). Text with two or more
+        ``[S1]``/``[S2]`` turns renders turn-by-turn via
+        ``voice.dialogue.render_dialogue`` — each speaker on their own
+        voice, unknown speakers on the engine default with a pitch
+        offset so they stay distinguishable — unless the backend
+        speaks ``[S1]`` natively (Dia), in which case the script
+        passes through whole. ``voice_name`` and ``mood`` are ignored
+        for dialogue (per-turn voices win). A lone ``[S1]`` marker is
+        not a dialogue and keeps the old path.
         """
         try:
             return self._speak_impl(tagged_text, voice_name=voice_name,
                                     out_path=out_path, mood=mood,
                                     mood_level=mood_level, audience=audience,
                                     speed=speed, exaggeration=exaggeration,
-                                    language=language, auto_tags=auto_tags)
+                                    language=language, auto_tags=auto_tags,
+                                    voice_map=voice_map)
         except Exception:
             try:
                 from ..core.error_system import heartbeat
@@ -3282,12 +3295,29 @@ class UniversalTTS:
                     speed: float = 1.0,
                     exaggeration: float | None = None,
                     language: str = "",
-                    auto_tags: bool = False) -> dict:
+                    auto_tags: bool = False,
+                    voice_map: dict[str, str] | None = None) -> dict:
         aud = audience or self.audience
+        backend = self._load_backend(audience=aud)
+        # Dialogue branch: a multi-speaker [S1]/[S2] script renders
+        # turn-by-turn through render_dialogue — unless the backend
+        # speaks [S1] natively (Dia), in which case the script passes
+        # through whole. One marker alone is not a dialogue. The branch
+        # sits before voice resolution: voice_name is ignored for
+        # dialogue (per-turn voices from voice_map win), so resolving it
+        # first could refuse a call the branch would have served.
+        # Turn texts are marker-free by construction, so the inner
+        # speak() calls can never re-trigger this branch.
+        from .dialogue import dialogue_needs_backend_split, parse_dialogue
+        turns = parse_dialogue(tagged_text)
+        if len(turns) >= 2 and dialogue_needs_backend_split(
+                getattr(backend, "name", "")):
+            return self._speak_dialogue(
+                tagged_text, backend, out_path=out_path, audience=aud,
+                voice_map=voice_map)
         text = mood_to_tagged_text(tagged_text, mood, mood_level) if mood \
             else tagged_text
         voice = self._resolve_voice(voice_name, aud)
-        backend = self._load_backend(audience=aud)
         if auto_tags:
             text = self._apply_auto_tags(text, backend)
         segments = self.tag_processor.parse(text)
@@ -3420,6 +3450,38 @@ class UniversalTTS:
             "native_opts": sorted(synth_opts),
             "speed_dsp": abs(residual_speed - 1.0) > 0.02,
         }
+
+    def _speak_dialogue(self, script: str, backend: Any, *,
+                        out_path: str = "",
+                        audience: str | None = None,
+                        voice_map: dict[str, str] | None = None) -> dict:
+        """Multi-speaker script → per-turn render (see speak()).
+
+        Returns render_dialogue's dict plus ``backend`` and
+        ``dialogue: True`` (and ``bytes`` when a file exists).
+        ``out_path`` is honored by copying the render to it. A failed
+        render returns its honest ``{"ok": False, "reason"}`` — never a
+        silent fallback to speaking the raw script with its markers.
+        """
+        from .dialogue import render_dialogue
+        result = render_dialogue(script, self, voice_map=voice_map or {},
+                                 audience=audience)
+        out: dict[str, Any] = dict(result)
+        out["backend"] = getattr(backend, "name", "")
+        out["dialogue"] = True
+        if out_path and result.get("path"):
+            shutil.copy(result["path"], out_path)
+            out["path"] = out_path
+        if out.get("path"):
+            import contextlib
+            with contextlib.suppress(OSError):
+                out["bytes"] = os.path.getsize(out["path"])
+        try:
+            from ..core.error_system import heartbeat
+            heartbeat("voice", bool(result.get("ok")))
+        except Exception as e: # telemetry never breaks synthesis
+            record_failure('tts.UniversalTTS._speak_dialogue', e)
+        return out
 
     def speak_aligned(self, tagged_text: str,
                       voice_name: Optional[str] = None,

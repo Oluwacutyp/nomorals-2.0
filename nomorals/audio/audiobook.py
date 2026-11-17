@@ -284,34 +284,35 @@ def _default_tts_fn(text: str, voice_ref: str, *,
 
     Returns the WAV path, or None (never fake audio) when anything is
     missing — the caller refuses the chapter rather than faking it.
+
+    Long-form rendering goes through ``voice.longform.synthesize_long``:
+    sentence-boundary chunks, one voice anchor, crossfade stitching,
+    and degenerate-chunk regeneration — instead of the old naive
+    400-word split, which drifted prosody across chunks and refused
+    the whole chapter on one bad chunk. A chunk that fails twice keeps
+    an honest 0.5 s silence gap (logged); the chapter still renders.
     """
     try:
         if not voice_ref or not Path(voice_ref).exists():
             return None
+        from ..voice.longform import synthesize_long
         from ..voice.tts import UniversalTTS
         tmp = tempfile.mkdtemp(prefix="audiobook-tts-")
         tts = UniversalTTS(backend="auto", voices_dir=tmp, audience="private")
         voice_name = "audiobook-narrator"
         tts.voices.upload_voice(voice_name, voice_ref, language=lang or "en")
-        # chunk long text so no single TTS call explodes
-        chunks: list[str] = []
-        words = text.split()
-        size = 400
-        for i in range(0, len(words), size):
-            chunks.append(" ".join(words[i:i + size]))
-        pieces: list[str] = []
-        for chunk in chunks:
-            out = tts.speak(chunk, voice_name=voice_name, audience="private")
-            p = (out or {}).get("path", "")
-            if not p or not Path(p).exists():
-                return None
-            pieces.append(p)
-        if len(pieces) == 1:
-            return pieces[0]
-        from ..media_edit.videos import concat
-        res = concat(pieces, out_dir=tmp, suffix="chapter", ext=".wav")
-        out = (res or {}).get("output", "") if isinstance(res, dict) else ""
-        return out if out and Path(out).exists() else None
+        out_path = os.path.join(tmp, "chapter-longform.wav")
+        res = synthesize_long(text, tts, voice_name=voice_name,
+                              mood="neutral", out_path=out_path)
+        if not res.get("ok"):
+            return None
+        failed = res.get("failed_chunks") or []
+        if failed:
+            _log.warning("audiobook TTS: %d chunk(s) failed twice "
+                         "(honest silence gaps kept): %s",
+                         len(failed), failed)
+        p = res.get("path", "")
+        return p if p and Path(p).exists() else None
     except Exception as exc:  # noqa: BLE001
         _log.warning("audiobook TTS failed: %s", exc)
         return None

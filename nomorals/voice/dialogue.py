@@ -103,14 +103,16 @@ def estimate_duration(turn_audios: list[tuple[array, int]],
 def render_dialogue(script: str, tts: Any,
                     voice_map: dict[str, str] | None = None,
                     pause_ms: int | None = None,
-                    resample_to: int = 0) -> dict[str, Any]:
+                    resample_to: int = 0,
+                    audience: str | None = None) -> dict[str, Any]:
     """Full dialogue pipeline: parse → per-turn synth → stitch.
 
     ``tts``: a UniversalTTS (or anything with ``speak(text,
     voice_name=...)`` → ``{"path"}``). ``voice_map``: speaker id or
     name → voice name (``{"1": "zara", "Zara": "zara"}``); unknown
     speakers fall back to the engine default with a pitch offset per
-    speaker index so they stay distinguishable.
+    speaker index so they stay distinguishable. ``audience`` passes
+    through to each turn's ``speak`` call (None = engine default).
 
     ``pause_ms`` None → per-turn punctuation pauses. Returns
     ``{"ok", "path", "turns", "seconds", "sample_rate", "voices"}``.
@@ -131,7 +133,8 @@ def render_dialogue(script: str, tts: Any,
         if not vname:
             # pitch-offset fallback: ±2 semitones per speaker index
             pitch_shift_st = ((idx % 4) - 1.5) * 2.0
-        result = tts.speak(turn.text, voice_name=vname or None)
+        result = tts.speak(turn.text, voice_name=vname or None,
+                           audience=audience)
         path = result.get("path", "")
         if not path:
             return {"ok": False,
