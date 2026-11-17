@@ -1054,6 +1054,14 @@ class SourceResolver:
                 query, "TooXclusiveSource", "tooxclusive")),
             ("mdundo-search", lambda: self._s_blog_search(
                 query, "MdundoSource", "mdundo")),
+            ("mp3pm-search", lambda: self._s_blog_search_many(
+                query, "MP3PMSource", "mp3pm")),
+            ("mp3juice-search", lambda: self._s_blog_search_many(
+                query, "MP3JuiceSource", "mp3juice")),
+            ("mp3pm-search", lambda: self._s_blog_search(
+                query, "MP3PMSource", "mp3pm")),
+            ("mp3juice-search", lambda: self._s_blog_search(
+                query, "MP3JuiceSource", "mp3juice")),
             ("soundcloud-search",
              lambda: self._s_soundcloud_search(query)),
             ("bandcamp-search", lambda: self._s_bandcamp_search(query)),
