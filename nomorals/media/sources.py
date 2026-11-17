@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import abc
 import html as html_mod
+import json
 import os
 import re
 import urllib.parse
@@ -55,8 +56,8 @@ __all__ = [
     "JamendoSource",
     "FMASource",
     "MdundoSource",
-    "mp3pm-search",
-    "mp3juice-search",
+    "MP3PMSource",
+    "MP3JuiceSource",
     "BandcampSource",
     "NotJustOkSource",
     "TooXclusiveSource",
@@ -469,6 +470,48 @@ class MP3PMSource(BaseScrapeSource):
                       candidate.url[:80], exc)
             return ""
 
+    # BaseScrapeSource framework — the class must implement these to
+    # be instantiable; the live path is the custom search() above,
+    # these are the same row shapes through the framework interface.
+    def search_url(self, query: str) -> str:
+        """The JSON search endpoint — the site's search URL."""
+        return self._SEARCH_API.format(
+            q=urllib.parse.quote_plus(query))
+
+    def parse_search(self, html: str) -> list[tuple[str, str]]:
+        """[(title, post_url)] from a search response — JSON first,
+        then the HTML-shell anchor fallback. Same row shape search()
+        reads, without the per-row artist enrichment."""
+        rows: list[dict[str, Any]] = []
+        try:
+            data = json.loads(html)
+            seq = data.get("songs") or data.get("results") or data
+            if isinstance(seq, list):
+                rows = [r if isinstance(r, dict) else {"url": r}
+                        for r in seq]
+        except (json.JSONDecodeError, AttributeError):
+            for href in re.findall(
+                    r'https://[a-z0-9\-]+\.mp3\.pm/song/[^"\']+', html):
+                rows.append({"url": href})
+        out: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for row in rows:
+            url = str(row.get("url") or row.get("link") or "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            slug = url.rstrip("/").rsplit("/", 1)[-1]
+            title = self._clean(str(row.get("title") or "")
+                                .replace("-", " ")
+                                or slug.replace("-", " "))
+            out.append((title, url))
+        return out
+
+    def extract_download(self, post_html: str, post_url: str) -> str:
+        """Direct file URL from a song page — the first media link."""
+        direct = self._direct_media_links(post_html, post_url)
+        return direct[0] if direct else ""
+
 
 class MP3JuiceSource(BaseScrapeSource):
     """MP3Juice mirror (service-et-reception.fr).  Keyless anonymous
@@ -487,9 +530,9 @@ class MP3JuiceSource(BaseScrapeSource):
         body = urllib.parse.urlencode(form).encode()
         req = urllib.request.Request(
             self._BASE + path, data=body,
-            headers={"User-Agent": _UA, "Referer": self._BASE + "/",
+            headers={"User-Agent": BROWSER_UA, "Referer": self._BASE + "/",
                      "Content-Type": "application/x-www-form-urlencoded"})
-        with urllib.request.urlopen(req, timeout=self._timeout) as r:
+        with urllib.request.urlopen(req, timeout=_HTTP_TIMEOUT) as r:
             return r.read().decode("utf-8", "replace")
 
     def search(self, query: str, limit: int = 5) -> list[SourceCandidate]:
@@ -523,6 +566,36 @@ class MP3JuiceSource(BaseScrapeSource):
             if direct:
                 return direct[0]
         return ""
+
+    # BaseScrapeSource framework — the class must implement these to
+    # be instantiable; the live path is the custom search() above,
+    # these are the same row shapes through the framework interface.
+    def search_url(self, query: str) -> str:
+        """The search endpoint — ``/``. The query travels in the
+        POST body (see ``_post``), not the URL, so there is no query
+        string to build."""
+        return self._BASE + "/"
+
+    def parse_search(self, html: str) -> list[tuple[str, str]]:
+        """[(title, post_url)] from a results page — ``data-id`` rows
+        with their ``<h3>`` titles. Same row shape search() reads."""
+        ids = re.findall(r'data-id="(\d+)"', html)
+        titles = [self._clean(re.sub(r"<[^>]+>", "", t))
+                  for t in re.findall(r"<h3[^>]*>(.*?)</h3>", html, re.S)]
+        return [(titles[n] if n < len(titles) else "",
+                 f"{self._BASE}/?id={sid}")
+                for n, sid in enumerate(ids)]
+
+    def extract_download(self, post_html: str, post_url: str) -> str:
+        """Direct file URL for a ``/?id=<sid>`` result page —
+        delegates to download_url with the id parsed out of the URL."""
+        sid = urllib.parse.parse_qs(
+            urllib.parse.urlparse(post_url).query).get("id", [""])[0]
+        if not sid:
+            return ""
+        return self.download_url(SourceCandidate(
+            source=self.name, title="", artist="", url=post_url,
+            extra={"id": sid}))
 
 # ── Boomplay ──────────────────────────────────────────────────────────────
 
@@ -1525,6 +1598,8 @@ SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("notjustok-search", NotJustOkSource()),
     ("tooxclusive-search", TooXclusiveSource()),
     ("mdundo-search", MdundoSource()),
+    ("mp3pm-search", MP3PMSource()),
+    ("mp3juice-search", MP3JuiceSource()),
     ("bandcamp-search", BandcampSource()),
     ("archiveorg-search", ArchiveOrgSource()),
     ("jamendo-search", JamendoSource()),
@@ -1551,6 +1626,8 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "notjustok-search",
     "tooxclusive-search",
     "mdundo-search",
+    "mp3pm-search",
+    "mp3juice-search",
     "soundcloud-search",
     "bandcamp-search",
     "youtube-search",
@@ -1623,6 +1700,8 @@ MUSIC_SOURCE_REGIONS: dict[str, str] = {
     "notjustok-search": "africa",
     "tooxclusive-search": "africa",
     "mdundo-search": "africa",
+    "mp3pm-search": "global",
+    "mp3juice-search": "global",
     "soundcloud-search": "global",
     "bandcamp-search": "global",
     "youtube-search": "global",

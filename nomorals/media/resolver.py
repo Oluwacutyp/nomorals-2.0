@@ -538,6 +538,8 @@ class SourceResolver:
             ("notjustok-search", self._notjustok_search_many),
             ("tooxclusive-search", self._tooxclusive_search_many),
             ("mdundo-search", self._mdundo_search_many),
+            ("mp3pm-search", self._mp3pm_search_many),
+            ("mp3juice-search", self._mp3juice_search_many),
             ("soundcloud-search", self._soundcloud_search_many),
             ("bandcamp-search", self._bandcamp_search_many),
             ("youtube-search", self._youtube_search_many),
@@ -836,6 +838,23 @@ class SourceResolver:
             query, limit, "MdundoSource", "mdundo",
             "Mdundo search", downloadable=True)
 
+    def _mp3pm_search_many(self, query: str,
+                           limit: int) -> list[ResolvedAudio]:
+        # MP3.pm is a full-track archive like Mdundo — the shared
+        # helper only needs a class with .search(), and
+        # downloadable=True marks the win as audio.
+        return self._api_source_search_many(
+            query, limit, "MP3PMSource", "mp3pm",
+            "MP3.pm search", downloadable=True)
+
+    def _mp3juice_search_many(self, query: str,
+                              limit: int) -> list[ResolvedAudio]:
+        # MP3Juice mirror serves full-track MP3s — same shape as
+        # Mdundo above.
+        return self._api_source_search_many(
+            query, limit, "MP3JuiceSource", "mp3juice",
+            "MP3Juice search", downloadable=True)
+
     def _preview_search_many(self, query: str, limit: int,
                              cls_name: str, kind: str,
                              label: str) -> list[ResolvedAudio]:
@@ -1054,10 +1073,6 @@ class SourceResolver:
                 query, "TooXclusiveSource", "tooxclusive")),
             ("mdundo-search", lambda: self._s_blog_search(
                 query, "MdundoSource", "mdundo")),
-            ("mp3pm-search", lambda: self._s_blog_search_many(
-                query, "MP3PMSource", "mp3pm")),
-            ("mp3juice-search", lambda: self._s_blog_search_many(
-                query, "MP3JuiceSource", "mp3juice")),
             ("mp3pm-search", lambda: self._s_blog_search(
                 query, "MP3PMSource", "mp3pm")),
             ("mp3juice-search", lambda: self._s_blog_search(
