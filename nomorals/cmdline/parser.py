@@ -118,6 +118,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "repo": ["rp"],
     "mesh": ["msh"],
     "sync": ["sy"],
+    "failures": ["fail"],
     "stream": ["strm"],
 
     "search": ["s"],
@@ -4341,6 +4342,20 @@ def _parser() -> argparse.ArgumentParser:
     sync.add_argument("task", nargs="*", default=[], help="verb and arguments")
     sync.add_argument("--json", action="store_true", help="Output as JSON")
     sync.add_argument("--peer-db", default="", help="peer database path")
+
+    failures = sub.add_parser("failures", aliases=CLI_ALIASES["failures"],
+        help="failures ledger: classified read, operator grading, re-fit",
+        description=("nm failures list [--json]\n"
+                     "nm failures grade <n|site> <real|noise> "
+                     "[--grader NAME]\n"
+                     "nm failures train [--json]\n"
+                     "nm failures grades [--json]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    failures.add_argument("task", nargs="*", default=[],
+                          help="verb and arguments")
+    failures.add_argument("--json", action="store_true",
+                          help="Output as JSON")
 
     search = sub.add_parser("search", aliases=CLI_ALIASES["search"],
         help="universal federated search across memory, books, wisdom, docs, code, timeline",

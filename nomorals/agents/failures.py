@@ -22,10 +22,13 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from typing import Any
+
 from nomorals.core import failure_store as _failure_store
 
-__all__ = ["Failure", "record_failure", "recent_failures",
-           "failure_count", "clear_failures", "format_failures"]
+__all__ = ["Failure", "TriagedFailure", "record_failure", "recent_failures",
+           "triaged_failures", "failure_count", "clear_failures",
+           "format_failures"]
 
 #: Ring size: enough to see a failing site's history, small enough to
 #: never grow. Oldest entries drop off silently by design.
@@ -40,6 +43,21 @@ class Failure:
     site: str
     exc_type: str
     message: str
+
+
+@dataclass(frozen=True)
+class TriagedFailure:
+    """One failure with its learned triage attached.
+
+    ``verdict`` is "real" (needs attention) or "noise" when a trained
+    classifier is loaded, and "ungraded" — with ``p_real`` 0.5 — when no
+    classifier has ever been promoted. An ungraded row is waiting data,
+    never an invented classification.
+    """
+
+    failure: Failure
+    p_real: float
+    verdict: str
 
 
 _ledger: deque[Failure] = deque(maxlen=_MAX_FAILURES)
@@ -94,6 +112,44 @@ def recent_failures(limit: int = 20) -> list[Failure]:
     return items[::-1][:max(0, limit)]
 
 
+def triaged_failures(limit: int = 20, *, model: Any = None,
+                      store: Any = None) -> list[TriagedFailure]:
+    """Newest-first failures with the learned triage attached.
+
+    ``model`` is a fitted classifier, or None to auto-load the latest
+    promoted one via :func:`agents.failure_models.load_error_classifier`.
+    With no model every row is "ungraded" (p_real 0.5) — the ledger
+    surfaces it, exactly as before. Never raises: a bad store or a bad
+    model degrades to ungraded, never to a crash in the read path.
+    """
+    items = recent_failures(limit)
+    recent = [{"ts": f.ts, "site": f.site, "exc_type": f.exc_type,
+               "message": f.message} for f in items]
+    loaded = model
+    if loaded is None:
+        try:
+            from .failure_models import load_error_classifier
+
+            loaded = load_error_classifier(store)
+        except Exception:  # noqa: BLE001 - a bad store never kills a read
+            loaded = None
+    out: list[TriagedFailure] = []
+    for f in items:
+        if loaded is None:
+            out.append(TriagedFailure(failure=f, p_real=0.5,
+                                      verdict="ungraded"))
+            continue
+        try:
+            from .failure_models import classify_failure
+
+            p = classify_failure(f, loaded, recent=recent)
+        except Exception:  # noqa: BLE001 - a bad row never kills a read
+            p = 0.5
+        out.append(TriagedFailure(failure=f, p_real=p,
+                                  verdict="real" if p >= 0.5 else "noise"))
+    return out
+
+
 def failure_count() -> int:
     """Total failures ever recorded (ledger length is capped; this is not)."""
     with _lock:
@@ -111,14 +167,34 @@ def clear_failures() -> None:
         _store.clear()
 
 
-def format_failures(limit: int = 20) -> str:
-    """One human-readable block for reading the ledger back."""
-    items = recent_failures(limit)
-    if not items:
+def format_failures(limit: int = 20, *, triage: bool = True) -> str:
+    """One human-readable block for reading the ledger back.
+
+    With a trained classifier loaded, each line carries its triage
+    (``[real 0.87]`` / ``[noise 0.12]``) and the header carries the
+    split. With no classifier the output is byte-identical to the
+    un-triaged format — an ungraded ledger is never reworded.
+    ``triage=False`` forces the old format.
+    """
+    if triage:
+        rows = triaged_failures(limit)
+    else:
+        rows = [TriagedFailure(failure=f, p_real=0.5, verdict="ungraded")
+                for f in recent_failures(limit)]
+    if not rows:
         return "no agents failures recorded."
-    lines = [f"⚠️ agents failures ({failure_count()} total, "
-             f"showing {len(items)} newest):"]
-    for f in items:
+    classified = [r for r in rows if r.verdict != "ungraded"]
+    header = (f"⚠️ agents failures ({failure_count()} total, "
+              f"showing {len(rows)} newest)")
+    if classified:
+        n_real = sum(1 for r in classified if r.verdict == "real")
+        header += (f"; triaged: {n_real} real, "
+                   f"{len(classified) - n_real} noise")
+    lines = [header + ":"]
+    for r in rows:
+        f = r.failure
         ts = time.strftime("%m-%d %H:%M", time.localtime(f.ts))
-        lines.append(f"• {ts} {f.site}: {f.exc_type}: {f.message}")
+        tag = (f" [{r.verdict} {r.p_real:.2f}]"
+               if r.verdict != "ungraded" else "")
+        lines.append(f"• {ts} {f.site}: {f.exc_type}: {f.message}{tag}")
     return "\n".join(lines)
