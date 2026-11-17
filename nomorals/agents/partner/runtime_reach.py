@@ -3158,8 +3158,63 @@ class RuntimeReachMixin:
             return f"removed draft: {page.title}"
         return usage
 
+    def _decisions_whatif_block(self, decision: str, options: list[str]) -> str:
+        """Render the what-if comparison for free-text options (read-only).
+
+        Matches each option to a world-graph node, simulates the change
+        against the live graph, and names the least-disruptive option.
+        The simulation never writes: the journal is untouched and no
+        graph node is marked disrupted.  A failure to simulate is
+        reported, never raised into the command.
+        """
+        from ...planning.counterfactual import whatif_for_options
+
+        try:
+            graph = self._world_graph()
+            result = whatif_for_options(graph, options)
+        except Exception as exc:  # noqa: BLE001 — simulation never fails a command
+            return f"what-if unavailable: {exc}"
+        lines = [f"what-if for “{decision}”:"]
+        for row in result.get("options") or []:
+            opt = row["option"]
+            node = graph.get(opt["node_id"]) if hasattr(graph, "get") else None
+            node_label = node.label if node is not None else opt["label"]
+            head = (f"{opt['label']} → {node_label}"
+                    if opt["label"] != node_label else opt["label"])
+            if not row.get("ok"):
+                lines.append(
+                    f"  {head} — {row.get('reason') or 'simulation failed'}")
+                continue
+            affected = row.get("affected_labels") or []
+            tail = f" · affects {', '.join(affected)}" if affected else ""
+            lines.append(
+                f"  {head} · blast {row.get('total_affected', 0)}"
+                f" · depth {row.get('max_depth', 0)}{tail}")
+        for item in result.get("unmatched") or []:
+            lines.append(f"  not simulated: {item['option']} — {item['reason']}")
+        rec = result.get("recommendation")
+        if rec is not None:
+            blast = result.get("recommendation_blast") or 0
+            node = graph.get(rec["node_id"]) if hasattr(graph, "get") else None
+            node_label = node.label if node is not None else rec["label"]
+            if rec.get("new_state") and rec["new_state"] != node_label:
+                change = f"changing {node_label} to {rec['new_state']!r}"
+            else:
+                change = f"changing {node_label}"
+            lines.append(
+                f"  least disruptive: {rec['label']} (blast {blast})"
+                f" — {change} would affect {blast} node(s) · advisory")
+        elif result.get("options"):
+            lines.append("  no viable option — every option failed to simulate")
+        else:
+            lines.append("  nothing to simulate yet — add nodes with /graph add")
+        over = result.get("over_budget") or []
+        if over:
+            lines.append(f"  over budget: {', '.join(over)}")
+        return "\n".join(lines)
+
     def _control_decisions(self, tail: str, *, chat_key: str = "") -> str:
-        """The decision journal: /decisions list|add|resolve|review|calibration.
+        """The decision journal: /decisions list|add|resolve|review|calibration|whatif.
 
         Records the OWNER's decisions with their predictions BEFORE
         outcomes, so the weekly review (and this surface) can show how
@@ -3194,9 +3249,11 @@ class RuntimeReachMixin:
             decision = fields[0] if fields else ""
             if not decision:
                 return ("usage: /decisions add <decision> "
-                        "[| chosen | prediction | conf%]")
+                        "[| chosen | prediction | conf% | opt1; opt2; ...]")
             chosen = fields[1] if len(fields) > 1 else ""
             prediction = fields[2] if len(fields) > 2 else ""
+            options = ([o.strip() for o in fields[4].split(";") if o.strip()]
+                       if len(fields) > 4 and fields[4] else [])
             confidence = None
             if len(fields) > 3 and fields[3]:
                 raw_conf = fields[3].rstrip("%").strip()
@@ -3210,13 +3267,20 @@ class RuntimeReachMixin:
             try:
                 d = journal.record(
                     decision=decision, chosen=chosen,
-                    prediction=prediction, confidence=confidence)
+                    prediction=prediction, confidence=confidence,
+                    options=options)
             except ValueError as exc:
                 return str(exc)
-            return (f"recorded: {d.id}: {d.decision}"
-                    + (f" → {d.chosen}" if d.chosen else "")
-                    + " — resolve it when the outcome lands: "
-                      f"/decisions resolve {d.id} [good|bad] <outcome>")
+            reply = (f"recorded: {d.id}: {d.decision}"
+                     + (f" → {d.chosen}" if d.chosen else "")
+                     + " — resolve it when the outcome lands: "
+                       f"/decisions resolve {d.id} [good|bad] <outcome>")
+            if options:
+                # The comparison runs at record time, before the decision
+                # is settled: the owner sees what each option would disturb
+                # while their pick is still just a pick.
+                reply += "\n" + self._decisions_whatif_block(d.decision, options)
+            return reply
         if verb == "resolve":
             bits = rest.strip().split(None, 1)
             if not bits:
@@ -3243,6 +3307,18 @@ class RuntimeReachMixin:
             if sentence:
                 lines.append(f"🧭 {sentence}")
             return "\n".join(lines)
+        if verb == "whatif":
+            if not rest.strip():
+                return "usage: /decisions whatif <id>"
+            d = self._resolve_decision(journal, rest.strip().split(None, 1)[0])
+            if d is None:
+                return (f"no decision matching {rest.strip()!r} — "
+                        "/decisions list shows ids.")
+            if not d.options:
+                return (f"no options recorded for {d.id} — record them with "
+                        "/decisions add <decision> | chosen | prediction "
+                        "| conf% | opt1; opt2")
+            return self._decisions_whatif_block(d.decision, list(d.options))
         if verb == "review":
             period = rest.strip().lower() or "weekly"
             if period not in ("weekly", "monthly"):
@@ -3256,9 +3332,9 @@ class RuntimeReachMixin:
                         "then resolve it when the outcome lands.")
             return f"🧭 {sentence}"
         return ("usage: /decisions list · add <decision> "
-                "[| chosen | prediction | conf%]\n"
+                "[| chosen | prediction | conf% | opt1; opt2; ...]\n"
                 "       resolve <id> [good|bad] <outcome> · "
-                "review [weekly|monthly] · calibration")
+                "review [weekly|monthly] · calibration · whatif <id>")
 
     # ── backups: /backup ──────────────────────────────────────────────
     def _control_backup(self, tail: str, *, chat_key: str = "") -> str:

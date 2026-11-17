@@ -7,6 +7,14 @@ from .graph import (
     control_graph,
     disruption_alerts,
 )
+from .counterfactual import (
+    DecisionOption,
+    CounterfactualResult,
+    simulate_counterfactual,
+    compare_options,
+    recommend_option,
+    whatif_for_options,
+)
 from .route import (
     Stop,
     Leg,
@@ -53,6 +61,12 @@ __all__ = [
     "GraphEdge",
     "control_graph",
     "disruption_alerts",
+    "DecisionOption",
+    "CounterfactualResult",
+    "simulate_counterfactual",
+    "compare_options",
+    "recommend_option",
+    "whatif_for_options",
     "Stop",
     "Leg",
     "RouteResult",

@@ -27,6 +27,7 @@ __all__ = [
     "simulate_counterfactual",
     "compare_options",
     "recommend_option",
+    "whatif_for_options",
 ]
 
 
@@ -157,3 +158,77 @@ def recommend_option(
         "over_budget": over_budget,
         "options": [r.to_dict() for r in results],
     }
+
+
+def whatif_for_options(
+    graph: Any,
+    options: Sequence[str],
+    *,
+    max_acceptable_blast: int | None = None,
+) -> dict[str, Any]:
+    """Match free-text decision options to world-graph nodes and compare them.
+
+    An option names the thing that would change — a graph node id
+    (``wg_...``) or a node label (``"Launch"``).  Matching is exact only
+    (node id, then case-insensitive label): a loose match would simulate
+    the wrong node and present its blast radius as the option's.  Options
+    that match nothing — or a label shared by several nodes — are reported
+    in ``unmatched`` with the reason, never dropped and never force-matched.
+    The return is the :func:`recommend_option` payload plus ``unmatched``.
+
+    Never raises and never mutates the graph: an unreadable graph or a
+    failed lookup degrades to unmatched entries, not an exception.
+    """
+    seen: set[str] = set()
+    clean: list[str] = []
+    for raw in options or []:
+        text = (raw or "").strip()
+        if text and text not in seen:
+            seen.add(text)
+            clean.append(text)
+    try:
+        nodes = list(graph.list_nodes()) if hasattr(graph, "list_nodes") else []
+    except Exception as exc:  # noqa: BLE001 — an unreadable graph simulates nothing
+        return {
+            "recommendation": None, "recommendation_blast": None,
+            "over_budget": [], "options": [],
+            "unmatched": [{"option": text,
+                           "reason": f"world graph unreadable: {exc}"}
+                          for text in clean],
+        }
+    by_id = {n.node_id: n for n in nodes}
+    by_label: dict[str, list] = {}
+    for node in nodes:
+        by_label.setdefault((node.label or "").strip().lower(), []).append(node)
+    unmatched: list[dict[str, str]] = []
+    matched: list[DecisionOption] = []
+    for text in clean:
+        node = by_id.get(text)
+        if node is None and hasattr(graph, "get"):
+            try:
+                node = graph.get(text)
+            except Exception:  # noqa: BLE001 — a failed lookup is "no match"
+                node = None
+        if node is None:
+            hits = by_label.get(text.lower(), [])
+            if len(hits) == 1:
+                node = hits[0]
+            elif len(hits) > 1:
+                unmatched.append({
+                    "option": text,
+                    "reason": (f"label matches {len(hits)} nodes — use a "
+                               f"node id (e.g. {hits[0].node_id}) to pick one"),
+                })
+                continue
+        if node is None:
+            unmatched.append({
+                "option": text,
+                "reason": "no world-graph node matches this option",
+            })
+            continue
+        matched.append(DecisionOption(node_id=node.node_id, label=text,
+                                      new_state=text))
+    result = recommend_option(graph, matched,
+                              max_acceptable_blast=max_acceptable_blast)
+    result["unmatched"] = unmatched
+    return result
