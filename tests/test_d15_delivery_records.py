@@ -623,11 +623,11 @@ class ProducerCensusTests(unittest.TestCase):
         summary = census_summarize()
         # No Notifier producer was added by this pass — the records
         # are registry writes at the hand-off seams, not alerts —
-        # so the census stands exactly where P1 pinned it, and the
-        # mechanical enforcement accepts every new call site. The
-        # three _journal event-bus exclusions (guardrails,
+        # so the census stands exactly where the d15 fix pinned it,
+        # and the mechanical enforcement accepts every new call
+        # site. The three _journal event-bus exclusions (guardrails,
         # prompt_compiler, livekit_call) bring excluded to 73.
-        self.assertEqual(summary["producers"], 65)
+        self.assertEqual(summary["producers"], 77)
         self.assertEqual(summary["excluded"], 73)
 
 

@@ -109,14 +109,14 @@ class TestProducerInventory:
 
     def test_census_counts(self):
         summary = census.summarize()
-        # the census reproduced from code on current main: 138
-        # publish-shaped call sites = 65 producers + 73 excluded.
-        assert summary["producers"] == 65
+        # the census reproduced from code on current main: 150
+        # publish-shaped call sites = 77 producers + 73 excluded.
+        assert summary["producers"] == 77
         assert summary["excluded"] == 73
         assert summary["by_posture"] == {
-            "hinted": 30, "unhinted": 28, "forwarding": 7}
+            "hinted": 30, "unhinted": 40, "forwarding": 7}
         # the bypass is the unhinted + hints-dependent-forwarding set
-        assert summary["by_class"]["mission"] == 6
+        assert summary["by_class"]["mission"] == 7
         assert summary["by_class"]["internal"] == 3
 
     def test_scanner_finds_a_planted_producer(self, tmp_path):

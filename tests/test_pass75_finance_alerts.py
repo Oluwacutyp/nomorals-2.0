@@ -310,6 +310,10 @@ def _collect_ensure_bindings(ctx, sched):
     """Execute every built-in ensure_* job registration against the
     scratch scheduler; return ({(tool, args-json): job name}, errors)."""
     from nomorals.agency.wiring import ensure_agency_shift_job
+    from nomorals.agents.dayrecord import ensure_day_derivation_job
+    from nomorals.agents.delegation_manager import (
+        ensure_delegation_manager_job)
+    from nomorals.agents.group_rhythm import ensure_group_rhythm_job
     from nomorals.agents.modes import ensure_agent_modes_tick_job
     from nomorals.agents.morning_briefing import ensure_briefing_job
     from nomorals.agents.morning_pulse import (
@@ -318,16 +322,40 @@ def _collect_ensure_bindings(ctx, sched):
     from nomorals.agents.betdesk.jobs import ensure_betdesk_jobs
     from nomorals.agents.afternoon_pulse import ensure_afternoon_pulse_job
     from nomorals.agents.evening_pulse import ensure_evening_pulse_job
+    from nomorals.agents.offline_host import ensure_offline_sync_job
+    from nomorals.agents.outcome_steward import ensure_outcome_steward_job
     from nomorals.agents.research_loop import ensure_research_job
     from nomorals.agents.scheduler import ensure_persona_jobs
+    from nomorals.agents.shorts_publisher import ensure_shorts_publisher_job
     from nomorals.agents.skill_evolution import ensure_improvement_schedule
+    from nomorals.agents.swarm_board import ensure_swarm_board_job
+    from nomorals.agents.watcher import ensure_watch_loop_job
     from nomorals.agents.watchers import ensure_sweeper_job
+    from nomorals.agents.workflow.runner import ensure_workflow_job
     from nomorals.autonomy.presence import ensure_heartbeat_job
+    from nomorals.autonomy.unified import ensure_unified_scheduler_job
+    from nomorals.backup.jobs import ensure_backup_jobs
+    from nomorals.cognition.calibration_loop import (
+        ensure_calibration_loop_job)
+    from nomorals.cognition.failure_loop import ensure_failure_loop_job
+    from nomorals.community.digest import ensure_group_ritual_job
+    from nomorals.community.orchestration import ensure_orchestration_job
     from nomorals.finance.jobs import ensure_finance_jobs
+    from nomorals.games.tournaments_seasons import ensure_season_tick_job
+    from nomorals.health.drift import ensure_health_drift_job
     from nomorals.immune.wiring import ensure_immune_sampler_job
+    from nomorals.media.explore.jobs import ensure_explore_jobs
     from nomorals.media.source_jobs import ensure_source_health_jobs
     from nomorals.memory.cadence import ensure_consolidation_job
     from nomorals.agents.motivation import ensure_motivation_jobs
+    from nomorals.missions.render_driver import ensure_render_tick_job
+    from nomorals.shows.scheduling import ensure_show_schedule_job
+    from nomorals.social.chat.group_backup import ensure_group_backup_job
+    from nomorals.social.chat.group_roster_diff import (
+        ensure_group_roster_diff_job)
+    from nomorals.social.chat.whatsapp_digest import ensure_group_digest_job
+    from nomorals.storage.parity import ensure_shadow_parity_job
+    from nomorals.training.continual_driver import ensure_continual_update_job
     from nomorals.workspace.rooms import ensure_rooms_tick_job
 
     calls = [
@@ -352,6 +380,38 @@ def _collect_ensure_bindings(ctx, sched):
         ("motivation jobs", lambda: ensure_motivation_jobs(ctx)),
         ("betdesk jobs", lambda: ensure_betdesk_jobs(sched)),
         ("download source health", lambda: ensure_source_health_jobs(sched)),
+        ("day derivation", lambda: ensure_day_derivation_job(sched)),
+        ("outcome steward sweep",
+         lambda: ensure_outcome_steward_job(sched)),
+        ("shorts publisher", lambda: ensure_shorts_publisher_job(sched)),
+        ("orchestration tick", lambda: ensure_orchestration_job(sched)),
+        ("exploration sweeps", lambda: ensure_explore_jobs(sched)),
+        ("shadow parity", lambda: ensure_shadow_parity_job(
+            ctx, scheduler_factory=Scheduler)),
+        ("delegation manager tick",
+         lambda: ensure_delegation_manager_job(sched)),
+        ("group rhythm tick", lambda: ensure_group_rhythm_job(sched)),
+        ("offline sync tick", lambda: ensure_offline_sync_job(sched)),
+        ("swarm board tick", lambda: ensure_swarm_board_job(sched)),
+        ("watch loop tick", lambda: ensure_watch_loop_job(sched)),
+        ("workflow tick", lambda: ensure_workflow_job(sched)),
+        ("unified scheduler tick",
+         lambda: ensure_unified_scheduler_job(sched)),
+        ("backup jobs", lambda: ensure_backup_jobs(sched)),
+        ("calibration loop tick",
+         lambda: ensure_calibration_loop_job(sched)),
+        ("failure loop tick", lambda: ensure_failure_loop_job(sched)),
+        ("group ritual tick", lambda: ensure_group_ritual_job(sched)),
+        ("season tick", lambda: ensure_season_tick_job(sched)),
+        ("health drift tick", lambda: ensure_health_drift_job(sched)),
+        ("render tick", lambda: ensure_render_tick_job(sched)),
+        ("show schedule tick", lambda: ensure_show_schedule_job(sched)),
+        ("group backup tick", lambda: ensure_group_backup_job(sched)),
+        ("group roster diff tick",
+         lambda: ensure_group_roster_diff_job(sched)),
+        ("group digest tick", lambda: ensure_group_digest_job(sched)),
+        ("continual update tick",
+         lambda: ensure_continual_update_job(sched)),
     ]
     errors = {}
     for label, fn in calls:
@@ -425,6 +485,25 @@ _VARIABLE_TOOL_FILES = {
     "agents/skill_evolution.py",  # loop over (name, spec, tool, args)
     "immune/wiring.py",          # {"tool": IMMUNE_SAMPLER_TOOL}
     "agents/partner/runtime.py",  # organ-tick loop {"tool": _tool}
+    "agents/delegation_manager.py",  # {"tool": DELEGATION_TOOL}
+    "agents/group_rhythm.py",    # {"tool": RHYTHM_TOOL}
+    "agents/offline_host.py",    # {"tool": OFFLINE_SYNC_TOOL}
+    "agents/swarm_board.py",     # {"tool": SWARM_BOARD_TOOL}
+    "agents/watcher.py",         # {"tool": WATCH_LOOP_TOOL}
+    "agents/workflow/runner.py",  # {"tool": WORKFLOW_TOOL}
+    "autonomy/unified.py",       # {"tool": UNIFIED_SCHEDULER_TOOL}
+    "backup/jobs.py",            # loop over specs {"tool": tool}
+    "cognition/calibration_loop.py",  # {"tool": CALIBRATION_LOOP_TOOL}
+    "cognition/failure_loop.py",  # {"tool": FAILURE_LOOP_TOOL}
+    "community/digest.py",       # {"tool": RITUAL_TOOL}
+    "games/tournaments_seasons.py",  # {"tool": SEASON_TOOL}
+    "health/drift.py",           # {"tool": DRIFT_TOOL}
+    "missions/render_driver.py",  # {"tool": RENDER_TOOL}
+    "shows/scheduling.py",       # {"tool": SHOW_SCHEDULE_TOOL}
+    "social/chat/group_backup.py",  # {"tool": BACKUP_TOOL}
+    "social/chat/group_roster_diff.py",  # {"tool": ROSTER_DIFF_TOOL}
+    "social/chat/whatsapp_digest.py",  # {"tool": DIGEST_TOOL}
+    "training/continual_driver.py",  # {"tool": CONTINUAL_TOOL}
 }
 
 
