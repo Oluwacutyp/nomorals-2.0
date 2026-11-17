@@ -38,8 +38,15 @@ Audio rates: the room is natively 48 kHz Opus. Devon publishes at
 out, in pure stdlib (integer-ratio box-average down, zero-order-hold
 up, linear interpolation otherwise). No numpy, no new dependency.
 
-Video is OUT of scope: the transport can publish video tracks, but
-this rung publishes audio only. A video rung would be a separate build.
+Video has its own rung in this same module (``LiveKitVideoSession``,
+``RtcTransport`` with ``video=True``): Devon publishes a real video
+track — a live title card, a still image, or her own motion-studio
+scene rendered frame by frame — and subscribes to the room's video,
+saving one snapshot PNG per publisher per second. The video session
+joins as a second participant (identity ``devon-video``) so it can run
+beside the voice call in the same room; with a pre-signed
+``LIVEKIT_TOKEN`` the identity is whatever the token says, so
+simultaneous voice + video wants API key + secret minting.
 
 Credentials: ``LIVEKIT_URL`` + either a pre-signed ``LIVEKIT_TOKEN``
 or ``LIVEKIT_API_KEY`` + ``LIVEKIT_API_SECRET`` (token minted locally
@@ -102,6 +109,9 @@ __all__ = [
     "LiveCallReport",
     "LiveKitCallSession",
     "LiveKitTransport",
+    "LiveKitVideoTransport",
+    "LiveVideoReport",
+    "LiveKitVideoSession",
     "RtcTransport",
     "sdk_available",
     "sdk_version",
@@ -112,7 +122,18 @@ __all__ = [
     "end_live_call",
     "get_live_call",
     "live_call_status",
+    "title_frame_source",
+    "image_frame_source",
+    "scene_frame_source",
+    "start_video_session",
+    "end_video_session",
+    "get_video_session",
+    "video_session_status",
+    "live_video_status",
     "LIVEKIT_SAMPLE_RATE",
+    "VIDEO_IDENTITY",
+    "VIDEO_DEFAULT_SIZE",
+    "VIDEO_DEFAULT_FPS",
 ]
 
 _log = get_logger(__name__)
@@ -137,6 +158,18 @@ REMOTE_SILENCE_END_S = 30.0
 
 #: End words — the same set as the local session.
 _END_WORDS = {"exit", "quit", "goodbye", "bye", "stop listening"}
+
+#: The video session joins as a second participant, so it can run
+#: beside the voice call in the same room.
+VIDEO_IDENTITY = "devon-video"
+#: Default publish size and rate for the video track.
+VIDEO_DEFAULT_SIZE = (640, 360)
+VIDEO_DEFAULT_FPS = 15.0
+#: One snapshot PNG per publisher at most this often.
+VIDEO_SNAPSHOT_EVERY_S = 1.0
+#: Inbound video frames held at once; the pump drops the oldest when
+#: the session is slower than the room (video never blocks the pump).
+VIDEO_MAX_QUEUE_FRAMES = 8
 
 
 class LiveKitUnavailable(Exception):
@@ -379,6 +412,43 @@ class LiveKitTransport(Protocol):
     def disconnect(self) -> None: ...
 
 
+class LiveKitVideoTransport(Protocol):
+    """What the video session needs from a room, in sync calls.
+
+    The same room connection as the voice transport — one
+    ``RtcTransport`` implements both — with video opted in at
+    construction. A fake implementing this protocol drives the REAL
+    video session in tests: published frames are counted and sized,
+    inbound frames are really received and really saved as snapshots.
+    """
+
+    def connect(self, url: str, token: str, *, timeout: float = 30.0
+                ) -> None: ...
+
+    def publish_video_frame(self, rgb: bytes, width: int, height: int,
+                            *, timeout: float = 5.0) -> None:
+        """Publish one RGB24 frame (``width * height * 3`` bytes).
+
+        The capture itself is synchronous, so the timeout does not
+        apply — it is kept for symmetry with the audio publish.
+        """
+        ...
+
+    def poll_video_frame(self, timeout: float = 0.05
+                         ) -> tuple[bytes, int, int, str] | None:
+        """One inbound RGB24 frame (bytes, width, height, identity),
+        or None on timeout."""
+        ...
+
+    def remote_video_publishers(self) -> list[str]:
+        """Identities currently publishing a video track."""
+        ...
+
+    def is_connected(self) -> bool: ...
+
+    def disconnect(self) -> None: ...
+
+
 class RtcTransport:
     """The real transport: ``livekit.rtc`` Room + AudioSource/AudioStream.
 
@@ -387,7 +457,9 @@ class RtcTransport:
     :func:`sdk_available` first and refuses honestly without it.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, video: bool = False,
+                 video_width: int = VIDEO_DEFAULT_SIZE[0],
+                 video_height: int = VIDEO_DEFAULT_SIZE[1]) -> None:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._thread: threading.Thread | None = None
         self._inbound: queue.Queue[bytes] = queue.Queue(maxsize=512)
@@ -398,6 +470,18 @@ class RtcTransport:
         self._publishers_lock = threading.Lock()
         self._connected = False
         self._dropped_inbound = 0
+        # -- video (opt-in: the voice call builds this transport with
+        #    video off and its behavior is byte-identical) --------------
+        self._video = video
+        self._video_width = video_width
+        self._video_height = video_height
+        self._video_source: Any = None
+        self._inbound_video: queue.Queue = queue.Queue(
+            maxsize=VIDEO_MAX_QUEUE_FRAMES)
+        self._video_publishers: set[str] = set()
+        self._video_publishers_lock = threading.Lock()
+        self._video_streams: dict[str, Any] = {}
+        self._dropped_video = 0
 
     # -- loop plumbing ---------------------------------------------------
     def _ensure_loop(self) -> asyncio.AbstractEventLoop:
@@ -437,12 +521,29 @@ class RtcTransport:
             else:
                 self._publishers.discard(identity)
 
+    def _note_video_publisher(self, identity: str, on: bool) -> None:
+        with self._video_publishers_lock:
+            if on:
+                self._video_publishers.add(identity)
+            else:
+                self._video_publishers.discard(identity)
+
     def _on_track_subscribed(self, track: Any, publication: Any,
                              participant: Any) -> None:
         mime = str(getattr(publication, "mime_type", "") or "")
+        identity = str(getattr(participant, "identity", "") or "remote")
+        if mime.startswith("video/"):
+            if not self._video:
+                return  # video track — this transport is audio only
+            self._note_video_publisher(identity, True)
+            loop = self._loop
+            if loop is None:
+                return
+            asyncio.run_coroutine_threadsafe(
+                self._pump_video(track, identity), loop)
+            return
         if mime and not mime.startswith("audio/"):
             return  # video / data track — this rung is audio only
-        identity = str(getattr(participant, "identity", "") or "remote")
         self._note_publisher(identity, True)
         loop = self._loop
         if loop is None:
@@ -452,12 +553,19 @@ class RtcTransport:
 
     def _on_track_unsubscribed(self, track: Any, publication: Any,
                                participant: Any) -> None:
+        mime = str(getattr(publication, "mime_type", "") or "")
         identity = str(getattr(participant, "identity", "") or "remote")
+        if mime.startswith("video/"):
+            self._note_video_publisher(identity, False)
+            return
+        if mime and not mime.startswith("audio/"):
+            return
         self._note_publisher(identity, False)
 
     def _on_participant_disconnected(self, participant: Any) -> None:
         identity = str(getattr(participant, "identity", "") or "remote")
         self._note_publisher(identity, False)
+        self._note_video_publisher(identity, False)
 
     async def _pump_audio(self, track: Any, identity: str) -> None:
         """Drain one subscribed audio track into the inbound queue."""
@@ -484,6 +592,46 @@ class RtcTransport:
             with contextlib.suppress(Exception):  # noqa: BLE001 — best effort
                 await stream.aclose()
 
+    async def _pump_video(self, track: Any, identity: str) -> None:
+        """Drain one subscribed video track into the inbound queue.
+
+        Frames arrive as RGB24 (the session's working format); the
+        queue holds the latest few and drops the oldest when the
+        session is slower than the room — video never blocks the pump.
+        """
+        from livekit import rtc as _rtc
+
+        try:
+            stream = _rtc.VideoStream.from_track(
+                track=track, format=_rtc.VideoBufferType.RGB24)
+        except Exception as exc:  # noqa: BLE001 — a bad track ends the pump
+            record_failure("livekit_call.RtcTransport._pump_video", exc)
+            return
+        self._video_streams[identity] = stream
+        try:
+            async for event in stream:
+                frame = event.frame
+                try:
+                    rgb = bytes(frame.data)
+                    item = (rgb, int(frame.width), int(frame.height),
+                            identity)
+                except Exception:  # noqa: BLE001 — a bad frame is dropped
+                    continue
+                try:
+                    self._inbound_video.put_nowait(item)
+                except queue.Full:
+                    self._dropped_video += 1
+                    with contextlib.suppress(queue.Empty):
+                        self._inbound_video.get_nowait()
+                    with contextlib.suppress(queue.Full):
+                        self._inbound_video.put_nowait(item)
+        except Exception as exc:  # noqa: BLE001 — stream end is normal
+            record_failure("livekit_call.RtcTransport._pump_video", exc)
+        finally:
+            self._video_streams.pop(identity, None)
+            with contextlib.suppress(Exception):  # noqa: BLE001 — best effort
+                await stream.aclose()
+
     async def _async_connect(self, url: str, token: str) -> None:
         from livekit import rtc as _rtc
 
@@ -500,15 +648,27 @@ class RtcTransport:
         await room.local_participant.publish_track(track)
         self._room = room
         self._source = source
+        if self._video:
+            vsource = _rtc.VideoSource(self._video_width,
+                                       self._video_height)
+            vtrack = _rtc.LocalVideoTrack.create_video_track(
+                "devon-video", vsource)
+            await room.local_participant.publish_track(vtrack)
+            self._video_source = vsource
         self._connected = True
 
     async def _async_disconnect(self) -> None:
         room, source = self._room, self._source
+        vsource = self._video_source
         self._room, self._source = None, None
+        self._video_source = None
         self._connected = False
         if source is not None:
             with contextlib.suppress(Exception):  # noqa: BLE001 — best effort
                 await source.aclose()
+        if vsource is not None:
+            with contextlib.suppress(Exception):  # noqa: BLE001 — best effort
+                await vsource.aclose()
         if room is not None:
             with contextlib.suppress(Exception):  # noqa: BLE001 — best effort
                 await room.disconnect()
@@ -554,6 +714,51 @@ class RtcTransport:
     def remote_audio_publishers(self) -> list[str]:
         with self._publishers_lock:
             return sorted(self._publishers)
+
+    def publish_video_frame(self, rgb: bytes, width: int, height: int,
+                            *, timeout: float = 5.0) -> None:
+        """Publish one RGB24 frame on the video track.
+
+        The capture itself is synchronous (``VideoSource.capture_frame``
+        is a plain FFI call), so the timeout does not apply. Raises
+        ValueError on a wrong size, LiveKitUnavailable when no video
+        track is live.
+        """
+        if len(rgb) != width * height * 3:
+            raise ValueError(
+                f"publish_video_frame needs one RGB24 frame "
+                f"({width * height * 3} bytes), got {len(rgb)}")
+        if (width, height) != (self._video_width, self._video_height):
+            raise ValueError(
+                f"publish_video_frame size {(width, height)} does not "
+                f"match the video source "
+                f"{(self._video_width, self._video_height)}")
+        if self._video_source is None:
+            raise LiveKitUnavailable("not publishing video in a LiveKit "
+                                     "room",
+                                     missing="a LiveKit video connection")
+        from livekit import rtc as _rtc
+
+        frame = _rtc.VideoFrame(width, height,
+                                _rtc.VideoBufferType.RGB24, bytes(rgb))
+        try:
+            self._video_source.capture_frame(frame)
+        except Exception as exc:
+            raise LiveKitUnavailable(
+                f"could not publish the video frame: "
+                f"{type(exc).__name__}: {exc}",
+                missing="a live video track") from exc
+
+    def poll_video_frame(self, timeout: float = 0.05
+                         ) -> tuple[bytes, int, int, str] | None:
+        try:
+            return self._inbound_video.get(timeout=timeout)
+        except queue.Empty:
+            return None
+
+    def remote_video_publishers(self) -> list[str]:
+        with self._video_publishers_lock:
+            return sorted(self._video_publishers)
 
     def is_connected(self) -> bool:
         if not self._connected or self._room is None:
@@ -1258,4 +1463,574 @@ def live_call_status(session_id: str = "") -> dict[str, Any]:
                 _key = (session_id if session_id in _ACTIVE_REPORTS
                         else next(iter(_ACTIVE_REPORTS)))
                 out["last_report"] = _ACTIVE_REPORTS[_key].to_dict()
+    return out
+
+
+# ── video frame sources ────────────────────────────────────────────────────
+#
+# A frame source is ``(elapsed_seconds) -> (rgb24, width, height) | None``:
+# one RGB24 frame at the session size, or None when the source is done
+# (the session then ends as "source-ended"). The session owns the
+# pacing; the source owns the pixels.
+
+
+#: A frame source: elapsed seconds in -> one RGB24 frame or None.
+FrameSource = Callable[[float], tuple[bytes, int, int] | None]
+
+
+def title_frame_source(room: str, *, width: int = VIDEO_DEFAULT_SIZE[0],
+                       height: int = VIDEO_DEFAULT_SIZE[1]) -> FrameSource:
+    """A live title card: Devon's mark, the room, elapsed time.
+
+    The card is drawn with PIL, once per whole second — the clock is
+    the elapsed time since the source started, so the frame is a pure
+    function of ``t`` (deterministic, testable) and still honest on a
+    real call. The room name is on the card, so two rooms never show
+    the same picture.
+    """
+    from PIL import Image, ImageDraw, ImageFont
+
+    room = (room or "").strip() or "?"
+    state: dict[str, Any] = {"second": -1, "frame": None}
+
+    def _source(t: float) -> tuple[bytes, int, int] | None:
+        whole = int(t)
+        if whole == state["second"] and state["frame"] is not None:
+            return state["frame"]
+        img = Image.new("RGB", (width, height), (10, 10, 14))
+        d = ImageDraw.Draw(img)
+        font_big = ImageFont.load_default(size=max(24, height // 6))
+        font = ImageFont.load_default(size=max(14, height // 12))
+        d.rectangle([0, height - 6, width, height], fill=(180, 40, 40))
+        d.text((width // 20, height // 8), "DEVON", font=font_big,
+               fill=(235, 235, 240))
+        d.text((width // 20, height // 8 + height // 5), room,
+               font=font, fill=(160, 200, 255))
+        mins, secs = divmod(whole, 60)
+        hours, mins = divmod(mins, 60)
+        clock = f"{hours:02d}:{mins:02d}:{secs:02d}"
+        d.text((width // 20, height - height // 5), clock, font=font,
+               fill=(235, 235, 240))
+        d.text((width // 2, height - height // 5), "● LIVE — video",
+               font=font, fill=(255, 120, 120))
+        frame = (img.tobytes(), width, height)
+        state["second"] = whole
+        state["frame"] = frame
+        return frame
+
+    return _source
+
+
+def image_frame_source(path: str | Path, *,
+                       width: int = VIDEO_DEFAULT_SIZE[0],
+                       height: int = VIDEO_DEFAULT_SIZE[1]) -> FrameSource:
+    """A still image, letterboxed to the session size, held as video.
+
+    The picture is loaded and resized ONCE — every call returns the
+    same bytes. A missing or unreadable file refuses at build time,
+    naming the path, instead of joining a room with no picture.
+    """
+    from PIL import Image, ImageOps
+
+    try:
+        img = Image.open(path).convert("RGB")
+    except Exception as exc:
+        raise LiveKitUnavailable(
+            f"video image not readable: {path}: {exc}",
+            missing=f"an image file at {path}") from exc
+    frame = (ImageOps.pad(img, (width, height),
+                          color=(0, 0, 0)).tobytes(), width, height)
+
+    def _source(t: float) -> tuple[bytes, int, int] | None:  # noqa: ARG001
+        return frame
+
+    return _source
+
+
+def scene_frame_source(design: dict[str, Any], *,
+                       width: int = VIDEO_DEFAULT_SIZE[0],
+                       height: int = VIDEO_DEFAULT_SIZE[1],
+                       duration: float = 30.0, text: str = "",
+                       loop: bool = True) -> FrameSource:
+    """Devon's own scene, rendered live into the room.
+
+    The motion-studio frame function seeks the design to ``t`` — the
+    same deterministic frames the code-video rung stitches into MP4s,
+    published here as a live track instead. By default the scene
+    loops until the call ends; with ``loop=False`` it ends at
+    ``duration`` and the session ends as "source-ended". An invalid
+    design or duration refuses at build time, naming the problem.
+    """
+    from ..media.motion_studio._core import MotionStudioError
+    from ..media.motion_studio.explainers import (
+        frame_image,
+        validate_design,
+    )
+
+    try:
+        validate_design(design)
+    except MotionStudioError as exc:
+        raise LiveKitUnavailable(
+            f"video scene is not valid: {exc}",
+            missing="a valid motion-studio design") from exc
+    if duration <= 0:
+        raise LiveKitUnavailable(
+            "video scene needs a positive duration",
+            missing="a scene duration in seconds")
+
+    def _source(t: float) -> tuple[bytes, int, int] | None:
+        if t >= duration:
+            if not loop:
+                return None
+            t = t % duration
+        img = frame_image(design, (width, height), float(t),
+                          float(duration), text=text)
+        return (img.convert("RGB").tobytes(), width, height)
+
+    return _source
+
+
+# ── the video session ──────────────────────────────────────────────────────
+
+
+@dataclass
+class LiveVideoReport:
+    session_id: str
+    room: str = ""
+    source: str = ""
+    frames_published: int = 0
+    frames_received: dict[str, int] = field(default_factory=dict)
+    snapshots: dict[str, str] = field(default_factory=dict)
+    duration_s: float = 0.0
+    end_reason: str = "completed"  # completed | stopped | source-ended |
+                                   # error
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "room": self.room,
+            "source": self.source,
+            "frames_published": self.frames_published,
+            "frames_received": dict(self.frames_received),
+            "snapshots": dict(self.snapshots),
+            "duration_s": round(self.duration_s, 2),
+            "end_reason": self.end_reason,
+            "error": self.error,
+        }
+
+    def format(self) -> str:
+        bar = "─" * 46
+        lines = [
+            f"📹 live video {self.session_id} (room {self.room or '?'})",
+            bar,
+            (f"  source {self.source or '?'}   frames published "
+             f"{self.frames_published}   {self.duration_s:.1f}s   "
+             f"ended: {self.end_reason}"),
+        ]
+        if self.error:
+            lines.append(f"  ⚠ {self.error}")
+        for identity, count in sorted(self.frames_received.items()):
+            snap = self.snapshots.get(identity, "")
+            lines.append(f"  👁 {identity}: {count} frames received"
+                         + (f" — snapshot {snap}" if snap else ""))
+        lines.append(bar)
+        return "\n".join(lines)
+
+
+class LiveKitVideoSession:
+    """One live video session in a LiveKit room.
+
+    States: ``idle → connecting → publishing → ended`` / ``error``.
+    The loop is the video mirror of the voice call: the frame source
+    is the camera, the published track is the picture, and the room's
+    video is watched at the same time — every publisher's latest
+    frame lands as a PNG snapshot (at most one per second each) so
+    the owner can see who is on camera without sitting in the room.
+    Nobody has to publish video back: the remote side may only watch,
+    so the session never waits for a remote publisher — it publishes
+    until stopped, the source ends, or the duration runs out.
+
+    The constructor takes an injected ``frame_source`` with the exact
+    ``(t) -> (rgb, w, h) | None`` contract above, so the whole loop
+    is testable against a fake transport with no room, no network,
+    and no camera.
+    """
+
+    def __init__(
+        self,
+        *,
+        frame_source: FrameSource | None = None,
+        transport: LiveKitVideoTransport | None = None,
+        config: LiveKitConfig | None = None,
+        room: str = "",
+        data_dir: str | Path = "",
+        width: int = VIDEO_DEFAULT_SIZE[0],
+        height: int = VIDEO_DEFAULT_SIZE[1],
+        fps: float = VIDEO_DEFAULT_FPS,
+        snapshot_every_s: float = VIDEO_SNAPSHOT_EVERY_S,
+        source_name: str = "",
+        bus: Any = None,
+    ) -> None:
+        self.session_id = new_short_id()
+        self.frame_source = frame_source
+        self.transport = transport
+        self.config = config or LiveKitConfig.from_env()
+        self.room = (room or "").strip()
+        self.data_dir = Path(data_dir) if data_dir else Path("voice_data")
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.snapshot_every_s = snapshot_every_s
+        self.source_name = source_name
+        self._bus = global_bus if bus is None else bus
+        self.state = "idle"
+        self._stop = threading.Event()
+        self._frames_published = 0
+        self._frames_received: dict[str, int] = {}
+        self._snapshots: dict[str, str] = {}
+        self._last_snapshot_ts: dict[str, float] = {}
+
+    # -- journal ---------------------------------------------------------
+    def _journal(self, topic: str, data: dict[str, Any]) -> None:
+        bus = self._bus
+        if bus is False or bus is None:
+            return
+        try:
+            bus.publish(Event(topic=topic, data={
+                "session_id": self.session_id,
+                "room": self.room,
+                **data,
+            }))
+        except Exception as exc:  # noqa: BLE001 — journal never breaks a call
+            _log.debug("livekit video journal failed: %s", exc)
+
+    def _set_state(self, state: str) -> None:
+        _log.info("live video %s: %s → %s", self.session_id, self.state,
+                  state)
+        self.state = state
+
+    def stop(self) -> None:
+        """End the video session from outside (tool end, owner gesture)."""
+        self._stop.set()
+
+    def snapshot(self, identity: str = "") -> dict[str, Any] | None:
+        """The latest snapshot for one publisher (or the only one).
+
+        Returns {"identity", "path", "frames_received", "age_s"} or
+        None when that publisher has sent no frame yet.
+        """
+        if identity:
+            path = self._snapshots.get(identity)
+            if path is None:
+                return None
+        elif len(self._snapshots) == 1:
+            identity, path = next(iter(self._snapshots.items()))
+        else:
+            return None
+        try:
+            age_s = time.time() - Path(path).stat().st_mtime
+        except OSError:
+            age_s = -1.0
+        return {
+            "identity": identity,
+            "path": path,
+            "frames_received": self._frames_received.get(identity, 0),
+            "age_s": round(age_s, 1),
+        }
+
+    # -- main loop ---------------------------------------------------------
+    def start(self, *, max_duration_s: float = 0.0) -> LiveVideoReport:
+        """Join the room and publish video. Raises LiveKitUnavailable
+        when the session cannot start; returns a report for everything
+        that ends after connecting."""
+        report = LiveVideoReport(session_id=self.session_id,
+                                 room=self.room,
+                                 source=self.source_name)
+        if not self.room:
+            raise LiveKitUnavailable(
+                "no room named — pass --room <name>",
+                missing="a room name")
+        missing = self.config.missing()
+        if missing:
+            raise LiveKitUnavailable(
+                "LiveKit is not configured: "
+                + self.config.describe_missing(),
+                missing=self.config.describe_missing())
+        if self.frame_source is None:
+            raise LiveKitUnavailable(
+                "no video frame source — pass a title, image, or scene",
+                missing="a frame source")
+        if self.transport is None:
+            if not sdk_available():
+                raise LiveKitUnavailable(
+                    "the livekit SDK is not installed — run "
+                    "`nm voice live provision` first",
+                    missing="the livekit SDK")
+            self.transport = RtcTransport(video=True,
+                                          video_width=self.width,
+                                          video_height=self.height)
+        transport = self.transport
+        token = self.config.token_for(self.room, identity=VIDEO_IDENTITY)
+
+        self._set_state("connecting")
+        try:
+            transport.connect(self.config.url, token)
+        except LiveKitUnavailable:
+            self._set_state("error")
+            raise
+        self._journal("voice.livekit.video_started",
+                      {"state": "connected",
+                       "source": self.source_name})
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+
+        t0 = time.time()
+        period = 1.0 / max(1.0, self.fps)
+        next_t = t0
+        try:
+            self._set_state("publishing")
+            while True:
+                if self._stop.is_set():
+                    report.end_reason = "stopped"
+                    break
+                elapsed = time.time() - t0
+                if max_duration_s and elapsed >= max_duration_s:
+                    report.end_reason = "completed"
+                    break
+                self._drain_inbound_video()
+                frame = self.frame_source(elapsed)
+                if frame is None:
+                    report.end_reason = "source-ended"
+                    break
+                rgb, w, h = frame
+                try:
+                    transport.publish_video_frame(rgb, w, h)
+                except Exception as exc:  # noqa: BLE001 — a bad frame ends it
+                    report.end_reason = "error"
+                    report.error = (f"video publish failed: "
+                                    f"{type(exc).__name__}: {exc}")
+                    break
+                self._frames_published += 1
+                next_t += period
+                sleep_s = next_t - time.time()
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+                else:
+                    # the source is slower than the frame rate: never
+                    # sleep a backlog, just re-time from now
+                    next_t = time.time()
+        except KeyboardInterrupt:  # noqa: E106 - deliberate
+            report.end_reason = "stopped"
+        except Exception as exc:  # noqa: BLE001 - a session must end cleanly
+            report.end_reason = "error"
+            report.error = f"{type(exc).__name__}: {exc}"
+            _log.exception("live video %s failed", self.session_id)
+        finally:
+            report.duration_s = time.time() - t0
+            report.frames_published = self._frames_published
+            report.frames_received = dict(self._frames_received)
+            report.snapshots = dict(self._snapshots)
+            self._set_state("ended")
+            try:
+                transport.disconnect()
+            except Exception as exc:  # noqa: BLE001 — best effort
+                record_failure("livekit_call.LiveKitVideoSession.start",
+                               exc)
+            self._journal("voice.livekit.video_ended", {
+                "frames_published": report.frames_published,
+                "frames_received": report.frames_received,
+                "end_reason": report.end_reason,
+                "error": report.error,
+            })
+            self._save_report(report)
+        return report
+
+    # -- inbound video → snapshots -----------------------------------------
+    def _drain_inbound_video(self) -> None:
+        """Move queued inbound frames into counts + snapshots.
+
+        At most one snapshot PNG per publisher per
+        ``snapshot_every_s`` — the latest frame wins, the disk never
+        fills with a frame per packet.
+        """
+        if self.transport is None:
+            return
+        now = time.time()
+        while True:
+            item = self.transport.poll_video_frame(timeout=0.0)
+            if item is None:
+                return
+            rgb, w, h, identity = item
+            self._frames_received[identity] = \
+                self._frames_received.get(identity, 0) + 1
+            last = self._last_snapshot_ts.get(identity, 0.0)
+            if now - last < self.snapshot_every_s:
+                continue
+            self._last_snapshot_ts[identity] = now
+            self._save_snapshot(identity, rgb, w, h)
+
+    def _save_snapshot(self, identity: str, rgb: bytes, width: int,
+                       height: int) -> None:
+        """One inbound frame as a PNG the owner can open."""
+        from PIL import Image
+
+        safe = re.sub(r"[^A-Za-z0-9_-]", "_", identity) or "remote"
+        path = (self.data_dir
+                / f"live-video-{self.session_id}-{safe}.png")
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            Image.frombytes("RGB", (width, height), rgb).save(path)
+        except Exception as exc:  # noqa: BLE001 — a bad frame never breaks a call
+            record_failure("livekit_call.LiveKitVideoSession."
+                           "_save_snapshot", exc)
+            return
+        self._snapshots[identity] = str(path)
+
+    def _save_report(self, report: LiveVideoReport) -> None:
+        """Last-video record, for `nm voice live video status`."""
+        try:
+            self.data_dir.mkdir(parents=True, exist_ok=True)
+            path = self.data_dir / "live-video-last.json"
+            path.write_text(json.dumps(report.to_dict(), indent=2))
+        except Exception:  # noqa: BLE001 — a report must never break a session
+            _log.debug("live video report write failed", exc_info=True)
+
+
+# ── readiness + the in-process video registry ──────────────────────────────
+
+
+def live_video_status(data_dir: str | Path = "") -> dict[str, Any]:
+    """Readiness for a live video session: SDK, config, last video.
+    No connections."""
+    config = LiveKitConfig.from_env()
+    missing = config.missing()
+    out: dict[str, Any] = {
+        "sdk_installed": sdk_available(),
+        "sdk_version": sdk_version(),
+        "sdk_pin": LIVEKIT_SDK_PIN,
+        "api_pin": LIVEKIT_API_PIN,
+        "configured": not missing,
+        "missing": missing,
+        "url_configured": bool(config.url),
+        "token_configured": bool(config.token),
+        "api_key_configured": bool(config.api_key),
+        "live_sessions": len(_ACTIVE_VIDEO),
+    }
+    if data_dir:
+        last = Path(data_dir) / "live-video-last.json"
+        try:
+            if last.exists():
+                out["last_video"] = json.loads(last.read_text())
+        except Exception:  # noqa: BLE001 — a bad record is not a failure
+            out["last_video"] = {"error": "unreadable last-video record"}
+    return out
+
+
+_ACTIVE_VIDEO: dict[str, LiveKitVideoSession] = {}
+_ACTIVE_VIDEO_THREADS: dict[str, threading.Thread] = {}
+_ACTIVE_VIDEO_REPORTS: dict[str, LiveVideoReport] = {}
+_ACTIVE_VIDEO_LOCK = threading.Lock()
+
+
+def start_video_session(session: LiveKitVideoSession, *,
+                        max_duration_s: float = 0.0
+                        ) -> LiveKitVideoSession:
+    """Run a video session on a daemon thread; returns immediately.
+
+    One live video session at a time — one video identity in the room,
+    and a second start refuses honestly instead of splitting her
+    picture. The caller ends it with :func:`end_video_session`.
+    """
+    with _ACTIVE_VIDEO_LOCK:
+        if _ACTIVE_VIDEO:
+            raise LiveKitUnavailable(
+                "a live video session is already running "
+                f"(session {next(iter(_ACTIVE_VIDEO))}) — end it first",
+                missing="a free video")
+        _ACTIVE_VIDEO[session.session_id] = session
+
+    def _run() -> None:
+        try:
+            report = session.start(max_duration_s=max_duration_s)
+        except LiveKitUnavailable as exc:
+            report = LiveVideoReport(session_id=session.session_id,
+                                     room=session.room,
+                                     source=session.source_name,
+                                     end_reason="error",
+                                     error=str(exc))
+        except Exception as exc:  # noqa: BLE001 — a dead thread still reports
+            report = LiveVideoReport(session_id=session.session_id,
+                                     room=session.room,
+                                     source=session.source_name,
+                                     end_reason="error",
+                                     error=f"{type(exc).__name__}: {exc}")
+        with _ACTIVE_VIDEO_LOCK:
+            _ACTIVE_VIDEO.pop(session.session_id, None)
+            _ACTIVE_VIDEO_THREADS.pop(session.session_id, None)
+            _ACTIVE_VIDEO_REPORTS[session.session_id] = report
+
+    thread = threading.Thread(target=_run, daemon=True,
+                              name=f"livekit-video-{session.session_id}")
+    with _ACTIVE_VIDEO_LOCK:
+        _ACTIVE_VIDEO_THREADS[session.session_id] = thread
+    thread.start()
+    return session
+
+
+def get_video_session(session_id: str = "") -> LiveKitVideoSession | None:
+    """The running video session (the only one, or by id)."""
+    with _ACTIVE_VIDEO_LOCK:
+        if session_id:
+            return _ACTIVE_VIDEO.get(session_id)
+        return next(iter(_ACTIVE_VIDEO.values()), None)
+
+
+def end_video_session(session_id: str = "") -> LiveVideoReport | None:
+    """Stop the running video session and wait for its report (≤ 15 s).
+
+    Returns None when no session is running. The report is the honest
+    record of what happened — frames published, frames seen, snapshots,
+    and why it ended.
+    """
+    with _ACTIVE_VIDEO_LOCK:
+        session = (_ACTIVE_VIDEO.get(session_id) if session_id
+                   else next(iter(_ACTIVE_VIDEO.values()), None))
+        thread = (_ACTIVE_VIDEO_THREADS.get(session.session_id)
+                  if session is not None else None)
+    if session is None:
+        with _ACTIVE_VIDEO_LOCK:
+            if session_id and session_id in _ACTIVE_VIDEO_REPORTS:
+                return _ACTIVE_VIDEO_REPORTS.pop(session_id)
+            if not session_id and _ACTIVE_VIDEO_REPORTS:
+                _key = next(iter(_ACTIVE_VIDEO_REPORTS))
+                return _ACTIVE_VIDEO_REPORTS.pop(_key)
+        return None
+    session.stop()
+    if thread is not None:
+        thread.join(timeout=15.0)
+    with _ACTIVE_VIDEO_LOCK:
+        return _ACTIVE_VIDEO_REPORTS.pop(session.session_id, None)
+
+
+def video_session_status(session_id: str = "") -> dict[str, Any]:
+    """Readiness + the running video session's state, if any.
+    No connections."""
+    out = live_video_status()
+    session = get_video_session(session_id)
+    if session is not None:
+        out["session"] = {
+            "session_id": session.session_id,
+            "room": session.room,
+            "state": session.state,
+            "source": session.source_name,
+            "frames_published": session._frames_published,
+            "frames_received": dict(session._frames_received),
+            "snapshots": dict(session._snapshots),
+        }
+    else:
+        with _ACTIVE_VIDEO_LOCK:
+            if _ACTIVE_VIDEO_REPORTS:
+                _key = (session_id if session_id in _ACTIVE_VIDEO_REPORTS
+                        else next(iter(_ACTIVE_VIDEO_REPORTS)))
+                out["last_report"] = _ACTIVE_VIDEO_REPORTS[_key].to_dict()
     return out

@@ -2570,7 +2570,12 @@ def _parser() -> argparse.ArgumentParser:
                      "nm voice live start --room NAME [--turns N] "
                      "[--profile P] [--stt tools|local|bridge]\n"
                      "nm voice live provision [--json]\n"
-                     "nm voice live status [--json]"),
+                     "nm voice live status [--json]\n"
+                     "nm voice live video start --room NAME "
+                     "[--source title|image|scene] [--image PATH] "
+                     "[--design JSON] [--duration S] [--fps N]\n"
+                     "nm voice live video status | end | snapshot "
+                     "[--identity ID] [--json]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     voice_sub = voice.add_subparsers(dest="voice_action", required=True)
@@ -2705,7 +2710,7 @@ def _parser() -> argparse.ArgumentParser:
     v_probe.add_argument("audio", help="audio file path")
     # -- live calls: Devon as a LiveKit room participant ---------------
     v_live = voice_sub.add_parser(
-        "live", help="live voice call in a LiveKit room (WebRTC)")
+        "live", help="live voice + video in a LiveKit room (WebRTC)")
     live_sub = v_live.add_subparsers(dest="voice_live_action", required=True)
     v_live_start = live_sub.add_parser(
         "start", help="join a LiveKit room and talk live")
@@ -2735,6 +2740,64 @@ def _parser() -> argparse.ArgumentParser:
         "status", help="live-call readiness (SDK, config, last call)")
     v_live_status.add_argument("--json", action="store_true",
                                help="Output as JSON")
+    v_live_video = live_sub.add_parser(
+        "video", help="live video in a LiveKit room: publish Devon's "
+                      "video, watch the room")
+    video_sub = v_live_video.add_subparsers(
+        dest="voice_live_video_action", required=True)
+    v_live_video_start = video_sub.add_parser(
+        "start", help="join a LiveKit room and publish video")
+    v_live_video_start.add_argument("--room", required=True,
+                                    help="LiveKit room name to join")
+    v_live_video_start.add_argument(
+        "--source", default="title",
+        choices=("title", "image", "scene"),
+        help="what the video track shows: title (a live card with "
+             "the room and the clock), image (a still file), scene "
+             "(a motion-studio design, rendered live)")
+    v_live_video_start.add_argument(
+        "--image", default="",
+        help="still-image path, for --source image")
+    v_live_video_start.add_argument(
+        "--design", default="",
+        help="motion-studio design as JSON, for --source scene")
+    v_live_video_start.add_argument(
+        "--text", default="",
+        help="caption text for a scene source")
+    v_live_video_start.add_argument(
+        "--duration", type=float, default=0.0,
+        help="scene length in seconds (default 30; loops until stopped)")
+    v_live_video_start.add_argument(
+        "--fps", type=float, default=15.0,
+        help="publish rate (default 15)")
+    v_live_video_start.add_argument(
+        "--width", type=int, default=640, help="publish width")
+    v_live_video_start.add_argument(
+        "--height", type=int, default=360, help="publish height")
+    v_live_video_start.add_argument(
+        "--max-duration", type=float, default=0.0,
+        help="stop after this many seconds (0 = until stopped)")
+    v_live_video_start.add_argument(
+        "--no-loop", dest="loop", action="store_false",
+        help="a scene source ends the session at the scene end "
+             "instead of looping")
+    v_live_video_start.add_argument("--json", action="store_true",
+                                    help="Output as JSON")
+    v_live_video_status = video_sub.add_parser(
+        "status", help="live-video readiness (SDK, config, last video)")
+    v_live_video_status.add_argument("--json", action="store_true",
+                                     help="Output as JSON")
+    v_live_video_end = video_sub.add_parser(
+        "end", help="end the live video session, show its report")
+    v_live_video_end.add_argument("--json", action="store_true",
+                                  help="Output as JSON")
+    v_live_video_snapshot = video_sub.add_parser(
+        "snapshot", help="the latest snapshot of a room's video")
+    v_live_video_snapshot.add_argument(
+        "--identity", default="",
+        help="the publisher to look at (empty = the only publisher)")
+    v_live_video_snapshot.add_argument("--json", action="store_true",
+                                       help="Output as JSON")
     v_probe.add_argument("--json", action="store_true",
                          help="Output as JSON")
 

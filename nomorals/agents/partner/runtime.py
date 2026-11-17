@@ -9736,6 +9736,10 @@ class PartnerRuntime(
                                        message=message)
         if kind in {"map-route", "headline", "teardown"}:
             return self._control_code_format(kind, command.tail or arg)
+        if kind == "videocall":
+            return self._control_videocall(command.tail or arg,
+                                           chat_key=chat_key,
+                                           message=message)
         if kind == "alternatives":
             return self._control_alternatives(command.tail or arg)
         if kind == "director":

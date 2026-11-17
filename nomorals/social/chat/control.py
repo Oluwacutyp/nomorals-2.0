@@ -958,6 +958,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "map-route": (0, None),  # /map-route <A> to <B> [via <C>…] — code-video route scene (no model)
     "headline": (0, None),   # /headline <text> [--lines "a|b"] — code-video headline scene
     "teardown": (0, None),   # /teardown <thing> : <part>, <part>… — code-video teardown scene
+    "videocall": (0, None),  # /videocall <room> | status | stop | snapshot — LiveKit video: Devon publishes her video in a room and watches it (owner-only)
     "director": (0, None),   # /director cover|plan|shoot|regen|show — coverage → design → shoot → QA
     "caption": (0, 1),       # /caption [style] — burn AI subtitles into a video (attach or path)
     "vision": (0, None),     # /vision [question] — analyze an image (attach or path/URL)
@@ -4650,6 +4651,20 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/teardown <thing> : <part>, <part>… [--seconds N]",
                  "example": "/teardown keyboard : keycap, switch, plate, case",
                  "related": "/map-route · /headline · /video gen"},
+    "videocall": {"what": "LiveKit video call: Devon joins a room as a "
+                         "second participant and publishes a real video "
+                         "track — a live title card, a still image, or "
+                         "her own motion-studio scene rendered frame by "
+                         "frame — while watching the room's video and "
+                         "saving one snapshot PNG per publisher per "
+                         "second. /videocall snapshot sends the latest "
+                         "frame she has seen. Needs a LiveKit server "
+                         "(LIVEKIT_URL plus LIVEKIT_TOKEN or "
+                         "LIVEKIT_API_KEY + LIVEKIT_API_SECRET) and the "
+                         "livekit SDK. Owner-only.",
+                  "usage": "/videocall <room> [--source title|image|scene] [--image PATH] [--seconds N] | /videocall status | /videocall stop | /videocall snapshot [identity]",
+                  "example": "/videocall studio --source scene",
+                  "related": "/video watch · /video gen · nm voice live video"},
     "director": {"what": "Devon directs: professional script coverage, "
                       "scene/shot breakdown, lighting + camera design "
                       "per shot (primitives composed by style packs — "
@@ -4816,7 +4831,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                         "translate", "tl"]),
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
-    ("media system", ["music", "distribute", "play", "video", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
+    ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
@@ -5082,7 +5097,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "deliver", "checkpoint", "checkpoints", "rewind", "novel", "books",
       "skills", "delegate", "workflow", "plan", "computer"]),
     ("media system — music · playback · video · podcast",
-     ["music", "play", "video", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
+     ["music", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
       "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
@@ -5616,6 +5631,7 @@ LIST_ONELINERS: dict[str, str] = {
     "kitsune": "a kitsune picture",
     "husbando": "a husbando picture",
     "video": "find videos across the web (ranked, enriched) + download",
+    "videocall": "LiveKit video: Devon publishes her video in a room and watches it (owner only)",
     "map-route": "code-video: a route draws itself (no model)",
     "headline": "code-video: newspaper headline push-in (no model)",
     "teardown": "code-video: exploded parts diagram (no model)",

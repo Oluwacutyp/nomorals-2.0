@@ -650,7 +650,9 @@ class TestVoiceLiveTools(unittest.TestCase):
         registry = self._registry()
         self.assertEqual(
             sorted(registry.tools),
-            ["voice_live_end", "voice_live_start", "voice_live_status"])
+            ["video_live_end", "video_live_snapshot",
+             "video_live_start", "video_live_status",
+             "voice_live_end", "voice_live_start", "voice_live_status"])
 
     def test_status_tool_never_connects(self):
         registry = self._registry()

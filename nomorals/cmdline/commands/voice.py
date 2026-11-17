@@ -217,8 +217,164 @@ def _cmd_voice_live(args: argparse.Namespace, context: Any) -> int:
         return _cmd_voice_live_provision(args, context)
     if action == "status":
         return _cmd_voice_live_status(args, context)
+    if action == "video":
+        return _cmd_voice_live_video(args, context)
     print(f"unknown voice live action: {action}", file=sys.stderr)
     return 2
+
+
+def _cmd_voice_live_video(args: argparse.Namespace, context: Any) -> int:
+    """Route `nm voice live video` subcommands."""
+    action = args.voice_live_video_action
+    if action == "start":
+        return _cmd_voice_live_video_start(args, context)
+    if action == "status":
+        return _cmd_voice_live_video_status(args, context)
+    if action == "end":
+        return _cmd_voice_live_video_end(args, context)
+    if action == "snapshot":
+        return _cmd_voice_live_video_snapshot(args, context)
+    print(f"unknown voice live video action: {action}", file=sys.stderr)
+    return 2
+
+
+def _cmd_voice_live_video_start(args: argparse.Namespace,
+                                context: Any) -> int:
+    from ...voice.livekit_call import (
+        LiveKitConfig,
+        LiveKitUnavailable,
+        LiveKitVideoSession,
+        image_frame_source,
+        scene_frame_source,
+        title_frame_source,
+    )
+
+    settings = context.settings
+    data_dir = _voice_data_dir(args, settings)
+    design = None
+    if args.source == "scene":
+        if not (args.design or "").strip():
+            print("video source 'scene' needs --design '<json>'",
+                  file=sys.stderr)
+            return 2
+        try:
+            design = json.loads(args.design)
+        except json.JSONDecodeError as exc:
+            print(f"--design is not valid JSON: {exc}", file=sys.stderr)
+            return 2
+        if not isinstance(design, dict) or not design:
+            print("--design must be a JSON object (a motion-studio "
+                  "design)", file=sys.stderr)
+            return 2
+    try:
+        if args.source == "title":
+            frame_source = title_frame_source(
+                args.room, width=args.width, height=args.height)
+            source_name = "title"
+        elif args.source == "image":
+            if not (args.image or "").strip():
+                print("video source 'image' needs --image <path>",
+                      file=sys.stderr)
+                return 2
+            frame_source = image_frame_source(
+                args.image, width=args.width, height=args.height)
+            source_name = f"image:{Path(args.image).name}"
+        else:
+            duration = args.duration if args.duration > 0 else 30.0
+            frame_source = scene_frame_source(
+                design, width=args.width, height=args.height,
+                duration=duration, text=args.text, loop=args.loop)
+            source_name = f"scene:{design.get('kind', 'scene')}"
+        session = LiveKitVideoSession(
+            frame_source=frame_source,
+            config=LiveKitConfig.from_env(),
+            room=args.room,
+            data_dir=data_dir,
+            width=args.width, height=args.height, fps=args.fps,
+            source_name=source_name,
+        )
+    except LiveKitUnavailable as exc:
+        print(f"cannot start the live video: {exc}", file=sys.stderr)
+        if exc.missing:
+            print(f"missing: {exc.missing}", file=sys.stderr)
+        return 1
+    print(f"Publishing video in LiveKit room {args.room!r} "
+          f"({source_name}) — Ctrl-C to stop.\n")
+    try:
+        report = session.start(max_duration_s=args.max_duration)
+    except LiveKitUnavailable as exc:
+        print(f"cannot start the live video: {exc}", file=sys.stderr)
+        if exc.missing:
+            print(f"missing: {exc.missing}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.format())
+    return 0 if report.end_reason != "error" else 1
+
+
+def _cmd_voice_live_video_status(args: argparse.Namespace,
+                                context: Any) -> int:
+    from ...voice.livekit_call import live_video_status
+
+    status = live_video_status(_voice_data_dir(args, context.settings))
+    if args.json:
+        print(json.dumps(status, indent=2))
+        return 0
+    if status["sdk_installed"]:
+        print(f"livekit SDK: installed ({status['sdk_version']})")
+    else:
+        print("livekit SDK: NOT installed — "
+              "nm voice live provision")
+    if status["configured"]:
+        print("LiveKit server: configured")
+    else:
+        print("LiveKit server: NOT configured — missing: "
+              + "; ".join(status["missing"]))
+    last = status.get("last_video")
+    if last:
+        print(f"last video: room {last.get('room')} — "
+              f"{last.get('frames_published')} frames published, "
+              f"ended {last.get('end_reason')}")
+    return 0
+
+
+def _cmd_voice_live_video_end(args: argparse.Namespace,
+                             context: Any) -> int:  # noqa: ARG001
+    from ...voice.livekit_call import end_video_session
+
+    report = end_video_session()
+    if report is None:
+        print("no live video session is running", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report.to_dict(), indent=2))
+    else:
+        print(report.format())
+    return 0 if report.end_reason != "error" else 1
+
+
+def _cmd_voice_live_video_snapshot(args: argparse.Namespace,
+                                  context: Any) -> int:  # noqa: ARG001
+    from ...voice.livekit_call import get_video_session
+
+    session = get_video_session()
+    if session is None:
+        print("no live video session is running", file=sys.stderr)
+        return 1
+    snap = session.snapshot(args.identity)
+    if snap is None:
+        who = f" from {args.identity!r}" if args.identity else ""
+        print(f"no video frame received yet{who}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(snap, indent=2))
+    else:
+        print(f"snapshot from {snap['identity']}: {snap['path']} "
+              f"({snap['frames_received']} frames received, "
+              f"{snap['age_s']}s old)")
+    return 0
 
 
 def _cmd_voice_live_start(args: argparse.Namespace, context: Any) -> int:

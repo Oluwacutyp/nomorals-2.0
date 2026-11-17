@@ -5291,6 +5291,137 @@ class RuntimeMediaMixin:
             return f"{kind} error: {exc}"
         return res.message()
 
+    def _control_videocall(self, tail: str, chat_key: str = "",
+                           message: Any = None) -> str:
+        """LiveKit video from chat: /videocall.
+
+        A thin dispatch to the same ``video_live_*`` tools the brain
+        uses — no session construction duplicated here, so the chat
+        surface and the brain surface can never drift apart. Never
+        raises: bad input returns usage, tool failures name the
+        problem in words.
+
+        ``/videocall <room>`` starts publishing Devon's video in the
+        room (title card by default; ``--source image|scene`` with
+        ``--image PATH`` picks the picture; ``--seconds N`` bounds
+        the session). ``status`` shows readiness and the running
+        session; ``stop`` ends it with the report; ``snapshot``
+        sends the latest frame she has seen from the room.
+        """
+        import re
+
+        tail = (tail or "").strip()
+        words = tail.split()
+        verb = (words[0].lower() if words else "status")
+        tools = getattr(self.context, "tools", None)
+        if tools is None:
+            return "videocall needs a live session — no tool registry here."
+
+        def _call(name: str, **kwargs: Any):
+            outcome = tools.call(name, **kwargs)
+            if not outcome.ok:
+                return None, (f"{getattr(outcome.error, 'message', outcome.error)}")
+            return outcome.value or {}, None
+
+        if verb == "status":
+            value, err = _call("video_live_status")
+            if err is not None:
+                return f"videocall status failed: {err}"
+            status = value.get("status") or {}
+            lines = ["📹 live video:"]
+            lines.append(f"  SDK: {'installed (' + str(status.get('sdk_version')) + ')' if status.get('sdk_installed') else 'NOT installed — nm voice live provision'}")
+            if status.get("configured"):
+                lines.append("  server: configured")
+            else:
+                lines.append("  server: NOT configured — missing: "
+                             + "; ".join(status.get("missing") or []))
+            session = status.get("session")
+            if session:
+                lines.append(f"  running: room {session.get('room')} — "
+                             f"{session.get('state')} "
+                             f"({session.get('source')}, "
+                             f"{session.get('frames_published')} frames "
+                             f"published, "
+                             f"{sum((session.get('frames_received') or {}).values())} received)")
+            last = status.get("last_report")
+            if not session and last:
+                lines.append(f"  last: room {last.get('room')} — "
+                             f"{last.get('frames_published')} frames, "
+                             f"ended {last.get('end_reason')}")
+            return "\n".join(lines)
+
+        if verb == "stop":
+            value, err = _call("video_live_end")
+            if err is not None:
+                return f"videocall stop failed: {err}"
+            report = value.get("report") or {}
+            return (f"📹 video ended in room {report.get('room')} — "
+                    f"{report.get('frames_published')} frames published, "
+                    f"{sum((report.get('frames_received') or {}).values())} received, "
+                    f"ended {report.get('end_reason')}")
+
+        if verb == "snapshot":
+            identity = words[1] if len(words) > 1 else ""
+            value, err = _call("video_live_snapshot",
+                               identity=identity)
+            if err is not None:
+                return f"videocall snapshot failed: {err}"
+            snap = value.get("snapshot") or {}
+            path = str(snap.get("path") or "")
+            if not path or message is None:
+                return (f"snapshot from {snap.get('identity')}: {path} "
+                        f"({snap.get('frames_received')} frames received, "
+                        f"{snap.get('age_s')}s old)")
+            chat = message.chat
+            outcome = tools.call(
+                "file_send",
+                platform=str(getattr(chat, "platform", "") or ""),
+                chat_id=str(getattr(chat, "chat_id", "") or ""),
+                path=path,
+                caption=(f"live video snapshot — {snap.get('identity')} "
+                         f"({snap.get('frames_received')} frames, "
+                         f"{snap.get('age_s')}s old)"))
+            if not outcome.ok:
+                return (f"snapshot saved to {path}, but sending it "
+                        f"failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            return "snapshot sent."
+
+        if verb == "start":
+            words = words[1:]
+        room = words[0] if words else ""
+        if not room:
+            return ("usage: /videocall <room> [--source title|image|scene] "
+                    "[--image PATH] [--seconds N] | /videocall status | "
+                    "/videocall stop | /videocall snapshot [identity]")
+        rest = " ".join(words[1:])
+        source = "title"
+        sm = re.search(r"--source\s+(\S+)", rest)
+        if sm:
+            source = sm.group(1)
+        image = ""
+        im = re.search(r"--image\s+(\S+)", rest)
+        if im:
+            image = im.group(1)
+        max_duration = 0.0
+        dm = re.search(r"--seconds\s+([\d.]+)", rest)
+        if dm:
+            try:
+                max_duration = float(dm.group(1))
+            except ValueError:
+                max_duration = 0.0
+        kwargs: dict[str, Any] = {"room": room, "source": source,
+                                   "max_duration": max_duration}
+        if image:
+            kwargs["image"] = image
+        value, err = _call("video_live_start", **kwargs)
+        if err is not None:
+            return f"videocall failed: {err}"
+        return (f"📹 live video in room {room} "
+                f"({value.get('source')}) — session "
+                f"{value.get('session_id')}. /videocall snapshot to see "
+                f"the room, /videocall stop to end it.")
+
     def _video_studio_gen(self, tail: str) -> str:
         import re
 

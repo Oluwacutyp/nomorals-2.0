@@ -6,6 +6,15 @@ readiness and the running session's state; ``voice_live_end`` leaves
 the room and returns the call report. Capability is ``net.out``: a
 call leaves the box to a LiveKit server.
 
+The video rung lives here too (``video_live_*``): Devon publishes a
+real video track in the room — a live title card, a still image, or
+her own motion-studio scene rendered frame by frame — and watches the
+room's video, saving one snapshot PNG per publisher per second.
+``video_live_snapshot`` returns the latest frame she has seen, so the
+brain (or the owner, through /videocall) can look at the room without
+sitting in it. The video session joins as a second participant
+(identity ``devon-video``), so it can run beside the voice call.
+
 The think path here is the brain itself (``brain_for`` + a rolling
 in-session history) — NOT the PartnerRuntime: that runtime is L5 and
 this module is L4, so it cannot be imported here. The CLI
@@ -26,9 +35,17 @@ from ..voice.livekit_call import (
     LiveKitCallSession,
     LiveKitConfig,
     LiveKitUnavailable,
+    LiveKitVideoSession,
     end_live_call,
+    end_video_session,
+    get_video_session,
+    image_frame_source,
     live_call_status,
+    scene_frame_source,
     start_live_call,
+    start_video_session,
+    title_frame_source,
+    video_session_status,
 )
 
 _log = get_logger(__name__)
@@ -138,6 +155,59 @@ def _build_session(registry: Any, room: str, *, profile: str = "",
     return session
 
 
+def _build_video_session(registry: Any, room: str, *,
+                         source: str = "title", image: str = "",
+                         design: Any = None, duration: float = 0.0,
+                         text: str = "", fps: float = 15.0,
+                         width: int = 640, height: int = 360,
+                         loop: bool = True) -> LiveKitVideoSession:
+    """Assemble a live-video session from the registry's context.
+
+    ``source`` picks the picture: "title" (a live card with the room
+    and the clock), "image" (a still file, letterboxed), or "scene"
+    (a motion-studio design dict, rendered frame by frame, looping
+    until the call ends unless ``loop`` is False).
+    """
+    context = getattr(registry, "context", None)
+    data_dir = _voice_data_dir(context)
+    if source == "title":
+        frame_source = title_frame_source(room, width=width,
+                                          height=height)
+        source_name = "title"
+    elif source == "image":
+        if not (image or "").strip():
+            raise LiveKitUnavailable(
+                "video source 'image' needs an image path",
+                missing="an image path")
+        frame_source = image_frame_source(image, width=width,
+                                          height=height)
+        source_name = f"image:{Path(image).name}"
+    elif source == "scene":
+        if not isinstance(design, dict) or not design:
+            raise LiveKitUnavailable(
+                "video source 'scene' needs a design dict",
+                missing="a motion-studio design")
+        if duration <= 0:
+            duration = 30.0
+        frame_source = scene_frame_source(
+            design, width=width, height=height, duration=duration,
+            text=text, loop=loop)
+        source_name = f"scene:{design.get('kind', 'scene')}"
+    else:
+        raise LiveKitUnavailable(
+            f"unknown video source {source!r} — title, image, or scene",
+            missing="a video source (title, image, or scene)")
+    return LiveKitVideoSession(
+        frame_source=frame_source,
+        config=LiveKitConfig.from_env(),
+        room=room,
+        data_dir=data_dir,
+        width=width, height=height, fps=fps,
+        source_name=source_name,
+        bus=None,
+    )
+
+
 def register(registry: Any) -> None:
     """Register the live-call tools on the spine."""
     from ..core.policy import Capability
@@ -226,3 +296,140 @@ def register(registry: Any) -> None:
         if report is None:
             return {"ok": False, "error": "no live call is running"}
         return {"ok": True, "report": report.to_dict()}
+
+    @registry.register(
+        "video_live_start",
+        description=(
+            "Start a live video session in a LiveKit room: Devon joins "
+            "the room as a second participant and publishes a real "
+            "video track, while watching the room's video and saving "
+            "one snapshot PNG per publisher per second. Returns "
+            "immediately with the session id; the session runs in the "
+            "background. Sources: 'title' (a live card with the room "
+            "and the clock), 'image' (a still file), 'scene' (a "
+            "motion-studio design dict, rendered frame by frame). "
+            "Needs a LiveKit server (LIVEKIT_URL plus LIVEKIT_TOKEN or "
+            "LIVEKIT_API_KEY + LIVEKIT_API_SECRET) and the livekit SDK "
+            "(`nm voice live provision`). One live video session at a "
+            "time; it can run beside the voice call."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "room": "str — the LiveKit room name to join",
+            "source": "str (optional) — 'title' (default), 'image', "
+                      "or 'scene'",
+            "image": "str (optional) — still-image path, for "
+                     "source='image'",
+            "design": "dict (optional) — motion-studio design, for "
+                      "source='scene'",
+            "duration": "float (optional) — scene length in seconds "
+                        "(default 30; loops until stopped)",
+            "text": "str (optional) — caption text for a scene source",
+            "fps": "float (optional) — publish rate (default 15)",
+            "width": "int (optional) — publish width (default 640)",
+            "height": "int (optional) — publish height (default 360)",
+            "max_duration": "float (optional) — stop after this many "
+                           "seconds (0 = until stopped)",
+            "loop": "bool (optional) — loop a scene source (default "
+                    "true; false ends the session at the scene end)",
+        },
+    )
+    def _video_live_start(
+            room: str, source: str = "title", image: str = "",
+            design: Any = None, duration: float = 0.0,
+            text: str = "", fps: float = 15.0, width: int = 640,
+            height: int = 360, max_duration: float = 0.0,
+            loop: bool = True) -> dict[str, Any]:
+        config = LiveKitConfig.from_env()
+        missing = config.missing()
+        if missing:
+            return {"ok": False,
+                    "error": "LiveKit is not configured: "
+                             + "; ".join(missing),
+                    "missing": missing}
+        if not (room or "").strip():
+            return {"ok": False, "error": "no room named",
+                    "missing": "a room name"}
+        try:
+            session = _build_video_session(
+                registry, room, source=source, image=image,
+                design=design, duration=duration, text=text, fps=fps,
+                width=width, height=height, loop=loop)
+            start_video_session(session, max_duration_s=max_duration)
+        except LiveKitUnavailable as exc:
+            return {"ok": False, "error": str(exc),
+                    "missing": exc.missing}
+        except Exception as exc:  # noqa: BLE001 — start never raises
+            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        return {"ok": True, "session_id": session.session_id,
+                "room": room, "state": session.state,
+                "source": session.source_name}
+
+    @registry.register(
+        "video_live_status",
+        description=(
+            "Live-video readiness and state: whether the livekit SDK "
+            "is installed, whether a LiveKit server is configured, and "
+            "the running video session's state, published frames, "
+            "received frames, and snapshots if any. No connections "
+            "are made by this call."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "session_id": "str (optional) — a session id; empty means "
+                          "the running video session",
+        },
+    )
+    def _video_live_status(session_id: str = "") -> dict[str, Any]:
+        return {"ok": True, "status": video_session_status(session_id)}
+
+    @registry.register(
+        "video_live_end",
+        description=(
+            "End the running live video session and return its report "
+            "(frames published, frames received per publisher, "
+            "snapshots, why it ended). Refuses honestly when no video "
+            "session is running."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "session_id": "str (optional) — a session id; empty means "
+                          "the running video session",
+        },
+    )
+    def _video_live_end(session_id: str = "") -> dict[str, Any]:
+        report = end_video_session(session_id)
+        if report is None:
+            return {"ok": False,
+                    "error": "no live video session is running"}
+        return {"ok": True, "report": report.to_dict()}
+
+    @registry.register(
+        "video_live_snapshot",
+        description=(
+            "The latest snapshot of a room's video: the newest PNG "
+            "Devon saved from a publisher's video track, with how "
+            "many frames she has received from them and how old the "
+            "snapshot is. Refuses honestly when no video session is "
+            "running or nobody has sent a frame yet."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "session_id": "str (optional) — a session id; empty means "
+                          "the running video session",
+            "identity": "str (optional) — the publisher to look at; "
+                        "empty means the only publisher",
+        },
+    )
+    def _video_live_snapshot(session_id: str = "",
+                             identity: str = "") -> dict[str, Any]:
+        session = get_video_session(session_id)
+        if session is None:
+            return {"ok": False,
+                    "error": "no live video session is running"}
+        snap = session.snapshot(identity)
+        if snap is None:
+            who = f" from {identity!r}" if identity else ""
+            return {"ok": False,
+                    "error": "no video frame received yet" + who}
+        return {"ok": True, "snapshot": snap}
