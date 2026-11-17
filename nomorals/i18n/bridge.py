@@ -17,7 +17,9 @@ are; this module is the explicit mapping onto them:
   machine-translated catalog contributions, exactly as the plan
   keeps it: a drafted catalog row is scored by back-translation
   against its English source key before it is trusted into a
-  catalog file.  :func:`score_contribution` is that scoring path.
+  catalog file.  :func:`score_contribution` is that scoring path —
+  and the translation quality gate (``llm/translate.py``) scores
+  through it too; the gate is its shipped consumer.
 
 The ``llm`` imports are lazy (function-level): the catalog runtime
 must stay importable without the provider stack, and the bridge is
@@ -76,29 +78,40 @@ def score_contribution(source_text: str, translated_text: str, *,
                        translate_fn: Callable[[str, str, str], str],
                        judge_fn: Callable[[str, str],
                                           tuple[float, str]] | None = None,
-                       threshold: float = 0.5) -> Any:
+                       threshold: float = 0.5,
+                       source_lang: str = "en",
+                       target_lang: str | None = None) -> Any:
     """Score one machine-translated catalog row before it lands.
 
     Wraps ``llm.translation_quality.translate_with_quality``: the
-    drafted row is back-translated to English and measured against
-    the source key (token F1), with the optional judge as the
+    drafted row is back-translated to the source language and measured
+    against the source key (token F1), with the optional judge as the
     second signal.  ``translate_fn`` is injected — the caller's
     translation ladder (or a test double); this function adds no
     provider of its own.  Returns the bridge's
     ``TranslationResult`` (``passed`` is the gate a contribution
     must clear to be written into a catalog).
+
+    ``source_lang`` is the source language (``"en"`` for a catalog
+    row, whose key *is* the English source string).  ``target_lang``
+    overrides the target code outright — a caller that already speaks
+    MT codes (the translation quality gate) passes its code verbatim
+    so the ladder receives byte-identical call triples; otherwise the
+    target is resolved from ``target_locale`` via
+    :func:`mt_language_code`.
     """
     from ..llm.translation_quality import translate_with_quality
 
-    target = mt_language_code(target_locale) or language_of(target_locale)
+    target = target_lang or (
+        mt_language_code(target_locale) or language_of(target_locale))
 
     def _fn(text: str, src: str, dst: str) -> str:
         # The forward leg returns the draft under test verbatim;
         # the back-translation leg uses the caller's real engine.
-        if translated_text and src == "en" and dst == target:
+        if translated_text and src == source_lang and dst == target:
             return translated_text
         return translate_fn(text, src, dst)
 
     return translate_with_quality(
-        source_text, source_lang="en", target_lang=target,
+        source_text, source_lang=source_lang, target_lang=target,
         translate_fn=_fn, judge_fn=judge_fn, threshold=threshold)

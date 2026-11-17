@@ -63,6 +63,7 @@ from urllib.parse import quote
 
 from ..core.http import HttpClient
 from ..core.logging_setup import get_logger
+from ..i18n.bridge import score_contribution
 from .cache import TranslationCacheStore, cache_key_for
 from .languages import (
     NLLB_CODES,
@@ -71,7 +72,6 @@ from .languages import (
     normalize_code,
 )
 from .receipts import TranslationReceiptStore, new_receipt_id
-from .translation_quality import translate_with_quality
 
 _log = get_logger(__name__)
 
@@ -817,9 +817,14 @@ class Translator:
             return back.text if back is not None else ""
 
         try:
-            result = translate_with_quality(
-                raw, source_lang=src, target_lang=dst,
-                translate_fn=_fn)
+            # The scoring runs through the i18n bridge: the gate is
+            # the bridge's shipped consumer, and the bridge's
+            # forward-leg adapter already returns the ladder's chosen
+            # candidate verbatim.  source/target are passed verbatim
+            # so the ladder receives byte-identical call triples.
+            result = score_contribution(
+                raw, forward, target_locale=dst, source_lang=src,
+                target_lang=dst, translate_fn=_fn)
         except Exception as exc:  # noqa: BLE001 — a crashed gate verifies nothing
             _log.warning("translate: quality gate failed to run: %s",
                          exc)
