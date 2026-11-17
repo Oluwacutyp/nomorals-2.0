@@ -65,7 +65,7 @@ __all__ = ["ChatGateway", "OwnerTarget", "PLATFORM_CATALOGUE",
 #: owner cannot discover that /start <platform> exists.
 PLATFORM_CATALOGUE = (
     "local", "telegram", "telegram-bot", "telegram-personal",
-    "discord", "whatsapp", "webhook", "sms")
+    "discord", "whatsapp", "webhook", "sms", "web")
 
 _log = get_logger(__name__)
 

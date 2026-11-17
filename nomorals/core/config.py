@@ -501,6 +501,15 @@ class ChatSettings:
     webhook_port: int = 0
     webhook_token: str = ""
     webhook_reply_url: str = ""
+    # Web console surface (gapfix R3-50): the browser console as a view of
+    # the same partner. The adapter serves its own HTTP in the bot process
+    # (the API server is a separate process with no runtime handle) —
+    # POST /console/message in, GET /console/parts out. ON by default like
+    # every other surface; NM_CHAT_WEB_CONSOLE_ENABLED=0 turns it off.
+    web_console_enabled: bool = True
+    web_console_host: str = "127.0.0.1"
+    web_console_port: int = 8791
+    web_console_token: str = ""
     # SMS fallback surface (build-map #19): text a number, get Devon.
     # COST: Twilio numbers cost real money (~$1/mo + per-segment each way).
     # ON by default — but a missing Twilio number means the adapter fails
@@ -597,7 +606,7 @@ class PartnerSettings:
     #: default for every surface: adapters with missing credentials fail
     #: honestly into the "chat adapters skipped" list instead of silently
     #: not running. NM_PARTNER_PLATFORMS=... overrides (explicit list wins).
-    platforms: str = "local,telegram,telegram-bot,telegram-personal,discord,whatsapp,webhook,sms"
+    platforms: str = "local,telegram,telegram-bot,telegram-personal,discord,whatsapp,webhook,sms,web"
     #: Power mode default.  When True (the default), power mode auto-activates
     #: on first use without requiring the owner key — the owner's standing
     #: choice is unlimited/unrestricted operation.  An explicit `nm power
@@ -1332,6 +1341,10 @@ _ENV_MAP: dict[str, str] = {
     "NM_CHAT_WEBHOOK_PORT": "chat.webhook_port",
     "NM_CHAT_WEBHOOK_TOKEN": "chat.webhook_token",
     "NM_CHAT_WEBHOOK_REPLY_URL": "chat.webhook_reply_url",
+    "NM_CHAT_WEB_CONSOLE_ENABLED": "chat.web_console_enabled",
+    "NM_CHAT_WEB_CONSOLE_HOST": "chat.web_console_host",
+    "NM_CHAT_WEB_CONSOLE_PORT": "chat.web_console_port",
+    "NM_CHAT_WEB_CONSOLE_TOKEN": "chat.web_console_token",
     "NM_CHAT_SMS_ENABLED": "chat.sms_enabled",
     "NM_CHAT_SMS_FROM_NUMBER": "chat.sms_from_number",
     "NM_CHAT_SMS_HOST": "chat.sms_host",

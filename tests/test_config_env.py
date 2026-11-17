@@ -120,7 +120,7 @@ class LoadSettingsChannelConfigTest(unittest.TestCase):
         settings = load_settings(env={}, use_env_file=False)
         self.assertEqual(
             settings.partner.platforms,
-            "local,telegram,telegram-bot,telegram-personal,discord,whatsapp,webhook,sms")
+            "local,telegram,telegram-bot,telegram-personal,discord,whatsapp,webhook,sms,web")
         self.assertTrue(settings.chat.telegram_enabled)
         self.assertTrue(settings.chat.discord_enabled)
         self.assertTrue(settings.chat.whatsapp_enabled)

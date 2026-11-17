@@ -268,6 +268,16 @@ def build_adapter(settings: Any, name: str, *, on_new_member: Any = None,
             )
         except Exception as exc:  # noqa: BLE001
             raise ValueError(f"whatsapp unavailable: {exc}") from exc
+    if name == "web":
+        if not chat.web_console_enabled:
+            return None
+        from .web import WebAdapter
+
+        return WebAdapter(
+            host=chat.web_console_host,
+            port=int(chat.web_console_port),
+            token=chat.web_console_token or "",
+        )
     if name == "webhook":
         if not chat.webhook_enabled:
             return None
