@@ -52,6 +52,8 @@
     reader_updates    new-chapter report across followed stories
     reader_highlight  highlights add/list/remove/export
     reader_catch_up   read all unread cached chapters in order
+    reader_catch_up_digest  summarize the unread tail (extractive digest)
+    reader_previously_on  'previously on' recap + bible open threads
     reader_stats      per-story reading stats
 
     Collab:
@@ -331,8 +333,12 @@ def register(registry: Any) -> None:
         capability=Capability.FS_READ,
     )
     def story_following() -> dict[str, Any]:
+        from .reader_continuity import group_by_series
+
         reader = _reader()
-        return {"stories": reader.following(),
+        stories = reader.following()
+        return {"stories": stories,
+                "series": group_by_series(stories),
                 "unreadable": reader.last_following_unreadable}
 
     @registry.register(
@@ -1552,6 +1558,50 @@ def register(registry: Any) -> None:
     )
     def reader_catch_up(slug: str, limit: int = 10) -> dict[str, Any]:
         return _reader().catch_up(slug, limit=limit)
+
+    @registry.register(
+        "reader_catch_up_digest",
+        description=(
+            "Summarize the unread tail of a followed story — an "
+            "extractive 'previously on' digest of the cached chapters "
+            "after your current one. Names chapters not held yet "
+            "instead of inventing them. Does not advance progress."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "slug": "str",
+            "max_chapters": "int (optional, 10)",
+            "max_sentences": "int (optional, 3)",
+        },
+    )
+    def reader_catch_up_digest(
+            slug: str, max_chapters: int = 10,
+            max_sentences: int = 3) -> dict[str, Any]:
+        from .reader_continuity import catch_up_digest
+
+        return catch_up_digest(_reader(), slug,
+                               max_chapters=max_chapters,
+                               max_sentences=max_sentences)
+
+    @registry.register(
+        "reader_previously_on",
+        description=(
+            "'Previously on' recap for a story after a break: "
+            "summaries of the last cached chapters, plus the bible's "
+            "open threads and cast when a story bible exists — "
+            "otherwise an explicit no-bible, never an invented recap."
+        ),
+        capability=Capability.FS_READ,
+        parameters={
+            "slug": "str",
+            "last_n": "int (optional, 5)",
+        },
+    )
+    def reader_previously_on(
+            slug: str, last_n: int = 5) -> dict[str, Any]:
+        from .reader_continuity import return_after_break
+
+        return return_after_break(_reader(), slug, last_n=last_n)
 
     @registry.register(
         "reader_stats",

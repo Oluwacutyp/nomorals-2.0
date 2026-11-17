@@ -553,6 +553,78 @@ class RuntimeSearchMixin:
                         f"({drift.get('verdict', 'no reference voice')})")
                 return "\n".join(lines)
 
+            if verb == "catchup":
+                # /books catchup <slug> — the unread tail as a recap:
+                # per-chapter extractive summaries of the cached
+                # chapters after your current one, gaps named as not
+                # held.  A recap, not a read: progress does not move.
+                from ...books.reader import ReaderError, StoryReader
+                from ...books.reader_continuity import catch_up_digest
+                if len(parts) < 2:
+                    return "usage: /books catchup <slug>"
+                try:
+                    reader = StoryReader(self.context)
+                    slug = reader.resolve_slug(parts[1])
+                    digest = catch_up_digest(reader, slug)
+                except ReaderError as exc:
+                    return f"📖 catch-up refused: {exc}"
+                except Exception as exc:  # noqa: BLE001 - chat surface
+                    record_failure("runtime_search._control_book.catchup",
+                                   exc)
+                    return f"📖 catch-up failed: {exc}"
+                if not digest.get("ok"):
+                    return f"📖 catch-up: {digest.get('reason', 'unknown')}"
+                lines = [f"📖 {digest['title']} — previously on "
+                         f"(you're on chapter "
+                         f"{digest['current_chapter']} of "
+                         f"{digest['total_chapters'] or '?'})"]
+                for s in digest["summaries"]:
+                    lines.append(f"  ch {s['chapter']} — {s['summary']}")
+                gaps = digest["gaps_not_cached"]
+                if gaps:
+                    lines.append(
+                        f"  (chapters {', '.join(str(g) for g in gaps)} "
+                        f"not held yet — /books read {slug} fetches one)")
+                if not digest["summaries"] and not gaps:
+                    lines.append("  nothing unread cached — you're caught up.")
+                lines.append("  (a recap, not a read — your place hasn't moved)")
+                return "\n".join(lines)
+
+            if verb == "previously":
+                # /books previously <slug> — 'previously on' after a
+                # break: the last cached chapters summarized, plus the
+                # bible's open threads and cast when a bible exists.
+                from ...books.reader import ReaderError, StoryReader
+                from ...books.reader_continuity import return_after_break
+                if len(parts) < 2:
+                    return "usage: /books previously <slug>"
+                try:
+                    reader = StoryReader(self.context)
+                    slug = reader.resolve_slug(parts[1])
+                    title = reader._load(slug).title
+                    ret = return_after_break(reader, slug)
+                except ReaderError as exc:
+                    return f"📖 previously refused: {exc}"
+                except Exception as exc:  # noqa: BLE001 - chat surface
+                    record_failure("runtime_search._control_book.previously",
+                                   exc)
+                    return f"📖 previously failed: {exc}"
+                if not ret.get("ok"):
+                    return f"📖 previously: {ret.get('reason', 'unknown')}"
+                lines = [f"📖 {title} — previously on "
+                         f"(chapters {', '.join(str(c) for c in ret['chapters_covered'])})"]
+                for s in ret["summaries"]:
+                    lines.append(f"  ch {s['chapter']} — {s['summary']}")
+                if ret["open_threads"]:
+                    lines.append("  open threads:")
+                    for t in ret["open_threads"]:
+                        lines.append(f"    · {t}")
+                if ret["cast"]:
+                    lines.append(f"  cast: {', '.join(ret['cast'])}")
+                if not ret["bible"]:
+                    lines.append("  (no story bible on file — threads/cast unknown)")
+                return "\n".join(lines)
+
             # ── new book ────────────────────────────────────────────────────
             # chapters: explicit number wins, otherwise the book grows
             # organically as it is written (no count decided up front)
