@@ -50,6 +50,7 @@ from .digest import (
     Ritual,
     RitualScheduler,
     build_digest,
+    next_occurrences,
     render_digest,
     render_ritual,
 )
@@ -680,7 +681,7 @@ def _usage() -> str:
         "/cgroup rep <member> · nudge · discover <member>\n"
         "/cgroup memory <group_id> remember <key> = <value> · recall <key> · "
         "search <query> · list · forget <key> · persona\n"
-        "/cgroup digest <group_id> · rituals <group_id> [list|run <name>|enable|disable]\n"
+        "/cgroup digest <group_id> · rituals <group_id> [list|run <name>|enable|disable|add <name> | <HH:MM|DAY HH:MM> | <message>]\n"
         "/cgroup schedule <minutes> <text> · posts · devices (AA-18 orchestration)\n"
         "Also: /cgroup event … · /cgroup meetup … — see events.py / meetups.py."
     )
@@ -847,15 +848,18 @@ def _control_digest(store: GroupStore, rest: str, who: str,
 
 def _control_rituals(store: GroupStore, rest: str, who: str,
                      context: Any) -> str:
-    """Group rituals (audit gap R2-29): list / run / enable / disable
-    over the group's persisted rituals. List is membership-gated;
-    run / enable / disable post to the whole group, so they are
+    """Group rituals (audit gap R2-29): list / run / enable / disable /
+    add over the group's persisted rituals. List is membership-gated;
+    run / enable / disable / add post to the whole group, so they are
     owner/admin only. A manual run marks the ritual delivered, so the
-    tick does not immediately re-fire it. Never raises."""
+    tick does not immediately re-fire it. An added ritual is saved
+    through the same store the tick reads, so it fires on its own
+    clock. Never raises."""
     from datetime import UTC, datetime
 
     usage = ("Usage: /cgroup rituals <group_id> [list | run <name> | "
-             "enable <name> | disable <name>]")
+             "enable <name> | disable <name> | add <name> | "
+             "<HH:MM | DAY HH:MM> | <message>]")
     segs = rest.split(None, 1)
     if not segs:
         return usage
@@ -880,11 +884,13 @@ def _control_rituals(store: GroupStore, rest: str, who: str,
             state = "enabled" if r.enabled else "disabled"
             lines.append(f"• {r.name} ({r.kind}) — {state}, next {when}")
         return "\n".join(lines)
-    if verb not in ("run", "enable", "disable"):
+    if verb not in ("run", "enable", "disable", "add"):
         return usage
     if g.role_of(who) not in (ROLE_OWNER, ROLE_ADMIN):
         return (f"Only the group owner or an admin can {verb} a ritual "
                 f"in **{g.name}**.")
+    if verb == "add":
+        return _add_ritual(store, g, arg, rituals, usage)
     match = [r for r in rituals if r.name.lower() == arg.lower()]
     if not match:
         names = ", ".join(r.name for r in rituals)
@@ -904,6 +910,69 @@ def _control_rituals(store: GroupStore, rest: str, who: str,
     ritual.enabled = False
     store.save_rituals(gid, rituals)
     return f"`{ritual.name}` disabled for **{g.name}**."
+
+
+def _add_ritual(store: GroupStore, g: ThemedGroup, arg: str,
+                rituals: list[Ritual], usage: str) -> str:
+    """Create a custom ritual: ``add <name> | <HH:MM | DAY HH:MM> |
+    <message>``. The ``|`` shape is the house style (``/cgroup new
+    <name> | <topic>``). A bare time is daily; a leading weekday
+    (MO..SU) makes it weekly. The schedule is validated through the
+    same ``parse_rrule`` the tick uses, so an added ritual can only
+    ever be one that fires. Caller is already admin-gated."""
+    from datetime import UTC, datetime
+
+    _WEEKDAYS = ("MO", "TU", "WE", "TH", "FR", "SA", "SU")
+    segs = [p.strip() for p in arg.split("|")]
+    if len(segs) != 3 or not all(segs):
+        return usage
+    name, when, template = segs
+    existing = [r for r in rituals if r.name.lower() == name.lower()]
+    if existing:
+        return (f"There's already a ritual named `{existing[0].name}` "
+                f"in **{g.name}** — pick another name, or disable the "
+                f"old one first.")
+    toks = when.split()
+    if len(toks) == 1:
+        day, clock = "", toks[0]
+    elif len(toks) == 2:
+        day, clock = toks[0].upper(), toks[1]
+    else:
+        return (f"couldn't read the time {when!r} — use HH:MM for "
+                f"daily, or DAY HH:MM for weekly, e.g. 09:30 or "
+                f"FR 16:00.")
+    if day and day not in _WEEKDAYS:
+        return (f"couldn't read the weekday {toks[0]!r} — use MO, TU, "
+                f"WE, TH, FR, SA or SU, e.g. FR 16:00.")
+    try:
+        hour_s, _, minute_s = clock.partition(":")
+        hour, minute = int(hour_s), int(minute_s)
+        if not minute_s or not 0 <= hour <= 23 or not 0 <= minute <= 59:
+            raise ValueError("hour/minute out of range")
+    except ValueError:
+        return (f"couldn't read the time {clock!r} — use 24-hour "
+                f"HH:MM, e.g. 09:30.")
+    if day:
+        rrule = (f"FREQ=WEEKLY;BYDAY={day};BYHOUR={hour};"
+                 f"BYMINUTE={minute}")
+        when_text = f"weekly on {day} at {hour:02d}:{minute:02d} UTC"
+    else:
+        rrule = f"FREQ=DAILY;BYHOUR={hour};BYMINUTE={minute}"
+        when_text = f"daily at {hour:02d}:{minute:02d} UTC"
+    ritual = Ritual(name=name, kind="custom", rrule=rrule,
+                    template=template, group_id=g.id, enabled=True)
+    now = datetime.now(tz=UTC)
+    try:
+        nxt = next_occurrences(ritual.recurrence, now, 1, start=now)
+    except ValueError as exc:
+        return f"that schedule never fires: {exc}"
+    if not nxt:
+        return "that schedule never fires — pick another time."
+    rituals.append(ritual)
+    store.save_rituals(g.id, rituals)
+    when_due = nxt[0].strftime("%a %H:%M UTC")
+    return (f"🕯️ Added `{name}` to **{g.name}** — {when_text}, "
+            f"next {when_due}.")
 
 
 def _control_cgroup(tail: str, context, chat,

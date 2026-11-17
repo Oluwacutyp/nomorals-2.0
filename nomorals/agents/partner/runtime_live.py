@@ -175,7 +175,9 @@ class RuntimeLiveMixin:
         /map fence (audit gap R1-45) is arrival / departure
         alerts over the location geofence organ: /map fence add
         circle|polygon saves a fence, /map fence list shows it
-        with its live state, /map fence remind saves a fire-once
+        with its live state, /map fence edit changes one field
+        (re-baselining the live state when the shape moves),
+        /map fence remind saves a fire-once
         reminder that speaks when the fence is entered or left.
         The add command IS the opt-in grant (scope "geofence",
         reminders "reminders") — the same shape as /map share.
@@ -205,7 +207,7 @@ class RuntimeLiveMixin:
                     "/map fence list  |  /map fence remove <id|label>  |  "
                     "/map fence remind <fence> <enter|exit> <message>  |  "
                     "/map fence reminders  |  /map fence unremind <id>  |  "
-                    "/map fence rearm <id>")
+                    "/map fence rearm <id>  |  /map fence edit <fence> <field> <value>")
         is_owner = True if message is None else self._is_operator(message)
         if not is_owner:
             return ("owner-only: Atlas renders the owner's installed "
@@ -254,7 +256,7 @@ class RuntimeLiveMixin:
                 "/map fence list | /map fence remove <id|label> | "
                 "/map fence remind <fence> <enter|exit> <message> | "
                 "/map fence reminders | /map fence unremind <id> | "
-                "/map fence rearm <id>")
+                "/map fence rearm <id> | /map fence edit <fence> <field> <value>")
 
     def _fence_store(self):
         """The FenceStore over the location root — the same root
@@ -277,7 +279,9 @@ class RuntimeLiveMixin:
         add circle|polygon saves a fence (and IS the opt-in
         grant, scope "geofence", mirroring /map share); list
         shows fences with their live inside/outside state;
-        remove drops a fence and its reminders; remind saves a
+        edit changes one field (name / radius / center / points /
+        locale) and re-baselines the live state when the shape
+        moves; remove drops a fence and its reminders; remind saves a
         fire-once reminder (and grants scope "reminders");
         reminders lists them; unremind drops one; rearm makes a
         fired one fireable again. Bad geometry is refused with
@@ -303,7 +307,8 @@ class RuntimeLiveMixin:
                  "/map fence remove <id|label>  |  /map fence remind "
                  "<fence> <enter|exit> <message>  |  /map fence "
                  "reminders  |  /map fence unremind <id>  |  /map fence "
-                 "rearm <id>")
+                 "rearm <id>  |  /map fence edit <fence> "
+                 "<name|radius|center|points|locale> <value>")
         toks = (spec or "").split()
         if not toks:
             return usage
@@ -491,11 +496,135 @@ class RuntimeLiveMixin:
             store.rearm_reminder(rem.id)
             return (f"reminder {rem.message!r} re-armed — it will "
                     "fire again.")
+        if sub == "edit":
+            if len(toks) < 3:
+                return ("usage: /map fence edit <fence> "
+                        "<name|radius|center|points|locale> <value>")
+            ref = toks[1]
+            fence = store.resolve_fence(ref)
+            if fence is None:
+                names = ", ".join(f.name for f in store.fences())
+                known = f" Fences: {names}." if names else " No fences yet."
+                return f"no fence {ref!r}.{known}"
+            field = toks[2].lower()
+            value = " ".join(toks[3:]).strip()
+            if field not in ("name", "radius", "center", "points",
+                             "locale"):
+                return (f"unknown fence field {field!r} — edit name | "
+                        "radius | center | points | locale")
+            if not value:
+                return (f"usage: /map fence edit <fence> {field} <value>")
+            fences, states, reminders = store.load_all()
+            current = fences.get(fence.id)
+            if current is None:
+                return f"no fence {ref!r}."
+            geometry_changed = False
+            if field == "name":
+                if current.kind == "circle":
+                    new = circle_fence(current.id, value, current.center,
+                                       current.radius_m,
+                                       locale=current.locale)
+                else:
+                    new = polygon_fence(current.id, value,
+                                        list(current.vertices),
+                                        locale=current.locale)
+            elif field == "locale":
+                if current.kind == "circle":
+                    new = circle_fence(current.id, current.name,
+                                       current.center, current.radius_m,
+                                       locale=value)
+                else:
+                    new = polygon_fence(current.id, current.name,
+                                        list(current.vertices),
+                                        locale=value)
+            elif field == "radius":
+                if current.kind != "circle":
+                    return (f"radius is a circle-fence field — "
+                            f"{current.name!r} is a polygon; edit its "
+                            f"points instead.")
+                try:
+                    radius = float(value)
+                except ValueError:
+                    return (f"radius must be a number, got {value!r} — "
+                            "/map fence edit <fence> radius <radius_m>")
+                if radius <= 0:
+                    return (f"radius must be > 0, got {radius:g} — a "
+                            "circle fence needs a positive radius in "
+                            "metres.")
+                new = circle_fence(current.id, current.name,
+                                   current.center, radius,
+                                   locale=current.locale)
+                geometry_changed = True
+            elif field == "center":
+                if current.kind != "circle":
+                    return (f"center is a circle-fence field — "
+                            f"{current.name!r} is a polygon; edit its "
+                            f"points instead.")
+                try:
+                    nums = [float(v) for v in value.split(",")]
+                except ValueError:
+                    nums = []
+                if len(nums) != 2:
+                    return (f"couldn't parse coordinates {value!r} — "
+                            "/map fence edit <fence> center <lat,lon>")
+                try:
+                    validate_lat(nums[0])
+                    validate_lon(nums[1])
+                except ValueError as exc:
+                    return f"bad fence point: {exc}"
+                new = circle_fence(current.id, current.name,
+                                   LatLon(nums[0], nums[1]),
+                                   current.radius_m,
+                                   locale=current.locale)
+                geometry_changed = True
+            else:  # points
+                if current.kind != "polygon":
+                    return (f"points is a polygon-fence field — "
+                            f"{current.name!r} is a circle; edit its "
+                            f"center or radius instead.")
+                verts: list[LatLon] = []
+                for part in value.split(";"):
+                    try:
+                        nums = [float(v) for v in part.split(",")]
+                    except ValueError:
+                        nums = []
+                    if len(nums) != 2:
+                        return (f"couldn't parse coordinates {part!r} "
+                                "— /map fence edit <fence> points "
+                                "<lat,lon>;<lat,lon>;...")
+                    try:
+                        validate_lat(nums[0])
+                        validate_lon(nums[1])
+                    except ValueError as exc:
+                        return f"bad fence point: {exc}"
+                    verts.append(LatLon(nums[0], nums[1]))
+                try:
+                    new = polygon_fence(current.id, current.name, verts,
+                                        locale=current.locale)
+                except ValueError as exc:
+                    return f"couldn't save fence {current.name!r}: {exc}"
+                geometry_changed = True
+            fences[current.id] = new
+            if geometry_changed:
+                # A moved fence re-baselines: the old inside/outside
+                # was measured against the old shape, so keeping it
+                # would fire a spurious exit/enter on the next update.
+                states.pop(current.id, None)
+            store.save_all(fences, states, reminders)
+            if new.kind == "circle":
+                shape = (f"circle, {new.radius_m:g} m around "
+                         f"{new.center.lat:.4f},{new.center.lon:.4f}")
+            else:
+                shape = f"polygon, {len(new.vertices)} vertices"
+            return (f"📍 fence {new.name!r} updated — {field} is now "
+                    f"{value!r} · {shape} (id {new.id}).")
         return (f"unknown /map fence verb {sub!r} — /map fence add "
                 "circle|polygon ... | /map fence list | /map fence "
                 "remove <id|label> | /map fence remind <fence> "
                 "<enter|exit> <message> | /map fence reminders | "
-                "/map fence unremind <id> | /map fence rearm <id>")
+                "/map fence unremind <id> | /map fence rearm <id> | "
+                "/map fence edit <fence> "
+                "<name|radius|center|points|locale> <value>")
 
     def _map_packs_text(self) -> str:
         from ...maps.packs import verify_pack_dir
