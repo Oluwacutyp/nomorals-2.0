@@ -57,6 +57,10 @@ CLI_ALIASES: dict[str, list[str]] = {
     "re": [],
     "desk": [],
     "decisions": [],
+    "focus": [],
+    "workflow": [],
+    "plan": [],
+    "museum": [],
     "markets": [],
     "pump": [],
     "book": ["bk"],
@@ -3388,6 +3392,73 @@ def _parser() -> argparse.ArgumentParser:
                       help="Output as JSON")
     av_p.add_argument("--no-quarantine", action="store_true",
                       help="scan without quarantining hits")
+
+    focus_p = sub.add_parser("focus", aliases=CLI_ALIASES["focus"],
+        help="focus sessions: start, pause, resume, stop, status, today, week, month",
+        description=("nm focus [status]\\n"
+                     "nm focus start [label]\\n"
+                     "nm focus pause · resume · stop [note]\\n"
+                     "nm focus today · week · month\\n"
+                     "The same sessions as chat /focus, over the same "
+                     "timer; week/month render the same weekly/monthly "
+                     "review chat does."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    focus_p.add_argument("focus_action", nargs="?", default="status",
+                         help="Action to perform")
+    focus_p.add_argument("focus_rest", nargs="*", default=[],
+                         help="action arguments (label / note)")
+    focus_p.add_argument("--json", action="store_true",
+                         help="Output as JSON")
+
+    workflow_p = sub.add_parser("workflow", aliases=CLI_ALIASES["workflow"],
+        help="saved workflow scripts: list, show, status, run, cancel, resume",
+        description=("nm workflow [list]\\n"
+                     "nm workflow show <name> · status [name]\\n"
+                     "nm workflow run <name> · cancel <name> · resume <name>\\n"
+                     "The store half of chat /workflow — drafting a new "
+                     "workflow from <task> needs the brain and stays "
+                     "chat-only."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    workflow_p.add_argument("workflow_action", nargs="?", default="list",
+                            help="Action to perform")
+    workflow_p.add_argument("workflow_rest", nargs="*", default=[],
+                            help="action arguments (workflow name)")
+    workflow_p.add_argument("--json", action="store_true",
+                            help="Output as JSON")
+
+    plan_p = sub.add_parser("plan", aliases=CLI_ALIASES["plan"],
+        help="saved Implementation Plans: list, show, status",
+        description=("nm plan [list]\\n"
+                     "nm plan show <id> · status [id]\\n"
+                     "The store half of chat /plan — drafting a new plan "
+                     "from <task> needs the brain and stays chat-only."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    plan_p.add_argument("plan_action", nargs="?", default="list",
+                        help="Action to perform")
+    plan_p.add_argument("plan_rest", nargs="*", default=[],
+                        help="action arguments (plan id)")
+    plan_p.add_argument("--json", action="store_true",
+                        help="Output as JSON")
+
+    museum_p = sub.add_parser("museum", aliases=CLI_ALIASES["museum"],
+        help="the Museum census: every system as sendable cards",
+        description=("nm museum [census|<shelf>]\\n"
+                     "nm museum find <id>\\n"
+                     "nm museum send <id> — refused: sending needs a "
+                     "live chat\\n"
+                     "The same census as chat /museum, over the same "
+                     "Museum; send is a chat-only verb."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    museum_p.add_argument("museum_action", nargs="?", default=None,
+                          help="census, a shelf name, find, or send")
+    museum_p.add_argument("museum_rest", nargs="*", default=[],
+                          help="action arguments (card id)")
+    museum_p.add_argument("--json", action="store_true",
+                          help="Output as JSON")
 
     timeline = sub.add_parser("timeline", aliases=CLI_ALIASES["timeline"],
                               help="event timeline: what happened, newest first")

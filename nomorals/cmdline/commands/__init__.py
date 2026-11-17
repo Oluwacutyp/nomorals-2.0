@@ -26,6 +26,10 @@ from .organs import _cmd_organs
 from .brain import _cmd_brain
 from .data import _cmd_data
 from .decisions import _cmd_decisions
+from .focus import _cmd_focus
+from .workflow import _cmd_workflow
+from .plan import _cmd_plan
+from .museum import _cmd_museum
 from .doctor import _cmd_doctor, _cmd_models, _cmd_models_doctor, _cmd_setup, _env_update_home
 from .exec import _cmd_apps, _cmd_exec
 from .finance import _cmd_finance
@@ -163,6 +167,10 @@ __all__ = [
     "_cmd_av",
     "_cmd_data",
     "_cmd_decisions",
+    "_cmd_focus",
+    "_cmd_workflow",
+    "_cmd_plan",
+    "_cmd_museum",
     "_cmd_brain",
     "_cmd_doctor",
     "_env_update_home",

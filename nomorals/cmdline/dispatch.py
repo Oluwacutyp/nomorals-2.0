@@ -26,6 +26,10 @@ from .commands.re import _cmd_re
 from .commands.repair import _cmd_repair
 from .commands.desk import _cmd_desk
 from .commands.decisions import _cmd_decisions
+from .commands.focus import _cmd_focus
+from .commands.workflow import _cmd_workflow
+from .commands.plan import _cmd_plan
+from .commands.museum import _cmd_museum
 from .commands.markets import _cmd_markets
 from .commands.pump import _cmd_pump
 from .commands.book import _cmd_book
@@ -522,6 +526,10 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "re": _CommandSpec(_cmd_re),
     "desk": _CommandSpec(_cmd_desk),
     "decisions": _CommandSpec(_cmd_decisions),
+    "focus": _CommandSpec(_cmd_focus),
+    "workflow": _CommandSpec(_cmd_workflow),
+    "plan": _CommandSpec(_cmd_plan),
+    "museum": _CommandSpec(_cmd_museum),
     "markets": _CommandSpec(_cmd_markets),
     "pump": _CommandSpec(_cmd_pump),
     "build": _CommandSpec(_cmd_build),
