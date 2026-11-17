@@ -25,7 +25,7 @@ production migration path, excluding FTS5 shadow tables
 runtime-created tables beyond the migration set, so its raw count runs
 higher; the pinned number is the fresh-migration count, reproducible
 from this tree alone.
-`tests/test_ten_packages_expose.py` re-asserts all three against the live
+`tests/test_ten_packages_expose.py` re-asserts both against the live
 tree on every run — if the tree grows, this section must be re-verified,
 not hand-edited upward.
 
@@ -40,9 +40,6 @@ does not:
   digital-twin "what changed since I left?", Naija steal scores vs the
   30-day median, NL → automation descriptors that never execute without
   confirmation.
-- `nomorals/audio/expose.py` — native Shazam (Wang-2003 local-max,
-  local DB only), transcript-as-timeline `remove_fillers`, talk-to-book-characters
-  with a `spoiler_level` cap, backends picked by `resource_profile`.
 - `nomorals/documents/expose.py` — 16 formats (pdf/docx/xlsx/xls/pptx/
   html/markdown/csv/tsv/txt/rtf/epub/odt/ods/json/xml), stdlib-only parsing,
   phone-offline; `.docx` *output* needs optional `python-docx`.
