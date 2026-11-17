@@ -53,6 +53,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "autonomy": ["auto"],
     "av": [],
     "airports": [],
+    "compute": [],
     "bet": ["bt"],
     "apk": [],
     "re": [],
@@ -3586,6 +3587,25 @@ def _parser() -> argparse.ArgumentParser:
                             help="action arguments (unused)")
     airports_p.add_argument("--json", action="store_true",
                             help="Output as JSON")
+
+    compute_p = sub.add_parser(
+        "compute", aliases=CLI_ALIASES["compute"],
+        help="computed answers: arithmetic, units, dates, symbolic math, WolframAlpha",
+        description=("nm compute <question> [--rung wolfram|sympy|stdlib] [--json]\n"
+                     "The computational-answer organ: WolframAlpha when an "
+                     "AppID is configured (NM_WOLFRAM_APPID), then the "
+                     "sympy CAS, then exact stdlib arithmetic, units and "
+                     "dates. Every answer names its rung and its "
+                     "derivation; an unanswerable question says so."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    compute_p.add_argument("question", nargs="+",
+                           help="the question in plain words")
+    compute_p.add_argument("--rung", default="auto",
+                           choices=["auto", "wolfram", "sympy", "stdlib"],
+                           help="one rung instead of the ladder")
+    compute_p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
 
     focus_p = sub.add_parser("focus", aliases=CLI_ALIASES["focus"],
         help="focus sessions: start, pause, resume, stop, status, today, week, month",

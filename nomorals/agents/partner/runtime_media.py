@@ -5234,6 +5234,48 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"alternatives lookup failed: {exc}"
 
+    def _control_compute(self, tail: str) -> str:
+        """Computed answers: /compute <question> [--rung wolfram|sympy|stdlib].
+
+        Arithmetic, units, dates and symbolic math on the local
+        ladder; curated facts through WolframAlpha when an AppID is
+        configured. Every answer names its rung and shows its
+        derivation; a question no rung can answer says so and names
+        what would help. Never raises: bad input returns usage.
+        """
+        import re
+
+        from ...codews.compute import compute_answer, format_compute_reply
+
+        tail = (tail or "").strip()
+        if not tail:
+            return ("usage: /compute <question> "
+                    "[--rung wolfram|sympy|stdlib]\n"
+                    "example: /compute integrate x^2 sin(x)")
+        rung = "auto"
+        m = re.search(r"--rung\s+(\S+)", tail)
+        if m:
+            rung = m.group(1).lower()
+            tail = (tail[:m.start()] + tail[m.end():]).strip()
+        question = re.sub(r"\s+", " ", tail).strip()
+        if not question:
+            return ("usage: /compute <question> "
+                    "[--rung wolfram|sympy|stdlib]")
+        try:
+            appid = ""
+            try:
+                settings = getattr(self, "settings", None)
+                wolfram = getattr(settings, "wolfram", None) \
+                    if settings is not None else None
+                appid = str(getattr(wolfram, "appid", "") or "") \
+                    if wolfram is not None else ""
+            except Exception:  # noqa: BLE001 — local rungs still answer
+                appid = ""
+            comp = compute_answer(question, appid=appid or None, rung=rung)
+            return format_compute_reply(comp)
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"compute failed: {exc}"
+
     def _control_code_format(self, kind: str, tail: str) -> str:
         """Code-video format commands: /map-route, /headline, /teardown.
 

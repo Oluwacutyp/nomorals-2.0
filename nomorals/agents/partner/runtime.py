@@ -9749,6 +9749,8 @@ class PartnerRuntime(
                                            message=message)
         if kind == "alternatives":
             return self._control_alternatives(command.tail or arg)
+        if kind == "compute":
+            return self._control_compute(command.tail or arg)
         if kind == "director":
             return self._control_director(command.tail or arg)
         if kind == "caption":

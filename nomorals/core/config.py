@@ -461,6 +461,20 @@ class A2ASettings:
 
 
 @dataclass
+class WolframSettings:
+    """The WolframAlpha AppID for the computational-answer organ.
+
+    Empty by default: without an AppID the Wolfram rung refuses in
+    words and the local ladder (stdlib exact + sympy CAS) answers
+    what it can. The AppID is a key — it lives in the environment
+    (``NM_WOLFRAM_APPID``) or the vault, never in a committed file.
+    See ``nomorals/codews/wolfram.py``.
+    """
+
+    appid: str = ""
+
+
+@dataclass
 class GuardrailSettings:
     """LLM I/O guardrails (input / output / dialogue rails on the
     brain's call path — see ``nomorals/llm/guardrails.py``).
@@ -1085,6 +1099,7 @@ class Settings:
     tools: ToolSettings = field(default_factory=ToolSettings)
     mcp: MCPSettings = field(default_factory=MCPSettings)
     a2a: A2ASettings = field(default_factory=A2ASettings)
+    wolfram: WolframSettings = field(default_factory=WolframSettings)
     guardrails: GuardrailSettings = field(default_factory=GuardrailSettings)
     prompt_compiler: PromptCompilerSettings = field(
         default_factory=PromptCompilerSettings)
@@ -1484,6 +1499,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_AUTONOMY_ENABLED": "autonomy.enabled",
     "NM_CHAT_WHATSAPP_ENABLED": "chat.whatsapp_enabled",
     "NM_GITHUB_TOKEN": "api.github_token",
+    "NM_WOLFRAM_APPID": "wolfram.appid",
     "NM_LLM_ALLOW_MOCK_FALLBACK": "llm.allow_mock_fallback",
     "NM_LLM_LOCAL_LORA": "llm.local_lora",
     "NM_MASTODON_TOKEN": "social.mastodon_token",

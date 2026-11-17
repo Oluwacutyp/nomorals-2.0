@@ -206,7 +206,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: pins the two together — a wave that adds a kind here must add its
 #: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "ping", "search", "alternatives", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "alternatives", "compute", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "map-route", "headline", "teardown",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
@@ -423,6 +423,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # search engine (Telegram / WhatsApp / console — same commands everywhere)
     "search": (1, None),     # /search <query> — free text, no length cap
     "alternatives": (1, None),  # /alternatives <software> — crowd-ranked software alternatives
+    "compute": (1, None),  # /compute <question> — computed answer (WolframAlpha + CAS ladder)
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
     "searchleads": (0, 0),   # legit paid-task platform report
     "money": (0, None),      # money opportunities hunter: scan|list|new|profile
@@ -2424,6 +2425,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                      "usage": "/alternatives <software> [--platform linux] [--free | --open-source] [--limit N]",
                      "example": "/alternatives Photoshop --platform linux --free",
                      "related": "/search · /searchdeep"},
+    "compute": {"what": "Computed answers, not guesses: arithmetic, units, "
+                       "dates and symbolic math (integrate, differentiate, "
+                       "solve, factor) on the local ladder, curated facts "
+                       "through WolframAlpha when it is keyed — every "
+                       "answer carries its rung and its derivation.",
+                "usage": "/compute <question> [--rung wolfram|sympy|stdlib]",
+                "example": "/compute integrate x^2 sin(x)",
+                "related": "/search · /alternatives"},
     "searchdeep": {"what": "deep multi-query research with synthesis (power mode).",
                    "usage": "/searchdeep <query>", "example": "/searchdeep eBPF rootkit detection",
                    "related": "/search /searchhist"},
@@ -4808,7 +4817,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "audit", "whois", "ports",
-                           "brief", "competitor", "aeo", "alternatives"]),
+                           "brief", "competitor", "aeo", "alternatives", "compute"]),
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
@@ -5093,7 +5102,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
-      "brief", "competitor", "aeo", "alternatives"]),
+      "brief", "competitor", "aeo", "alternatives", "compute"]),
     ("wisdom keeper — corpus · history · practice",
      ["wisdom", "wis"]),
     ("building for real — code & missions",
@@ -5286,6 +5295,7 @@ LIST_ONELINERS: dict[str, str] = {
     "restart": "checkpoint missions + restart, no pull",
     "search": "quick research + cited summary",
     "alternatives": "crowd-ranked software alternatives to a named app",
+    "compute": "computed answers: arithmetic, units, dates, symbolic math, WolframAlpha",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",
     "books": "story reader + continuer: /books read <url|slug> | part <slug> | contents <slug> | export <slug> [pdf|epub|html] | continue <slug> [n] | sources",

@@ -17,6 +17,7 @@ from .commands.agent import _cmd_agent, _cmd_ask, _cmd_run
 from .commands.autonomy import _cmd_autonomy
 from .commands.av import _cmd_av
 from .commands.airports import _cmd_airports
+from .commands.compute import _cmd_compute
 from .commands.backup import _cmd_backup
 from .commands.benchmark import _cmd_benchmark
 from .commands.bet import _cmd_bet
@@ -562,6 +563,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "offline": _CommandSpec(_cmd_offline),
     "av": _CommandSpec(_cmd_av),
     "airports": _CommandSpec(_cmd_airports),
+    "compute": _CommandSpec(_cmd_compute),
     "benchmark": _CommandSpec(_cmd_benchmark),
 }
 

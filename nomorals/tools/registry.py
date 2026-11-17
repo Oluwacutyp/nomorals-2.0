@@ -621,6 +621,7 @@ class ToolRegistry:
             "wisdom", "social", "whatsapp",
             "services",  # 28 service connectors bridged to the spine
             "software",  # software alternatives (AlternativeTo catalogue)
+            "compute",  # computational answers (WolframAlpha + CAS ladder)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",
