@@ -131,10 +131,20 @@ _PROPOSALS_DDL = """CREATE TABLE IF NOT EXISTS proposals (
     member TEXT NOT NULL, idea TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'proposed',
     created_at REAL NOT NULL DEFAULT 0)"""
+_RSVPS_DDL = """CREATE TABLE IF NOT EXISTS rsvps (
+    trip_id TEXT NOT NULL, member TEXT NOT NULL,
+    status TEXT NOT NULL, updated_at REAL NOT NULL DEFAULT 0,
+    PRIMARY KEY (trip_id, member))"""
 _DDL = ";\n".join((_TRIPS_DDL, _POLLS_DDL, _VOTES_DDL, _EXPENSES_DDL,
-                   _PAYMENTS_DDL, _BUDGETS_DDL, _LEGS_DDL, _PROPOSALS_DDL))
+                   _PAYMENTS_DDL, _BUDGETS_DDL, _LEGS_DDL, _PROPOSALS_DDL,
+                   _RSVPS_DDL))
 _TABLES = ("group_trips", "polls", "votes", "expenses", "payments",
-           "budgets", "legs", "proposals")
+           "budgets", "legs", "proposals", "rsvps")
+
+#: RSVP statuses, shared by the store and the community bridge
+#: (community_impl.py). One source of truth — a bad status is never
+#: silently coerced to 'maybe'.
+_RSVP_STATUSES = ("going", "maybe", "declined")
 
 
 def compute_shares(amount_kobo: int, members: list[str], *,
@@ -405,6 +415,10 @@ class GroupTripStore:
                 member TEXT NOT NULL, idea TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'proposed',
                 created_at REAL NOT NULL DEFAULT 0);
+            CREATE TABLE IF NOT EXISTS rsvps (
+                trip_id TEXT NOT NULL, member TEXT NOT NULL,
+                status TEXT NOT NULL, updated_at REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (trip_id, member));
         """)
         # additive migrations for older group DBs
         for _ddl in (
@@ -720,6 +734,80 @@ class GroupTripStore:
         trip = self.get_trip(res["poll"].trip_id)
         members = set(trip.members) if trip else set()
         return sorted(members - set(res["voters"]))
+
+    # -- RSVPs (durable; the community bridge delegates here) ----------
+
+    def record_rsvp(self, trip_id: str, member: str,
+                    status: str) -> bool:
+        """Record (or update) one member's RSVP on a trip.
+
+        Raises ValueError on an unknown trip, an unknown status, or an
+        empty member — a bad RSVP is never silently stored or coerced.
+        Returns False only when the store itself is unavailable.
+        """
+        if self.get_trip(trip_id) is None:
+            raise ValueError(f"no such trip {trip_id!r}")
+        status = (status or "").strip().lower()
+        if status not in _RSVP_STATUSES:
+            raise ValueError(
+                f"unknown RSVP status {status!r}; "
+                f"expected {_RSVP_STATUSES}")
+        member = (member or "").strip()
+        if not member:
+            raise ValueError("RSVP needs a member name")
+        if self._port is not None:
+            # put is an upsert — the seam twin of INSERT OR REPLACE.
+            self._port.tables["rsvps"].put({
+                "trip_id": trip_id, "member": member, "status": status,
+                "updated_at": _now()})
+            return True
+        if self._db is None:
+            return False
+        self._db.execute(
+            "INSERT OR REPLACE INTO rsvps (trip_id, member, status,"
+            " updated_at) VALUES (?, ?, ?, ?)",
+            (trip_id, member, status, _now()))
+        self._db.commit()
+        return True
+
+    def rsvp_summary(self, trip_id: str) -> dict[str, Any]:
+        """Counts + member lists per RSVP status. Members with no RSVP
+        are listed under ``no_reply`` — silence is visible, not assumed.
+        Raises ValueError on an unknown trip."""
+        trip = self.get_trip(trip_id)
+        if trip is None:
+            raise ValueError(f"no such trip {trip_id!r}")
+        try:
+            if self._port is not None:
+                # the composite key parts live only in the joined
+                # document id, so scan the restored rows and filter in
+                # Python (the votes precedent).
+                rows = [r for r in self._port.tables["rsvps"].all()
+                        if r["trip_id"] == trip_id]
+            else:
+                rows = self._db.execute(
+                    "SELECT member, status FROM rsvps WHERE trip_id = ?",
+                    (trip_id,)).fetchall()
+        except Exception:  # noqa: BLE001
+            rows = []
+        table = {r["member"]: r["status"] for r in rows
+                 if r["status"] in _RSVP_STATUSES}
+        buckets: dict[str, list[str]] = {s: [] for s in _RSVP_STATUSES}
+        buckets["no_reply"] = []
+        for member in trip.members:
+            rec = table.get(member)
+            if rec is None:
+                buckets["no_reply"].append(member)
+            else:
+                buckets[rec].append(member)
+        return {
+            "trip_id": trip_id,
+            "counts": {k: len(v) for k, v in buckets.items()},
+            "going": buckets["going"],
+            "maybe": buckets["maybe"],
+            "declined": buckets["declined"],
+            "no_reply": buckets["no_reply"],
+        }
 
 
     # -- expenses -------------------------------------------------------
@@ -1571,6 +1659,54 @@ def control_gtrip(tail: str, context: Any = None, chat: Any = None,
                 return "Which trip? `/gtrip list`, then `/gtrip itinerary <id>`."
             return store.merged_itinerary(trip.id)
 
+        if sub == "share":
+            # The bridge over the group's own store; the returned card
+            # text IS the post to this group (the reply mechanism
+            # delivers it), so no separate publish hook exists here and
+            # post_ref stays empty — never pretended otherwise.
+            from .community_impl import CommunityGroupTripBridge
+
+            trip = _resolve_trip(store, rest)
+            if trip is None:
+                return "Create a trip first: `/gtrip new <name>`."
+            bridge = CommunityGroupTripBridge(store, post=None)
+            share = bridge.share_itinerary(trip.id, _group_key(chat))
+            return share.format_post()
+
+        if sub == "rsvp":
+            from .community_impl import CommunityGroupTripBridge
+
+            parts = (rest or "").split(None, 1)
+            status = parts[0].lower() if parts else ""
+            trip = _resolve_trip(
+                store, parts[1] if len(parts) > 1 else "")
+            if trip is None:
+                return "Create a trip first: `/gtrip new <name>`."
+            bridge = CommunityGroupTripBridge(store, post=None)
+            try:
+                bridge.rsvp(trip.id, name, status)
+            except ValueError as exc:
+                return (f"RSVP: {exc}. "
+                        "Try `/gtrip rsvp going|maybe|declined`.")
+            return (f"✅ {name}: {status} for **{trip.name}**. "
+                    "See `/gtrip rsvps`.")
+
+        if sub == "rsvps":
+            from .community_impl import CommunityGroupTripBridge
+
+            trip = _resolve_trip(store, rest)
+            if trip is None:
+                return "Create a trip first: `/gtrip new <name>`."
+            bridge = CommunityGroupTripBridge(store, post=None)
+            summary = bridge.rsvp_summary(trip.id)
+            lines = [f"📋 RSVPs for **{trip.name}**:"]
+            for key in ("going", "maybe", "declined", "no_reply"):
+                members = summary[key]
+                lines.append(
+                    f"  • {key}: {summary['counts'][key]}" + (
+                        f" — {', '.join(members)}" if members else ""))
+            return "\n".join(lines)
+
         return ("🧳 **/gtrip** — the group-travel stack:\n"
                 "`/gtrip new <name>` · `/gtrip list` · `/gtrip join <id>`\n"
                 "`/gtrip destination <place>` · `/gtrip dates <start> <end>`\n"
@@ -1583,6 +1719,8 @@ def control_gtrip(tail: str, context: Any = None, chat: Any = None,
                 " `/gtrip overview [id]` · `/gtrip leave`\n"
                 "`/gtrip budget <member> <amount>` · `/gtrip spending [member]`\n"
                 "`/gtrip leg <flight details>` · `/gtrip itinerary [id]`\n"
+                "`/gtrip share [id]` · `/gtrip rsvp going|maybe|declined [id]` ·"
+                " `/gtrip rsvps [id]`\n"
                 "`/gtrip propose <idea>` · `/gtrip agree <id>` ·"
                 " `/gtrip proposals`")
     except Exception as exc:  # noqa: BLE001 — chat surface never raises

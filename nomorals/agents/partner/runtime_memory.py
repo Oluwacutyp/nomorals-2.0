@@ -1139,6 +1139,10 @@ class RuntimeMemoryMixin:
         /trip add <text>       parse a pasted confirmation
         /trip calendar <id>    sync to Google Calendar (confirmation-gated)
         /trip docs <id>        vault docs for a trip
+        /trip visa <origin> <destination> <passport>
+                               advisory visa answer from the curated table
+                               (ISO codes, e.g. /trip visa NG GH NG) —
+                               unknown routes stay unknown, never guessed.
         """
         from ...travel.itinerary import (ItineraryBuilder,
                                          ItineraryStoreError,
@@ -1198,6 +1202,39 @@ class RuntimeMemoryMixin:
             if not docs:
                 return f"no docs for {tid}."
             return f"📎 {tid} vault:\n" + "\n".join(f"  • {d}" for d in docs)
+        if low.startswith("visa "):
+            # Advisory only: the curated table answers from explicit ISO
+            # codes. The itinerary builder itself cannot call this — its
+            # flights carry IATA airport codes and the repo has no
+            # airport→country mapping, so guessing countries from
+            # airports would break the visa layer's never-guess rule.
+            from ...travel.visa import documents_required, visa_needed
+
+            parts = rest[5:].split()
+            if len(parts) != 3:
+                return ("usage: /trip visa <origin> <destination> "
+                        "<passport> — ISO country codes, "
+                        "e.g. /trip visa NG GH NG")
+            origin, destination, passport = (p.upper() for p in parts)
+            answer = visa_needed(origin, destination, passport)
+            if not answer["known"]:
+                return (f"🛂 {origin} → {destination} "
+                        f"({passport} passport): unknown — {answer['notes']}")
+            needed = answer["needed"]
+            verdict = ("visa / ETA / ESTA required — apply before "
+                       "travelling" if needed else "no visa needed")
+            lines = [f"🛂 {origin} → {destination} "
+                     f"({passport} passport): {answer['status']} — "
+                     f"{verdict}."]
+            if answer["stay_days"]:
+                lines.append(f"Stay: up to {answer['stay_days']} days.")
+            docs = documents_required(origin, destination, passport)
+            if docs["documents"]:
+                lines.append("Documents: "
+                             + ", ".join(docs["documents"]) + ".")
+            if answer["notes"]:
+                lines.append(answer["notes"])
+            return "\n".join(lines)
         try:
             trip = builder.get_trip(rest.split()[0])
         except ItineraryStoreError:

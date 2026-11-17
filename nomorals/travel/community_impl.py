@@ -37,7 +37,6 @@ __all__ = [
 RSVP_GOING = "going"
 RSVP_MAYBE = "maybe"
 RSVP_DECLINED = "declined"
-_RSVP_STATUSES = (RSVP_GOING, RSVP_MAYBE, RSVP_DECLINED)
 
 
 @dataclass
@@ -132,7 +131,6 @@ class CommunityGroupTripBridge:
                 prefix="community-trip-bridge-", suffix=".db")
             self.store = GroupTripStore("bridge", db_path=path)
         self.post = post
-        self._rsvps: dict[str, dict[str, RSVP]] = {}
         self._shares: dict[str, GroupTripShare] = {}
 
     # ── trips ───────────────────────────────────────────────────────────
@@ -207,41 +205,17 @@ class CommunityGroupTripBridge:
 
     def rsvp(self, trip_id: str, member: str, status: str) -> RSVP:
         """Record (or update) one member's RSVP. Unknown trip → error;
-        unknown status → error (no silent coercion to 'maybe')."""
-        if self.store.get_trip(trip_id) is None:
-            raise ValueError(f"no such trip {trip_id!r}")
-        status = (status or "").strip().lower()
-        if status not in _RSVP_STATUSES:
-            raise ValueError(
-                f"unknown RSVP status {status!r}; expected {_RSVP_STATUSES}")
-        member = (member or "").strip()
-        if not member:
-            raise ValueError("RSVP needs a member name")
-        rec = RSVP(trip_id=trip_id, member=member, status=status,
-                   updated_at=time.time())
-        self._rsvps.setdefault(trip_id, {})[member] = rec
-        return rec
+        unknown status → error (no silent coercion to 'maybe').
+
+        RSVPs live in the group trip store, not in memory: a bridge
+        built fresh over the same store in a later call sees them.
+        """
+        self.store.record_rsvp(trip_id, member, status)
+        return RSVP(trip_id=trip_id, member=(member or "").strip(),
+                    status=(status or "").strip().lower(),
+                    updated_at=time.time())
 
     def rsvp_summary(self, trip_id: str) -> dict[str, Any]:
         """Counts + member lists per RSVP status. Members with no RSVP
         are listed under ``no_reply`` — silence is visible, not assumed."""
-        trip = self.store.get_trip(trip_id)
-        if trip is None:
-            raise ValueError(f"no such trip {trip_id!r}")
-        table = self._rsvps.get(trip_id, {})
-        buckets: dict[str, list[str]] = {s: [] for s in _RSVP_STATUSES}
-        buckets["no_reply"] = []
-        for member in trip.members:
-            rec = table.get(member)
-            if rec is None:
-                buckets["no_reply"].append(member)
-            else:
-                buckets[rec.status].append(member)
-        return {
-            "trip_id": trip_id,
-            "counts": {k: len(v) for k, v in buckets.items()},
-            "going": buckets[RSVP_GOING],
-            "maybe": buckets[RSVP_MAYBE],
-            "declined": buckets[RSVP_DECLINED],
-            "no_reply": buckets["no_reply"],
-        }
+        return self.store.rsvp_summary(trip_id)
