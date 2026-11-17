@@ -3844,6 +3844,21 @@ def _parser() -> argparse.ArgumentParser:
                        help="override the training backend for this run")
     train.add_argument("--base-model", default="",
                        help="HF base model id (required for external backends)")
+    train.add_argument("--export-telegram", action="store_true",
+                       help="harvest the owner's Telegram history (read-only, "
+                            "PII-scrubbed) and register it as a training dataset")
+    train.add_argument("--max-dialogs", type=int, default=50,
+                       help="with --export-telegram: max dialogs to harvest (default: 50)")
+    train.add_argument("--max-per-chat", type=int, default=300,
+                       help="with --export-telegram: max messages per chat (default: 300)")
+    train.add_argument("--only-chats", default="",
+                       help="with --export-telegram: comma-separated chat ids to restrict to")
+    train.add_argument("--no-register", action="store_true",
+                       help="with --export-telegram: write the JSONL file only, "
+                            "do not register a dataset")
+    train.add_argument("--dataset", default="",
+                       help="with --run: train on a specific registered dataset id "
+                            "(e.g. one from --export-telegram)")
     train.add_argument("--json", action="store_true", help="Output as JSON")
     render = sub.add_parser("render", aliases=CLI_ALIASES["render"],
                             help="mission render queue: enqueue, advance, status")

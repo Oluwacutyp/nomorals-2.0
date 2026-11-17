@@ -23,6 +23,60 @@ def _cmd_train(args, context):
         _emit(args, {"configured": configured, "backends": rows}, "\n".join(lines))
         return 0
 
+    if getattr(args, "export_telegram", False):
+        # Owner-history export (audit R3-71): the harvester itself
+        # (nomorals/exporter.py) is complete and already reachable through
+        # the brain tool registry, but the CLI had no surface — and the
+        # module docstring's `nm train --run --dataset <id>` never existed
+        # either (see --dataset below). One invocation does one job: the
+        # export runs and returns; the text names the dataset id for the
+        # follow-up `nm train --run --dataset <id>`.
+        from ...exporter import export_telegram
+
+        db = getattr(context, "db", None)
+        register = not bool(getattr(args, "no_register", False))
+        if register and db is None:
+            _emit(args, {"ok": False, "error": "no database available"},
+                  "telegram export failed — no database available to register the dataset")
+            return 1
+        try:
+            result = export_telegram(
+                context.settings,
+                db=db,
+                max_dialogs=int(getattr(args, "max_dialogs", 50) or 50),
+                max_per_chat=int(getattr(args, "max_per_chat", 300) or 300),
+                only_chats=getattr(args, "only_chats", "") or "",
+                register=register,
+            )
+        except Exception as exc:  # noqa: BLE001 — honest CLI error, never a traceback
+            _emit(args, {"ok": False, "error": f"{type(exc).__name__}: {exc}"},
+                  f"telegram export failed — {type(exc).__name__}: {exc}")
+            return 1
+        stats = result.stats
+        payload = result.to_dict()
+        payload["ok"] = True
+
+        def _n(count: int, word: str) -> str:
+            return f"{count} {word}" + ("s" if count != 1 else "")
+
+        summary = (f"{_n(stats.dialogs, 'dialog')}, "
+                   f"{_n(stats.messages, 'message')} -> "
+                   f"{_n(stats.examples, 'example')} "
+                   f"({stats.pii_scrubbed} PII scrubbed, "
+                   f"{stats.duplicates} duplicates)")
+        if not stats.examples:
+            _emit(args, payload,
+                  f"telegram export: no examples harvested — {summary} "
+                  "(a window needs both an owner reply and another side)")
+            return 1
+        if result.dataset_id:
+            _emit(args, payload,
+                  f"telegram export: {summary}; dataset {result.dataset_id}")
+        else:
+            _emit(args, payload,
+                  f"telegram export: {summary}; file {result.path} (not registered)")
+        return 0
+
     if getattr(args, "continual", False):
         from ...training.continual_driver import run_continual_update_once
 
@@ -64,11 +118,37 @@ def _cmd_train(args, context):
               "nothing to do — pass --backends to see engines or --run to train")
         return 0
 
+    # --dataset seeds the run with a specific registered corpus (e.g. an
+    # account-history export) instead of collecting live-use rows. The
+    # module docstring promised `nm train --run --dataset <id>`; the flag
+    # never existed and _cmd_train never passed the id through, so an
+    # exported dataset could only reach training via the newest-dataset
+    # fallback in _step_collect. Validate up front: a bad id is refused
+    # before any mission is created.
+    dataset_id = getattr(args, "dataset", "") or ""
+    if dataset_id:
+        from ...core.errors import NotFound
+        from ...training.dataset import DatasetRegistry
+
+        db = getattr(context, "db", None)
+        if db is None:
+            _emit(args, {"ok": False, "error": "no database available"},
+                  "training failed — no database available to look up the dataset")
+            return 1
+        try:
+            DatasetRegistry(db).get(dataset_id)
+        except NotFound:
+            _emit(args, {"ok": False, "error": f"no dataset {dataset_id!r}"},
+                  f"training failed — no dataset {dataset_id!r} "
+                  "(export one with `nm train export-telegram`)")
+            return 1
+
     from ...self_improvement import SelfImprovementJob
 
     job = SelfImprovementJob(context)
     result = job.run(
         force=True,
+        dataset_id=dataset_id,
         backend=getattr(args, "backend", "") or "",
         base_model=getattr(args, "base_model", "") or "",
     )
