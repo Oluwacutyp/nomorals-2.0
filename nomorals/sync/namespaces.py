@@ -97,6 +97,8 @@ class Namespace:
         self._counter: dict[str, int] = {}
         self._conflicts: list[Conflict] = []
         self._conflict_keys: set[tuple[str, str]] = set()
+        # Owner resolutions (see resolve()): persisted, never pruned.
+        self._resolutions: list[dict[str, Any]] = []
 
     # ── local writes ────────────────────────────────────────────────────
 
@@ -158,6 +160,75 @@ class Namespace:
         """Every conflict this namespace has ever recorded — the full
         fork history, newest last.  Nothing here was silently dropped."""
         return list(self._conflicts)
+
+    def resolutions(self) -> list[dict[str, Any]]:
+        """Owner resolutions, newest last.  Each records the conflict
+        it settled (kind, key, both values) and the value chosen."""
+        return [dict(r) for r in self._resolutions]
+
+    def open_conflicts(self) -> list[Conflict]:
+        """Conflicts with no owner resolution recorded yet.  A conflict
+        is open until :meth:`resolve` settles its (kind, key, values);
+        the full history stays in :meth:`conflicts`."""
+        resolved = {
+            (r["kind"], r["key"],
+             tuple(repr(v) for v in r.get("values", [])))
+            for r in self._resolutions
+        }
+        return [
+            c for c in self._conflicts
+            if (c.kind, c.key, tuple(repr(v) for v in c.values))
+            not in resolved
+        ]
+
+    def resolve(self, key: str, value: Any, *,
+                device: str | None = None) -> dict[str, Any]:
+        """Settle an open conflict by owner choice.
+
+        Map: the chosen value is written with a fresh timestamp, so
+        it deterministically wins all future merges, and the choice
+        is recorded.  List: ``key`` is the forked item id; the entry
+        whose value matches the choice is kept, its twin dropped and
+        its flag cleared.  Counters never conflict.  Raises
+        ``ValueError`` when there is no open conflict for the key (or
+        the choice matches no forked value), ``TypeError`` for a
+        counter namespace.  Returns the resolution record.
+        """
+        open_keys = {(c.kind, c.key) for c in self.open_conflicts()}
+        if self.kind == "counter":
+            raise TypeError("counter namespaces never conflict")
+        if (self.kind, str(key)) not in open_keys:
+            raise ValueError(
+                f"no open conflict for {self.kind} {str(key)!r} "
+                f"in namespace {self.name!r}")
+        dev = device or self.device_id
+        ts = _now()
+        conflict = next(
+            c for c in self.open_conflicts()
+            if c.kind == self.kind and c.key == str(key))
+        if self.kind == "map":
+            self.put(str(key), value, ts=ts, device=dev)
+        else:  # list: key is the forked item id
+            twins = [e for e in self._list if e["id"] == str(key)]
+            kept = [e for e in twins if e["value"] == value]
+            if len(kept) != 1:
+                raise ValueError(
+                    f"resolve needs exactly one entry with value "
+                    f"{value!r} for item {str(key)!r}")
+            self._list = [e for e in self._list
+                          if not (e["id"] == str(key) and e is not kept[0])]
+            kept[0]["conflicted"] = False
+        record = {
+            "namespace": self.name,
+            "kind": self.kind,
+            "key": str(key),
+            "values": list(conflict.values),
+            "resolved_to": value,
+            "device": dev,
+            "timestamp": ts,
+        }
+        self._resolutions.append(record)
+        return dict(record)
 
     # ── merge ───────────────────────────────────────────────────────────
 
@@ -272,6 +343,7 @@ class Namespace:
             "list": [dict(e) for e in self._list],
             "counter": dict(self._counter),
             "conflicts": [c.to_dict() for c in self._conflicts],
+            "resolutions": [dict(r) for r in self._resolutions],
         }
 
     @classmethod
@@ -295,6 +367,8 @@ class Namespace:
             ns._conflict_keys.add(
                 (c.get("kind", ns.kind), c.get("key", ""),
                  tuple(repr(v) for v in c.get("values", []))))
+        for r in data.get("resolutions") or []:
+            ns._resolutions.append(dict(r))
         return ns
 
 
@@ -309,6 +383,26 @@ class NamespaceSet:
     def __init__(self, device_id: str = "local") -> None:
         self.device_id = device_id or "local"
         self._namespaces: dict[str, Namespace] = {}
+
+    def names(self) -> list[str]:
+        """Sorted namespace names in this set."""
+        return sorted(self._namespaces)
+
+    def get(self, name: str) -> Namespace | None:
+        """The namespace, or None when it does not exist."""
+        return self._namespaces.get(name)
+
+    def adopt(self, ns: Namespace) -> Namespace:
+        """Take ownership of a fully-formed namespace (e.g. restored
+        from a sync record).  Raises when a different-kind namespace
+        of the same name already lives here."""
+        existing = self._namespaces.get(ns.name)
+        if existing is not None and existing.kind != ns.kind:
+            raise ValueError(
+                f"namespace {ns.name!r} already exists as "
+                f"{existing.kind!r}, not {ns.kind!r}")
+        self._namespaces[ns.name] = ns
+        return ns
 
     def get_or_create(self, name: str, kind: str = "map") -> Namespace:
         ns = self._namespaces.get(name)

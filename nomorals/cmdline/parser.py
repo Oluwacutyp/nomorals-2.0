@@ -4333,7 +4333,8 @@ def _parser() -> argparse.ArgumentParser:
                      "nm sync delete <key>\n"
                      "nm sync keys [--json]\n"
                      "nm sync push --peer-db PATH [--json]\n"
-                     "nm sync pull --peer-db PATH [--json]"),
+                     "nm sync pull --peer-db PATH [--json]\n"
+                     "nm sync ns list|create|get|put|append|incr|merge|conflicts|resolve"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     sync.add_argument("task", nargs="*", default=[], help="verb and arguments")

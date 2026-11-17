@@ -23,4 +23,23 @@ __all__ = [
 # Tier 3: sync namespaces — typed replicated state with visible conflicts.
 from .namespaces import Conflict, Namespace, NamespaceSet, merge_namespaces
 
+# Gapfix R2-39: namespace persistence on the sync store.
+from .ns_store import (
+    NS_KEY_PREFIX,
+    load_set,
+    load_set_from_peer,
+    merge_peer_namespaces,
+    ns_key,
+    save_namespace,
+)
+
 __all__ += ["Conflict", "Namespace", "NamespaceSet", "merge_namespaces"]
+
+__all__ += [
+    "NS_KEY_PREFIX",
+    "load_set",
+    "load_set_from_peer",
+    "merge_peer_namespaces",
+    "ns_key",
+    "save_namespace",
+]
