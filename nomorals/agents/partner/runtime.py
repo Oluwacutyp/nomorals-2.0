@@ -3870,9 +3870,21 @@ class PartnerRuntime(
                         from ..modes import proactive_source
                         from ..proactive import ProactiveEngine
 
+                        # One engine, retained on the modes engine and
+                        # backed by the durable pattern store under the
+                        # real home: the bridge reads its suggestions
+                        # and the approval path feeds decisions back
+                        # into it, so patterns survive a restart.
+                        # Best-effort home resolution — a missing home
+                        # still wires the bridge, memory-only.
+                        _settings = getattr(self, "settings", None)
+                        _home = (getattr(_settings, "home_path", None)
+                                 or getattr(_settings, "home", None))
+                        _engine = ProactiveEngine(home=_home)
                         modes.autonomous.add_source(
                             "proactive",
-                            proactive_source(ProactiveEngine(), "owner"))
+                            proactive_source(_engine, "owner"))
+                        modes.autonomous.proactive_engine = _engine
                     from ..modes import ensure_agent_modes_tick_job
 
                     ensure_agent_modes_tick_job(self._scheduler)

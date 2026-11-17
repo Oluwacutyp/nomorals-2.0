@@ -33,10 +33,13 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
+import threading
 import time
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 from ..core.logging_setup import get_logger
@@ -52,6 +55,64 @@ __all__ = [
 ]
 
 _log = get_logger(__name__)
+
+
+#: Durable pattern store: one atomic JSON index under ``<home>/data``,
+#: the same shape as the swarm-board and agent-modes stores.
+PROACTIVE_PATTERNS_FILENAME = "proactive_patterns.json"
+PATTERN_STORE_VERSION = 1
+
+
+def _default_patterns_path(home: Any) -> Path:
+    """The durable patterns index under a home."""
+    return (Path(os.path.expanduser(str(home))) / "data"
+            / PROACTIVE_PATTERNS_FILENAME)
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically (tmp file + os.replace)."""
+    tmp = path.with_name(
+        f".{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+    tmp.write_text(text, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _pattern_from_dict(data: Any) -> Pattern | None:
+    """Rebuild a Pattern from its stored dict. None when malformed."""
+    if not isinstance(data, dict):
+        return None
+    action = data.get("action")
+    user_id = data.get("user_id")
+    if not isinstance(action, str) or not action:
+        return None
+    if not isinstance(user_id, str) or not user_id:
+        return None
+    try:
+        occurrences = int(data.get("occurrences") or 0)
+        last_seen = float(data.get("last_seen") or 0.0)
+        confidence = float(data.get("confidence") or 0.0)
+    except (TypeError, ValueError):
+        return None
+    context: dict[str, Counter] = defaultdict(Counter)
+    raw_context = data.get("context")
+    if isinstance(raw_context, dict):
+        for key, freq in raw_context.items():
+            if not isinstance(freq, dict):
+                continue
+            for value, count in freq.items():
+                try:
+                    context[str(key)][str(value)] += int(count)
+                except (TypeError, ValueError):
+                    continue
+    return Pattern(
+        pattern_id=str(data.get("pattern_id") or ""),
+        user_id=user_id,
+        action=action,
+        context=context,
+        occurrences=occurrences,
+        last_seen=last_seen,
+        confidence=confidence,
+    )
 
 
 @dataclass
@@ -149,6 +210,8 @@ class ProactiveEngine:
         calendar: Any = None,
         email: Any = None,
         shopping: Any = None,
+        *,
+        home: Any = None,
     ) -> None:
         self.memory = memory
         self.calendar = calendar
@@ -161,7 +224,20 @@ class ProactiveEngine:
         # Pattern storage
         self._patterns: dict[str, list[Pattern]] = defaultdict(list)  # user_id -> patterns
         self._habits: dict[str, list[UserHabit]] = defaultdict(list)  # user_id -> habits
-        
+
+        # Durable pattern store (atomic JSON under <home>/data, like
+        # the swarm-board and agent-modes stores). None = memory-only:
+        # the engine learns within the process and forgets on restart.
+        self._store_path: Path | None = (
+            _default_patterns_path(home) if home is not None else None)
+        self._store_lock = threading.Lock()
+        #: user_id -> action -> {"count", "last_rejected", "context"}.
+        #: A denied suggestion stays suppressed until the owner does
+        #: the action anyway (record_action clears the entry).
+        self._rejections: dict[str, dict[str, dict[str, Any]]] = {}
+        if self._store_path is not None:
+            self._load_patterns()
+
         # Suggestion generators
         self._suggestion_generators = [
             self._generate_pattern_suggestions,
@@ -170,8 +246,79 @@ class ProactiveEngine:
             self._generate_habit_suggestions,
             self._generate_context_suggestions,
         ]
-        
+
         _log.info("Proactive engine initialized")
+
+    # ── durable pattern store ─────────────────────────────────────────
+
+    def _load_patterns(self) -> None:
+        """Load persisted patterns + rejections. Never raises."""
+        path = self._store_path
+        if path is None:
+            return
+        try:
+            raw = path.read_text(encoding="utf-8")
+        except OSError:
+            return  # no store yet — first run
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            _log.warning(
+                "proactive patterns store is not valid JSON — starting fresh")
+            return
+        if not isinstance(data, dict):
+            _log.warning(
+                "proactive patterns store is malformed — starting fresh")
+            return
+        for user_id, rows in (data.get("patterns") or {}).items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                pattern = _pattern_from_dict(row)
+                if pattern is not None and pattern.user_id == user_id:
+                    self._patterns[user_id].append(pattern)
+        rejections = data.get("rejections")
+        if isinstance(rejections, dict):
+            for user_id, actions in rejections.items():
+                if not isinstance(actions, dict):
+                    continue
+                kept = {str(a): dict(v) for a, v in actions.items()
+                        if isinstance(v, dict)}
+                if kept:
+                    self._rejections[str(user_id)] = kept
+
+    def _save_patterns(self) -> None:
+        """Persist patterns + rejections atomically. Never raises."""
+        path = self._store_path
+        if path is None:
+            return
+        with self._store_lock:
+            try:
+                payload = {
+                    "version": PATTERN_STORE_VERSION,
+                    "patterns": {
+                        user_id: [p.to_dict() for p in patterns]
+                        for user_id, patterns in self._patterns.items()
+                    },
+                    "rejections": {
+                        user_id: dict(actions)
+                        for user_id, actions in self._rejections.items()
+                    },
+                }
+                text = json.dumps(payload, default=str, indent=2,
+                                  sort_keys=True)
+            except Exception as e:  # noqa: BLE001 - serialization never breaks learning
+                record_failure("proactive.save_patterns.serialize", e)
+                return
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                _atomic_write_text(path, text)
+            except Exception as e:  # noqa: BLE001 - persistence never breaks learning
+                record_failure("proactive.save_patterns.write", e)
+
+    def _is_rejected(self, user_id: str, action: str) -> bool:
+        """True when the owner denied this action and has not done it since."""
+        return action in self._rejections.get(user_id, {})
     
     async def get_suggestions(
         self,
@@ -211,6 +358,12 @@ class ProactiveEngine:
         filtered = [
             s for s in all_suggestions
             if s.confidence >= min_confidence
+        ]
+
+        # A denied action stays suppressed until the owner does it anyway.
+        filtered = [
+            s for s in filtered
+            if not self._is_rejected(user_id, getattr(s, "action", ""))
         ]
         
         # Sort by priority, then confidence
@@ -261,7 +414,7 @@ class ProactiveEngine:
             record_failure("identity_signature", e)
             return "Devon"
     
-    async def record_action(
+    def _record_action_sync(
         self,
         user_id: str,
         action: str,
@@ -269,23 +422,16 @@ class ProactiveEngine:
         context: dict[str, Any] | None = None,
         parameters: dict[str, Any] | None = None,
     ) -> None:
-        """Record a user action for pattern learning.
-        
-        Args:
-            user_id: User ID
-            action: Action name
-            context: Context when action occurred
-            parameters: Action parameters
-        """
+        """Synchronous core of :meth:`record_action` (see it)."""
         context = context or {}
         parameters = parameters or {}
-        
+
         # Add temporal context
         now = datetime.now()
         context.setdefault("hour", now.hour)
         context.setdefault("day_of_week", now.strftime("%A").lower())
         context.setdefault("month", now.month)
-        
+
         # Find or create pattern
         pattern = self._find_pattern(user_id, action)
         if not pattern:
@@ -296,36 +442,98 @@ class ProactiveEngine:
                 action=action,
             )
             self._patterns[user_id].append(pattern)
-        
+
         # Update pattern
         pattern.occurrences += 1
         pattern.last_seen = time.time()
-        
+
         # Update context frequency
         for key, value in context.items():
             pattern.context[key][str(value)] += 1
-        
+
         # Recalculate confidence
         pattern.confidence = min(1.0, pattern.occurrences / 10.0)
-        
+
+        # The owner did it anyway — a past denial no longer suppresses it.
+        self._rejections.get(user_id, {}).pop(action, None)
+        self._save_patterns()
+
         _log.debug(f"Recorded action: {action} (occurrences: {pattern.occurrences})")
-    
-    async def accept_suggestion(self, suggestion: Suggestion) -> None:
+
+    async def record_action(
+        self,
+        user_id: str,
+        action: str,
+        *,
+        context: dict[str, Any] | None = None,
+        parameters: dict[str, Any] | None = None,
+    ) -> None:
+        """Record a user action for pattern learning.
+
+        Args:
+            user_id: User ID
+            action: Action name
+            context: Context when action occurred
+            parameters: Action parameters
+        """
+        self._record_action_sync(user_id, action, context=context,
+                                 parameters=parameters)
+
+    def record_accepted(self, user_id: str, action: str, *,
+                        context: dict[str, Any] | None = None) -> None:
+        """Learn from an approved suggestion. Never raises.
+
+        An approval is a recorded action: the pattern gains an
+        occurrence, so a repeatedly approved action surfaces sooner
+        and with higher confidence. Called by the modes engine when
+        the owner approves a proactive initiative.
+        """
+        try:
+            self._record_action_sync(user_id, action, context=context)
+        except Exception as e:  # noqa: BLE001 - learning never breaks an approval
+            record_failure("proactive.record_accepted", e)
+
+    def record_rejected(self, user_id: str, action: str, *,
+                        context: dict[str, Any] | None = None) -> None:
+        """Learn from a denied suggestion. Never raises.
+
+        A denial suppresses the action: it stops being suggested
+        until the owner does the action anyway. Called by the modes
+        engine when the owner denies a proactive initiative.
+        """
+        try:
+            entry = self._rejections.setdefault(user_id, {}).setdefault(
+                action, {"count": 0, "last_rejected": 0.0, "context": {}})
+            entry["count"] = int(entry.get("count", 0)) + 1
+            entry["last_rejected"] = time.time()
+            if context:
+                entry["context"] = dict(context)
+            self._save_patterns()
+            _log.info("Suggestion rejected: %s (denials: %s)",
+                      action, entry["count"])
+        except Exception as e:  # noqa: BLE001 - learning never breaks a denial
+            record_failure("proactive.record_rejected", e)
+
+    async def accept_suggestion(self, suggestion: Suggestion, *,
+                                user_id: str = "owner") -> None:
         """Record that a suggestion was accepted.
-        
-        Args:
-            suggestion: The accepted suggestion
+
+        The approval is a recorded action, so the pattern behind
+        it gains an occurrence and surfaces sooner next time.
         """
-        # This could be used to improve future suggestions
+        self.record_accepted(user_id, suggestion.action,
+                             context=dict(suggestion.parameters or {}))
         _log.info(f"Suggestion accepted: {suggestion.text}")
-    
-    async def reject_suggestion(self, suggestion: Suggestion) -> None:
+
+    async def reject_suggestion(self, suggestion: Suggestion, *,
+                                user_id: str = "owner") -> None:
         """Record that a suggestion was rejected.
-        
-        Args:
-            suggestion: The rejected suggestion
+
+        The denial suppresses the action, so it stops being
+        suggested until the owner does it anyway.
         """
-        # Lower confidence for similar suggestions in the future
+        self.record_rejected(user_id, suggestion.action,
+                             context=dict(suggestion.parameters or {}))
         _log.info(f"Suggestion rejected: {suggestion.text}")
     
     # ── Suggestion Generators ────────────────────────────────────────────────

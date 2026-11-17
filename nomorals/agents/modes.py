@@ -600,6 +600,7 @@ class AutonomousEngine:
                                               dict[str, Any]], bool] | None = None,
                  park_after_s: float = 5.0,
                  pending_store: Any = None,
+                 proactive_engine: Any = None,
                  ) -> None:
         self.learner = learner or AdaptiveLearner()
         self.proposal_sink = proposal_sink
@@ -608,6 +609,12 @@ class AutonomousEngine:
         #: None for a purely in-memory engine): holds persist the
         #: JSON-safe record here so a restart can rehydrate them.
         self.pending_store = pending_store
+        #: The proactive engine whose suggestions this engine approves
+        #: or denies (None = no learning feedback). Set by the caller
+        #: that builds both — the runtime boot and
+        #: :func:`with_production_sources` — so approval decisions
+        #: feed back into the suggestion patterns.
+        self.proactive_engine = proactive_engine
         #: Grace period before a slow action parks as a background job.
         #: Fast actions complete inline (unchanged behavior); slower ones
         #: keep running with heartbeats while the tick moves on. A latency
@@ -713,6 +720,35 @@ class AutonomousEngine:
             if init not in self._history:
                 self._history.append(init)
 
+    def _record_proactive_outcome(self, init: Initiative,
+                                  spec: dict[str, Any] | None, *,
+                                  accepted: bool) -> None:
+        """Feed an approval decision back into the proactive engine.
+
+        Approving a proactive initiative records its action (the
+        pattern gains an occurrence, so it surfaces sooner); denying
+        it records a negative signal (the action stops being
+        suggested). Learning is a side effect, never a gate: any
+        failure here is a warning and the decision itself stands.
+        """
+        engine = getattr(self, "proactive_engine", None)
+        if engine is None or getattr(init, "source", "") != "proactive":
+            return
+        try:
+            payload = spec.get("payload") if isinstance(spec, dict) else None
+            if not isinstance(payload, dict):
+                return
+            action = str(payload.get("action") or "")
+            if not action:
+                return
+            user_id = str(payload.get("user_id") or "owner")
+            if accepted:
+                engine.record_accepted(user_id, action)
+            else:
+                engine.record_rejected(user_id, action)
+        except Exception as exc:  # noqa: BLE001 - learning never breaks a decision
+            _log.warning("proactive learning failed: %s", exc)
+
     def approve_proposal(self, proposal_id: str) -> Initiative:
         """Owner approved a held initiative — run its action now.
 
@@ -728,6 +764,7 @@ class AutonomousEngine:
             raise KeyError(
                 f"no pending initiative for proposal {proposal_id!r}")
         init = self._execute(init, spec, ctx, executor)
+        self._record_proactive_outcome(init, spec, accepted=True)
         if init.status == "done":
             # Decided and ran: the persisted record goes away.  A failed
             # run keeps its record, so a restart can offer the retry.
@@ -744,8 +781,10 @@ class AutonomousEngine:
         knows nothing about (neither pending nor persisted).
         """
         pid = str(proposal_id)
+        pending_spec: dict[str, Any] | None = None
         try:
             init, _spec, _ctx, _executor = self._pending.pop(pid)
+            pending_spec = _spec
         except KeyError:
             init = None
         record = None
@@ -775,6 +814,12 @@ class AutonomousEngine:
         init.status = "denied"
         init.error = "denied by owner"
         self.learner.record_outcome("autonomous", init.source, False)
+        spec = pending_spec
+        if spec is None and isinstance(record, dict):
+            rec_spec = record.get("spec")
+            if isinstance(rec_spec, dict):
+                spec = rec_spec
+        self._record_proactive_outcome(init, spec, accepted=False)
         return init
 
     def history(self, *, limit: int = 50) -> list[Initiative]:
@@ -1014,7 +1059,14 @@ def proactive_source(proactive: Any, user_id: str, *,
         out = []
         for s in suggestions or []:
             payload = {"title": getattr(s, "title", str(s)),
-                       "confidence": getattr(s, "confidence", 0.0)}
+                       "confidence": getattr(s, "confidence", 0.0),
+                       # The action name rides the payload: the closure
+                       # is the live action, but only the JSON-safe
+                       # payload survives a restart — and the approval
+                       # path learns from it, so it must name the
+                       # action, not just the display text.
+                       "action": getattr(s, "action", ""),
+                       "user_id": user_id}
             # The ``payload`` is the data twin of the ``action`` closure:
             # a held initiative persists its JSON-safe spec, and a fresh
             # engine rebuilds the action from the payload after a restart
@@ -1091,8 +1143,15 @@ def with_production_sources(modes: AgentModes, *,
     if "proactive" not in modes.autonomous.source_names():
         from .proactive import ProactiveEngine
 
+        # One engine, retained on the modes engine: the bridge reads
+        # its suggestions and the approval path feeds decisions back
+        # into it. No home here — the CLI / scheduler fallback tick
+        # learns in-process only; the durable store is wired at the
+        # runtime boot, which passes the real home.
+        engine = ProactiveEngine()
         modes.autonomous.add_source(
-            "proactive", proactive_source(ProactiveEngine(), "owner"))
+            "proactive", proactive_source(engine, "owner"))
+        modes.autonomous.proactive_engine = engine
     return modes
 
 
