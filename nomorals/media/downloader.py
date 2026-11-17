@@ -98,6 +98,7 @@ import re
 import sys
 import time
 import urllib.parse
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -299,6 +300,11 @@ class DownloadReport:
     #: ``_succeed``. None when the file was never scanned (no path, or
     #: the download failed before landing).
     av: dict[str, Any] | None = None
+    #: Artifact id this download registered as (WS1 artifact), set by
+    #: ``_register_download_artifact`` when it mints a row — "" when
+    #: nothing was registered (dedup, no store, or registration
+    #: failed). The member-block path withdraws exactly this row.
+    artifact_id: str = ""
     #: Structured block class when the failure is one the site
     #: itself classified (the resolver's vocabulary: preview / drm
     #: / region / login / private) — ``"login"`` when the
@@ -639,7 +645,10 @@ def _scan_intake(report: DownloadReport, context: Any) -> None:
 
 def _scan_extracted_members(report: DownloadReport,
                             result: dict[str, Any],
-                            context: Any) -> None:
+                            context: Any, *,
+                            on_member_blocked: Callable[
+                                [DownloadReport], None] | None = None
+                            ) -> None:
     """Scan every file an archive unpacked, at intake.
 
     Runs in ``_unpack_archive`` right after a successful extraction.
@@ -660,6 +669,14 @@ def _scan_extracted_members(report: DownloadReport,
       infected container: ``ok`` False, the threat and the member
       named in ``likely_cause``, ``path`` cleared so nothing hands
       the archive to the owner.
+
+    ``on_member_blocked`` runs in the infected branch, with the
+    blocked report — the ``_unpack_archive`` caller passes the
+    downloader's artifact deregister, so the row this download
+    registered is withdrawn with the block. It is optional and never
+    load-bearing: a missing callback changes nothing about the scan
+    or the block, and a callback that raises is the caller's own
+    problem (the downloader's deregister never raises).
 
     The scan cap is the Archivist's own extraction cap
     (``archives._MAX_EXTRACT_FILES``): the unpack can land at most
@@ -732,6 +749,8 @@ def _scan_extracted_members(report: DownloadReport,
                    "see `nm av quarantine` for what was moved, or "
                    "`nm av scan <path>` to re-check it")
     report.path = ""
+    if on_member_blocked is not None:
+        on_member_blocked(report)
 
 
 class MediaDownloader:
@@ -1171,7 +1190,7 @@ class MediaDownloader:
             if report.resolved_url and \
                     report.resolved_url != report.url:
                 metadata["resolved_url"] = report.resolved_url
-            store.put_file(
+            art = store.put_file(
                 path, type=kind, creator="media_downloader",
                 mime=mime, metadata=metadata,
                 provenance={
@@ -1179,10 +1198,49 @@ class MediaDownloader:
                     "source_id": "media_downloader",
                     "source_timestamp": time.time(),
                 })
+            # Remember the minted row on the report: the member-block
+            # path withdraws exactly this row (see
+            # ``_deregister_download_artifact``). The dedup
+            # early-return above deliberately stashes nothing — a
+            # pre-existing row for identical bytes is not this
+            # download's record.
+            report.artifact_id = art.id
             _log.info("download registered as artifact url=%s "
                       "sha256=%s", report.url, digest[:16])
         except Exception as e:  # bookkeeping never breaks downloads
             record_failure("_register_download_artifact", e)
+
+    def _deregister_download_artifact(self, report: DownloadReport) -> None:
+        """Withdraw the artifact row this download registered (AV
+        archive gap): a member-blocked download must leave no
+        artifact record for the container — the report no longer
+        delivers it, so the store must not cite it either.
+
+        Deletes exactly the row ``_register_download_artifact``
+        minted for this download (``report.artifact_id``); a
+        pre-existing row for identical bytes — minted by an earlier
+        download — is left alone, and so is a container-blocked
+        download, which never registered at all. ``drop_blob=True``:
+        every ``put_file`` bumps the blob refcount by one
+        (``storage.blob.BlobStore``), so the release drops exactly
+        this row's reference and the bytes survive while any other
+        artifact shares them. Best-effort bookkeeping: a store
+        failure is journaled via ``record_failure`` and never turns
+        a blocked download into a different outcome.
+        """
+        try:
+            artifact_id = report.artifact_id
+            if not artifact_id:
+                return
+            store = self._artifact_store()
+            if store is None:
+                return
+            if store.delete(artifact_id, drop_blob=True):
+                report.artifact_id = ""
+                _log.info("download artifact withdrawn after member "
+                          "block: %s", artifact_id)
+        except Exception as e:  # bookkeeping never breaks downloads
+            record_failure("_deregister_download_artifact", e)
 
     # ── rule learning (Pass #87) ──────────────────────────────────
 
@@ -1495,8 +1553,12 @@ class MediaDownloader:
             # was scanned before the unpack, but its members never
             # were — scan every extracted file now, at intake, so a
             # bad file inside an archive is blocked here instead of
-            # waiting for the daily sweep.
-            _scan_extracted_members(report, result, self.context)
+            # waiting for the daily sweep. The member-block callback
+            # withdraws the artifact row this download registered,
+            # so a blocked download leaves no record behind.
+            _scan_extracted_members(
+                report, result, self.context,
+                on_member_blocked=self._deregister_download_artifact)
 
     # ── public API ────────────────────────────────────────────────────
 
