@@ -40,12 +40,52 @@ import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
 
+from .cross_listing import (
+    Listing,
+    PropertyPassportStore,
+    cross_listing_score,
+    group_listings,
+)
+
 __all__ = [
     "ScamReport", "ScamFlag", "AREA_NORMS", "ILLEGAL_FEE_TERMS",
     "ScamStore", "check_listing", "control_scamcheck",
 ]
 
 _log = logging.getLogger(__name__)
+
+
+#: Price tolerance for the cross-listing seam (audit R3-68): listing
+#: prices for the same property across sites differ by small rounding
+#: (₦2.5m vs ₦2.45m), so exact-kobo matching would almost never group.
+#: 2% of the current price, in kobo. Address + photo rules from
+#: ``same_property`` still apply, so two different properties never
+#: merge on price alone.
+_CROSS_LISTING_TOLERANCE_PCT = 0.02
+
+_URL_RE = re.compile(r"https?://\S+")
+
+
+def _source_from_url(url: str) -> str:
+    """Domain of a listing URL (``jiji.ng``), "" when there is none.
+    Pasted-text listings carry no source — never invent one."""
+    try:
+        host = urllib.parse.urlparse(url or "").netloc.lower()
+        if host.startswith("www."):
+            host = host[4:]
+        return host
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+def _listing_source(raw: str, url: str) -> str:
+    """Source for a listing: the checked URL's domain, else the first
+    URL embedded in the listing text, else "" (unknown)."""
+    source = _source_from_url(url)
+    if source:
+        return source
+    m = _URL_RE.search(raw or "")
+    return _source_from_url(m.group(0)) if m else ""
 
 
 def _default_db() -> str:
@@ -138,6 +178,11 @@ class ScamReport:
     area: str = ""
     price_kobo: int = 0
     checked_at: float = 0.0
+    #: Cross-listing signal (audit R3-68): the ``cross_listing_score``
+    #: dict for the group this listing belongs to — only set when a
+    #: prior sighting of the same property exists. Informational only;
+    #: it never changes the score or the verdict.
+    cross_listing: dict = field(default_factory=dict)
 
     def format(self) -> str:
         icon = "✅" if (self.score >= 70 and not any(
@@ -156,6 +201,24 @@ class ScamReport:
                 lines.append(f"   ↳ {f.evidence[:120]}")
         if not self.flags:
             lines.append("No red flags found in the seven automated checks.")
+        if self.cross_listing:
+            cl = self.cross_listing
+            names = cl.get("source_names") or []
+            n = cl.get("sources", 0)
+            listings = cl.get("listings", 0)
+            if n > 1:
+                lines.append(
+                    f"🔁 Cross-listed: same property on {n} sources "
+                    f"({', '.join(names)}) — one property, not "
+                    f"{listings} properties.")
+            elif n == 1 and listings > 1:
+                lines.append(
+                    f"🔁 Seen {listings} time(s) on {names[0]} — "
+                    "same listing seen before.")
+            elif listings > 1:
+                lines.append(
+                    f"🔁 Seen {listings} time(s) before "
+                    "(source unknown).")
         lines.append("")
         lines.append("Before paying anything:")
         lines.append("  1. Always inspect in person — never pay for a "
@@ -254,7 +317,16 @@ class ScamStore:
 
     def find_duplicate(self, photo_hash: str,
                        address_norm: str) -> list[dict]:
-        """Prior listings with the same photos or the same address."""
+        """Prior listings with the same photos or the same address.
+
+        The address branch used to exclude rows whose photo hash
+        equalled the queried one — which, for the common photo-less
+        listing (both hashes ""), excluded every address match and
+        made same-address duplicates invisible. The id-based dedup
+        below already prevents double-counting a row that matches
+        both ways, so the exclusion is dropped (audit R3-68: the
+        cross-listing seam needs those sightings).
+        """
         try:
             if self._port is not None:
                 table = self._port.tables["seen_listings"]
@@ -262,9 +334,7 @@ class ScamStore:
                 if photo_hash:
                     rows += table.find({"photo_hash": photo_hash})
                 if address_norm:
-                    rows += [r for r in table.find(
-                        {"address_norm": address_norm})
-                        if r["photo_hash"] != (photo_hash or "")]
+                    rows += table.find({"address_norm": address_norm})
                 seen, out = set(), []
                 for r in rows:
                     if r["id"] not in seen:
@@ -280,9 +350,8 @@ class ScamStore:
                     (photo_hash,)).fetchall()
             if address_norm:
                 rows += self._db.execute(
-                    "SELECT * FROM seen_listings WHERE address_norm = ? "
-                    "AND photo_hash != ?",
-                    (address_norm, photo_hash or "")).fetchall()
+                    "SELECT * FROM seen_listings WHERE address_norm = ?",
+                    (address_norm,)).fetchall()
             seen, out = set(), []
             for r in rows:
                 if r["id"] not in seen:
@@ -527,8 +596,16 @@ def check_listing(url_or_text: str, *,
                   store: ScamStore | None = None,
                   fetcher=None,
                   photo_analyzer=None,
-                  photo_bytes: bytes = b"") -> ScamReport:
-    """Run the six checks. Never raises. Fully offline-capable."""
+                  photo_bytes: bytes = b"",
+                  passport_store=None) -> ScamReport:
+    """Run the six checks. Never raises. Fully offline-capable.
+
+    ``passport_store`` — audit R3-68: an optional
+    :class:`PropertyPassportStore` that records each sighting, so a
+    property's passport accumulates across re-listings. ``None``
+    (the default) records nothing and keeps this function pure apart
+    from its existing injectable seams.
+    """
     report = ScamReport(checked_at=time.time())
     try:
         raw = (url_or_text or "").strip()
@@ -548,11 +625,20 @@ def check_listing(url_or_text: str, *,
         area = _extract_area(text)
         bedrooms = _extract_bedrooms(text)
         price_kobo = _extract_price_kobo(text)
+        # Strip URLs before extracting the address: a source link pasted
+        # after "Address: ..." is not part of the address, and it made
+        # the same property on two sites normalize to two different
+        # addresses (so neither the duplicate check nor the
+        # cross-listing grouping could see them as one property).
+        addr_text = _URL_RE.sub(" ", text)
+        addr_m = re.search(r"(?:address|location)[:\s]+(.{0,80})",
+                           addr_text, re.I)
+        raw_address = (addr_m.group(1).strip().rstrip(".").strip()
+                       if addr_m else "")
         address_norm = _normalize_address(
-            re.search(r"(?:address|location)[:\s]+(.{0,80})", text, re.I).group(1)
-            if re.search(r"(?:address|location)[:\s]+(.{0,80})", text, re.I)
-            else text[:80])
+            raw_address if raw_address else text[:80])
         phash = _photo_hash(photo_bytes) if photo_bytes else ""
+        source = _listing_source(raw, report.url)
 
         report.area = area
         report.price_kobo = price_kobo
@@ -577,9 +663,65 @@ def check_listing(url_or_text: str, *,
             "check carefully" if report.score >= 40 else
             "likely scam — do not pay")
 
+        # ── cross-listing signal (audit R3-68) ──────────────────
+        # The current listing + its prior sightings in the ScamStore
+        # form the group; group_listings/cross_listing_score say
+        # whether the same property is marketed on several sources.
+        # Informational only — it never changes the score or verdict.
+        if store is not None:
+            try:
+                dups = store.find_duplicate(phash, address_norm)
+            except Exception:  # noqa: BLE001
+                dups = []
+            if dups:
+                items = [Listing(source=source, address=address_norm,
+                                 price=float(price_kobo),
+                                 photo_hashes=[phash] if phash else [],
+                                 url=report.url or "")]
+                for row in dups:
+                    row = dict(row)
+                    items.append(Listing(
+                        source=_source_from_url(
+                            str(row.get("url") or "")),
+                        address=str(row.get("address_norm") or ""),
+                        price=float(row.get("price_kobo") or 0),
+                        photo_hashes=(
+                            [str(row.get("photo_hash"))]
+                            if row.get("photo_hash") else []),
+                        url=str(row.get("url") or "")))
+                tolerance = (price_kobo * _CROSS_LISTING_TOLERANCE_PCT
+                             if price_kobo > 0 else 0.0)
+                groups = group_listings(items, price_tolerance=tolerance)
+                own = next((g for g in groups if items[0] in g), [])
+                if len(own) > 1:
+                    report.cross_listing = cross_listing_score(own)
+
+        # ── property passport sighting (audit R3-68) ────────────
+        # One property, one passport (the store dedupes on normalized
+        # address); every sighting appends a "listed" event, so the
+        # history accumulates across re-listings instead of resetting.
+        if passport_store is not None and (raw_address or address_norm):
+            try:
+                passport = passport_store.create(
+                    raw_address or address_norm)
+                if passport is not None:
+                    detail = (f"{source or 'text'}"
+                              + (f" · ₦{price_kobo // 100:,}"
+                                 if price_kobo > 0 else ""))
+                    passport_store.add_event(
+                        passport.passport_id, "listed", detail=detail,
+                        source=source)
+            except Exception:  # noqa: BLE001
+                _log.debug("scam passport sighting failed", exc_info=True)
+
         if store is not None and (phash or address_norm):
-            store.remember(phash, address_norm, report.url or "text",
-                           price_kobo)
+            # Remember the source URL when the listing text carries one
+            # (a pasted link), not the literal "text" — the stored URL
+            # is what the cross-listing seam derives the source from,
+            # and it is what the duplicate flag shows as "first seen".
+            url_m = _URL_RE.search(raw)
+            store_url = report.url or (url_m.group(0) if url_m else "text")
+            store.remember(phash, address_norm, store_url, price_kobo)
         return report
     except Exception:  # noqa: BLE001 — never raises, by contract
         _log.warning("check_listing failed", exc_info=True)
@@ -615,9 +757,19 @@ def control_scamcheck(tail: str, context=None, chat=None, **kwargs) -> str:
             if context is not None:
                 photo_analyzer = getattr(context, "photo_analyzer", None)
         store = ScamStore()
+        # Audit R3-68: every sighting accumulates on the property's
+        # passport (injectable via kwarg for tests; the default store
+        # is the durable cross-listing passport file).
+        pp_store = kwargs.get("property_passport_store")
+        if pp_store is None:
+            try:
+                pp_store = PropertyPassportStore()
+            except Exception:  # noqa: BLE001
+                pp_store = None
         report = check_listing(tail, store=store,
                                photo_analyzer=photo_analyzer,
-                               photo_bytes=photo_bytes)
+                               photo_bytes=photo_bytes,
+                               passport_store=pp_store)
         return report.format() + "\n\n" + _general_signals_section(tail)
     except Exception:  # noqa: BLE001
         _log.warning("scamcheck failed", exc_info=True)

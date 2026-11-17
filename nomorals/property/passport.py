@@ -30,6 +30,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass, field
+from .cross_listing import PropertyPassport, PropertyPassportStore
 from .failures import record_failure
 
 _log = logging.getLogger(__name__)
@@ -1024,7 +1025,40 @@ def _usage() -> str:
         "never the document\n"
         "  export [id] — shareable tenant summary\n"
         "  readiness — OpenRent-style referencing readiness score\n"
-        "  reattest — renew the 30-day attestation")
+        "  reattest — renew the 30-day attestation\n"
+        "  property <address> — the PROPERTY's passport: every listing "
+        "/scamcheck has seen at that address (history, documents, "
+        "viewings) — a different passport from the tenant one above")
+
+
+def _format_property_passport(pp: PropertyPassport) -> str:
+    """Shareable view of a property passport (audit R3-68)."""
+    lines = ["🏠 Property passport — one property, one record"]
+    lines.append(f"Address: {pp.address}")
+    lines.append(f"ID: {pp.passport_id} · v{pp.version}")
+    if pp.history:
+        lines.append(f"History ({len(pp.history)} sighting(s)):")
+        for e in pp.history:
+            bit = f"  • {e.kind}"
+            if e.detail:
+                bit += f" — {e.detail}"
+            if e.source:
+                bit += f" ({e.source})"
+            lines.append(bit)
+    else:
+        lines.append("No sightings recorded yet.")
+    if pp.documents:
+        lines.append("Documents (references only):")
+        for d in pp.documents:
+            lines.append(f"  • {d.label or 'document'} — {d.ref_id}")
+    if pp.viewings:
+        lines.append("Viewings:")
+        for v in pp.viewings:
+            bit = f"  • {v.outcome or 'viewing'}"
+            if v.note:
+                bit += f" — {v.note}"
+            lines.append(bit)
+    return "\n".join(lines)
 
 
 def _memory_facts(context) -> dict:
@@ -1061,6 +1095,23 @@ def control_passport(tail: str, context=None, chat=None, **kwargs) -> str:
         if not rest or rest.lower() in ("help", "?"):
             return _usage()
         low = rest.lower()
+
+        if low.startswith("property"):
+            # Audit R3-68: the PROPERTY passport (cross_listing.py) —
+            # a different passport from the tenant one above. Read-only
+            # view of the sightings /scamcheck has accumulated for one
+            # address. Never raises; never invents a passport.
+            addr = rest[len("property"):].strip()
+            if not addr:
+                return "usage: /passport property <address>"
+            pp_store = kwargs.get("property_passport_store")
+            if pp_store is None:
+                pp_store = PropertyPassportStore()
+            pp = pp_store.by_address(addr)
+            if pp is None:
+                return ("no property passport yet for that address — "
+                        "it appears after /scamcheck sees the address.")
+            return _format_property_passport(pp)
 
         if low.startswith("readiness"):
             p = store.default()
