@@ -10,7 +10,7 @@ from ..emit import _emit
 
 
 def _cmd_project(args: argparse.Namespace, context: Any) -> int:
-    """Projects CLI: create/list/status/heal/replan/run."""
+    """Projects CLI: create/list/status/heal/replan/run/update/delete."""
     from ...agents.projects import ProjectManager
 
     pm = ProjectManager(context)
@@ -99,15 +99,36 @@ def _cmd_project(args: argparse.Namespace, context: Any) -> int:
         payload = res.to_dict() if hasattr(res, "to_dict") else res
         _emit(args, payload, f"{action}: {pid}")
         return 0
-    if action in ("update", "delete"):
-        # The parser advertises these two, but ProjectManager has no
-        # update/delete operation at all (no method, no row-deletion
-        # path) — there is nothing in the organ to wire to. Answer
-        # honestly (exit 1, the command-failed code) instead of the
-        # old "unknown action" with the usage-error code 2, which
-        # claimed a parser-valid verb did not exist.
-        print(f"project: {action} is not supported — ProjectManager "
-              f"has no {action} operation", file=sys.stderr)
-        return 1
+    if action == "update":
+        # The field rides the description slot (the integrity verb's own
+        # idiom): `nm project update <id> title=New title` or
+        # `nm project update <id> title New title`.
+        spec = (getattr(args, "description", "") or "").strip()
+        field = value = ""
+        if "=" in spec:
+            field, value = spec.split("=", 1)
+        elif spec:
+            parts = spec.split(None, 1)
+            if len(parts) == 2:
+                field, value = parts
+        field, value = field.strip(), value.strip()
+        if not field or not value:
+            print("project: update needs <field>=<value> "
+                  "(e.g. title=New title)", file=sys.stderr)
+            return 1
+        res = pm.update(pid, **{field: value})
+        if not res.get("ok"):
+            _emit(args, res, f"could not update {pid}: {res.get('error', '')}")
+            return 1
+        _emit(args, res, f"updated {pid}: {field} = {value}")
+        return 0
+    if action == "delete":
+        res = pm.delete(pid)
+        if not res.get("ok"):
+            _emit(args, res, f"could not delete {pid}: {res.get('error', '')}")
+            return 1
+        _emit(args, res, f"deleted {pid} — {res.get('title', '')} "
+              f"[{res.get('status', '')}]")
+        return 0
     print(f"project: unknown action {action}", file=sys.stderr)
     return 2

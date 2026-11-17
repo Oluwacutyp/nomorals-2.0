@@ -36,7 +36,8 @@ from ..core.logging_setup import get_logger
 from ..llm.base import Message
 from ..storage.kv import KVStore
 from ..llm.brain import brain_for
-from .auditor import AuditorError, audit_project_step, get_integrity_mode
+from .auditor import (INTEGRITY_KV_PREFIX, AuditorError, audit_project_step,
+                      get_integrity_mode)
 from .failures import record_failure
 
 __all__ = ["Project", "ProjectStep", "ProjectManager", "register"]
@@ -45,6 +46,11 @@ _log = get_logger(__name__)
 
 STEP_STATUSES = ("pending", "in_progress", "done", "failed", "skipped")
 PROJECT_STATUSES = ("planning", "running", "paused", "done", "failed")
+# Fields update() may change. Everything else is identity, derived, or
+# owned by another verb (status: pause/resume; steps: plan/replan).
+_UPDATABLE_FIELDS = ("title", "objective", "task_kind", "artifact",
+                     "verify_cmd", "budget_wall", "budget_tokens")
+_TASK_KINDS = ("build", "investigate", "research", "chat")
 _KV_PREFIX = "project.steps."
 DEFAULT_MAX_ATTEMPTS = 3
 
@@ -1272,6 +1278,104 @@ class ProjectManager:
         self._upsert_row(p)
         return p
 
+    # ── update / delete (audit R2-41) ─────────────────────────────────────
+    def update(self, project_id: str, **fields: Any) -> dict[str, Any]:
+        """Change named fields on a stored project — and nothing else.
+
+        Only the named field(s) change: no re-classification when the
+        objective changes (a stale task_kind/artifact/verify_cmd is
+        corrected by updating those fields explicitly), no step or
+        history touch. ``status`` is not updatable here — status
+        transitions go through pause/resume/plan/advance. Returns an
+        ``{"ok": ...}`` dict in the status()/heal() idiom, never raises
+        for a bad id or field.
+        """
+        p = self._load(project_id)
+        if p is None:
+            return {"ok": False, "error": f"unknown project: {project_id}"}
+        if not fields:
+            return {"ok": False, "error": "nothing to update: name a field"}
+        protected = {
+            "status": "status changes go through pause/resume",
+            "progress": "progress is derived from the steps",
+            "report": "report is derived from the steps",
+            "steps": "steps are planned via plan/replan",
+            "id": "id is the project's identity",
+            "created_at": "created_at is the project's history",
+            "updated_at": "updated_at is maintained by the manager",
+            "finished_at": "finished_at is set when a project finishes",
+            "goal_id": "goal_id is set at create time",
+        }
+        for name in fields:
+            if name in protected:
+                return {"ok": False,
+                        "error": f"field {name!r} is not updatable: "
+                                 f"{protected[name]}"}
+        unknown = [f for f in fields if f not in _UPDATABLE_FIELDS]
+        if unknown:
+            return {"ok": False,
+                    "error": f"unknown field(s): {', '.join(sorted(unknown))}; "
+                             f"updatable: {', '.join(_UPDATABLE_FIELDS)}"}
+        if "task_kind" in fields and str(fields["task_kind"]) not in _TASK_KINDS:
+            return {"ok": False,
+                    "error": f"unknown task_kind {fields['task_kind']!r}; "
+                             f"expected one of {', '.join(_TASK_KINDS)}"}
+        coerced: dict[str, Any] = {}
+        for name, value in fields.items():
+            if name == "budget_wall":
+                try:
+                    coerced[name] = float(value)
+                except (TypeError, ValueError):
+                    return {"ok": False,
+                            "error": f"budget_wall must be a number, "
+                                     f"got {value!r}"}
+            elif name == "budget_tokens":
+                try:
+                    coerced[name] = int(value)  # type: ignore[arg-type]
+                except (TypeError, ValueError):
+                    return {"ok": False,
+                            "error": f"budget_tokens must be an integer, "
+                                     f"got {value!r}"}
+            else:
+                coerced[name] = str(value)
+        for name, value in coerced.items():
+            setattr(p, name, value)
+        p.updated_at = time.time()
+        self._upsert_row(p)
+        return {"ok": True, "id": p.id, "updated": coerced,
+                "title": p.title, "status": p.status}
+
+    def delete(self, project_id: str) -> dict[str, Any]:
+        """Remove a project and its own durable record — and name the rest.
+
+        Removed: the ``projects`` row, the ``project.steps.<id>`` KV
+        entry, and the per-project integrity-mode KV entry (config,
+        not journal). Retained and named: the frozen acceptance runs
+        and auditor verdicts (journals are never pruned by a delete),
+        the linked goal row (mirrored, never owned), and the linked
+        room (no room delete path exists anywhere in the repo).
+
+        There is no durable running workflow/mission linked to a
+        project anywhere in the repo (projects execute synchronously
+        via advance()/run()), so a `running` project deletes cleanly
+        with its dependents named — nothing is silently orphaned.
+        """
+        p = self._load(project_id)
+        if p is None:
+            return {"ok": False, "error": f"unknown project: {project_id}"}
+        kept_runs = len(self.acceptance_history(project_id))
+        linked_goal = p.goal_id or ""
+        linked_room = self._linked_room(project_id) is not None
+        self.db.execute("DELETE FROM projects WHERE id=?", (project_id,))
+        KVStore(self.db).delete(_KV_PREFIX + project_id)
+        KVStore(self.db).delete(INTEGRITY_KV_PREFIX + project_id)
+        return {"ok": True, "id": project_id, "title": p.title,
+                "status": p.status,
+                "removed": ["project row", "steps", "integrity mode"],
+                "retained": {"acceptance_runs": kept_runs,
+                             "linked_goal": linked_goal,
+                             "linked_room": linked_room}}
+
     # ── self-healing (wave 62) ─────────────────────────────────────────────
     def heal(self, project_id: str) -> dict[str, Any]:
         """Revive a FAILED project using what the system has learned.
@@ -1396,20 +1500,26 @@ def register(registry: Any) -> None:
                      "advance (do next step), run (autonomously execute), report "
                      "(progress), list, status, pause, resume, heal (revive a "
                      "failed project with learned failure lessons, escalating "
-                     "to replan), replan (fresh plan with failure context)."),
+                     "to replan), replan (fresh plan with failure context), "
+                     "update (change title/objective/task_kind/artifact/"
+                     "verify_cmd/budget_*), delete (remove a project; its "
+                     "frozen history and linked goal/room stay)."),
         capability="model.call",
         parameters={
-            "action": "str — create|plan|advance|run|report|list|status|pause|resume|heal|replan",
+            "action": "str — create|plan|advance|run|report|list|status|pause|resume|heal|replan|update|delete",
             "project_id": "str (for most actions)",
             "title": "str (create)",
             "objective": "str (create)",
             "steps_json": "json str [..] (create with explicit steps)",
             "max_steps": "str (run)",
+            "field": "str (update)",
+            "value": "str (update)",
         },
     )
     def project(
         action: str = "list", *, project_id: str = "", title: str = "",
         objective: str = "", steps_json: str = "", max_steps: str = "",
+        field: str = "", value: str = "",
     ) -> dict[str, Any]:
         mgr = ProjectManager(context)
         action = (action or "list").strip().lower()
@@ -1454,6 +1564,13 @@ def register(registry: Any) -> None:
                 return mgr.heal(project_id)
             if action == "replan":
                 return mgr.replan(project_id)
+            if action == "update":
+                if not field:
+                    return {"ok": False,
+                            "error": "field required for update"}
+                return mgr.update(project_id, **{field: value})
+            if action == "delete":
+                return mgr.delete(project_id)
         except KeyError as exc:
             return {"ok": False, "error": str(exc)}
         return {"ok": False, "error": f"unknown action: {action}"}

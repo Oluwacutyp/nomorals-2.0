@@ -275,29 +275,88 @@ class CardsWiringTests(unittest.TestCase):
 
 
 class ProjectHonestyTests(unittest.TestCase):
-    """``nm project update``/``delete`` are parser-advertised, but
-    ProjectManager has no such operations. Pre-fix they printed
-    "unknown action" with exit 2 (the usage-error code) — claiming a
-    valid verb did not exist. They must now say "not supported" with
-    the command-failed code 1."""
+    """``nm project update``/``delete`` were parser-advertised, but
+    ProjectManager had no such operations. Pre-R2-41 they printed
+    "not supported" with exit 1. The verbs are wired now (audit
+    R2-41): update changes the named field, delete removes the
+    project; an unknown id still fails honestly with exit 1."""
 
-    def proj(self, action):
-        args = argparse.Namespace(json=False, action=action, title="p1",
-                                  description="", id="")
+    def _ctx(self):
+        import os
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from types import SimpleNamespace
+
+        from nomorals.storage.db import Database
+
+        workdir = Path(tempfile.mkdtemp(
+            dir=os.environ.get("NM_TEST_TMPDIR") or None))
+        self.addCleanup(lambda: shutil.rmtree(workdir, True))
+        db = Database(":memory:")
+        db.migrate()
+        ctx = SimpleNamespace(
+            db=db, home=workdir,
+            settings=SimpleNamespace(workspace_dir=str(workdir)))
+        return ctx, db
+
+    def proj(self, action, title="p1", description="", ctx=None):
+        args = argparse.Namespace(json=False, action=action, title=title,
+                                  description=description, id="")
         out, err = io.StringIO(), io.StringIO()
         with redirect_stdout(out), redirect_stderr(err):
-            rc = _cmd_project(args, mock.Mock())
+            rc = _cmd_project(args, ctx)
         return rc, out.getvalue() + err.getvalue()
 
-    def test_update_reports_not_supported(self):
-        rc, text = self.proj("update")
-        self.assertEqual(rc, 1, text)
-        self.assertIn("not supported", text)
+    def test_update_now_supported(self):
+        from nomorals.agents.projects import ProjectManager
+        ctx, _db = self._ctx()
+        pm = ProjectManager(ctx)
+        p = pm.create("plain", objective="do a thing")
+        rc, text = self.proj("update", p.id, "title=Renamed", ctx)
+        self.assertEqual(rc, 0, text)
+        self.assertIn("updated", text)
+        after = pm._load(p.id)
+        assert after is not None
+        self.assertEqual(after.title, "Renamed")
 
-    def test_delete_reports_not_supported(self):
-        rc, text = self.proj("delete")
+    def test_update_without_field_value_reports_usage(self):
+        from nomorals.agents.projects import ProjectManager
+        ctx, _db = self._ctx()
+        pm = ProjectManager(ctx)
+        p = pm.create("plain", objective="do a thing")
+        rc, text = self.proj("update", p.id, "", ctx)
         self.assertEqual(rc, 1, text)
-        self.assertIn("not supported", text)
+        self.assertIn("field", text)
+        after = pm._load(p.id)
+        assert after is not None
+        self.assertEqual(after.title, "plain")
+
+    def test_update_unknown_project_fails_honestly(self):
+        ctx, _db = self._ctx()
+        rc, text = self.proj("update", "no-such", "title=x", ctx)
+        self.assertEqual(rc, 1, text)
+        self.assertIn("no-such", text)
+
+    def test_delete_now_supported(self):
+        from nomorals.agents.projects import ProjectManager
+        ctx, _db = self._ctx()
+        pm = ProjectManager(ctx)
+        p = pm.create("plain", objective="do a thing")
+        rc, text = self.proj("delete", p.id, "", ctx)
+        self.assertEqual(rc, 0, text)
+        self.assertIn("deleted", text)
+        self.assertIsNone(pm._load(p.id))
+        # a second delete refuses honestly — no silent success
+        rc, text = self.proj("delete", p.id, "", ctx)
+        self.assertEqual(rc, 1, text)
+        self.assertIn(p.id, text)
+
+    def test_delete_unknown_project_fails_honestly(self):
+        ctx, _db = self._ctx()
+        rc, text = self.proj("delete", "no-such", "", ctx)
+        self.assertEqual(rc, 1, text)
+        self.assertIn("no-such", text)
 
 
 if __name__ == "__main__":
