@@ -506,8 +506,8 @@ PORT_RESIDUE: dict[str, str] = {
         "per-tick pool) and seven other modules read/write these "
         "tables natively (agents/job_reports.py, agents/motivation.py, "
         "agents/outcome_steward.py, agents/skill_evolution.py, "
-        "agents/autonomy/presence.py, cmdline/commands/schedule.py, "
-        "agents/scheduler/facade.py), so a claim-only seam wiring "
+        "autonomy/presence.py, cmdline/commands/schedule.py, "
+        "scheduler/facade.py), so a claim-only seam wiring "
         "would fork the record between two stores; the wholesale "
         "scheduler domain port is a later pass"),
     "schedule_runs": "the claim book's history collection (same disposition as schedule_jobs)",
