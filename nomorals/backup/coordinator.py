@@ -55,6 +55,7 @@ from .snapshot import take_snapshot
 
 __all__ = [
     "BackupCoordinator",
+    "open_s3_store",
     "schedule_specs",
     "register_jobs",
     "run_scheduled_backup",
@@ -100,6 +101,31 @@ def register_jobs(facade: Any) -> list[dict[str, Any]]:
             installed.append({"job_id": spec["job_id"], "installed": False,
                               "reason": str(exc)[:200]})
     return installed
+
+
+def open_s3_store() -> Any | None:
+    """Open the optional S3 4th-copy store from the environment, or None.
+
+    S3 is configured purely by environment (``S3_ENDPOINT`` /
+    ``S3_BUCKET`` / ``S3_ACCESS_KEY`` / ``S3_SECRET_KEY`` — see
+    :class:`S3Config.from_env`): fully set returns a real
+    :class:`S3BlobStore` (construction touches no network); anything
+    missing or malformed returns None and the backup runs exactly as
+    before, with no 4th copy. Never raises for a missing or malformed
+    S3 env — an optional copy must never kill the daily backup.
+    """
+    try:
+        from ..core.errors import ConfigError
+        from ..storage.s3blob import S3Config, open_blob_store
+
+        return open_blob_store("s3", s3_config=S3Config.from_env())
+    except ConfigError:
+        _log.info("S3 4th copy not configured — skipping offsite copy")
+        return None
+    except ValueError as exc:
+        _log.warning("S3 4th copy misconfigured (%s) — skipping "
+                     "offsite copy", exc)
+        return None
 
 
 @dataclass

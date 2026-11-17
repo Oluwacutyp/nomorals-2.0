@@ -46,7 +46,7 @@ def _build_coordinator(context: Any) -> Any:
     """
     from ..accounts.vault import open_vault
     from ..agents.notifier import Notifier
-    from ..backup.coordinator import BackupCoordinator
+    from ..backup.coordinator import BackupCoordinator, open_s3_store
     from ..backup.errors import BackupError
     from ..connectors.github import GitHubConnector
 
@@ -64,6 +64,7 @@ def _build_coordinator(context: Any) -> Any:
     return BackupCoordinator(
         root=settings.home_path, work_dir=settings.backup_dir,
         vault=vault, connector=connector, notifier=Notifier(context),
+        s3_store=open_s3_store(),
     )
 
 
@@ -116,6 +117,8 @@ def register(registry: Any) -> None:
                 "shipped": bool(result.get("shipped")),
                 "queued": bool(result.get("queued")),
                 "manifest_pushed": bool(result.get("manifest_pushed")),
+                "s3": bool(result.get("s3")),
+                "s3_error": str(result.get("s3_error", "")),
                 "total_encrypted_bytes": result.get(
                     "total_encrypted_bytes", 0)}
 

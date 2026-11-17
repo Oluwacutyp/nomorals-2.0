@@ -72,12 +72,20 @@ def report_backup_result(
     if result.get("queued"):
         return report_queued(target, result)
     title = f"backup shipped: {backup_id}"
+    s3_note = ""
+    if "s3" in result:
+        s3_note = (f" S3 copy: uploaded "
+                   f"{len((result.get('s3') or {}).get('objects', []))} "
+                   f"objects.")
+    elif "s3_error" in result:
+        s3_note = f" S3 copy failed: {result['s3_error']}."
     body = (
         f"Backup {backup_id} shipped to GitHub Releases "
         f"({result.get('assets', []) and len(result['assets'])} assets, "
         f"{result.get('total_encrypted_bytes', 0)} encrypted bytes). "
         f"Release: {result.get('tag', '')}. "
         f"Manifest committed: {result.get('manifest_pushed', False)}."
+        f"{s3_note}"
     )
     from ..agents.alert_templates import backup_result_doc
 

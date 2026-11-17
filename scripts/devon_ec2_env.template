@@ -313,6 +313,14 @@
 # NM_BACKUP_GIT_REPO=
 # Backup encryption key (base64, secure entry only). Lose it = backups unrecoverable.
 # NM_BACKUP_KEY_B64=
+# S3-compatible offsite backup copy (B2/R2/Wasabi/MinIO): when all four are
+# set, the daily backup also uploads a 4th copy via nomorals/storage/s3blob.py.
+# S3_ENDPOINT=https://s3.amazonaws.com
+# S3_BUCKET=
+# S3_ACCESS_KEY=
+# S3_SECRET_KEY=
+# S3_REGION=us-east-1
+# S3_PREFIX=
 # Thread pool size (0 = cpu_count).
 # NM_THREADS=
 # Config key read by Devon code.

@@ -330,6 +330,14 @@ def backup_result_doc(result: Mapping[str, Any]) -> Doc:
                 KV("Release", str(result.get("tag", "")), mono=True),
                 KV("Manifest committed",
                    bool(result.get("manifest_pushed", False)))]
+        # The S3 row appears only when the 4th copy was attempted —
+        # unconfigured S3 leaves the report byte-identical to before.
+        if "s3" in result:
+            rows.append(KV(
+                "S3 copy",
+                f"uploaded {len((result.get('s3') or {}).get('objects', []))} objects"))
+        elif "s3_error" in result:
+            rows.append(KV("S3 copy", f"failed: {result['s3_error']}"))
         return Doc(title=f"backup shipped: {backup_id}", tone="ok",
                    summary=(f"Backup {backup_id} shipped to GitHub "
                             "Releases."),

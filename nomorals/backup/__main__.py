@@ -31,7 +31,7 @@ def _build_cli_coordinator(root: Path, work_dir: str) -> Any:
     from ..accounts.vault import open_vault
     from ..connectors.github import GitHubConnector
     from ..storage.db import Database
-    from .coordinator import BackupCoordinator
+    from .coordinator import BackupCoordinator, open_s3_store
     from .errors import BackupError
 
     db_path = root / "data" / "nomorals.db"
@@ -47,6 +47,7 @@ def _build_cli_coordinator(root: Path, work_dir: str) -> Any:
     return BackupCoordinator(
         root=root, work_dir=work_dir, vault=vault,
         connector=connector, notifier=None,
+        s3_store=open_s3_store(),
     )
 
 
