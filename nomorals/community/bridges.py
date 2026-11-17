@@ -43,6 +43,7 @@ __all__ = [
     "BridgeStore",
     "default_bridge_dir",
     "format_bridged",
+    "merge_rosters",
 ]
 
 PLATFORMS = ("telegram", "whatsapp", "discord")
@@ -173,6 +174,39 @@ class UnifiedRoster:
     @classmethod
     def from_dicts(cls, data: list[dict[str, Any]]) -> "UnifiedRoster":
         return cls([BridgeMember.from_dict(d) for d in data])
+
+
+def merge_rosters(rosters: list[UnifiedRoster]) -> UnifiedRoster:
+    """Merge per-group rosters into one community-wide roster.
+
+    Members are keyed by member id (first wins); their platform
+    links union, first wins on a conflicting link. A member linked
+    in one group's roster is therefore resolvable when they speak
+    from any group of the same community — that is what lets the
+    live inbound mirror attribute by identity instead of falling
+    back to the display name. A platform identity linked to two
+    different members in two groups resolves to the first group
+    in the given order, the same first-hit-wins rule the
+    /community mirror command already uses when it scans rosters.
+    """
+    merged = UnifiedRoster()
+    by_id: dict[str, BridgeMember] = {}
+    for roster in rosters:
+        for member in roster.members:
+            existing = by_id.get(member.id)
+            if existing is None:
+                copy = BridgeMember(
+                    id=member.id,
+                    display_name=member.display_name,
+                    platforms=dict(member.platforms),
+                    created_ts=member.created_ts,
+                )
+                by_id[member.id] = copy
+                merged.members.append(copy)
+                continue
+            for platform, platform_user_id in member.platforms.items():
+                existing.platforms.setdefault(platform, platform_user_id)
+    return merged
 
 
 def plan_bridge(

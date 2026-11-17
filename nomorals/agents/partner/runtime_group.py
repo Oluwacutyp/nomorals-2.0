@@ -1644,6 +1644,21 @@ class RuntimeGroupMixin:
                     parse_mode=self._rendered_mode(
                         message, ask_reply.text))
             return True
+        # Community mirroring (audit gap R2-26 follow-up): a plain
+        # inbound message in an armed community mirrors to the
+        # community's groups on the other platforms — the live
+        # inbound hook for /community mirror. Runs after
+        # moderation (a moderated-away message never mirrors) and
+        # after the pending-ask drain (a local control answer
+        # never mirrors); never raises, never eats the message.
+        try:
+            self._community_mirror_inbound(
+                surface, key, message, result, game_input=game_input)
+        except Exception as exc:  # noqa: BLE001 - a mirror never eats chat
+            from ...social.chat.failures import record_failure
+
+            record_failure(
+                "runtime.PartnerRuntime._community_mirror_inbound", exc)
         if not actions:
             return False
         adapter = self._group_adapter(message.chat.platform)
@@ -7235,6 +7250,16 @@ class RuntimeGroupMixin:
                 "mirror one message to the community's groups on "
                 "the other platforms (rules, audit and per-target "
                 "policy applied), then send it live once armed\n"
+                "/community member add <g1|key> <name> — add a "
+                "member to a group's roster (link their platform "
+                "identities next, so mirrors attribute them)\n"
+                "/community member link <g1|key> <member-id> "
+                "<platform> <platform-user-id> — link one of a "
+                "member's platform identities to them\n"
+                "/community member unlink <g1|key> <member-id> "
+                "<platform> — drop one linked platform identity\n"
+                "/community member list <g1|key> — the roster: "
+                "members and their linked platform identities\n"
                 "/community arm [post|mirror] | disarm [post|mirror] "
                 "| status — arm live cross-posts or mirrors, disarm "
                 "them, or see the arm state")
@@ -7701,6 +7726,278 @@ class RuntimeGroupMixin:
             lines.append(f"  – {key} — held: {reason}")
         return "\n".join(lines)
 
+    def _community_resolve_member(self, roster, token):  # type: ignore[no-untyped-def]
+        """Resolve a member token to a BridgeMember: exact id
+        first, else a unique id prefix. Returns (member, None)
+        or (None, error)."""
+        token = str(token or "").strip()
+        if not token:
+            return None, ("name a member id — see "
+                          "/community member list <g1>.")
+        for member in roster.members:
+            if member.id == token:
+                return member, None
+        matches = [m for m in roster.members if m.id.startswith(token)]
+        if len(matches) == 1:
+            return matches[0], None
+        if len(matches) > 1:
+            return None, (f"more than one member id starts with "
+                          f"“{token}” — use the full id from "
+                          "/community member list.")
+        return None, (f"no member {token!r} in this group's roster "
+                      "— see /community member list <g1>.")
+
+    def _community_member(self, surface, message, sender, tail,
+                          session):  # type: ignore[no-untyped-def]
+        """`/community member ...` — the per-group roster verbs
+        (audit gap R2-26 follow-up): add / link / unlink / list
+        over UnifiedRoster, so a member's platform identities can
+        be linked from chat and mirror attribution resolves to
+        the linked identity instead of falling back to the
+        display name. The roster is per group (the BridgeStore
+        shape the mirror command already reads); link/unlink
+        take the group's handle like the other verbs and need
+        its admin (the /community proof, unchanged). `add` exists
+        because a roster starts empty — there is no member to
+        link until one is added; `list` exists because link
+        needs the member id."""
+        words = str(tail or "").split()
+        sub = words[1].lower() if len(words) > 1 else ""
+        if sub not in ("add", "link", "unlink", "list"):
+            return self._community_usage()
+        if sub == "add":
+            if len(words) < 4:
+                return self._community_usage()
+            key, error = self._community_resolve(
+                surface, message, sender, session, words[2])
+            if error:
+                return error
+            name = " ".join(words[3:])
+            store = self._community_bridge_store()
+            roster = store.load(key)
+            member = roster.add_member(name)
+            store.save(key, roster)
+            return (f"added {name} as member {member.id} in {key} — "
+                    "link a platform identity with /community "
+                    f"member link {key} {member.id} <platform> <id>.")
+        if sub == "list":
+            if len(words) < 3:
+                return self._community_usage()
+            key, error = self._community_resolve(
+                surface, message, sender, session, words[2])
+            if error:
+                return error
+            roster = self._community_bridge_store().load(key)
+            if not roster.members:
+                return (f"no members in {key} yet — add one with "
+                        f"/community member add {key} <name>.")
+            lines = [f"members in {key}:"]
+            for member in roster.members:
+                links = ", ".join(
+                    f"{p}:{u}"
+                    for p, u in sorted(member.platforms.items()))
+                lines.append(
+                    f"  · {member.display_name} ({member.id})"
+                    + (f" — {links}" if links
+                       else " — no linked identities"))
+            return "\n".join(lines)
+        if sub == "link":
+            if len(words) < 6:
+                return self._community_usage()
+            key, error = self._community_resolve(
+                surface, message, sender, session, words[2])
+            if error:
+                return error
+            store = self._community_bridge_store()
+            roster = store.load(key)
+            member, merror = self._community_resolve_member(
+                roster, words[3])
+            if merror:
+                return merror
+            platform = words[4].strip().lower()
+            platform_user_id = words[5]
+            try:
+                roster.link(member.id, platform, platform_user_id)
+            except ValueError as exc:
+                return str(exc)
+            store.save(key, roster)
+            return (f"linked {platform}:{platform_user_id} to "
+                    f"{member.display_name} ({member.id}) in {key}.")
+        if len(words) < 5:
+            return self._community_usage()
+        key, error = self._community_resolve(
+            surface, message, sender, session, words[2])
+        if error:
+            return error
+        store = self._community_bridge_store()
+        roster = store.load(key)
+        member, merror = self._community_resolve_member(roster, words[3])
+        if merror:
+            return merror
+        platform = words[4].strip().lower()
+        try:
+            removed = roster.unlink(member.id, platform)
+        except ValueError as exc:
+            return str(exc)
+        store.save(key, roster)
+        if removed:
+            return (f"unlinked {platform} from {member.display_name} "
+                    f"({member.id}) in {key}.")
+        return (f"{member.display_name} ({member.id}) has no "
+                f"{platform} identity linked in {key}.")
+
+    def _community_mirror_inbound(self, surface, key, message, result,
+                                  *, game_input=False):  # type: ignore[no-untyped-def]
+        """Mirror one live inbound group message to its
+        community's groups on the other platforms (audit gap
+        R2-26 follow-up: the live inbound hook for /community
+        mirror).
+
+        Runs on the group cycle, after moderation: a message the
+        surface planned to delete, ban or kick never mirrors;
+        commands never mirror (local control); a solicited game
+        move never mirrors (play in this room, not content for
+        the sibling room); only plain inbound text mirrors. The
+        community is the one tagging this group; nothing mirrors
+        when mirror is disarmed for it. Targets are the
+        community's groups on other platforms that are not
+        channels and allow system output — the command path's
+        gates, minus the visible-to-sender gate, which does not
+        transfer to passive intake (the arm IS the operator's
+        authorisation; the author chooses no targets — and
+        requiring the author to admin every sibling group would
+        silence ordinary members entirely). Loop safety is the
+        shared engine's seen_ids + origin-platform exclusion,
+        same as the command path. Sends are immediate — no
+        pacing sleep, the inbound pump must not stall — and the
+        run is journaled like a live command mirror.
+        Attribution resolves through the community's merged
+        roster, else the display name; the message is remembered
+        in group memory either way. Returns a small summary
+        dict; never raises.
+        """
+        import hashlib as _hashlib
+        import time as _time
+
+        from ...community.bridges import merge_rosters
+        from ...community.mirroring import GroupMirror
+        from ...social.chat.base import ChatKind, ChatRef
+
+        def _summary(mirrored, **extra):  # type: ignore[no-untyped-def]
+            out = {"mirrored": mirrored}
+            out.update(extra)
+            return out
+
+        text = str(getattr(message, "text", "") or "")
+        if not getattr(message, "incoming", False):
+            return _summary(False, reason="not inbound")
+        if game_input:
+            return _summary(False, reason="game input")
+        if not text.strip():
+            return _summary(False, reason="empty text")
+        if text.strip().startswith("/"):
+            return _summary(False, reason="command")
+        origin_chat_platform = str(
+            (getattr(message, "chat", None)
+             and message.chat.platform) or "").strip().lower()
+        origin = {"telegram-bot": "telegram"}.get(
+            origin_chat_platform, origin_chat_platform)
+        if origin not in ("telegram", "whatsapp"):
+            return _summary(False, reason="unsupported platform")
+        actions = (result or {}).get("actions") or []
+        if any(str(a.get("kind") or "") in ("delete", "ban", "kick")
+               for a in actions if isinstance(a, dict)):
+            return _summary(False, reason="moderated away")
+        from ...social.chat import group_community as _gc
+
+        index = _gc.communities_index(surface)
+        cid = None
+        row = None
+        for found_id, found_row in index.items():
+            if key in found_row["groups"]:
+                cid, row = found_id, found_row
+                break
+        if row is None:
+            return _summary(False, reason="no community")
+        svc = self._community_service()
+        arms, journal = svc["arms"], svc["journal"]
+        if not arms.armed("community-mirror"):
+            return _summary(False, reason="disarmed")
+        targets: dict[str, list[str]] = {}
+        held: list[str] = []
+        for group_key in row["groups"]:
+            bridge_platform = str(group_key).split(":", 1)[0]
+            bridge_platform = {"telegram-bot": "telegram"}.get(
+                bridge_platform, bridge_platform)
+            if bridge_platform == origin:
+                continue
+            if surface.is_channel(group_key):
+                held.append(f"{group_key} — a channel, not a group")
+                continue
+            if not surface.system_output_allowed(group_key):
+                held.append(
+                    f"{group_key} — system output not allowed there")
+                continue
+            targets.setdefault(bridge_platform, []).append(group_key)
+        if not targets:
+            return _summary(False, reason="no targets", held=held)
+        store = self._community_bridge_store()
+        rosters = []
+        for group_key in row["groups"]:
+            try:
+                rosters.append(store.load(group_key))
+            except Exception:  # noqa: BLE001 — roster read never blocks
+                continue
+        engine = self._community_mirror_engine()
+        senders = {}
+        for platform in targets:
+            def _send(target, txt, _platform=platform):  # type: ignore[no-untyped-def]
+                adapter_platform = {"telegram": "telegram-bot"}.get(
+                    _platform, _platform)
+                adapter = self._adapter_for(adapter_platform)
+                if adapter is None:
+                    raise RuntimeError(
+                        f"no live {_platform} surface here")
+                verdict = adapter.send(
+                    ChatRef.parse(target, kind=ChatKind.GROUP), txt)
+                if isinstance(verdict, dict):
+                    return bool(verdict.get("ok"))
+                return bool(getattr(verdict, "ok", False))
+            senders[platform] = _send
+        engine.targets = dict(targets)
+        engine.senders = dict(senders)
+        sender_id = str(getattr(message, "sender_id", "") or "")
+        display_name = str(getattr(message, "sender", "") or sender_id)
+        adapter_msg_id = str(getattr(message, "message_id", "") or "")
+        if adapter_msg_id:
+            msg_id = f"mirror-inbound:{cid}:{origin}:{adapter_msg_id}"
+        else:
+            msg_id = (f"mirror-inbound:{cid}:{origin}:"
+                      f"{_hashlib.sha1(text.encode('utf-8')).hexdigest()[:12]}")
+        mirror = GroupMirror(
+            group_id=cid, roster=merge_rosters(rosters), engine=engine,
+            memory_root=getattr(self, "_community_memory_root", None))
+        out = mirror.handle_incoming(origin, sender_id, display_name,
+                                     text, message_id=msg_id)
+        deliveries = out.get("deliveries") or []
+        if not deliveries:
+            # The engine deduped this message (seen_ids): nothing
+            # was attempted, nothing is journaled — same as the
+            # command path's early "already mirrored" return.
+            return _summary(False, reason="already mirrored", held=held)
+        sent = sum(1 for d in deliveries if d.sent)
+        failed = len(deliveries) - sent
+        journal.append({
+            "tool": "community-mirror-inbound",
+            "run_id": f"cmi-{int(_time.time())}",
+            "ts": _time.time(), "community": cid,
+            "origin": origin, "message_id": msg_id,
+            "targets": len(deliveries), "sent": sent, "failed": failed,
+            "results": [d.to_dict() for d in deliveries]})
+        arms.note_live_run("community-mirror")
+        return _summary(True, sent=sent, failed=failed, held=held,
+                        deliveries=deliveries)
+
     def _control_community(self, tail, message):  # type: ignore[no-untyped-def]
         """The §16 community board (/community): Telegram Communities
         and WhatsApp communities over one surface — list, show, link,
@@ -7846,6 +8143,9 @@ class RuntimeGroupMixin:
             label = found.get("name") or found.get("id") or "?"
             verb_word = "now" if out.get("changed") else "still"
             return f"{key} is {verb_word} in community {label}."
+        if verb == "member":
+            return self._community_member(surface, message, sender,
+                                          tail, session)
         return self._community_usage()
 
     def _gbackup_board(self, surface, message, sender,
