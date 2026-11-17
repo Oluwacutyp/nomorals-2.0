@@ -12,8 +12,7 @@ mutates the operation it concerns.
 The discipline the store enforces in code, not in convention:
 
 * **Unknown stays unknown.** A case opens with the verdict
-  ``outcome_unknown`` (the shared result-contract vocabulary,
-  ``core/result_contract.py``). The ONLY way a case reaches
+  ``outcome_unknown`` (the shared result vocabulary). The ONLY way a case reaches
   ``resolved`` is :meth:`OutcomeCaseStore.resolve`, which demands a
   verdict from the resolvable set AND a cited evidence receipt that
   exists on this very case. There is no other code path to a resolved
@@ -62,7 +61,7 @@ __all__ = [
 UNKNOWN_VERDICT = "outcome_unknown"
 
 #: Verdicts a case may be resolved TO, with cited evidence. Mirrors
-#: ``core/result_contract.ExecutionStatus`` minus ``outcome_unknown``
+#: the shared result statuses minus ``outcome_unknown``
 #: (a standing state, never a resolution) and ``waiting`` (a live
 #: state, not an outcome).
 RESOLVABLE_VERDICTS = ("succeeded", "verified", "failed", "partial",

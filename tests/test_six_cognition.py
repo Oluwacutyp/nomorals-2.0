@@ -364,20 +364,3 @@ def test_selfheal_both_modules_still_importable():
     assert selfheal.RecoveryOutcome is not None
     assert self_heal.heal_one is not None
     assert self_heal.FIX_STRATEGIES is not None
-
-
-def test_selfheal_facade_reexports_both():
-    from nomorals.core import selfheal_facade as facade
-
-    desc = facade.describe()
-    assert desc["overlap"] == []
-    assert "SelfHealingExecutor" in desc["selfheal"]
-    assert "heal_one" in desc["self_heal"]
-    assert facade.SelfHealingExecutor is not None
-    assert facade.heal_one is not None
-    assert facade.FIX_STRATEGIES is not None
-    assert "heal_one" in facade.healing_names()
-    assert "SelfHealingExecutor" in facade.healing_names()
-    # Facade exposes the original modules themselves.
-    assert facade.selfheal_module.__name__.endswith("selfheal")
-    assert facade.self_heal_module.__name__.endswith("self_heal")

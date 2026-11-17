@@ -7,7 +7,6 @@ import threading
 import time
 import unittest
 
-from nomorals.core.clock import FrozenClock, ScaledClock
 from nomorals.core.config import Settings, load_settings
 from nomorals.core.errors import (
     CapabilityDenied,
@@ -130,27 +129,6 @@ class TestIds(unittest.TestCase):
         flat = [v for chunk in seen for v in chunk]
         self.assertEqual(len(flat), 2000)
         self.assertEqual(len(set(flat)), 2000)
-
-
-# ── clock ──────────────────────────────────────────────────────────────────────
-
-
-class TestClock(unittest.TestCase):
-    def test_frozen_clock_advances_explicitly(self) -> None:
-        clock = FrozenClock(1000.0)
-        self.assertEqual(clock.now(), 1000.0)
-        self.assertEqual(clock.advance(60), 1060.0)
-        self.assertEqual(clock.now_ms(), 1_060_000)
-
-    def test_scaled_clock_runs_fast(self) -> None:
-        clock = ScaledClock(factor=1000.0)
-        start = clock.monotonic()
-        time.sleep(0.01)
-        self.assertGreater(clock.monotonic() - start, 1.0)
-
-    def test_iso_format(self) -> None:
-        stamp = FrozenClock(0.0).iso()
-        self.assertEqual(stamp, "1970-01-01T00:00:00Z")
 
 
 # ── config ─────────────────────────────────────────────────────────────────────
@@ -600,7 +578,25 @@ class TestPolicy(unittest.TestCase):
         self.assertFalse(decision.allowed, "token minted for fs.delete must not unlock db.admin")
 
     def test_confirmation_expires(self) -> None:
-        clock = FrozenClock(1000.0)
+        class _FakeClock:
+            """Minimal stand-in for the deleted core.clock.FrozenClock.
+
+            Policy's clock parameter is duck-typed (Any): it only calls
+            .now(). The deleted module's only live use in this file was
+            this test, so the fake lives here.
+            """
+
+            def __init__(self, start: float) -> None:
+                self._now = float(start)
+
+            def now(self) -> float:
+                return self._now
+
+            def advance(self, seconds: float) -> float:
+                self._now += seconds
+                return self._now
+
+        clock = _FakeClock(1000.0)
         policy = Policy(
             default_grant=CapabilitySet.of(Capability.FS_DELETE),
             confirmation_ttl=10.0,

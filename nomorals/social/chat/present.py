@@ -31,10 +31,10 @@ pieces (Phase-0 survey §E.1):
   :func:`chunks` splits rendered output with its markup-balanced
   splitter, and the F2 conformance tests run its ``check_message``
   over every chunk of every renderer.
-* :mod:`nomorals.core.output_style`'s header + divider discipline is
-  folded into the plain renderer (title, divider, ``Label: value``
-  rows). The module itself stays — chat tool results still use it;
-  F7 owns that convergence.
+* The header + divider discipline (once
+  :mod:`nomorals.core.output_style`, deleted in audit R3-62 — its
+  behavior now lives here) is folded into the plain renderer (title,
+  divider, ``Label: value`` rows). F7 owns that convergence.
 
 Structural text (titles, KV labels, section heads) is *data*, not
 prose: it is escaped literally per dialect, never dialect-converted,
@@ -186,7 +186,7 @@ def board_placeholder(title: str = "") -> str:
         return f"{head}\n…"
     return "…"
 
-#: The output_style divider — the plain renderer's header rule.
+#: The header divider — the plain renderer's header rule.
 _DIVIDER = "━━━━━━━━━━━━━━━"
 
 
@@ -737,7 +737,7 @@ def _render(doc: Doc, dialect: str, *, include_title: bool = True) -> str:
         elif dialect in ("markdown", "canonical"):
             head = f"{icon} **{title}**" if title else icon
         if dialect == "plain":
-            head = f"{head}\n{_DIVIDER}"  # output_style: header+rule
+            head = f"{head}\n{_DIVIDER}"  # header+rule
         groups.append(head)
     if doc.summary:
         groups.append(_prose(doc.summary, dialect))

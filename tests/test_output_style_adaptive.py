@@ -3,8 +3,10 @@
 Owner correction (2026-10-17): style was meant for OUTPUTS — the
 results that are not normal chats. These tests pin:
 
-* ``core.output_style.render_output`` — header + divider + structured
-  body, never a raw JSON blob, clean truncation;
+* the presentation layer's rendering of outputs — header + divider +
+  structured body, never a raw JSON blob, clean truncation (the old
+  ``core.output_style.render_output`` was deleted in audit R3-62; its
+  discipline lives in ``social/chat/present.py`` + ``core/tool_render``);
 * ``social.chat.adaptive_buttons`` — buttons derived from the output
   (kind + content), never the stale Retry/Expand/Next set, never a
   button for an unrelated command, never a dead button (every
@@ -31,82 +33,6 @@ production-right:
 """
 
 import unittest
-
-
-class TestOutputStyle(unittest.TestCase):
-    def test_dict_payload_structured_no_raw_json(self):
-        from nomorals.core.output_style import render_output
-
-        out = render_output(kind="tool", title="memory",
-                            payload={"mode": "additive", "episodes": 1,
-                                     "batches": 0, "ok": True})
-        self.assertIn("🔧 memory", out)
-        self.assertIn("mode: additive", out)
-        self.assertIn("episodes: 1", out)
-        self.assertNotIn('{"mode"', out)
-        self.assertNotIn('"mode":', out)
-
-    def test_key_json_string_parsed(self):
-        from nomorals.core.output_style import render_output
-
-        out = render_output(
-            kind="scheduled", title="scheduled: memory-consolidation",
-            payload='memory: {"mode": "additive", "episodes": 1, '
-                    '"batches": 0, "summaries": 0, "forgotten": 0, '
-                    '"skipped_distilled": 0, "seconds": 0.008, '
-                    '"remaining": 2, "ok": true, "run_number": 15}')
-        self.assertIn("memory:", out)
-        self.assertIn("mode: additive", out)
-        self.assertIn("run_number: 15", out)
-        self.assertNotIn('{"mode"', out)
-        self.assertNotIn('"mode":', out)
-
-    def test_bare_json_string_parsed(self):
-        from nomorals.core.output_style import render_output
-
-        out = render_output(kind="tool", title="probe",
-                            payload='{"ok": true, "count": 3}')
-        self.assertIn("ok: yes", out)
-        self.assertIn("count: 3", out)
-        self.assertNotIn('{"ok"', out)
-
-    def test_plain_string_gets_header(self):
-        from nomorals.core.output_style import render_output
-
-        out = render_output(kind="search", title="search: cats",
-                            payload="found 3 results")
-        self.assertTrue(out.startswith("🔍 search: cats"))
-        self.assertIn("found 3 results", out)
-
-    def test_long_output_truncates_cleanly(self):
-        from nomorals.core.output_style import render_output
-
-        big = {"field_%02d" % i: ("x" * 200) for i in range(40)}
-        out = render_output(kind="tool", title="big", payload=big,
-                            max_chars=500)
-        self.assertLessEqual(len(out), 500)
-        self.assertNotIn('{"field_00"', out)
-
-    def test_never_raises(self):
-        from nomorals.core.output_style import render_output
-
-        self.assertIsInstance(render_output(kind="tool", title="t",
-                                           payload=object()), str)
-        self.assertIsInstance(render_output(kind="tool", title="t",
-                                           payload=None), str)
-
-    def test_parse_json_payload(self):
-        from nomorals.core.output_style import parse_json_payload
-
-        key, parsed = parse_json_payload('memory: {"a": 1}')
-        self.assertEqual(key, "memory")
-        self.assertEqual(parsed, {"a": 1})
-        key, parsed = parse_json_payload('{"a": 1}')
-        self.assertIsNone(key)
-        self.assertEqual(parsed, {"a": 1})
-        self.assertEqual(parse_json_payload("just text"), (None, None))
-        self.assertEqual(parse_json_payload('memory: {broken'),
-                         (None, None))
 
 
 class TestAdaptiveButtons(unittest.TestCase):

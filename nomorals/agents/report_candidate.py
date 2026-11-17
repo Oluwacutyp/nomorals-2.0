@@ -45,8 +45,7 @@ Field map against the doc's required candidate fields:
   :meth:`AlertPolicy.superseding_record` and the notifier's
   release path).
 * actual outcome, useful result/artifact refs, impact and
-  uncertainty → ``outcome`` (the :mod:`..core.result_contract`
-  vocabulary), ``result_refs``, ``impact``, ``uncertainty``.
+  uncertainty → ``outcome`` (the shared result vocabulary), ``result_refs``, ``impact``, ``uncertainty``.
 * owner action needed, deadline/urgency, supported next actions →
   ``action_needed``, ``deadline``, ``urgency``, ``next_actions``.
 * solicited response / requested subscription-milestone / proactive
@@ -127,7 +126,7 @@ class ReportCandidate:
     prev_revision: str = ""
     current_revision: str = ""
     change_evidence: str = ""
-    outcome: str = ""      # core.result_contract vocabulary
+    outcome: str = ""      # shared result vocabulary
     result_refs: tuple[str, ...] = ()
     impact: str = ""
     uncertainty: str = ""

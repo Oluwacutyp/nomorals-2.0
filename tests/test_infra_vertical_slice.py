@@ -13,7 +13,6 @@ import unittest
 from nomorals.agents.partner.tool_loop import ToolCallingLoop, ToolCall
 from nomorals.core.correlation import correlation_context, current_correlation
 from nomorals.core.events import global_bus
-from nomorals.core.result_contract import ExecutionResult
 from nomorals.core.tool_render import render_tool_value
 from nomorals.os.replay import replay_mission
 from nomorals.os.timeline import Timeline
@@ -113,16 +112,10 @@ class TestVerticalSlice(unittest.TestCase):
         self.assertEqual(len(adapter.sent), 1)
         self.assertIn(art.uri, adapter.sent[0])
 
-        # 5. Receipt exists; result carries the correlated ids.
+        # 5. Receipt exists.
         receipts = gw2.outbox.receipts(chat_key=chat.key)
         self.assertEqual(len(receipts), 1)
         self.assertEqual(receipts[0]["state"], "sent")
-        result = ExecutionResult.succeeded(
-            summary="report delivered", data={"rows": 40},
-            artifacts=[art.uri], request_id=request_id, run_id=run_id,
-            delivery_state="sent")
-        self.assertEqual(result.request_id, request_id)
-        self.assertEqual(result.delivery_state, "sent")
 
         # 6. User opens full details from the artifact, not the preview.
         reopened = json.loads(store.read_text(art.id))
@@ -150,12 +143,6 @@ class TestVerticalSlice(unittest.TestCase):
         obs_bad = loop._invoke(ToolCall("bad", {}), actor="owner")
         self.assertIn("[tool ok]", obs_good)
         self.assertIn("boom", obs_bad)
-        result = ExecutionResult.partial(
-            summary="1 of 2 tools succeeded", data={"succeeded": ["good"],
-                                                   "failed": ["bad"]},
-            recovery=["inspect bad-tool failure", "retry remaining"])
-        self.assertEqual(result.status, "partial")
-        self.assertIn("retry remaining", result.recovery)
 
 
 if __name__ == "__main__":

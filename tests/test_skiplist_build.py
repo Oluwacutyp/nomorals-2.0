@@ -251,12 +251,6 @@ def test_scheduler_facade_passthrough(tmp_path):
     assert kind  # agent-scheduler parser passthrough works
 
 
-def test_selfheal_already_facaded_not_rebuilt():
-    from nomorals.core import selfheal_facade
-    assert hasattr(selfheal_facade, "SelfHealingExecutor") or \
-        hasattr(selfheal_facade, "heal_one")
-
-
 # ── 6. marketplace rejects plugin failing its own tests ─────────────────────
 
 def _plugin_dir(tmp_path, name, test_body, manifest_extra=None):

@@ -1,4 +1,4 @@
-"""Section F observability upgrades: logging, metrics, tracing, health, tasks, clock."""
+"""Section F observability upgrades: logging, metrics, tracing, health, tasks."""
 
 import json
 import logging
@@ -8,7 +8,6 @@ import tempfile
 import time
 import unittest
 
-from nomorals.core.clock import Backoff, Deadline, FrozenClock, SystemClock
 from nomorals.core.logging_setup import (
     LogCapture,
     RedactionFilter,
@@ -438,53 +437,6 @@ class TestTaskGraphUpgrades(unittest.TestCase):
                        idempotency_key="k9")
         self.assertEqual(t.max_attempts, 6)
         self.assertEqual(t.idempotency_key, "k9")
-
-
-class TestClockUpgrades(unittest.TestCase):
-    def test_deadline(self):
-        clock = FrozenClock(100.0)
-        dl = Deadline.after(30, clock)
-        self.assertAlmostEqual(dl.remaining(), 30.0)
-        self.assertFalse(dl.expired())
-        clock.advance(31)
-        self.assertTrue(dl.expired())
-        self.assertEqual(dl.remaining(), 0.0)
-        with self.assertRaises(TimeoutError):
-            dl.raise_if_expired()
-
-    def test_deadline_child_respects_parent(self):
-        clock = FrozenClock()
-        parent = Deadline.after(10, clock)
-        child = parent.child(60)
-        self.assertAlmostEqual(child.remaining(), 10.0)
-
-    def test_timeout_contextmanager(self):
-        clock = FrozenClock()
-        with clock.timeout(5) as dl:
-            self.assertIsInstance(dl, Deadline)
-            self.assertAlmostEqual(dl.remaining(), 5.0)
-
-    def test_backoff_advances_frozen_clock(self):
-        clock = FrozenClock()
-        b = Backoff(base=2.0, jitter=False, clock=clock)
-        waited = b.wait()
-        self.assertEqual(waited, 2.0)
-        self.assertEqual(clock.monotonic(), 2.0)
-        self.assertEqual(b.attempt, 1)
-        b.reset()
-        self.assertEqual(b.attempt, 0)
-
-    def test_backoff_real_clock_fast(self):
-        b = Backoff(base=0.001, jitter=False, clock=SystemClock())
-        b.wait()
-        self.assertEqual(b.attempt, 1)
-
-    def test_sleep_until(self):
-        clock = FrozenClock()
-        clock.sleep_until(10.0)
-        self.assertEqual(clock.monotonic(), 10.0)
-        clock.sleep_until(5.0)  # past: no-op
-        self.assertEqual(clock.monotonic(), 10.0)
 
 
 class TestGlobalShorthands(unittest.TestCase):

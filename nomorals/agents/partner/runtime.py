@@ -11334,8 +11334,8 @@ class PartnerRuntime(
         F3-style generic Doc: summary first, noise suppressed, detail
         expandable) rendered in the canonical dialect, which the
         gateway's F1 presentation converts per platform at send.
-        ``core.output_style.render_output`` stays as a module; this
-        path no longer renders through it.
+        ``core.output_style.render_output`` was deleted in audit R3-62;
+        this path renders through the presentation layer.
         """
         from ...core.idempotency_keys import scoped_idempotency_key
 

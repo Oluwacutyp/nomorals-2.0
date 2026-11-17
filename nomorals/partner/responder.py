@@ -577,7 +577,7 @@ class PartnerResponder:
         # is NOT applied to conversational replies. The owner's
         # correction (2026-10-17): style was meant for OUTPUTS — the
         # results that are not normal chats (command / tool / game /
-        # scheduled outputs, rendered by core.output_style) — not for
+        # scheduled outputs, rendered by the presentation layer) — not for
         # normal chats. Conversational replies keep the persona's own
         # voice passes below (normalize_formatting / humanize_emoji /
         # apply_texting_voice / clamp_to_budget) plus the gating
