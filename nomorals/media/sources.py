@@ -1592,15 +1592,18 @@ class DiscoveredBlogSource(NetNaijaSource):
 
 #: Text-search priority for /play.  Regional blogs first (direct MP3s
 #: beat metadata), proven globals next, metadata-only last.
+#: Mdundo is the exception: it sits after the big globals (SoundCloud,
+#: YouTube, YouTube Music) by the owner's order 2026-11-17 — its loose
+#: search was surfacing irrelevant tracks too early.
 #: Each entry: (strategy name, source instance or None for legacy paths).
 SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("netnaija-search", NetNaijaSource()),
     ("notjustok-search", NotJustOkSource()),
     ("tooxclusive-search", TooXclusiveSource()),
-    ("mdundo-search", MdundoSource()),
     ("mp3pm-search", MP3PMSource()),
     ("mp3juice-search", MP3JuiceSource()),
     ("bandcamp-search", BandcampSource()),
+    ("mdundo-search", MdundoSource()),
     ("archiveorg-search", ArchiveOrgSource()),
     ("jamendo-search", JamendoSource()),
     ("fma-search", FMASource()),
@@ -1625,13 +1628,13 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "netnaija-search",
     "notjustok-search",
     "tooxclusive-search",
-    "mdundo-search",
     "mp3pm-search",
     "mp3juice-search",
     "soundcloud-search",
     "bandcamp-search",
     "youtube-search",
     "youtube-music-search",
+    "mdundo-search",
     "archiveorg-search",
     "jamendo-search",
     "fma-search",

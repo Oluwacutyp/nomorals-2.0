@@ -537,13 +537,13 @@ class SourceResolver:
             ("netnaija-search", self._netnaija_search_many),
             ("notjustok-search", self._notjustok_search_many),
             ("tooxclusive-search", self._tooxclusive_search_many),
-            ("mdundo-search", self._mdundo_search_many),
             ("mp3pm-search", self._mp3pm_search_many),
             ("mp3juice-search", self._mp3juice_search_many),
             ("soundcloud-search", self._soundcloud_search_many),
             ("bandcamp-search", self._bandcamp_search_many),
             ("youtube-search", self._youtube_search_many),
             ("youtube-music-search", self._youtube_music_search_many),
+            ("mdundo-search", self._mdundo_search_many),
             ("archiveorg-search", self._archiveorg_search_many),
             ("jamendo-search", self._jamendo_search_many),
             ("fma-search", self._fma_search_many),
@@ -1059,6 +1059,9 @@ class SourceResolver:
         # globals; metadata-only (Boomplay, MusicBrainz) + 30s-preview
         # APIs (iTunes/Deezer) + Spotify last. Boomplay is back in the
         # chain via browser-backed search (verified live 2026-10-18).
+        # Mdundo is the exception: it sits after the big globals by the
+        # owner's order 2026-11-17 (its loose search surfaced
+        # irrelevant tracks too early).
         # GLOBAL coverage: Nigeria/Africa is one region
         # among many — the chain spans worldwide catalogs (YouTube
         # Music, MusicBrainz, Openverse, Wikimedia, iTunes, Deezer).
@@ -1071,8 +1074,6 @@ class SourceResolver:
                 query, "NotJustOkSource", "notjustok")),
             ("tooxclusive-search", lambda: self._s_blog_search(
                 query, "TooXclusiveSource", "tooxclusive")),
-            ("mdundo-search", lambda: self._s_blog_search(
-                query, "MdundoSource", "mdundo")),
             ("mp3pm-search", lambda: self._s_blog_search(
                 query, "MP3PMSource", "mp3pm")),
             ("mp3juice-search", lambda: self._s_blog_search(
@@ -1083,6 +1084,8 @@ class SourceResolver:
             ("youtube-search", lambda: self._s_youtube_search(query)),
             ("youtube-music-search",
              lambda: self._s_youtube_music_search(query)),
+            ("mdundo-search", lambda: self._s_blog_search(
+                query, "MdundoSource", "mdundo")),
             ("archiveorg-search", lambda: self._s_archiveorg_search(query)),
             ("jamendo-search", lambda: self._s_blog_search(
                 query, "JamendoSource", "jamendo")),
