@@ -703,7 +703,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "brief": (0, None),       # /brief <topic> | run <topic> — SERP-derived content brief (owner only)
     "content": (0, None),     # /content score <draft> | schedule <id> <when> | run <topic> — brief-first pipeline (owner only)
     "guardrails": (0, None),   # /guardrails add <rule> | list | run | override … — rule-based ad-spend safety (owner only)
-    "cost": (0, 2),          # /cost [on|off] | /cost budget $0.50 — transparent spend display (owner only)
+    "cost": (0, None),        # /cost [on|off] | /cost budget $0.50 | /cost whatsapp [category] [conversations] [cold] | week | card — transparent spend display (owner only)
     "competitor": (0, None),   # /competitor track <account> | report <account> | digest | vs <them> <you> — no-access competitor intel (owner only)
     "routine": (0, None),     # /routine <natural language> | confirm <id> | list
     "home": (0, None),        # /home status | what changed | unusual?

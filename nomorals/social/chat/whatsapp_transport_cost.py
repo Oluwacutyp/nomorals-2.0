@@ -25,9 +25,27 @@ from __future__ import annotations
 
 from typing import Any
 
-from ...social.whatsapp_cost import RATE_CARD_2026, RATE_SERVICE_KOBO, naira
+from ...social.whatsapp_cost import (
+    RATE_CARD_2026,
+    RATE_SERVICE_KOBO,
+    CostTracker,
+    naira,
+    rate_card_text,
+)
 
-__all__ = ["estimate", "compare", "CLOUD_CATEGORIES"]
+__all__ = [
+    "estimate",
+    "compare",
+    "CLOUD_CATEGORIES",
+    "format_compare",
+    "whatsapp_cost_reply",
+]
+
+#: The rate card's vintage, as documented on the card itself
+#: (whatsapp_cost.py: "Meta Nigeria, Oct 1 2026 billing"). The card carries
+#: no as-of field, so the reply states the vintage the code claims —
+#: staleness is visible to the owner, never silently assumed fresh.
+RATE_CARD_VINTAGE = "Meta Nigeria, Oct 2026 card"
 
 #: Cloud API categories (Meta's four).
 CLOUD_CATEGORIES: tuple[str, ...] = ("service", "utility", "authentication", "marketing")
@@ -109,3 +127,81 @@ def compare(*, category: str = "service", conversations: int = 1,
                      "and the account is already warmed for it.")
     return {"recommendation": pick, "why": why,
             "cloud": cloud, "baileys": baileys}
+
+
+def format_compare(result: dict[str, Any]) -> str:
+    """Owner-facing rendering of a :func:`compare` result. Never raises."""
+    try:
+        cloud = result.get("cloud") or {}
+        baileys = result.get("baileys") or {}
+        category = str(cloud.get("category") or "service")
+        conv = int(cloud.get("conversations") or 1)
+        lines = [
+            f"💬 WhatsApp transport — {category}, "
+            f"{conv} conversation{'s' if conv != 1 else ''}",
+            f"  Cloud API: {cloud.get('total', '—')} total "
+            f"({naira(int(cloud.get('per_conversation_kobo') or 0))} "
+            f"per conversation)",
+            f"  Baileys: {baileys.get('total', '—')} · no per-message Meta fee",
+            f"  → use {result.get('recommendation', '—')} — "
+            f"{result.get('why', '')}",
+            f"  rates: {RATE_CARD_VINTAGE} — verify periodically",
+        ]
+        return "\n".join(lines)
+    except Exception:  # noqa: BLE001
+        return "💬 WhatsApp transport comparison unavailable."
+
+
+def whatsapp_cost_reply(tail: str, *, tracker: Any = None) -> str:
+    """Chat reply for the ``/cost whatsapp`` subverb.
+
+    ``whatsapp`` → compare() on the defaults (service, 1 conversation).
+    ``whatsapp <category> [conversations] [cold]`` → compare() on those
+    args. ``whatsapp week`` → the real ``wa_costs`` ledger via CostTracker.
+    ``whatsapp card`` → the rate card. ``tracker`` is injectable for tests;
+    the live path uses the home CostTracker. Never raises: an unknown
+    category is an honest refusal naming the valid categories, never an
+    invented number.
+    """
+    try:
+        parts = (tail or "").strip().split()
+        args = parts[1:] if parts and parts[0].lower() == "whatsapp" else parts
+        if not args:
+            return format_compare(compare())
+        head = args[0].lower()
+        if head == "card":
+            return rate_card_text()
+        if head == "week":
+            try:
+                tr = tracker if tracker is not None else CostTracker()
+                line = tr.weekly_spend()
+                warn = tr.budget_warning()
+                return line + (f"\n{warn}" if warn else "")
+            except Exception:  # noqa: BLE001
+                return ("💸 WhatsApp spend data unavailable — "
+                        "the cost ledger couldn't be read.")
+        category = head
+        conversations = 1
+        cold = False
+        for tok in args[1:]:
+            low = tok.lower()
+            if low == "cold":
+                cold = True
+            elif low.lstrip("-").isdigit():
+                conversations = max(0, int(low))
+            else:
+                return (
+                    f"usage: /cost whatsapp [category] [conversations] [cold]\n"
+                    f"  categories: {', '.join(CLOUD_CATEGORIES)}"
+                )
+        try:
+            result = compare(category=category, conversations=conversations,
+                             cold_outreach=cold)
+        except ValueError:
+            return (
+                f"unknown WhatsApp category {category!r} — one of "
+                f"{', '.join(CLOUD_CATEGORIES)}. No price was estimated."
+            )
+        return format_compare(result)
+    except Exception:  # noqa: BLE001
+        return "💬 WhatsApp cost comparison unavailable."

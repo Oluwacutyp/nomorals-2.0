@@ -21,13 +21,14 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable
 from .failures import record_failure
+from .whatsapp_cost import RATE_MARKETING_KOBO, RATE_SERVICE_KOBO
 
 _log = logging.getLogger(__name__)
 
 # ── module-level defaults ──────────────────────────────────────────────────
 
-_WHATSAPP_SERVICE_KOBO = 1400    # ₦14 service message (Nigeria, #68)
-_WHATSAPP_MARKETING_KOBO = 8400  # ₦84 marketing message (Nigeria, #68)
+# WhatsApp legs are priced from the single rate card (whatsapp_cost) —
+# no second hardcoded price list here (gapfix R3-51).
 
 _DOMAINS = ("instagram", "facebook", "tiktok", "telegram", "whatsapp")
 
@@ -703,7 +704,7 @@ def render_dm(template: str, lead: Lead, extra: dict | None = None) -> str:
 
 
 def _whatsapp_cost_kobo(is_marketing: bool) -> int:
-    return _WHATSAPP_MARKETING_KOBO if is_marketing else _WHATSAPP_SERVICE_KOBO
+    return RATE_MARKETING_KOBO if is_marketing else RATE_SERVICE_KOBO
 
 
 def handle_comment(store: LeadStore, ev: CommentEvent, *,

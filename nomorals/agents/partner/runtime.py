@@ -9324,6 +9324,17 @@ class PartnerRuntime(
             # Owner-only.
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
+            _cost_tail = (command.tail or arg or "").strip()
+            _cost_head = _cost_tail.split(None, 1)[0].lower() if _cost_tail else ""
+            if _cost_head == "whatsapp":
+                # WhatsApp transport comparison lives in social/chat (L4):
+                # llm/cost_display (L3) may not import upward, so the
+                # whatsapp subverb routes here, in the L5 composition
+                # layer. Gapfix R3-51.
+                from ...social.chat.whatsapp_transport_cost import (
+                    whatsapp_cost_reply,
+                )
+                return whatsapp_cost_reply(_cost_tail)
             from ...llm.cost_display import control_cost
             return control_cost(
                 command.tail or arg,

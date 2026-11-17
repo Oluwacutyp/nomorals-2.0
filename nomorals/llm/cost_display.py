@@ -318,7 +318,10 @@ def _usage() -> str:
         "💰 /cost — transparent spend display\n"
         "  /cost on|off — show 'this answer cost $X' after every reply\n"
         "  /cost — today's metered spend\n"
-        "  /cost budget $0.50 — set the research spend cap"
+        "  /cost budget $0.50 — set the research spend cap\n"
+        "  /cost whatsapp [category] [conversations] [cold] — Cloud API vs Baileys\n"
+        "  /cost whatsapp week — actual WhatsApp spend this week\n"
+        "  /cost whatsapp card — the WhatsApp rate card"
     )
 
 
