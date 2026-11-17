@@ -6,6 +6,7 @@ from .agent import _cmd_ask, _cmd_run
 from .autonomy import _cmd_autonomy, _set_daily_call_cap
 from .av import _cmd_av
 from .airports import _cmd_airports
+from .flight import _cmd_flight
 from .backup import _cmd_backup
 from .benchmark import _BuildersBuildBackend, _cmd_benchmark
 from .bet import _cmd_bet
@@ -170,6 +171,7 @@ __all__ = [
     "_cmd_organs",
     "_cmd_av",
     "_cmd_airports",
+    "_cmd_flight",
     "_cmd_data",
     "_cmd_decisions",
     "_cmd_focus",

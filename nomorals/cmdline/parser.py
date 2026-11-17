@@ -54,6 +54,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "av": [],
     "airports": [],
     "compute": [],
+    "flight": [],
     "bet": ["bt"],
     "apk": [],
     "re": [],
@@ -3606,6 +3607,30 @@ def _parser() -> argparse.ArgumentParser:
                            help="one rung instead of the ladder")
     compute_p.add_argument("--json", action="store_true",
                            help="Output as JSON")
+
+    flight_p = sub.add_parser(
+        "flight", aliases=CLI_ALIASES["flight"],
+        help="live flight tracking: position, altitude, speed, ETA, track map, watches",
+        description=("nm flight <flight>\\n"
+                     "nm flight area <IATA> | nm flight area <lat_min> <lon_min> <lat_max> <lon_max>\\n"
+                     "nm flight watch <flight> [destination] [expect-epoch]\\n"
+                     "nm flight unwatch <flight>\\n"
+                     "nm flight watches\\n"
+                     "nm flight tick\\n"
+                     "Where a flight is RIGHT NOW, from the open ADS-B "
+                     "feeds (OpenSky) — never the schedule: live "
+                     "position, altitude, speed, heading, ETA, data age "
+                     "and source, plus the track map she draws herself. "
+                     "A watch pings when the flight lands, diverts, "
+                     "runs late or vanishes."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    flight_p.add_argument("flight_action", nargs="?", default="",
+                          help="flight to track, or area | watch | unwatch | watches | tick")
+    flight_p.add_argument("flight_rest", nargs="*", default=[],
+                          help="action arguments (destination, expect-epoch, box)")
+    flight_p.add_argument("--json", action="store_true",
+                          help="Output as JSON")
 
     focus_p = sub.add_parser("focus", aliases=CLI_ALIASES["focus"],
         help="focus sessions: start, pause, resume, stop, status, today, week, month",

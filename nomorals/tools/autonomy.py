@@ -748,14 +748,41 @@ def register(registry: Any) -> None:
     )
     def _airport_refresh_tick_tool() -> dict[str, Any]:
         from ..agents.notifier import Notifier
-        from ..travel.refresh import run_airport_refresh_tick_once
+        from ..travel.refresh import (
+            COORDS_PATH,
+            run_airport_refresh_tick_once,
+        )
 
         try:
             return run_airport_refresh_tick_once(
-                context=_context, notifier=Notifier(_context))
+                context=_context, notifier=Notifier(_context),
+                coords_path=COORDS_PATH)
         except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
             return {"ok": False,
                     "error": f"airport refresh tick failed: {exc}"}
+
+    @registry.register(
+        "__flight_track_tick__",
+        description="Run one flight-watch tick (FlightRadar24 "
+        "build-new): check every armed flight watch against the "
+        "live ADS-B feed and publish one Notifier note per watch "
+        "that landed, diverted, ran late or vanished — one alert "
+        "per event, never twice. Scheduler-internal; runs every "
+        "15 minutes. Routine and silent when nothing changed; a "
+        "feed failure reports the reason and never kills the job.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _flight_track_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..travel.tracking import run_flight_track_tick_once
+
+        try:
+            return run_flight_track_tick_once(
+                context=_context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"flight track tick failed: {exc}"}
 
     @registry.register(
         "__group_ritual_tick__",

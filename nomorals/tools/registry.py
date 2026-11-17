@@ -603,7 +603,7 @@ class ToolRegistry:
             "computer",
             "database", "deals", "decoder", "decoder_agent", "deliver_report",
             "commerce", "filesend",
-            "filesystem", "finance", "giftcard", "git", "hashcrack", "imagedb",
+            "filesystem", "finance", "flight_track", "giftcard", "git", "hashcrack", "imagedb",
             "lint",
             "edit_loop",
             "errorsys",  # system health / error budgets / incident history

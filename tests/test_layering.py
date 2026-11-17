@@ -366,6 +366,11 @@ MODULE_PINS: dict[str, int] = {
     # foundation tool. The registry loads it dynamically by dotted
     # name, never by static import.
     "nomorals.tools.compute": 5,
+    # tools/flight_track is the same shape: a tool *surface* over the
+    # L5 travel organ (the live flight-tracking organ), not an L4
+    # foundation tool. The registry loads it dynamically by dotted
+    # name, never by static import.
+    "nomorals.tools.flight_track": 5,
     # tools/backup is the same shape: it composes the L5 backup organ
     # (coordinator/report) + agents (L5, notifier) + connectors (L5,
     # GitHub) into the two scheduler-internal tick tools. Pinned L5

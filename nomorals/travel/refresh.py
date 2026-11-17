@@ -50,14 +50,18 @@ __all__ = [
     "AIRPORTS_REFRESH_SPEC",
     "AIRPORTS_REFRESH_TOOL",
     "AIRPORTS_SOURCE_URL",
+    "COORDS_PATH",
     "DATA_PATH",
+    "build_coords",
     "build_mapping",
     "ensure_airport_refresh_job",
     "next_refresh_run",
     "read_refresh_state",
     "refresh_airports",
+    "render_coords",
     "render_mapping",
     "run_airport_refresh_tick_once",
+    "validate_coords",
     "validate_mapping",
 ]
 
@@ -71,6 +75,11 @@ AIRPORTS_SOURCE_URL = (
 
 #: The table this job refreshes. Tests point it at a temp file.
 DATA_PATH = AIRPORTS_DATA_PATH
+
+#: The airport coordinates table (``travel/tracking.py`` — the live
+#: flight-tracking organ) — rebuilt from the same fetched dump
+#: beside the country table whenever a coords path is given.
+COORDS_PATH = Path(__file__).parent / "data" / "airports_coords.csv"
 
 AIRPORTS_REFRESH_JOB = "airport dataset refresh"
 AIRPORTS_REFRESH_TOOL = "__airport_refresh_tick__"
@@ -109,6 +118,9 @@ _MIN_ROWS = 5000
 _MIN_COUNTRIES = 100
 _MAX_ROWS = 50000
 _MAX_DROPPED_FRACTION = 0.05
+#: The coordinates table carries the same 9,053 codes; its floor is
+#: the same row count (no country floor — coordinates have none).
+_MIN_COORDS = 5000
 
 
 def build_mapping(text: str) -> tuple[dict[str, str], dict[str, int]]:
@@ -158,6 +170,92 @@ def render_mapping(mapping: dict[str, str]) -> str:
     for code in sorted(mapping):
         w.writerow([code, mapping[code]])
     return buf.getvalue()
+
+
+def build_coords(
+        text: str) -> tuple[dict[str, tuple[float, float, str, str, str]],
+                            dict[str, int]]:
+    """Build the IATA→coordinates table from a dump's CSV text.
+
+    The same generator rules as :func:`build_mapping`, for the
+    coordinates columns: a row with no IATA code is skipped; a bad
+    code (not 3 letters) or bad coordinates (not finite lat/lon in
+    range) is dropped; a code seen before with DIFFERENT
+    coordinates is dropped (first wins); a code seen before with
+    the SAME coordinates collapses silently. Returns ``(coords,
+    stats)`` where each value is ``(lat, lon, name, municipality,
+    country)``.
+    """
+    coords: dict[str, tuple[float, float, str, str, str]] = {}
+    total = 0
+    dropped = 0
+    try:
+        rows = csv.DictReader(io.StringIO(text))
+        for row in rows:
+            total += 1
+            code = (row.get("iata_code") or "").strip().upper()
+            if not code:
+                continue
+            try:
+                lat = float(row.get("latitude_deg") or "")
+                lon = float(row.get("longitude_deg") or "")
+            except (TypeError, ValueError):
+                dropped += 1
+                continue
+            if len(code) != 3 or not code.isalpha():
+                dropped += 1
+                continue
+            if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+                dropped += 1
+                continue
+            value = (lat, lon, (row.get("name") or "").strip(),
+                     (row.get("municipality") or "").strip(),
+                     (row.get("iso_country") or "").strip().upper())
+            if code in coords and coords[code][:2] != value[:2]:
+                # Same code, different coordinates: first wins.
+                dropped += 1
+                continue
+            coords.setdefault(code, value)
+    except Exception:  # noqa: BLE001 - an unreadable dump builds nothing
+        _log.debug("airport dump unreadable for coords", exc_info=True)
+        return {}, {"total_rows": total, "dropped": dropped, "codes": 0}
+    return coords, {"total_rows": total, "dropped": dropped,
+                    "codes": len(coords)}
+
+
+def render_coords(
+        coords: dict[str, tuple[float, float, str, str, str]]) -> str:
+    """The coordinates table as CSV text: header + one row per
+    code, sorted."""
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["iata", "latitude", "longitude", "name",
+                "municipality", "iso_country"])
+    for code in sorted(coords):
+        lat, lon, name, city, country = coords[code]
+        w.writerow([code, lat, lon, name, city, country])
+    return buf.getvalue()
+
+
+def validate_coords(coords: dict[str, tuple[float, float, str, str, str]],
+                    stats: dict[str, int]) -> str:
+    """Sanity-check a built coordinates table. "" means valid."""
+    total = stats.get("total_rows", 0)
+    dropped = stats.get("dropped", 0)
+    codes = stats.get("codes", len(coords))
+    if total == 0:
+        return "dump has no rows"
+    if codes < _MIN_COORDS:
+        return f"too few IATA codes: {codes} < {_MIN_COORDS}"
+    if dropped / total > _MAX_DROPPED_FRACTION:
+        return (f"dropped {dropped} of {total} rows "
+                f"({dropped / total:.1%} > {_MAX_DROPPED_FRACTION:.0%})")
+    for code, (lat, lon, _name, _city, _country) in coords.items():
+        if len(code) != 3 or not code.isalpha():
+            return f"bad IATA code in coordinates: {code!r}"
+        if not (-90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0):
+            return f"bad coordinates for {code!r}: {lat}, {lon}"
+    return ""
 
 
 def validate_mapping(mapping: dict[str, str],
@@ -232,6 +330,7 @@ def refresh_airports(
         *,
         fetcher: Any = None,
         data_path: str | Path | None = None,
+        coords_path: str | Path | None = None,
         state_path: str | Path | None = None,
         now: float | None = None) -> dict[str, Any]:
     """Fetch, build, validate, atomically replace the airport table.
@@ -241,15 +340,23 @@ def refresh_airports(
     afterwards, because nothing is written until validation passes.
     On success the ``airports`` module cache is invalidated so the
     running process serves the new table at once.
+
+    When ``coords_path`` is given, the same fetched dump also
+    rebuilds the coordinates table (``travel/tracking.py``) under
+    the same guarantees — both tables validate before either is
+    replaced. When it is None (the historical call shape) the
+    coordinates table is left alone.
     """
     from .airports import invalidate_cache
+    from .tracking import invalidate_coords_cache
 
     now_f = float(now if now is not None else time.time())
     target = Path(data_path) if data_path is not None else DATA_PATH
     state: dict[str, Any] = {"ran_at": now_f, "ok": False,
                              "rows": 0, "countries": 0, "dropped": 0,
                              "source": AIRPORTS_SOURCE_URL,
-                             "source_sha256": "", "error": ""}
+                             "source_sha256": "", "error": "",
+                             "coords": 0}
     try:
         fetch = fetcher if fetcher is not None else _fetch_dump
         text = fetch()
@@ -269,12 +376,31 @@ def refresh_airports(
                 _write_state(Path(state_path), state)
         return state
     rendered = render_mapping(mapping)
+    coords_rendered = ""
+    coords_stats: dict[str, int] = {}
+    if coords_path is not None:
+        coords, coords_stats = build_coords(text)
+        creason = validate_coords(coords, coords_stats)
+        if creason:
+            state["error"] = f"coords validation failed: {creason}"
+            state["dropped"] = stats.get("dropped", 0)
+            if state_path is not None:
+                with contextlib.suppress(Exception):
+                    _write_state(Path(state_path), state)
+            return state
+        coords_rendered = render_coords(coords)
     source_sha = hashlib.sha256(text.encode("utf-8")).hexdigest()
     try:
         target.parent.mkdir(parents=True, exist_ok=True)
         tmp = target.with_suffix(".tmp")
         tmp.write_text(rendered, encoding="utf-8")
         os.replace(tmp, target)
+        if coords_path is not None:
+            ctarget = Path(coords_path)
+            ctarget.parent.mkdir(parents=True, exist_ok=True)
+            ctmp = ctarget.with_suffix(".tmp")
+            ctmp.write_text(coords_rendered, encoding="utf-8")
+            os.replace(ctmp, ctarget)
     except Exception as exc:  # noqa: BLE001 - a failed replace is a result
         state["error"] = f"replace failed: {exc}"
         if state_path is not None:
@@ -282,9 +408,12 @@ def refresh_airports(
                 _write_state(Path(state_path), state)
         return state
     invalidate_cache()
+    if coords_path is not None:
+        invalidate_coords_cache()
     state.update({"ok": True, "rows": stats["codes"],
                   "countries": stats["countries"],
                   "dropped": stats["dropped"],
+                  "coords": coords_stats.get("codes", 0),
                   "source_sha256": source_sha})
     if state_path is not None:
         with contextlib.suppress(Exception):
@@ -298,6 +427,7 @@ def run_airport_refresh_tick_once(
         notifier: Any = None,
         fetcher: Any = None,
         data_path: str | Path | None = None,
+        coords_path: str | Path | None = None,
         state_path: str | Path | None = None,
         now: float | None = None) -> dict[str, Any]:
     """One airport-refresh tick. Never raises.
@@ -305,17 +435,21 @@ def run_airport_refresh_tick_once(
     A routine monthly success is silent. A failure is published
     through the Notifier — a table going stale is the one thing worth
     paging about — and recorded in durable state either way.
+    ``coords_path`` rebuilds the coordinates table beside the
+    country table; the scheduled tick passes the live path, direct
+    callers pass a temp path or leave it off.
     """
     try:
         mark = (Path(state_path) if state_path is not None
                 else _state_path(context))
         out = refresh_airports(fetcher=fetcher, data_path=data_path,
+                               coords_path=coords_path,
                                state_path=mark, now=now)
     except Exception as exc:  # noqa: BLE001 - tick must never raise
         out = {"ran_at": float(now if now is not None else time.time()),
                "ok": False, "rows": 0, "countries": 0, "dropped": 0,
                "source": AIRPORTS_SOURCE_URL, "source_sha256": "",
-               "error": f"tick failed: {exc}"}
+               "coords": 0, "error": f"tick failed: {exc}"}
     if not out.get("ok") and notifier is not None:
         with contextlib.suppress(Exception):
             notifier.publish(

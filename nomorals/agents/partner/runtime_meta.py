@@ -480,6 +480,204 @@ class RuntimeMetaMixin:
                     f"{out.get('dropped', 0)} rows dropped")
         return f"refresh failed: {out.get('error') or 'unknown error'}"
 
+    def _control_flight(self, tail: str, message: Any = None) -> str:
+        """The /flight reply: live flight tracking, in chat.
+
+        ``/flight BA249`` follows one flight — live position,
+        altitude, speed, heading, ETA, data age and source — and
+        sends the track map she draws herself. ``/flight area LOS``
+        lists live aircraft over an airport (or a lat/lon box).
+        ``/flight watch BA249 LHR [expect-epoch]`` arms a watch
+        that pings on landing, diversion, delay or loss;
+        ``/flight unwatch BA249`` drops it, ``/flight watches``
+        lists the armed watches. Owner-only. The feed is the open
+        ADS-B feeds (OpenSky) — never the schedule; a down or empty
+        feed is reported in words with the reason, never a faked
+        position. A render or send failure reports in words — never
+        silence, never a fake image.
+        """
+        from ...travel.tracking import (
+            FlightWatcher,
+            OpenSkyFeed,
+            TrackStore,
+            aircraft_in_area,
+            coords_for_iata,
+            render_track_map,
+            track_flight,
+        )
+
+        settings = getattr(self.context, "settings", None)
+        home = getattr(settings, "home", None) if settings is not None else None
+        home = str(home or "~/.nomorals")
+
+        def _map_for(out: dict[str, Any],
+                     destination: str | None) -> str | None:
+            """Draw the track map for a successful track. Returns the
+            PNG path, or None when there is no home to write to."""
+            try:
+                store = TrackStore(home)
+                points = store.points(out["callsign"])
+                current = {"latitude": out.get("latitude"),
+                           "longitude": out.get("longitude")}
+                png, _digest = render_track_map(
+                    points, destination=destination or None,
+                    current=current)
+                path = (Path(home) / "travel"
+                        / f"track_{out['callsign']}.png")
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(png)
+                return str(path)
+            except Exception:  # noqa: BLE001 - a failed map never kills the track
+                return None
+
+        words = (tail or "").split()
+        verb = words[0].lower() if words else ""
+        if verb == "watch":
+            if len(words) < 2:
+                return ("usage: /flight watch <flight> "
+                        "[destination] [expect-epoch]")
+            destination = ""
+            expect_at = 0.0
+            if len(words) >= 3 and len(words[2]) == 3:
+                destination = words[2].upper()
+            for token in words[2:]:
+                try:
+                    expect_at = float(token)
+                except (TypeError, ValueError):
+                    continue
+            try:
+                watch = FlightWatcher(home=home).watch(
+                    words[1], destination=destination,
+                    expect_at=expect_at)
+            except Exception as exc:  # noqa: BLE001 - watch never crashes chat
+                return f"watch failed: {exc}"
+            line = f"watching {watch.flight}"
+            if watch.destination:
+                line += f" → {watch.destination}"
+            if watch.expect_at:
+                line += (f" — expected "
+                         f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(watch.expect_at))}")
+            return line + "."
+        if verb == "unwatch":
+            if len(words) < 2:
+                return "usage: /flight unwatch <flight>"
+            watcher = FlightWatcher(home=home)
+            query = words[1].upper()
+            removed = 0
+            for watch in watcher.list_watches(active_only=False):
+                if watch.flight == query:
+                    removed += int(watcher.unwatch(watch.id))
+            if removed:
+                return f"no longer watching {query}."
+            return f"no watch on {query}."
+        if verb == "watches":
+            watches = FlightWatcher(home=home).list_watches()
+            if not watches:
+                return "no flights watched."
+            lines = ["watched flights:"]
+            for watch in watches:
+                line = f"• {watch.flight}"
+                if watch.destination:
+                    line += f" → {watch.destination}"
+                if watch.expect_at:
+                    line += (f" — expected "
+                             f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(watch.expect_at))}")
+                if watch.alerted:
+                    line += f" (alerted: {', '.join(watch.alerted)})"
+                lines.append(line)
+            return "\n".join(lines)
+        if verb == "area":
+            if len(words) < 2:
+                return ("usage: /flight area <IATA> | /flight area "
+                        "<lat_min> <lon_min> <lat_max> <lon_max>")
+            box: tuple[float, float, float, float] | None = None
+            label = ""
+            if len(words) == 2 and len(words[1]) == 3:
+                coords = coords_for_iata(words[1])
+                if coords is None:
+                    return f"no airport {words[1].upper()!r}"
+                lat, lon = coords
+                box = (lat - 1.0, lon - 1.0, lat + 1.0, lon + 1.0)
+                label = f"over {words[1].upper()}"
+            elif len(words) == 5:
+                try:
+                    box = (float(words[1]), float(words[2]),
+                           float(words[3]), float(words[4]))
+                except (TypeError, ValueError):
+                    return ("usage: /flight area <IATA> | /flight area "
+                            "<lat_min> <lon_min> <lat_max> <lon_max>")
+                label = "in that box"
+            if box is None:
+                return ("usage: /flight area <IATA> | /flight area "
+                        "<lat_min> <lon_min> <lat_max> <lon_max>")
+            try:
+                states, meta = OpenSkyFeed().fetch(box)
+            except Exception as exc:  # noqa: BLE001 - area never crashes chat
+                return f"area lookup failed: {exc}"
+            if meta.get("error"):
+                return (f"live feed unavailable: {meta['error']} "
+                        "(the schedule is not a substitute)")
+            found = aircraft_in_area(states, box)
+            if not found:
+                return (f"no live aircraft {label} right now "
+                        f"({meta.get('source') or 'OpenSky'}, "
+                        f"data {meta.get('fetched_at', 0)} fetched)")
+            lines = [f"live aircraft {label} "
+                     f"({len(found)}, {meta.get('source') or 'OpenSky'}):"]
+            for state in found[:15]:
+                lines.append(
+                    f"• {state.callsign or state.icao24} — "
+                    f"{state.altitude_ft if state.altitude_ft is not None else '?'} ft, "
+                    f"{state.speed_kts if state.speed_kts is not None else '?'} kt, "
+                    f"{state.true_track if state.true_track is not None else '?'}°")
+            if len(found) > 15:
+                lines.append(f"… and {len(found) - 15} more")
+            return "\n".join(lines)
+        if not verb:
+            return ("usage: /flight <flight> | /flight watch <flight> "
+                    "[destination] [expect-epoch] | /flight unwatch "
+                    "<flight> | /flight watches | /flight area <IATA>")
+        # Default: track one flight, and send the map she draws.
+        try:
+            out = track_flight(OpenSkyFeed(), words[0],
+                               store=TrackStore(home))
+        except Exception as exc:  # noqa: BLE001 - track never crashes chat
+            return f"flight lookup failed: {exc}"
+        if not out.get("ok"):
+            return (f"no live position for {words[0].upper()} right now"
+                    f" — {out.get('reason') or 'unknown reason'}")
+        lines = [f"✈️ {out['callsign'] or out['icao24']} "
+                 f"({out.get('flight') or words[0].upper()})"]
+        if out.get("latitude") is not None:
+            lines.append(f"position: {out['latitude']:.4f}, "
+                         f"{out['longitude']:.4f}")
+        lines.append(f"altitude: {out.get('altitude_ft') or '?'} ft · "
+                     f"speed: {out.get('speed_kts') or '?'} kt · "
+                     f"heading: {out.get('heading') or '?'}°")
+        if out.get("on_ground"):
+            lines.append("on the ground")
+        if out.get("destination"):
+            lines.append(f"→ {out['destination']} "
+                         f"{out.get('distance_km', '?')} km away, "
+                         f"bearing {out.get('bearing', '?')}°"
+                         + (f", ETA ~{out['eta_minutes']} min"
+                            if out.get("eta_minutes") is not None
+                            else ""))
+        lines.append(f"data {out.get('age_s', 0)}s old "
+                     f"({out.get('freshness') or 'unknown'}) · "
+                     f"source: {out.get('source') or 'OpenSky'}")
+        text = "\n".join(lines)
+        map_path = _map_for(out, out.get("destination"))
+        if map_path and message is not None:
+            failed = self._scene_send_file(
+                str(map_path), message, "track map")
+            if failed is not None:
+                return text + f"\n{failed}"
+            return text + "\nmap sent."
+        if map_path:
+            return text + f"\nmap: {map_path}"
+        return text
+
     def _impossible_diagram(self, claim_id: str,
                             message: Any = None) -> str:
         """``/impossible diagram <id>``: the dossier's prior-art map

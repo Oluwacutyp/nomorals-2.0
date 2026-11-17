@@ -3495,6 +3495,18 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("airport refresh job not registered: %s",
                                  exc)
+                # Travel: the flight-watch tick (every 15 minutes —
+                # armed flight watches checked against the live
+                # ADS-B feed; one alert per landing/diversion/delay/
+                # loss, silent otherwise). Idempotent by name; a
+                # stale spec is replaced.
+                try:
+                    from ...travel.tracking import ensure_flight_track_job
+
+                    ensure_flight_track_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("flight track job not registered: %s",
+                                 exc)
                 # Social measurement spine (WS3 P1): posted rows get
                 # their real metrics refreshed every 6h, so posting
                 # windows and brief outcomes learn from measured data
@@ -8256,6 +8268,8 @@ class PartnerRuntime(
             return self._control_analytics(command.tail, message)
         if kind == "airports":
             return self._control_airports(command.tail, message)
+        if kind == "flight":
+            return self._control_flight(command.tail, message)
         if kind == "arena-research":
             return self._control_arena_research(command.tail, message)
         if kind == "community":
