@@ -712,7 +712,7 @@ class FlightRegistrationTests(unittest.TestCase):
         self.assertIn("/flight <flight>",
                       COMMAND_DETAILS["flight"]["usage"])
         self.assertNotIn("flight", PUBLIC_COMMANDS)
-        self.assertEqual(268, len(PUBLIC_COMMANDS))
+        self.assertEqual(269, len(PUBLIC_COMMANDS))
         self.assertFalse(caller_may_run("flight", False))
         self.assertTrue(caller_may_run("flight", True))
         self.assertIn("/flight", list_catalog())

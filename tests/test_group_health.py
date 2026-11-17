@@ -504,7 +504,7 @@ class RegistryTests(unittest.TestCase):
 
     def test_public_count_pin(self):
         # 262 pre-digest; /digest adds one public command.
-        self.assertEqual(len(PUBLIC_COMMANDS), 268)
+        self.assertEqual(len(PUBLIC_COMMANDS), 269)
 
 
 if __name__ == "__main__":

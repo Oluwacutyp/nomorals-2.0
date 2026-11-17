@@ -54,6 +54,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "av": [],
     "airports": [],
     "compute": [],
+    "soundtrack": [],
     "flight": [],
     "breach": [],
     "bet": ["bt"],
@@ -3608,6 +3609,43 @@ def _parser() -> argparse.ArgumentParser:
                            help="one rung instead of the ladder")
     compute_p.add_argument("--json", action="store_true",
                            help="Output as JSON")
+
+    soundtrack_p = sub.add_parser(
+        "soundtrack", aliases=CLI_ALIASES["soundtrack"],
+        help="what song plays in a film or TV scene — song, artist, scene, /play",
+        description=("nm soundtrack <show|film> [S1E2]\n"
+                     "nm soundtrack song <track> [--artist X]\n"
+                     "nm soundtrack clip <path>\n"
+                     "nm soundtrack add --work <title> --track <title> "
+                     "[--kind tv|film|game] [--season N] [--episode N] "
+                     "[--scene ...]\n"
+                     "nm soundtrack vote --work <title> --track <title> "
+                     "confirm|deny\n"
+                     "The soundtrack index: seeded from public soundtrack "
+                     "listings, every entry labelled with provenance and "
+                     "confidence; an unknown work or song is refused "
+                     "honestly, never invented."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    soundtrack_p.add_argument("soundtrack_query", nargs="*", default=[],
+                              help="show/film and episode, or song|clip|add|vote …")
+    soundtrack_p.add_argument("--artist", default="",
+                              help="artist for song/add/vote")
+    soundtrack_p.add_argument("--work", default="",
+                              help="work title for add/vote")
+    soundtrack_p.add_argument("--track", default="",
+                              help="track title for add/vote")
+    soundtrack_p.add_argument("--kind", default="tv",
+                              choices=["tv", "film", "game"],
+                              help="kind of work for add")
+    soundtrack_p.add_argument("--season", type=int, default=None,
+                              help="season for add")
+    soundtrack_p.add_argument("--episode", type=int, default=None,
+                              help="episode for add")
+    soundtrack_p.add_argument("--scene", default="",
+                              help="scene note for add")
+    soundtrack_p.add_argument("--json", action="store_true",
+                              help="Output as JSON")
 
     flight_p = sub.add_parser(
         "flight", aliases=CLI_ALIASES["flight"],

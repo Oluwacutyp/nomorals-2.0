@@ -206,7 +206,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: pins the two together — a wave that adds a kind here must add its
 #: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "ping", "search", "alternatives", "compute", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "alternatives", "compute", "soundtrack", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "map-route", "headline", "teardown",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
@@ -425,6 +425,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "search": (1, None),     # /search <query> — free text, no length cap
     "alternatives": (1, None),  # /alternatives <software> — crowd-ranked software alternatives
     "compute": (1, None),  # /compute <question> — computed answer (WolframAlpha + CAS ladder)
+    "soundtrack": (1, None),  # /soundtrack <show|film> [S1E2] | song <track> | clip <path> | add ... | vote ... — what song plays in a scene
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
     "searchleads": (0, 0),   # legit paid-task platform report
     "money": (0, None),      # money opportunities hunter: scan|list|new|profile
@@ -2438,6 +2439,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/compute <question> [--rung wolfram|sympy|stdlib]",
                 "example": "/compute integrate x^2 sin(x)",
                 "related": "/search · /alternatives"},
+    "soundtrack": {"what": "What song plays in a film or TV scene: the song, the artist, the scene it plays in, its provenance and confidence, and the /play command that hears it. A clip can be identified first through Devon's own fingerprint memory. An unknown work or song is refused honestly — nothing here is invented.",
+                "usage": "/soundtrack <show|film> [S1E2] | song <track> [by <artist>] | clip <path> | add <work> | S1E2 | <track> — <artist> | <scene> | vote <work> | <track> | confirm|deny",
+                "example": "/soundtrack Stranger Things S4E4",
+                "related": "/play · /music"},
     "searchdeep": {"what": "deep multi-query research with synthesis (power mode).",
                    "usage": "/searchdeep <query>", "example": "/searchdeep eBPF rootkit detection",
                    "related": "/search /searchhist"},
@@ -4836,7 +4841,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "audit", "whois", "ports",
-                           "brief", "competitor", "aeo", "alternatives", "compute"]),
+                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack"]),
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
@@ -5121,7 +5126,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
-      "brief", "competitor", "aeo", "alternatives", "compute"]),
+      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack"]),
     ("wisdom keeper — corpus · history · practice",
      ["wisdom", "wis"]),
     ("building for real — code & missions",
@@ -5315,6 +5320,7 @@ LIST_ONELINERS: dict[str, str] = {
     "search": "quick research + cited summary",
     "alternatives": "crowd-ranked software alternatives to a named app",
     "compute": "computed answers: arithmetic, units, dates, symbolic math, WolframAlpha",
+    "soundtrack": "what song plays in a film or TV scene — song, artist, scene, and the /play command that hears it",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",
     "books": "story reader + continuer: /books read <url|slug> | part <slug> | contents <slug> | export <slug> [pdf|epub|html] | continue <slug> [n] | sources",

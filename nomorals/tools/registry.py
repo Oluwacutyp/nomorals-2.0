@@ -623,6 +623,7 @@ class ToolRegistry:
             "software",  # software alternatives (AlternativeTo catalogue)
             "compute",  # computational answers (WolframAlpha + CAS ladder)
             "breach",  # breach exposure (Pwned Passwords + HIBP watcher)
+            "soundtrack",  # soundtrack index (TuneFind core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",

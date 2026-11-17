@@ -5387,6 +5387,110 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"breach check failed: {exc}"
 
+    def _control_soundtrack(self, tail: str) -> str:
+        """Soundtrack index: what song plays in a film or TV scene.
+
+        Public. /soundtrack <show|film> [S1E2] | song <track>
+        [by <artist>] | clip <path> | add <work> | S1E2 | <track> —
+        <artist> | <scene> | vote <work> | <track> | confirm|deny.
+        Every placement shows its provenance and confidence; curated
+        entries are labelled, never presented as verified. An unknown
+        work or song is refused honestly. Never raises: bad input
+        returns usage.
+        """
+        from ...music_sources.placements import (
+            Placement,
+            format_placement_reply,
+            format_reverse_reply,
+            lookup,
+            open_store,
+            parse_soundtrack_query,
+            placements_for_clip,
+        )
+
+        tail = (tail or "").strip()
+        usage = ("usage: /soundtrack <show|film> [S1E2] | song <track> "
+                 "[by <artist>] | clip <path> | add <work> | S1E2 | "
+                 "<track> — <artist> | <scene> | vote <work> | <track> | "
+                 "confirm|deny")
+        if not tail:
+            return usage
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — default home then
+                home = None
+            store = open_store(home)
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb == "song":
+                if not rest:
+                    return "usage: /soundtrack song <track> [by <artist>]"
+                track, _, artist = rest.partition(" by ")
+                works = store.works_for_track(track.strip(),
+                                              artist.strip() or None)
+                if not works:
+                    return (f"no placements recorded for “{track.strip()}” "
+                            f"yet — add one with /soundtrack add.")
+                return format_reverse_reply(works)
+            if verb == "clip":
+                if not rest:
+                    return "usage: /soundtrack clip <path>"
+                from ...audio.fingerprint import identify as _identify
+
+                ans = placements_for_clip(store, rest, identify_fn=_identify)
+                if ans.get("ok"):
+                    return format_reverse_reply(ans["placements"])
+                return format_placement_reply(ans)
+            if verb == "add":
+                fields = [f.strip() for f in rest.split("|")]
+                if len(fields) < 3 or not fields[0] or not fields[2]:
+                    return ("usage: /soundtrack add <work> | S1E2 | "
+                            "<track> — <artist> | <scene>")
+                parsed = parse_soundtrack_query(fields[1])
+                track, _, artist = fields[2].partition(" — ")
+                if not artist:
+                    track, _, artist = fields[2].partition(" - ")
+                placement = Placement(
+                    work_kind="tv" if parsed["episode"] is not None
+                    else "film",
+                    work_title=fields[0],
+                    season=parsed["season"] if parsed["season"] is not None
+                    else -1,
+                    episode=parsed["episode"] if parsed["episode"] is not None
+                    else -1,
+                    scene_note=fields[3] if len(fields) > 3 else "",
+                    track_title=track.strip(),
+                    track_artist=artist.strip(),
+                    provenance="owner", confidence=0.95)
+                added = store.add(placement)
+                return (f"recorded: {placement.track_title} — "
+                        f"{placement.track_artist} in "
+                        f"{placement.work_title}"
+                        + (" — already recorded" if not added else ""))
+            if verb == "vote":
+                fields = [f.strip() for f in rest.split("|")]
+                if len(fields) < 3 or fields[2].lower() not in (
+                        "confirm", "deny"):
+                    return ("usage: /soundtrack vote <work> | <track> | "
+                            "confirm|deny")
+                resolved = store.resolve_work(fields[0])
+                if not resolved:
+                    return f"“{fields[0]}” is not in the catalogue"
+                updated = store.vote(resolved[0]["work_id"], fields[1],
+                                     confirm=(fields[2].lower() == "confirm"))
+                if updated is None:
+                    return (f"no community placement for “{fields[1]}” in "
+                            f"{resolved[0]['work_title']} to vote on")
+                return (f"{updated.track_title} — {updated.trust_label()}")
+            if verb in {"help", "--help"}:
+                return usage
+            return format_placement_reply(lookup(store, tail))
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"soundtrack failed: {exc}"
+
     def _control_code_format(self, kind: str, tail: str) -> str:
         """Code-video format commands: /map-route, /headline, /teardown.
 

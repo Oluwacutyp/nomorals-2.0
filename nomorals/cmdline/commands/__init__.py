@@ -7,6 +7,7 @@ from .autonomy import _cmd_autonomy, _set_daily_call_cap
 from .av import _cmd_av
 from .airports import _cmd_airports
 from .flight import _cmd_flight
+from .soundtrack import _cmd_soundtrack
 from .backup import _cmd_backup
 from .benchmark import _BuildersBuildBackend, _cmd_benchmark
 from .bet import _cmd_bet
@@ -153,6 +154,7 @@ __all__ = [
     "_cmd_bet",
     "_cmd_braineval",
     "_cmd_sandbox",
+    "_cmd_soundtrack",
     "_cmd_book",
     "_cmd_account",
     "_cmd_briefing",

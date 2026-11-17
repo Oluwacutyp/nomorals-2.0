@@ -12,6 +12,20 @@ from .chat import MUSIC_SOURCES_USAGE, control_music_sources
 from .downloader import DownloadPlan, DownloadResult, download, plan_download
 from .enrichment import EnrichmentChain, EnrichmentResult
 from .health import HealthProber, HealthStatus
+from .placements import (
+    COMMUNITY_VERIFY_MARGIN,
+    SEED_PLACEMENTS,
+    Placement,
+    PlacementStore,
+    default_store_path,
+    format_placement_reply,
+    format_reverse_reply,
+    lookup,
+    open_store,
+    parse_soundtrack_query,
+    placements_for_clip,
+    play_handoff,
+)
 from .play import PlayResult, play_via_registry, registry_play_text
 from .registry import (
     DEFAULT_PACK,
@@ -54,6 +68,18 @@ __all__ = [
     "PlayResult",
     "play_via_registry",
     "registry_play_text",
+    "Placement",
+    "PlacementStore",
+    "SEED_PLACEMENTS",
+    "COMMUNITY_VERIFY_MARGIN",
+    "default_store_path",
+    "open_store",
+    "parse_soundtrack_query",
+    "lookup",
+    "placements_for_clip",
+    "format_placement_reply",
+    "format_reverse_reply",
+    "play_handoff",
     "control_music_sources",
     "MUSIC_SOURCES_USAGE",
 ]
