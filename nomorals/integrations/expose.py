@@ -49,6 +49,7 @@ __all__ = [
     "make_smart_home",
     "make_home_twin",
     "make_naija_shopping",
+    "make_shopping",
     "send_email",
     "read_inbox",
     "add_calendar_event",
@@ -235,6 +236,16 @@ def make_naija_shopping(db: Any, browser: Any, proxy_manager: Any = None) -> Any
     from .naija_shopping import NaijaShoppingEngine
 
     return NaijaShoppingEngine(db, browser, proxy_manager)
+
+
+def make_shopping(account_manager: Any, session_manager: Any,
+                  browser: Any = None) -> Any:
+    """Build :class:`ShoppingIntegration` (needs account + session
+    managers; browser is a ``BrowserService`` or a tab — without one,
+    cart/checkout refuse loudly instead of faking success)."""
+    from .shopping_integration import ShoppingIntegration
+
+    return ShoppingIntegration(account_manager, session_manager, browser)
 
 
 # ── email / calendar wrappers (async, delegate) ────────────────────────────

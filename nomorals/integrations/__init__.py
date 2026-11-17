@@ -114,6 +114,7 @@ _LAZY = {
     "make_smart_home": (".expose", "make_smart_home"),
     "make_home_twin": (".expose", "make_home_twin"),
     "make_naija_shopping": (".expose", "make_naija_shopping"),
+    "make_shopping": (".expose", "make_shopping"),
     "home": (".home", None),  # the module itself
     "HomeBackend": (".home", "HomeBackend"),
     "HomeDevice": (".home", "HomeDevice"),

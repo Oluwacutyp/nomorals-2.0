@@ -70,6 +70,11 @@ __all__ = [
     "BrowserService",
     "DownloadResult",
     "ScreenshotResult",
+    "detect_retailer",
+    "open_shopping_tab",
+    "shop_add_to_cart",
+    "shop_checkout_to_payment",
+    "shop_place_order",
 ]
 
 _log = get_logger(__name__)
@@ -4622,6 +4627,244 @@ class BrowserService:
                 handle._active_tab_id = next(iter(handle._tabs))
             restored += 1
         return restored
+
+
+# ── shopping: cart + checkout flows (audit gap R2-36) ─────────────────────
+"""Browser-driven shopping flows.
+
+The flows drive a duck-typed tab — any object with the ``RenderedTab`` /
+``Tab`` verbs ``navigate`` / ``click`` / ``text`` / ``links`` (and
+``select`` where the page has one). They never guess success: every
+step is verified by reading the page back (added-to-cart markers,
+payment-step markers, order-confirmation markers). A missing control
+or a missing marker is a :class:`BrowserError` with the reason, never
+a fake ``True``.
+
+Checkout stops at the payment step: the flow returns
+``status="awaiting_payment"`` and never fills payment fields or
+submits anything. Placing the order is a separate, explicitly
+approved step (:func:`shop_place_order`).
+"""
+
+#: Host suffixes that identify each named retailer. Anything else is
+#: the generic flow (common "Add to Cart" controls, verified the same way).
+_RETAILER_HOSTS: dict[str, tuple[str, ...]] = {
+    "amazon": ("amazon.com", "amazon.co.uk", "amazon.ca", "amazon.de"),
+    "ebay": ("ebay.com", "ebay.co.uk"),
+    "walmart": ("walmart.com",),
+    "bestbuy": ("bestbuy.com",),
+}
+
+#: Per-retailer flow spec. ``add_targets`` / ``checkout_targets`` /
+#: ``place_order_targets`` are tried in order; the first click that
+#: lands wins. ``*_markers`` are page-text fragments that must appear
+#: after the step, or the step is a failure.
+_SHOPPING_FLOWS: dict[str, dict[str, Any]] = {
+    "amazon": {
+        "cart_url": "https://www.amazon.com/gp/cart/view.html",
+        "add_targets": ("#add-to-cart-button", "#addToCartButton",
+                        "Add to Cart"),
+        "added_markers": ("Added to Cart", "added to cart"),
+        "checkout_targets": ("Proceed to checkout",
+                             "#sc-buy-box-ptc-button"),
+        "payment_markers": ("Select a payment method",
+                            "Add a payment method", "Payment method"),
+        "place_order_targets": ("Place your order", "#placeOrder"),
+        "order_markers": ("Thank you for your order", "Order placed",
+                          "Order confirmation"),
+    },
+    "ebay": {
+        "cart_url": "https://cart.ebay.com/",
+        "add_targets": ("Add to cart", "Add to Cart"),
+        "added_markers": ("Added to your cart", "added to cart"),
+        "checkout_targets": ("Go to checkout", "Proceed to checkout"),
+        "payment_markers": ("Pay with", "Add a payment method",
+                            "payment method"),
+        "place_order_targets": ("Confirm and pay", "Place order"),
+        "order_markers": ("Thank you for your order", "Order placed",
+                          "Order confirmation"),
+    },
+    "walmart": {
+        "cart_url": "https://www.walmart.com/cart",
+        "add_targets": ("Add to cart", "Add to Cart"),
+        "added_markers": ("Added to cart", "added to cart"),
+        "checkout_targets": ("Proceed to checkout", "Check out"),
+        "payment_markers": ("Add a payment method", "Payment method",
+                            "Payment"),
+        "place_order_targets": ("Place order", "Place your order"),
+        "order_markers": ("Thank you for your order", "Order placed",
+                          "Order confirmation"),
+    },
+    "bestbuy": {
+        "cart_url": "https://www.bestbuy.com/cart",
+        "add_targets": ("Add to Cart", "add-to-cart-button"),
+        "added_markers": ("Added to Cart", "added to your cart"),
+        "checkout_targets": ("Proceed to Checkout", "Checkout"),
+        "payment_markers": ("Payment Information", "Add a payment method",
+                            "Payment method"),
+        "place_order_targets": ("Place Your Order", "Place order"),
+        "order_markers": ("Thank you for your order", "Order placed",
+                          "Order confirmation"),
+    },
+    "generic": {
+        "cart_url": "",
+        "add_targets": ("Add to Cart", "Add to cart", "add to cart"),
+        "added_markers": ("added to cart", "Added to Cart",
+                          "in your cart"),
+        "checkout_targets": ("Proceed to checkout", "Checkout",
+                             "Go to checkout"),
+        "payment_markers": ("payment method", "Payment method",
+                            "Payment", "Billing"),
+        "place_order_targets": ("Place order", "Place your order",
+                                "Confirm and pay"),
+        "order_markers": ("Thank you", "Order confirmation",
+                          "Order placed", "Order #"),
+    },
+}
+
+#: Retailers the flows know by name. Anything else is refused, naming it.
+_KNOWN_RETAILERS = frozenset(_SHOPPING_FLOWS)
+
+
+def detect_retailer(url: str) -> str:
+    """Retailer for a product URL, by host; unknown hosts are generic."""
+    host = urllib.parse.urlparse(url or "").netloc.lower()
+    host = host.split(":", 1)[0]
+    for retailer, suffixes in _RETAILER_HOSTS.items():
+        if any(host == s or host.endswith("." + s) for s in suffixes):
+            return retailer
+    return "generic"
+
+
+def _shopping_spec(retailer: str) -> dict[str, Any]:
+    name = (retailer or "").strip().lower()
+    if name not in _KNOWN_RETAILERS:
+        raise BrowserError(
+            f"checkout not supported for retailer {retailer!r}: "
+            f"known retailers are {', '.join(sorted(_KNOWN_RETAILERS))}")
+    return _SHOPPING_FLOWS[name]
+
+
+def _tab_text(tab: Any) -> str:
+    page = tab.text() or {}
+    return str(page.get("text", "") or "")
+
+
+def _tab_url(tab: Any) -> str:
+    return str(getattr(tab, "url", "") or "")
+
+
+def _first_marker(text: str, markers: tuple[str, ...]) -> str:
+    lowered = text.lower()
+    for marker in markers:
+        if marker.lower() in lowered:
+            return marker
+    return ""
+
+
+def _click_first(tab: Any, targets: tuple[str, ...], what: str,
+                 retailer: str) -> str:
+    """Click the first target that lands; all-miss is a loud failure."""
+    last_error: Exception | None = None
+    for target in targets:
+        try:
+            tab.click(target)
+            return target
+        except Exception as exc:  # noqa: BLE001 - try the next target
+            last_error = exc
+    raise BrowserError(
+        f"{retailer} {what} failed: no {what} control found on the page"
+        + (f" (last error: {last_error})" if last_error else ""))
+
+
+def open_shopping_tab(service: Any, url: str = "",
+                      *, session_name: str = "shopping") -> Any:
+    """Open a tab for shopping: rendered (Playwright) first, plain-HTTP
+    tab when the rendered one cannot start. Mirrors the
+    ``cmdline/commands/account.py`` ``_open_tab`` pattern."""
+    try:
+        return service.open_rendered_tab(session_name, url)
+    except Exception:  # noqa: BLE001 - rendered needs playwright+chromium
+        handle = service.open_session(session_name)
+        return handle.open_tab(url)
+
+
+def shop_add_to_cart(tab: Any, retailer: str, quantity: int = 1) -> dict[str, Any]:
+    """Add the current product page's item to the cart, verified.
+
+    The tab must already be on the product page. Tries the retailer's
+    add controls in order, sets the quantity first when the page has
+    a quantity select (best-effort — a missing select never fails the
+    add), then reads the page back: without an added-to-cart marker
+    the add is a failure, never a success.
+    """
+    spec = _shopping_spec(retailer)
+    if quantity and int(quantity) > 1:
+        try:
+            tab.select("quantity", str(int(quantity)))
+        except Exception:  # noqa: BLE001 - quantity select is optional
+            _log.debug("shopping quantity select missing", exc_info=True)
+    clicked = _click_first(tab, spec["add_targets"], "add to cart", retailer)
+    text = _tab_text(tab)
+    marker = _first_marker(text, spec["added_markers"])
+    if not marker:
+        raise BrowserError(
+            f"{retailer} add to cart failed: clicked the add control but "
+            "the page shows no added-to-cart confirmation — the page "
+            "may have changed")
+    return {"ok": True, "retailer": retailer, "url": _tab_url(tab),
+            "clicked": clicked, "quantity": int(quantity or 1),
+            "confirmation": marker,
+            "evidence": text[:300]}
+
+
+def shop_checkout_to_payment(tab: Any, retailer: str) -> dict[str, Any]:
+    """Drive the cart to the payment step and STOP there.
+
+    Cart URL -> proceed to checkout -> verify a payment-step marker in
+    the page text. Returns ``status="awaiting_payment"``. Never fills
+    payment fields, never submits anything, never places an order.
+    A sign-in wall or a changed page has no payment marker, so it is a
+    loud failure, not a silent pass.
+    """
+    spec = _shopping_spec(retailer)
+    if spec["cart_url"]:
+        tab.navigate(spec["cart_url"])
+    _click_first(tab, spec["checkout_targets"], "checkout", retailer)
+    text = _tab_text(tab)
+    marker = _first_marker(text, spec["payment_markers"])
+    if not marker:
+        raise BrowserError(
+            f"{retailer} checkout failed: reached the checkout page but "
+            "no payment step is visible — the page may have changed or "
+            "a sign-in is required")
+    return {"ok": True, "status": "awaiting_payment", "retailer": retailer,
+            "url": _tab_url(tab), "payment_marker": marker,
+            "summary": text[:500]}
+
+
+def shop_place_order(tab: Any, retailer: str) -> dict[str, Any]:
+    """Place the order from the payment step. ONLY call this after an
+    explicit owner approval — the caller proves it, this function does
+    not. Clicks the place-order control and verifies the confirmation
+    page; without an order marker the order is a failure, never a
+    success."""
+    spec = _shopping_spec(retailer)
+    _click_first(tab, spec["place_order_targets"], "place order", retailer)
+    text = _tab_text(tab)
+    marker = _first_marker(text, spec["order_markers"])
+    if not marker:
+        raise BrowserError(
+            f"{retailer} place order failed: clicked the place-order "
+            "control but the page shows no order confirmation")
+    ref = ""
+    match = re.search(r"Order\s*#?\s*([A-Z0-9][A-Z0-9\-]{5,})",
+                      text, re.IGNORECASE)
+    if match:
+        ref = match.group(0).strip()
+    return {"ok": True, "status": "placed", "retailer": retailer,
+            "url": _tab_url(tab), "order_ref": ref,
+            "confirmation": marker, "evidence": text[:300]}
 
 
 def _filename_from_url(url: str) -> str:

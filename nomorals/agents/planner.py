@@ -226,6 +226,8 @@ class AgentPlanner:
             "list_calendar_events": self._action_list_calendar_events,
             "search_products": self._action_search_products,
             "compare_prices": self._action_compare_prices,
+            "add_to_cart": self._action_add_to_cart,
+            "checkout": self._action_checkout,
             "wait": self._action_wait,
         }
         
@@ -800,6 +802,34 @@ Generate the plan:"""
         comparison = await self.shopping.compare_prices(query=query)
         
         return comparison.to_dict()
+
+    async def _action_add_to_cart(self, **kwargs) -> dict[str, Any]:
+        """Add a product to the cart through the browser."""
+        if not self.shopping:
+            raise RuntimeError("Shopping integration not available")
+
+        product_url = kwargs.get("product_url", "") or kwargs.get("url", "")
+        account = kwargs.get("account", "")
+        try:
+            quantity = int(kwargs.get("quantity", 1) or 1)
+        except (TypeError, ValueError):
+            quantity = 1
+
+        ok = await self.shopping.add_to_cart(
+            product_url, account, quantity=quantity)
+        return {"ok": ok, "product_url": product_url, "quantity": quantity}
+
+    async def _action_checkout(self, **kwargs) -> dict[str, Any]:
+        """Drive checkout to the payment step (never places the order)."""
+        if not self.shopping:
+            raise RuntimeError("Shopping integration not available")
+
+        retailer = kwargs.get("retailer", "")
+        account = kwargs.get("account", "")
+        return await self.shopping.checkout(
+            retailer, account,
+            payment_method=kwargs.get("payment_method", "default"),
+            shipping_address=kwargs.get("shipping_address", "default"))
     
     async def _action_wait(self, **kwargs) -> dict[str, Any]:
         """Wait for specified time."""
@@ -878,6 +908,38 @@ Generate the plan:"""
         _log.info(f"Registered custom action: {name}")
 
 
+def _shopping_from_context(context: Any) -> Any | None:
+    """Build the shopping integration from the registry context, or None.
+
+    Follows the ``tools/deals.py`` lazy pattern: a vault-backed
+    ``AccountManager`` + ``SessionManager`` (``open_vault``) and a bare
+    ``BrowserService``. A locked vault, a missing DB, or any build
+    failure means shopping stays unavailable — the cart/checkout
+    action handlers raise honestly instead of running without a
+    browser.
+    """
+    if context is None:
+        return None
+    try:
+        from ..accounts.manager import AccountManager
+        from ..accounts.sessions import SessionManager
+        from ..accounts.vault import open_vault
+        from ..browser.service import BrowserService
+        from ..integrations.expose import make_shopping
+    except Exception:  # noqa: BLE001 - shopping stays unavailable
+        return None
+    db = getattr(context, "db", None)
+    if db is None:
+        return None
+    try:
+        vault = open_vault(db, context=context, actor="planner")
+        return make_shopping(
+            AccountManager(vault), SessionManager(vault),
+            BrowserService())
+    except Exception:  # noqa: BLE001 - shopping stays unavailable
+        return None
+
+
 def register(registry: Any) -> None:
     """Expose the AgentPlanner as an agent tool for goal decomposition."""
 
@@ -899,7 +961,16 @@ def register(registry: Any) -> None:
 
         context = registry.context
         llm = getattr(context, "llm_router", None) or getattr(context, "llm", None)
-        planner = AgentPlanner(llm_router=llm)
+        # Shopping goals only: a vault-backed shopping integration with
+        # a real browser. Anything missing leaves shopping None, and
+        # the cart/checkout handlers raise honestly instead of faking
+        # a browser.
+        shopping = None
+        goal_lower = (goal or "").lower()
+        if any(word in goal_lower for word in
+               ("shop", "buy", "purchase", "cart", "checkout")):
+            shopping = _shopping_from_context(context)
+        planner = AgentPlanner(llm_router=llm, shopping_integration=shopping)
         try:
             result = asyncio.run(planner.execute(goal=goal, account=account or None))
             return {

@@ -21,7 +21,9 @@ Usage:
 
 from __future__ import annotations
 
+import asyncio
 import json
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -347,34 +349,62 @@ class ShoppingIntegration:
         quantity: int = 1,
     ) -> bool:
         """Add a product to cart via browser automation.
-        
+
+        Drives the real retailer flow through the browser tab
+        (``browser/service.py`` shopping flows) and records the cart
+        entry durably. Loud failure only: no browser, an unparsable
+        URL, or a failed add all raise :class:`ShoppingError` with the
+        reason — never a silent ``False``, never a fake ``True``.
+
         Args:
             product_url: Product URL
             account: Retailer account
             quantity: Quantity to add
-            
+
         Returns:
-            True if successful
+            True on a verified add (the page confirmed it).
         """
-        if not self.browser:
-            _log.error("Browser session not available for cart operations")
-            return False
-        
+        parsed = urllib.parse.urlparse(product_url or "")
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ShoppingError(
+                f"not a product URL: {product_url!r} — pass a full "
+                "http(s) product link")
+        retailer = self._retailer_for_url(product_url)
         try:
-            # Navigate to product page
-            await self.browser.navigate(product_url)
-            
-            # Detect retailer and use appropriate selectors
-            if "amazon.com" in product_url:
-                return await self._add_to_cart_amazon(quantity)
-            elif "ebay.com" in product_url:
-                return await self._add_to_cart_ebay(quantity)
-            else:
-                return await self._add_to_cart_generic(quantity)
-        except Exception as e:
-            _log.error(f"Failed to add to cart: {e}")
-            return False
-    
+            result = await asyncio.to_thread(
+                self._add_to_cart_sync, product_url, retailer, quantity)
+        except ShoppingError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - flow errors are opaque
+            self._record_failure(product_url, retailer, str(exc))
+            raise ShoppingError(
+                f"{retailer} add to cart failed: {exc}") from exc
+        return bool(result.get("ok"))
+
+    def _add_to_cart_sync(
+        self,
+        product_url: str,
+        retailer: str,
+        quantity: int,
+    ) -> dict[str, Any]:
+        """Sync half of add_to_cart: open the tab, run the flow, record."""
+        from ..browser.service import shop_add_to_cart
+
+        tab, owned = self._resolve_tab(product_url)
+        try:
+            result = shop_add_to_cart(tab, retailer, quantity)
+        finally:
+            if owned:
+                self._close_tab_quietly(tab)
+        self._record_entry({
+            "url": product_url,
+            "retailer": retailer,
+            "quantity": int(quantity or 1),
+            "confirmation": result.get("confirmation", ""),
+            "evidence": result.get("evidence", ""),
+        })
+        return result
+
     async def checkout(
         self,
         retailer: str,
@@ -383,28 +413,233 @@ class ShoppingIntegration:
         payment_method: str = "default",
         shipping_address: str = "default",
     ) -> dict[str, Any]:
-        """Complete checkout via browser automation.
-        
+        """Drive checkout to the payment step and STOP there.
+
+        The cart is driven to the payment step and the result reports
+        ``status="awaiting_payment"``. No payment fields are filled,
+        nothing is submitted, no order is placed — placing the order
+        is the separate, explicitly approved :meth:`place_order` step.
+
         Args:
-            retailer: Retailer name
+            retailer: Retailer name (amazon, ebay, walmart, bestbuy,
+                generic)
             account: Retailer account
             payment_method: Payment method to use
             shipping_address: Shipping address to use
-            
+
         Returns:
-            Order confirmation details
+            ``{"status": "awaiting_payment", ...}`` with the payment
+            marker the page showed.
         """
+        name = (retailer or "").strip().lower()
+        if name not in {"amazon", "ebay", "walmart", "bestbuy", "generic"}:
+            raise ShoppingError(
+                f"checkout not supported for retailer {retailer!r}: "
+                "known retailers are amazon, ebay, walmart, bestbuy, "
+                "generic")
         if not self.browser:
-            raise RuntimeError("Browser session not available for checkout")
-        
+            raise ShoppingError(
+                "checkout needs a browser session: pass a BrowserService "
+                "or a tab when constructing ShoppingIntegration — no "
+                "order was placed")
         try:
-            if retailer == "amazon":
-                return await self._checkout_amazon(account, payment_method, shipping_address)
-            else:
-                return await self._checkout_generic(account, payment_method, shipping_address)
-        except Exception as e:
-            _log.error(f"Checkout failed: {e}")
+            result = await asyncio.to_thread(
+                self._checkout_sync, name)
+        except ShoppingError:
             raise
+        except Exception as exc:  # noqa: BLE001 - flow errors are opaque
+            _log.error(f"Checkout failed: {exc}")
+            raise ShoppingError(
+                f"{name} checkout failed: {exc}") from exc
+        return {
+            "status": result.get("status", "awaiting_payment"),
+            "retailer": name,
+            "account": account,
+            "payment_method": payment_method,
+            "shipping_address": shipping_address,
+            "url": result.get("url", ""),
+            "summary": result.get("summary", ""),
+            "payment_marker": result.get("payment_marker", ""),
+        }
+
+    def _checkout_sync(self, retailer: str) -> dict[str, Any]:
+        """Sync half of checkout: open the tab, run the flow."""
+        from ..browser.service import shop_checkout_to_payment
+
+        tab, owned = self._resolve_tab(None)
+        try:
+            return shop_checkout_to_payment(tab, retailer)
+        finally:
+            if owned:
+                self._close_tab_quietly(tab)
+
+    async def place_order(
+        self,
+        retailer: str,
+        account: str,
+        *,
+        confirm: bool = False,
+        payment_method: str = "default",
+        shipping_address: str = "default",
+    ) -> dict[str, Any]:
+        """Place the order — ONLY with an explicit owner approval.
+
+        ``confirm=True`` is the approval: without it this refuses, and
+        no money moves. With it, the checkout is driven to the payment
+        step and the place-order control is clicked; the order is only
+        reported placed when the confirmation page says so.
+        """
+        if not confirm:
+            raise ShoppingError(
+                "place_order needs explicit owner approval "
+                "(confirm=True) — no order was placed")
+        name = (retailer or "").strip().lower()
+        if name not in {"amazon", "ebay", "walmart", "bestbuy", "generic"}:
+            raise ShoppingError(
+                f"place_order not supported for retailer {retailer!r}: "
+                "known retailers are amazon, ebay, walmart, bestbuy, "
+                "generic")
+        if not self.browser:
+            raise ShoppingError(
+                "place_order needs a browser session: pass a "
+                "BrowserService or a tab when constructing "
+                "ShoppingIntegration — no order was placed")
+        try:
+            result = await asyncio.to_thread(self._place_order_sync, name)
+        except ShoppingError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - flow errors are opaque
+            _log.error(f"Place order failed: {exc}")
+            raise ShoppingError(
+                f"{name} place order failed: {exc}") from exc
+        return {
+            "status": result.get("status", "placed"),
+            "retailer": name,
+            "account": account,
+            "payment_method": payment_method,
+            "shipping_address": shipping_address,
+            "url": result.get("url", ""),
+            "order_ref": result.get("order_ref", ""),
+            "confirmation": result.get("confirmation", ""),
+        }
+
+    def _place_order_sync(self, retailer: str) -> dict[str, Any]:
+        """Sync half of place_order: payment step, then place the order."""
+        from ..browser.service import (
+            shop_checkout_to_payment,
+            shop_place_order,
+        )
+
+        tab, owned = self._resolve_tab(None)
+        try:
+            shop_checkout_to_payment(tab, retailer)
+            return shop_place_order(tab, retailer)
+        finally:
+            if owned:
+                self._close_tab_quietly(tab)
+
+    # ── browser seam ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _retailer_for_url(product_url: str) -> str:
+        from ..browser.service import detect_retailer
+
+        return detect_retailer(product_url)
+
+    def _resolve_tab(self, url: str | None) -> tuple[Any, bool]:
+        """Return (tab, owned).
+
+        A ``BrowserService`` opens a fresh shopping tab (rendered,
+        plain-tab fallback) which the caller must close; a bare tab
+        object is used as-is and never closed here. Anything else is
+        a loud failure naming what was passed.
+        """
+        from ..browser.service import open_shopping_tab
+
+        browser = self.browser
+        if browser is None:
+            raise ShoppingError(
+                "add to cart needs a browser session: pass a "
+                "BrowserService or a tab when constructing "
+                "ShoppingIntegration — no item was added to any cart")
+        if hasattr(browser, "open_rendered_tab"):
+            return open_shopping_tab(browser, url or ""), True
+        if (hasattr(browser, "navigate") and hasattr(browser, "click")
+                and hasattr(browser, "text")):
+            if url:
+                browser.navigate(url)
+            return browser, False
+        raise ShoppingError(
+            f"browser object {type(browser).__name__!r} has no usable "
+            "tab protocol (needs navigate/click/text, or a "
+            "BrowserService) — no item was added to any cart")
+
+    @staticmethod
+    def _close_tab_quietly(tab: Any) -> None:
+        try:
+            tab.close()
+        except Exception:  # noqa: BLE001 - close is best-effort
+            _log.debug("shopping tab close failed", exc_info=True)
+
+    # ── durable cart ─────────────────────────────────────────────────────
+
+    def _cart_path(self) -> str:
+        path = os.path.expanduser("~/.nomorals/shopping/cart.json")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        return path
+
+    def _load_cart(self) -> dict[str, Any]:
+        path = self._cart_path()
+        if not os.path.isfile(path):
+            return {"entries": [], "failures": []}
+        try:
+            with open(path) as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return {"entries": [], "failures": []}
+            data.setdefault("entries", [])
+            data.setdefault("failures", [])
+            return data
+        except (ValueError, OSError):
+            return {"entries": [], "failures": []}
+
+    def _save_cart(self, data: dict[str, Any]) -> None:
+        with open(self._cart_path(), "w") as f:
+            json.dump(data, f, indent=2)
+
+    def _record_entry(self, entry: dict[str, Any]) -> dict[str, Any]:
+        """Record a verified cart add, replacing any earlier entry for
+        the same URL."""
+        import time
+        cart = self._load_cart()
+        record = {**entry, "added_at": time.time()}
+        cart["entries"] = [e for e in cart["entries"]
+                           if e.get("url") != entry.get("url")] + [record]
+        self._save_cart(cart)
+        return record
+
+    def _record_failure(self, url: str, retailer: str,
+                        reason: str) -> dict[str, Any]:
+        """Record a failed add with its reason — never a fake success."""
+        import time
+        cart = self._load_cart()
+        record = {"url": url, "retailer": retailer,
+                  "reason": reason, "at": time.time()}
+        cart["failures"] = cart["failures"] + [record]
+        self._save_cart(cart)
+        return record
+
+    def get_cart(self) -> list[dict[str, Any]]:
+        """Verified cart entries recorded by add_to_cart."""
+        return self._load_cart().get("entries", [])
+
+    def get_cart_failures(self) -> list[dict[str, Any]]:
+        """Failed adds, each with its reason."""
+        return self._load_cart().get("failures", [])
+
+    def clear_cart(self) -> None:
+        """Empty the recorded cart (entries and failures)."""
+        self._save_cart({"entries": [], "failures": []})
     
     # ── Amazon ─────────────────────────────────────────────────────────────
     
@@ -461,28 +696,6 @@ class ShoppingIntegration:
             _log.error(f"Amazon search failed: {e}")
             return []
     
-    async def _add_to_cart_amazon(self, quantity: int) -> bool:
-        """Add to cart on Amazon."""
-        # Loud failure: browser automation for cart not implemented.
-        # Never return fake True — the user would believe an item is in their cart.
-        raise ShoppingError(
-            "Amazon add-to-cart not implemented: requires browser automation "
-            "which is not yet wired. No item was added to any cart."
-        )
-    
-    async def _checkout_amazon(
-        self,
-        account: str,
-        payment_method: str,
-        shipping_address: str,
-    ) -> dict[str, Any]:
-        """Checkout on Amazon."""
-        # Loud failure: never return a fake pending order.
-        raise ShoppingError(
-            "Amazon checkout not implemented: requires browser automation. "
-            "No order was placed."
-        )
-    
     # ── eBay ───────────────────────────────────────────────────────────────
     
     async def _search_ebay(self, query: str, max_results: int) -> list[Product]:
@@ -535,13 +748,6 @@ class ShoppingIntegration:
         except Exception as e:
             _log.error(f"eBay search failed: {e}")
             return []
-    
-    async def _add_to_cart_ebay(self, quantity: int) -> bool:
-        """Add to cart on eBay."""
-        raise ShoppingError(
-            "eBay add-to-cart not implemented: requires browser automation. "
-            "No item was added to any cart."
-        )
     
     # ── Walmart ────────────────────────────────────────────────────────────
     
@@ -654,21 +860,3 @@ class ShoppingIntegration:
             f"Supported: amazon, ebay, walmart, bestbuy."
         )
     
-    async def _add_to_cart_generic(self, quantity: int) -> bool:
-        """Generic add to cart."""
-        raise ShoppingError(
-            "Generic add-to-cart not implemented: requires browser automation. "
-            "No item was added to any cart."
-        )
-    
-    async def _checkout_generic(
-        self,
-        account: str,
-        payment_method: str,
-        shipping_address: str,
-    ) -> dict[str, Any]:
-        """Generic checkout."""
-        raise ShoppingError(
-            "Generic checkout not implemented: requires browser automation. "
-            "No order was placed."
-        )
