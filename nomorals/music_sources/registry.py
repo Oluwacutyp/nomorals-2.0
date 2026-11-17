@@ -445,24 +445,33 @@ MUSIC_REGISTRY: List[MusicSource] = [
              "audio URL. (Repeated anonymous fetches were then "
              "refused — empty replies / 403 — so the probe must run "
              "in a browser session.)"),
-    _M(id="ghanamusic", name="Ghana Music", source_class="open", auth="none",
-       formats=["MP3"], quality_ceiling="not observed — posts link streaming only",
-       licence="Per-item licence as stated by rights holder",
-       volatility="commercial", bulk=False, api=False, bot_wall=True,
+    _M(id="mp3pm", name="MP3.pm", source_class="open", auth="none",
+       formats=["MP3"], quality_ceiling="as posted, no transcode",
+       licence="Aggregator; rights stay with the host it indexes",
+       volatility="commercial", bulk=False, api=True, bot_wall=False,
        etiquette=OPEN_POLITE,
-       notes="Ghana music magazine (WordPress 6.8.2, MiPROMO network). NOT "
-             "wired into the /play chain — verified 2026-11-12: a Hostinger "
-             "JS challenge (/hcdn-cgi/jschallenge) 403s every anonymous "
-             "fetch (home, wp-json, search), so the chain's plain fetch "
-             "reads nothing; and a real music post (Efemor 'Jo', Sept 2025 "
-             "capture) carries zero .mp3 links and zero audio tags — the "
-             "only listen path is an Apple Music embed plus an ffm.to "
-             "smart-link to streaming stores, so the posts identify songs "
-             "but deliver no audio. Search is WordPress ?s= returning "
-             "editorial articles, not tracks. No yt-dlp extractor either. "
-             "Do NOT add a GhanaMusicSource until a live-browser probe "
-             "passes the challenge and pins a track-page audio URL.",
-       pack={"nation": "GH"}),
+       notes="Mobile-first MP3 archive. Server-rendered /top/ charts, "
+             "per-song pages under <artist>.mp3.pm/song/<id>-<slug>/ "
+             "carrying a direct file. Search is XHR-only — /search/?q= "
+             "returns the shell with zero rows — so the source reads the "
+             "JSON search endpoint pinned by tools/probe_new_sources.py "
+             "and takes the file off the song page. No key, no yt-dlp. "
+             "Hostile to bursts: one request per second.",
+       pack={"platform": "MP3.pm"}),
+    _M(id="mp3juice_fr", name="MP3Juice (service-et-reception.fr)",
+       source_class="open", auth="none",
+       formats=["MP3"], quality_ceiling="64–320 kbps selectable",
+       licence="Aggregator; rights stay with the host it indexes",
+       volatility="commercial", bulk=False, api=False, bot_wall=False,
+       etiquette=OPEN_POLITE,
+       notes="MP3Juice mirror. Keyless anonymous POST to / with the form "
+             "field `query` (method is POST, not GET — a GET returns the "
+             "marketing page only) yields server-rendered rows with "
+             "data-id, then a download endpoint per row. Nine language "
+             "subtrees (/fr/ /es/ /id/ …) resolve the same catalogue. "
+             "Aggregator over YouTube and SoundCloud, so the bitrate is "
+             "whatever it re-encoded.",
+       pack={"platform": "MP3Juice"}),
     _M(id="palcomp3", name="Palco MP3", source_class="open", auth="none",
        formats=["MP3"], quality_ceiling="MP3 via GraphQL mp3File (unverified live — endpoint 403s plain fetch from this box)",
        licence="Per-track licence as stated by rights holder",
