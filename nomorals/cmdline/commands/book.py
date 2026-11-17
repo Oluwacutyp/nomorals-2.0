@@ -306,7 +306,7 @@ def _cmd_book(args: argparse.Namespace, context: Any) -> int:
               f"open threads: {len(st['open_threads'])}\n" + "\n".join(lines))
         return 0
 
-    if action not in ("status", "build"):
+    if action not in ("status", "build", "review"):
         print(f"book: unknown action {action}", file=sys.stderr)
         return 2
 
@@ -335,6 +335,20 @@ def _cmd_book(args: argparse.Namespace, context: Any) -> int:
               f"{book.slug} — “{book.display_title}” [{book.status}]\n"
               f"chapters: {book.chapters_written}/{len(book.chapters)} written, "
               f"{book.total_words} words\n" + "\n".join(lines))
+        return 0
+
+    if action == "review":
+        # re-run the post-draft L3 pass without rebuilding the PDF
+        report = forge.review(slug)
+        coh = report.get("coherence", {}) or {}
+        counts = coh.get("counts", {}) or {}
+        crit = report.get("critique", {}) or {}
+        _emit(args, report,
+              f"{slug} — L3 review: verdict {crit.get('verdict', '?')} · "
+              f"{counts.get('total', 0)} coherence findings "
+              f"({counts.get('contradictions', 0)} contradictions) · "
+              f"clean={report.get('clean')} · bible {report.get('bible')}\n"
+              f"report: {forge.book_dir(slug) / 'l3_report.json'}")
         return 0
 
     if action == "build":

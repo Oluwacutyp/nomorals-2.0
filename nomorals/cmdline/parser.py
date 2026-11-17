@@ -3627,6 +3627,7 @@ def _parser() -> argparse.ArgumentParser:
     book = sub.add_parser("book", aliases=CLI_ALIASES["book"], help="AI-assisted book writing: create, write, build; story reader + fiction studio")
     book.add_argument("action", nargs="?", default="list",
                      choices=["list", "create", "run", "status", "build",
+                              "review",
                               "search-stories", "follow", "following", "read",
                               "next", "prev", "sync", "progress", "bookmark",
                               "bible", "continue", "fiction", "fiction-write",

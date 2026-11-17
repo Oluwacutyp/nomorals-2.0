@@ -274,8 +274,17 @@ class RuntimeSearchMixin:
                 if len(parts) < 2:
                     return "usage: /book build <slug>"
                 r = forge.build(parts[1])
+                l3 = r.get("l3_report") or {}
+                l3_line = ""
+                if isinstance(l3, dict) and "critique" in l3:
+                    counts = (l3.get("coherence") or {}).get("counts", {})
+                    l3_line = (f"\nL3 review: "
+                               f"{l3['critique'].get('verdict', '?')} · "
+                               f"{counts.get('total', 0)} coherence findings "
+                               f"({counts.get('contradictions', 0)} "
+                               "contradictions)")
                 return (f"built {r['slug']}: {r['pages']} pages · {r['pdf_bytes']} bytes\n"
-                        f"{r['pdf']}")
+                        f"{r['pdf']}{l3_line}")
 
             if verb == "send":
                 if len(parts) < 4:

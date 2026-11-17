@@ -654,6 +654,100 @@ class BookForge:
         }
 
     # ── stage 3: build ─────────────────────────────────────────────────────
+    def review(self, slug: str) -> dict[str, Any]:
+        """Post-draft L3 pass: coherence + critique + voice, REPORT ONLY.
+
+        Runs the three L3 engines over the book's written chapters and
+        saves the report as ``<book_dir>/l3_report.json``.  The draft is
+        never touched: the review reads chapter texts, and a "rewrite"
+        verdict is a judgment string in the report, not an action — the
+        words survive unless the owner asks for a rewrite through an
+        existing path (``collab.revise_with_critique``).
+
+        Bible source: an existing bible for the slug is used as-is;
+        otherwise one is built from the draft itself (model-first, with
+        the heuristic floor — the forge's own idiom everywhere else),
+        because the foreshadowing / arc / Chekhov checks have nothing
+        to check against without a cast and threads.  If the bible
+        cannot be built at all, coherence runs over an empty state and
+        the report says so honestly (``bible: "error"``).
+        """
+        from .bible import BibleBuilder
+        from .coherence import analyze_coherence
+        from .continuity import ContinuityEngine, ContinuityState
+        from .critique_engine import CritiqueEngine
+        from .voice import VoiceClaim
+
+        book = self.load(slug)
+        chapters = [(c.number, c.text) for c in book.chapters
+                    if c.status == STATUS_WRITTEN and c.text.strip()]
+        if not chapters:
+            raise BookError(f"book {slug!r} has no written chapters yet")
+        engine = ContinuityEngine()
+        bible_source = "absent"
+        state: ContinuityState | None = None
+        try:
+            bible = BibleBuilder(self.context).load(slug)
+            if bible is not None:
+                state = engine.from_story_bible(bible)
+                bible_source = "existing"
+            else:
+                built = BibleBuilder(self.context).build(
+                    slug, book.display_title,
+                    [(c.number, c.title, c.text) for c in book.chapters
+                     if c.status == STATUS_WRITTEN and c.text.strip()])
+                state = engine.from_story_bible(built)
+                bible_source = "built"
+        except Exception as exc:  # noqa: BLE001 - review never sinks the build
+            record_failure("forge.review.bible", exc)
+            _log.warning("L3 review %s: bible unavailable (%s); coherence "
+                         "runs over an empty state", slug, exc)
+            state = engine.new_state(slug, book.display_title)
+            bible_source = "error"
+        coherence = analyze_coherence(state, chapters)
+        # CoherenceReport.to_dict() carries the flat findings + counts;
+        # the forge report also keeps the five per-check lists so a
+        # consumer never has to re-filter by kind.
+        coherence_d = coherence.to_dict()
+        coherence_d.update({
+            "foreshadowing": [f.to_dict()
+                              for f in coherence.foreshadowing],
+            "timeline": [f.to_dict() for f in coherence.timeline],
+            "arcs": [f.to_dict() for f in coherence.arcs],
+            "chekhov": [f.to_dict() for f in coherence.chekhov],
+            "contradictions": [f.to_dict()
+                               for f in coherence.contradictions],
+        })
+        manuscript = book.manuscript()
+        critique = CritiqueEngine().review(
+            manuscript, context={"continuity_state": state,
+                                 "chapter": chapters[-1][0]})
+        try:
+            voice = VoiceClaim().report(chapters)
+        except ValueError as exc:
+            voice = {"available": False, "reason": str(exc),
+                     "per_chapter": [], "drifted_chapters": []}
+        report: dict[str, Any] = {
+            "slug": slug,
+            "title": book.display_title,
+            "chapters_checked": len(chapters),
+            "words": book.total_words,
+            "bible": bible_source,
+            "state": {"entities": len(state.entities),
+                      "threads": len(state.threads),
+                      "rules": len(state.rules)},
+            "coherence": coherence_d,
+            "critique": critique.to_dict(),
+            "voice": voice,
+            "verdict": critique.verdict,
+            "clean": coherence.clean,
+            "generated_at": time.strftime("%Y-%m-%dT%H:%M:%SZ",
+                                          time.gmtime()),
+        }
+        (self.book_dir(slug) / "l3_report.json").write_text(
+            _dumps(report), encoding="utf-8")
+        return report
+
     def build(self, slug: str, *, page_size: str = "A4",
               formats: tuple[str, ...] = ("pdf",)) -> dict[str, Any]:
         """Compile manuscript.md + real book files (PDF / EPUB / HTML)."""
@@ -672,6 +766,17 @@ class BookForge:
             "chapters_written": book.chapters_written,
             "total_chapters": len(book.chapters),
         }
+        # post-draft L3 pass (report only — never rewrites the draft):
+        # coherence + critique + voice over the finished chapters.  A
+        # failed review is recorded and the build carries on without a
+        # report rather than failing the book.
+        try:
+            l3 = self.review(slug)
+        except Exception as exc:  # noqa: BLE001 - report must not sink build
+            record_failure("forge.build.l3", exc)
+            _log.warning("L3 review failed for %s: %s", slug, exc)
+            l3 = {"slug": slug, "available": False, "reason": str(exc)}
+        result["l3_report"] = l3
         want = {f.lower() for f in formats} or {"pdf"}
         if "pdf" in want:
             from ..core.branding import resolve_brand_mark
