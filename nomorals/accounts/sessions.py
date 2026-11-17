@@ -332,6 +332,22 @@ class SessionManager:
         """
         return self._load_session(service, username)
 
+    def list_pairs(self) -> list[tuple[str, str]]:
+        """(service, username) pairs with a stored session. Read-only.
+
+        The union of the vault ``sessions`` table and the in-memory
+        cache, sorted — the enumeration the OS session adapters need
+        to project every account session into the unified view
+        (audit gap R2-37). Never touches or creates anything.
+        """
+        pairs: set[tuple[str, str]] = set()
+        for row in self.vault.db.query(
+                "SELECT service, username FROM sessions"):
+            pairs.add((str(row["service"]), str(row["username"])))
+        for session in self._sessions.values():
+            pairs.add((str(session.service), str(session.username)))
+        return sorted(pairs)
+
     def get_session(self, service: str, username: str) -> Session:
         """Get or create a session for a service.
 

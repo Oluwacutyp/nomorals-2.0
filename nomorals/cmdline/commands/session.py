@@ -14,7 +14,10 @@ def _cmd_session(args: argparse.Namespace, context: Any) -> int:
     Every surface (Telegram, WhatsApp, Discord, CLI, TUI, API) attaches to
     one OS Session per chat. These commands inspect that layer.
     """
-    from ...os.session_bridge import SessionBridge
+    from ...os.session_bridge import (
+        SessionBridge,
+        try_register_account_source,
+    )
 
     task = " ".join(args.task).strip() if args.task else "list"
     verb = task.split()[0] if task else "list"
@@ -22,14 +25,20 @@ def _cmd_session(args: argparse.Namespace, context: Any) -> int:
 
     db = getattr(context, "db", None)
     bridge = SessionBridge(db=db)
+    # Unified view (audit gap R2-37): the vault's account sessions join
+    # the bridge's own rows when the vault opens; a locked vault just
+    # means bridge-only rows, never a failed listing.
+    try_register_account_source(bridge, db, context=context)
     store = bridge.store
 
     if verb == "list":
-        sessions = store.list_active()
+        sessions = bridge.list_unified()
         _emit(args, {"sessions": [s.to_dict() for s in sessions]},
               "\n".join(
                   f"{s.id}  {s.frontend:10s} {s.principal:8s} "
                   f"{s.conversation_id:30s} mode={s.state.get('gating_mode', '?')}"
+                  + (f" kind={s.state['kind']}" if "kind" in s.state else "")
+                  + (" degraded" if s.state.get("degraded") else "")
                   for s in sessions
               ) or "no active sessions")
         return 0
@@ -39,6 +48,11 @@ def _cmd_session(args: argparse.Namespace, context: Any) -> int:
             print("usage: nm session show <session-id>", flush=True)
             return 2
         session = store.get(rest[0])
+        if session is None:
+            # Adapter views are not stored rows — they are addressable
+            # through the unified enumeration instead.
+            session = next(
+                (s for s in bridge.list_unified() if s.id == rest[0]), None)
         if session is None:
             print(f"no such session: {rest[0]}", flush=True)
             return 1
@@ -51,6 +65,8 @@ def _cmd_session(args: argparse.Namespace, context: Any) -> int:
         )
         text += (f"\n{'gating_mode':16s} {d['state'].get('gating_mode', '?')}"
                  f"\n{'platform':16s} {d['state'].get('platform', '?')}")
+        if "kind" in d["state"]:
+            text += f"\n{'kind':16s} {d['state']['kind']}"
         _emit(args, d, text)
         return 0
 
@@ -61,6 +77,13 @@ def _cmd_session(args: argparse.Namespace, context: Any) -> int:
         if bridge.end_session(rest[0]):
             print(f"ended {rest[0]}")
             return 0
+        view = next(
+            (s for s in bridge.list_unified() if s.id == rest[0]), None)
+        if view is not None:
+            print(f"session {rest[0]} is an adapter view "
+                  f"({view.state.get('kind', '?')}) and cannot be ended "
+                  f"here", flush=True)
+            return 1
         print(f"no such session: {rest[0]}", flush=True)
         return 1
 

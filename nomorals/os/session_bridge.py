@@ -24,12 +24,15 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..core.ids import new_short_id
 from ..core.logging_setup import get_logger
 from ..social.chat.base import ChatKind, ChatMessage
+from .adapters import ADAPTERS
 from .project import ProjectStore
 from .session import Session, SessionStore
 
-__all__ = ["SessionBridge", "conversation_id_for"]
+__all__ = ["SessionBridge", "conversation_id_for",
+           "try_register_account_source"]
 
 _log = get_logger(__name__)
 
@@ -45,6 +48,29 @@ def conversation_id_for(platform: str, chat_id: str) -> str:
     return f"{platform}:{chat_id}"
 
 
+def try_register_account_source(bridge: SessionBridge, db: Any, *,
+                                context: Any = None) -> bool:
+    """Best-effort: open the accounts vault and register its sessions
+    as the bridge's ``"account"`` adapter source (audit gap R2-37).
+
+    The vault is opened the same way the ``nm account`` CLI opens it
+    (any owner credential — power key, seal passphrase, legacy env).
+    Returns True when the source registered; False when the vault is
+    locked/absent or anything else fails — the bridge keeps working
+    with its own rows only. Never raises.
+    """
+    try:
+        from ..accounts.sessions import SessionManager
+        from ..accounts.vault import open_vault
+
+        vault = open_vault(db, context=context, actor="session-bridge")
+        bridge.register_account_manager(SessionManager(vault))
+    except Exception:  # noqa: BLE001 — vault locked is normal, not fatal
+        _log.debug("account session source unavailable", exc_info=True)
+        return False
+    return True
+
+
 class SessionBridge:
     """Get-or-create OS Sessions for chat messages, on every platform.
 
@@ -57,9 +83,16 @@ class SessionBridge:
         gating mode (owner/private/group) in the session state. When omitted
         the mode is derived from ``is_owner`` and ``chat.kind`` with the
         same rules as ``partner.gating.classify_chat``.
+    adapter_sources:
+        Optional mapping ``kind -> source`` registering adapter sources
+        up front (see :meth:`register_adapter_source`). Sources are
+        callables yielding the raw session concepts for their kind;
+        :meth:`list_unified` projects each through the ``ADAPTERS``
+        class for that kind.
     """
 
-    def __init__(self, db: Any = None, gating_fn: Any = None) -> None:
+    def __init__(self, db: Any = None, gating_fn: Any = None, *,
+                 adapter_sources: dict[str, Any] | None = None) -> None:
         self.store = SessionStore(db=db)
         # OS projects (AA-28): the scoping shells sessions and artifacts
         # attach to, on the SAME database as the session store — a
@@ -67,6 +100,12 @@ class SessionBridge:
         # SessionStore.list_for_project without a second store wiring.
         self.projects = ProjectStore(db=self.store.db)
         self._gating_fn = gating_fn
+        # Adapter sources (audit gap R2-37): kind -> [(source, adapter)].
+        # A source is a zero-arg callable yielding raw session concepts;
+        # the adapter for the kind projects each concept into a Session.
+        self._adapter_sources: dict[str, list[tuple[Any, Any]]] = {}
+        for kind, source in (adapter_sources or {}).items():
+            self.register_adapter_source(kind, source)
 
     def project_summary(self, project_id: str, *,
                         artifact_store: Any = None) -> dict[str, Any] | None:
@@ -192,6 +231,116 @@ class SessionBridge:
         """Every active session belonging to ``principal``."""
         return [s for s in self.store.list_active()
                 if s.principal == principal]
+
+    # ── adapter enumeration (audit gap R2-37) ─────────────────────────
+    def register_adapter_source(self, kind: str, source: Any, *,
+                                adapter: Any = None) -> None:
+        """Register a source of raw session concepts for ``kind``.
+
+        ``kind`` must be one of the ``ADAPTERS`` kinds (``account``,
+        ``voice``, ``generic``); ``source`` is a zero-arg callable
+        returning an iterable of raw concepts — ``(service, username)``
+        pairs for ``account``, ``VoiceSession`` objects for ``voice``,
+        payload mappings for ``generic``. ``adapter`` is an optional
+        already-bound adapter instance (e.g. an
+        ``AccountSessionAdapter`` holding a live ``SessionManager``);
+        when omitted the adapter class for the kind is constructed
+        with no arguments. Several sources may register per kind.
+        Unknown kinds and non-callable sources raise ``ValueError``
+        here, at registration — enumeration itself never raises.
+        """
+        kinds = dict(ADAPTERS)
+        if kind not in kinds:
+            raise ValueError(
+                f"unknown session adapter kind: {kind!r} "
+                f"(known: {sorted(kinds)})")
+        if not callable(source):
+            raise ValueError("adapter source must be callable")
+        if adapter is None:
+            adapter = kinds[kind]()
+        self._adapter_sources.setdefault(kind, []).append((source, adapter))
+
+    def register_account_manager(self, manager: Any) -> None:
+        """Register a live accounts ``SessionManager`` as the
+        ``"account"`` source: its stored ``(service, username)`` pairs
+        (see ``SessionManager.list_pairs``) are projected through an
+        ``AccountSessionAdapter`` bound to that manager."""
+        from .adapters import AccountSessionAdapter
+
+        adapter = AccountSessionAdapter(manager)
+        self.register_adapter_source(
+            "account", manager.list_pairs, adapter=adapter)
+
+    def list_unified(self) -> list[Session]:
+        """The unified session view (audit gap R2-37): the bridge's own
+        active sessions first, then one adapter-projected view per
+        session concept from every registered source, in ``ADAPTERS``
+        order.
+
+        Each view carries its adapter kind in ``state["kind"]``
+        (``account`` / ``voice`` / ``generic``); bridge rows carry no
+        kind. A concept claimed by two sources yields ONE row (dedup
+        by conversation id, first wins). Never raises: a failing
+        source is logged and skipped, and a failing projection
+        becomes a degraded view (``state["degraded"] is True`` with
+        the error named) instead of a fabricated session — the
+        bridge's own rows are always returned.
+        """
+        rows = self.store.list_active()
+        seen: set[tuple[str, str]] = set()
+        for row in rows:
+            if row.conversation_id:
+                seen.add(("conv", row.conversation_id))
+        for kind, _cls in ADAPTERS:
+            for source, adapter in self._adapter_sources.get(kind, []):
+                try:
+                    concepts = list(source())
+                except Exception:  # noqa: BLE001 — one bad source skips
+                    _log.warning("session adapter source %r failed", kind,
+                                 exc_info=True)
+                    continue
+                for concept in concepts:
+                    try:
+                        view = self._project_concept(kind, adapter, concept)
+                    except Exception as exc:  # noqa: BLE001 — degrade, don't drop
+                        _log.warning(
+                            "session adapter %r failed on %r", kind, concept,
+                            exc_info=True)
+                        state: dict[str, Any] = {
+                            "kind": kind,
+                            "degraded": True,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                        if (isinstance(concept, (tuple, list))
+                                and len(concept) == 2):
+                            state["service"] = str(concept[0])
+                            state["username"] = str(concept[1])
+                        view = Session(
+                            id=new_short_id("sess_"),
+                            principal="owner",
+                            frontend=getattr(adapter, "frontend", "api"),
+                            state=state,
+                        )
+                    if view.conversation_id:
+                        key = ("conv", view.conversation_id)
+                    else:
+                        key = ("err", f"{kind}:{view.state.get('error', '')}")
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    rows.append(view)
+        return rows
+
+    @staticmethod
+    def _project_concept(kind: str, adapter: Any, concept: Any) -> Session:
+        """Project one raw concept through its kind's adapter."""
+        if kind == "account":
+            if not (isinstance(concept, (tuple, list))
+                    and len(concept) == 2):
+                raise ValueError(
+                    "account concept must be a (service, username) pair")
+            return adapter.to_os_session(concept[0], concept[1])
+        return adapter.to_os_session(concept)
 
     def session_counts(self) -> dict[str, Any]:
         """Active sessions by frontend and by principal."""

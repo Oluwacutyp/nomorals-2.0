@@ -32,6 +32,21 @@ __all__ = [
 ]
 
 
+def _view_id(kind: str, conversation_id: str) -> str:
+    """Deterministic id for a projected view.
+
+    A row shown by ``nm session list`` stays addressable by
+    ``nm session show <id>`` only if its id does not change between
+    enumerations — a fresh random id per projection would make every
+    adapter row unshowable. The id is derived from the concept's
+    identity (kind + conversation id); degraded views keep fresh
+    random ids (transient failure markers, not sessions).
+    """
+    if conversation_id:
+        return f"adapter:{kind}:{conversation_id}"
+    return new_short_id("sess_")
+
+
 def _safe_view(error: Exception, *, frontend: str, principal: str,
                project_id: str, extra: dict[str, Any] | None = None) -> Session:
     """Fallback Session when the wrapped concept cannot be projected."""
@@ -84,11 +99,21 @@ class AccountSessionAdapter:
         manager = self._manager
         if manager is None:
             raise ValueError("no SessionManager was provided")
-        get_session = getattr(manager, "get_session", None)
-        if not callable(get_session):
-            raise AttributeError("manager has no get_session(service, username)")
-
-        acct = get_session(service, username)
+        # Read-only by contract: prefer peek_session (a pure look that
+        # never refreshes last_used) over get_session (which touch()es
+        # and saves — listing sessions must not refresh them).
+        peek = getattr(manager, "peek_session", None)
+        if callable(peek):
+            acct = peek(service, username)
+            if acct is None:
+                raise ValueError(
+                    f"no stored session for {service}/{username}")
+        else:
+            get_session = getattr(manager, "get_session", None)
+            if not callable(get_session):
+                raise AttributeError(
+                    "manager has no get_session(service, username)")
+            acct = get_session(service, username)
 
         def _opt(name: str, default: Any = None) -> Any:
             try:
@@ -117,7 +142,7 @@ class AccountSessionAdapter:
             "last_used": _opt("last_used"),
         }
         return Session(
-            id=new_short_id("sess_"),
+            id=_view_id("account", f"{service}:{username}"),
             principal=principal,
             frontend=frontend,
             project_id=project_id,
@@ -184,7 +209,7 @@ class VoiceSessionAdapter:
             "report": report,
         }
         return Session(
-            id=new_short_id("sess_"),
+            id=_view_id("voice", str(_opt("session_id", ""))),
             principal=principal,
             frontend=frontend,
             project_id=project_id,
@@ -247,15 +272,16 @@ class GenericSessionAdapter:
             value = _opt(name)
             if value is not None:
                 state[name] = value
+        conversation_id = (conversation_id
+                           or str(_opt("conversation_id", "")
+                                  or _opt("session_id", "")
+                                  or _opt("chat_id", "")))
         return Session(
-            id=new_short_id("sess_"),
+            id=_view_id(self.kind, conversation_id),
             principal=principal,
             frontend=frontend,
             project_id=project_id,
-            conversation_id=(conversation_id
-                             or str(_opt("conversation_id", "")
-                                    or _opt("session_id", "")
-                                    or _opt("chat_id", ""))),
+            conversation_id=conversation_id,
             state=state,
         )
 

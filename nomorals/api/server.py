@@ -1070,11 +1070,19 @@ class APIServer:
         def sessions(body: dict[str, Any], query: dict[str, str]) -> dict[str, Any]:
             principal = server._current_principal()
             _require_capability(principal, Capability.DB_READ)
-            from ..os.session_bridge import SessionBridge
+            from ..os.session_bridge import (
+                SessionBridge,
+                try_register_account_source,
+            )
 
             bridge = SessionBridge(context.db)
+            # Unified view (audit gap R2-37): the vault's account
+            # sessions join the bridge's own rows when the vault
+            # opens; a locked vault just means bridge-only rows.
+            try_register_account_source(bridge, context.db,
+                                        context=context)
             return {
-                "sessions": [s.to_dict() for s in bridge.store.list_active()]
+                "sessions": [s.to_dict() for s in bridge.list_unified()]
             }
 
         @self.route(
