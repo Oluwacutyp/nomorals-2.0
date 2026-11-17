@@ -683,6 +683,29 @@ def register(registry: Any) -> None:
                     "error": f"group digest tick failed: {exc}"}
 
     @registry.register(
+        "__weekly_review_tick__",
+        description="Run one weekly review tick (small remainders "
+        "bundle): build the week's review from the real ledgers "
+        "(commitments, decisions, focus) and publish it to the owner "
+        "via the Notifier, once per week (watermarked) — skipping "
+        "empty weeks. Scheduler-internal; runs Sundays 20:00 local. "
+        "Routine and silent — a second run in the same week publishes "
+        "nothing.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _weekly_review_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..reviews.jobs import run_weekly_review_tick_once
+
+        try:
+            return run_weekly_review_tick_once(
+                context=_context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"weekly review tick failed: {exc}"}
+
+    @registry.register(
         "__group_ritual_tick__",
         description="Run one group ritual tick (audit gap R2-29): "
         "every themed community group with a ritual due within a "

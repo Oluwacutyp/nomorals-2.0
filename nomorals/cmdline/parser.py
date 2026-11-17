@@ -41,6 +41,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "briefing": ["br"],
     "outcomes": [],
     "notify": [],
+    "offline": [],
     "train": ["tr"],
     "render": [],
     "benchmark": ["bm"],
@@ -54,6 +55,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "apk": [],
     "re": [],
     "desk": [],
+    "decisions": [],
     "markets": [],
     "pump": [],
     "book": ["bk"],
@@ -2444,6 +2446,26 @@ def _parser() -> argparse.ArgumentParser:
     desk_sub.add_parser("sources", help="betting sources on the registry")
     desk_sub.add_parser("provision", help="desk API key state (drive from chat: /desk provision <service>)")
 
+    decisions_p = sub.add_parser("decisions", aliases=CLI_ALIASES["decisions"],
+        help="decision journal: list, add, resolve, review, calibration, whatif",
+        description=("nm decisions [list]\\n"
+                     "nm decisions add <decision> [| chosen | prediction | conf% | opt1; opt2; ...]\\n"
+                     "nm decisions resolve <id> [good|bad] <outcome>\\n"
+                     "nm decisions review [weekly|monthly]\\n"
+                     "nm decisions calibration\\n"
+                     "nm decisions whatif <id>\\n"
+                     "The same journal as chat /decisions"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    decisions_p.add_argument("decisions_action", nargs="?", default="list",
+                             choices=["list", "add", "resolve", "review",
+                                      "calibration", "whatif"],
+                             help="Action to perform")
+    decisions_p.add_argument("decisions_rest", nargs="*", default=[],
+                             help="action arguments")
+    decisions_p.add_argument("--json", action="store_true",
+                             help="Output as JSON")
+
     markets_p = sub.add_parser("markets", aliases=CLI_ALIASES["markets"],
         help="markets desk: BTC/stocks pattern lab, verdicts library, timed signal calls (analysis only)",
         description=("nm markets status\\n"
@@ -3326,6 +3348,23 @@ def _parser() -> argparse.ArgumentParser:
                                        help="candidate coverage")
     n_coverage.add_argument("--json", action="store_true",
                             help="Output as JSON")
+
+    offline_p = sub.add_parser("offline", aliases=CLI_ALIASES["offline"],
+        help="offline fallback state: queue, sync job, held replies, degradation matrix",
+        description=("nm offline [status]\\n"
+                     "nm offline queue\\n"
+                     "Read-only: the persisted offline queue, the durable "
+                     "5-minute sync job, BrainGate held/recovered episodes, "
+                     "and the per-feature offline levels. There is no drain "
+                     "verb — the 5-minute tick already drains the queue."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    offline_p.add_argument("offline_action", nargs="?", default="status",
+                           choices=["status", "queue"],
+                           help="Action to perform")
+    offline_p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
+
     timeline = sub.add_parser("timeline", aliases=CLI_ALIASES["timeline"],
                               help="event timeline: what happened, newest first")
     timeline.add_argument("--session", default="",

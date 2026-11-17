@@ -3447,6 +3447,17 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("weekly content job not registered: %s",
                                  exc)
+                # Reviews: the weekly review (Sundays 20:00 local — the
+                # week's review, built from the real ledgers and
+                # published to the owner; watermarked, empty weeks
+                # skipped). Idempotent by name; a stale spec is replaced.
+                try:
+                    from ...reviews.jobs import ensure_weekly_review_job
+
+                    ensure_weekly_review_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("weekly review job not registered: %s",
+                                 exc)
                 # Social measurement spine (WS3 P1): posted rows get
                 # their real metrics refreshed every 6h, so posting
                 # windows and brief outcomes learn from measured data

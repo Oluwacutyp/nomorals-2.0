@@ -24,6 +24,7 @@ from .commands.apk import _cmd_apk
 from .commands.re import _cmd_re
 from .commands.repair import _cmd_repair
 from .commands.desk import _cmd_desk
+from .commands.decisions import _cmd_decisions
 from .commands.markets import _cmd_markets
 from .commands.pump import _cmd_pump
 from .commands.book import _cmd_book
@@ -31,6 +32,7 @@ from .commands.account import _cmd_account
 from .commands.books import _cmd_books
 from .commands.briefing import _cmd_briefing
 from .commands.notify import _cmd_notify
+from .commands.offline import _cmd_offline
 from .commands.outcomes import _cmd_outcomes
 from .commands.audio import _cmd_audio
 from .commands.builders import _cmd_build
@@ -518,6 +520,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "apk": _CommandSpec(_cmd_apk),
     "re": _CommandSpec(_cmd_re),
     "desk": _CommandSpec(_cmd_desk),
+    "decisions": _CommandSpec(_cmd_decisions),
     "markets": _CommandSpec(_cmd_markets),
     "pump": _CommandSpec(_cmd_pump),
     "build": _CommandSpec(_cmd_build),
@@ -538,6 +541,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "briefing": _CommandSpec(_cmd_briefing),
     "outcomes": _CommandSpec(_cmd_outcomes),
     "notify": _CommandSpec(_cmd_notify),
+    "offline": _CommandSpec(_cmd_offline),
     "benchmark": _CommandSpec(_cmd_benchmark),
 }
 

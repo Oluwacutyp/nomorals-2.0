@@ -3200,51 +3200,14 @@ class RuntimeReachMixin:
         graph node is marked disrupted.  A failure to simulate is
         reported, never raised into the command.
         """
-        from ...planning.counterfactual import whatif_for_options
+        from ...planning.counterfactual import render_whatif_block, whatif_for_options
 
         try:
             graph = self._world_graph()
             result = whatif_for_options(graph, options)
         except Exception as exc:  # noqa: BLE001 — simulation never fails a command
             return f"what-if unavailable: {exc}"
-        lines = [f"what-if for “{decision}”:"]
-        for row in result.get("options") or []:
-            opt = row["option"]
-            node = graph.get(opt["node_id"]) if hasattr(graph, "get") else None
-            node_label = node.label if node is not None else opt["label"]
-            head = (f"{opt['label']} → {node_label}"
-                    if opt["label"] != node_label else opt["label"])
-            if not row.get("ok"):
-                lines.append(
-                    f"  {head} — {row.get('reason') or 'simulation failed'}")
-                continue
-            affected = row.get("affected_labels") or []
-            tail = f" · affects {', '.join(affected)}" if affected else ""
-            lines.append(
-                f"  {head} · blast {row.get('total_affected', 0)}"
-                f" · depth {row.get('max_depth', 0)}{tail}")
-        for item in result.get("unmatched") or []:
-            lines.append(f"  not simulated: {item['option']} — {item['reason']}")
-        rec = result.get("recommendation")
-        if rec is not None:
-            blast = result.get("recommendation_blast") or 0
-            node = graph.get(rec["node_id"]) if hasattr(graph, "get") else None
-            node_label = node.label if node is not None else rec["label"]
-            if rec.get("new_state") and rec["new_state"] != node_label:
-                change = f"changing {node_label} to {rec['new_state']!r}"
-            else:
-                change = f"changing {node_label}"
-            lines.append(
-                f"  least disruptive: {rec['label']} (blast {blast})"
-                f" — {change} would affect {blast} node(s) · advisory")
-        elif result.get("options"):
-            lines.append("  no viable option — every option failed to simulate")
-        else:
-            lines.append("  nothing to simulate yet — add nodes with /graph add")
-        over = result.get("over_budget") or []
-        if over:
-            lines.append(f"  over budget: {', '.join(over)}")
-        return "\n".join(lines)
+        return render_whatif_block(decision, graph, result)
 
     def _control_decisions(self, tail: str, *, chat_key: str = "") -> str:
         """The decision journal: /decisions list|add|resolve|review|calibration|whatif.

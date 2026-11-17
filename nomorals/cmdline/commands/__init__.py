@@ -24,6 +24,7 @@ from .consent import _cmd_consent
 from .organs import _cmd_organs
 from .brain import _cmd_brain
 from .data import _cmd_data
+from .decisions import _cmd_decisions
 from .doctor import _cmd_doctor, _cmd_models, _cmd_models_doctor, _cmd_setup, _env_update_home
 from .exec import _cmd_apps, _cmd_exec
 from .finance import _cmd_finance
@@ -71,6 +72,7 @@ from .models import _cmd_model_broker
 from .money import _cmd_money
 from .music import _cmd_music
 from .native import _cmd_native
+from .offline import _cmd_offline
 from .owner import _cmd_owner
 from .partner import _cmd_partner_ask, _cmd_reason, _cmd_workspace
 from .power import _cmd_power
@@ -158,6 +160,7 @@ __all__ = [
     "_cmd_consent",
     "_cmd_organs",
     "_cmd_data",
+    "_cmd_decisions",
     "_cmd_brain",
     "_cmd_doctor",
     "_env_update_home",
@@ -212,6 +215,7 @@ __all__ = [
     "_cmd_money",
     "_cmd_music",
     "_cmd_native",
+    "_cmd_offline",
     "_cmd_owner",
     "_cmd_reason",
     "_cmd_workspace",
