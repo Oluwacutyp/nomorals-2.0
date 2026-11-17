@@ -10,6 +10,7 @@ from the REAL module that owns the list:
 * film — ``media.film_sources.FILM_CHAIN``
 * weather — ``agents.weather`` endpoint constants
 * wisdom — ``wisdom.ingestor`` endpoint constants
+* software — ``sources.software.AlternativeToSource`` search URL
 * price — probe URLs mirroring ``ta.feeds`` (that module builds its
   endpoint URLs inline; the probes here are the same public endpoints
   with a fixed test query, marked as probes)
@@ -199,6 +200,20 @@ def _collect_wisdom(specs: list[SourceSpec], errors: list[str]) -> None:
     ])
 
 
+def _collect_software(specs: list[SourceSpec], errors: list[str]) -> None:
+    try:
+        from ..sources.software import AlternativeToSource
+    except Exception as exc:  # noqa: BLE001
+        errors.append(f"software: {exc}")
+        return
+    source = AlternativeToSource()
+    specs.append(SourceSpec(
+        key="software:alternativeto", category="software",
+        name="alternativeto",
+        url=source.search_url("Photoshop"),
+        kind="html-alternatives"))
+
+
 def _collect_price(specs: list[SourceSpec], errors: list[str]) -> None:
     # Probes mirroring ta.feeds' public endpoints (that module builds
     # its URLs inline per fetch function; these are the same endpoints
@@ -239,6 +254,7 @@ def collect() -> tuple[list[SourceSpec], list[str]]:
     _collect_film(specs, errors)
     _collect_weather(specs, errors)
     _collect_wisdom(specs, errors)
+    _collect_software(specs, errors)
     _collect_price(specs, errors)
     return specs, errors
 

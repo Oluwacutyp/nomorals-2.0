@@ -206,7 +206,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: pins the two together — a wave that adds a kind here must add its
 #: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "ping", "search", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "alternatives", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "map-route", "headline", "teardown",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
@@ -422,6 +422,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "restart": (0, 0),     # /restart — checkpoint missions + restart, no pull
     # search engine (Telegram / WhatsApp / console — same commands everywhere)
     "search": (1, None),     # /search <query> — free text, no length cap
+    "alternatives": (1, None),  # /alternatives <software> — crowd-ranked software alternatives
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
     "searchleads": (0, 0),   # legit paid-task platform report
     "money": (0, None),      # money opportunities hunter: scan|list|new|profile
@@ -2413,6 +2414,13 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "search": {"what": "quick research: searches and replies with a cited summary.",
                "usage": "/search <query>", "example": "/search llama 3.1 8b quant",
                "related": "/searchdeep /searchhist"},
+    "alternatives": {"what": "Software alternatives to a named app, crowd-ranked "
+                            "(AlternativeTo catalogue, grown by live fetch, seeded "
+                            "so it answers offline) — Devon herself first where "
+                            "she does the same job.",
+                     "usage": "/alternatives <software> [--platform linux] [--free | --open-source] [--limit N]",
+                     "example": "/alternatives Photoshop --platform linux --free",
+                     "related": "/search · /searchdeep"},
     "searchdeep": {"what": "deep multi-query research with synthesis (power mode).",
                    "usage": "/searchdeep <query>", "example": "/searchdeep eBPF rootkit detection",
                    "related": "/search /searchhist"},
@@ -4775,7 +4783,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "audit", "whois", "ports",
-                           "brief", "competitor", "aeo"]),
+                           "brief", "competitor", "aeo", "alternatives"]),
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
@@ -5060,7 +5068,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
-      "brief", "competitor", "aeo"]),
+      "brief", "competitor", "aeo", "alternatives"]),
     ("wisdom keeper — corpus · history · practice",
      ["wisdom", "wis"]),
     ("building for real — code & missions",
@@ -5252,6 +5260,7 @@ LIST_ONELINERS: dict[str, str] = {
     "deploy": "deploy this code: gate + checkpoint + pull + restart",
     "restart": "checkpoint missions + restart, no pull",
     "search": "quick research + cited summary",
+    "alternatives": "crowd-ranked software alternatives to a named app",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",
     "books": "story reader + continuer: /books read <url|slug> | part <slug> | contents <slug> | export <slug> [pdf|epub|html] | continue <slug> [n] | sources",

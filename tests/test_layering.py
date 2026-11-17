@@ -110,6 +110,13 @@ LAYERS: dict[str, int] = {
     # datasci/ is the data-science workspace (pandas datasets, queries,
     # plots as artifacts): a service organ at L4, reaching only downward.
     "datasci": 4,
+    # sources/ is the external-software catalogue organ (52-websites
+    # site #4, AlternativeTo): records + "alternative to" edges, live
+    # fetch merging into a durable catalogue. A service organ at L4
+    # beside media — it imports core only, and is consumed by the
+    # agency sources registry (L5, pinned) + tools/software (L4) +
+    # the partner runtime (L5). Reaches only downward.
+    "sources": 4,
     # plugins/ is the plugin package model (manifests, registry, sandboxed
     # loading): a service organ at L4 beside skills, reaching only downward.
     "plugins": 4,

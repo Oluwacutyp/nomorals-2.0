@@ -5168,6 +5168,68 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 - chat surfaces as text
             return f"video studio error: {exc}"
 
+    def _control_alternatives(self, tail: str) -> str:
+        """Software alternatives: /alternatives <software> [flags].
+
+        Crowd-ranked alternatives from the AlternativeTo catalogue
+        (seeded, grown by live fetch) — Devon herself first where she
+        does the same job. Flags: --platform <name>, --free,
+        --open-source, --limit N. Never raises: bad input returns
+        usage, lookup failures name the problem.
+        """
+        import re
+
+        from ...sources.software import (
+            AlternativeToSource,
+            SoftwareCatalog,
+            format_alternatives_reply,
+        )
+
+        tail = (tail or "").strip()
+        if not tail:
+            return ("usage: /alternatives <software> [--platform <name>] "
+                    "[--free | --open-source] [--limit N]\n"
+                    "example: /alternatives Photoshop --platform linux "
+                    "--free")
+        platform = None
+        license_tier = None
+        open_source = None
+        limit = 10
+        m = re.search(r"--platform\s+(\S+)", tail)
+        if m:
+            platform = m.group(1)
+            tail = (tail[:m.start()] + tail[m.end():]).strip()
+        m = re.search(r"--limit\s+(\d+)", tail)
+        if m:
+            try:
+                limit = max(1, int(m.group(1)))
+            except ValueError:
+                limit = 10
+            tail = (tail[:m.start()] + tail[m.end():]).strip()
+        if "--open-source" in tail:
+            open_source = True
+            tail = tail.replace("--open-source", " ").strip()
+        if "--free" in tail:
+            license_tier = "Free"
+            tail = tail.replace("--free", " ").strip()
+        name = re.sub(r"\s+", " ", tail).strip()
+        if not name:
+            return ("usage: /alternatives <software> [--platform <name>] "
+                    "[--free | --open-source] [--limit N]")
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — seeds still answer
+                home = None
+            source = AlternativeToSource(catalog=SoftwareCatalog(home))
+            results = source.alternatives(
+                name, platform=platform, license_tier=license_tier,
+                open_source=open_source, limit=limit)
+            return format_alternatives_reply(name, results)
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"alternatives lookup failed: {exc}"
+
     def _control_code_format(self, kind: str, tail: str) -> str:
         """Code-video format commands: /map-route, /headline, /teardown.
 
