@@ -5168,6 +5168,63 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 - chat surfaces as text
             return f"video studio error: {exc}"
 
+    def _control_code_format(self, kind: str, tail: str) -> str:
+        """Code-video format commands: /map-route, /headline, /teardown.
+
+        Each builds its scene spec from the tail and renders it on the
+        videogen code backend — deterministic seek(t) frames, no model.
+        Never raises: bad input returns usage, render failures name the
+        problem.
+        """
+        import re
+
+        from ...media.videogen import VideogenError, render_format
+
+        tail = (tail or "").strip()
+        seconds = 5.0
+        sm = re.search(r"--seconds\s+([\d.]+)", tail)
+        if sm:
+            try:
+                seconds = float(sm.group(1))
+            except ValueError:
+                seconds = 5.0
+            tail = (tail[:sm.start()] + tail[sm.end():]).strip()
+        try:
+            if kind == "map-route":
+                if not tail:
+                    return ("usage: /map-route <A> to <B> [via <C>…] | "
+                            "/map-route <A>, <B>, <C> [--seconds N]")
+                res = render_format("map-route", route=tail,
+                                    duration_s=seconds)
+            elif kind == "headline":
+                lines = None
+                lm = re.search(r'--lines\s+"([^"]*)"', tail)
+                if lm:
+                    lines = lm.group(1)
+                    tail = (tail[:lm.start()] + tail[lm.end():]).strip()
+                if not tail:
+                    return ('usage: /headline <text> [--lines "a|b"] '
+                            "[--seconds N]")
+                res = render_format("headline", headline=tail,
+                                    lines=lines, duration_s=seconds)
+            else:  # teardown
+                if not tail:
+                    return ("usage: /teardown <thing> : <part>, <part>… "
+                            "[--seconds N]")
+                thing, sep, parts = tail.partition(":")
+                if not sep:
+                    thing, sep, parts = tail.partition("—")
+                if not sep or not parts.strip():
+                    return ("usage: /teardown <thing> : <part>, <part>… "
+                            "[--seconds N]")
+                res = render_format("teardown", thing=thing.strip(),
+                                    parts=parts, duration_s=seconds)
+        except VideogenError as exc:
+            return f"{kind}: {exc}"
+        except Exception as exc:  # noqa: BLE001 - chat surfaces as text
+            return f"{kind} error: {exc}"
+        return res.message()
+
     def _video_studio_gen(self, tail: str) -> str:
         import re
 
@@ -5181,7 +5238,7 @@ class RuntimeMediaMixin:
             parts = tail.split("--", 1)
             prompt, flags = parts[0].strip(), ("--" + parts[1] if len(parts) > 1 else "")
         if not prompt:
-            return ('usage: /video gen "<prompt>" [--backend auto|ltx|wan|motion] '
+            return ('usage: /video gen "<prompt>" [--backend auto|ltx|wan|motion|code] '
                     '[--seconds N] [--seed N] [--model NAME] '
                     '[--lora NAME[:WEIGHT]] [--lora NAME2 ...]')
         backend = "auto"

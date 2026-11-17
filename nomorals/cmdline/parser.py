@@ -3044,7 +3044,10 @@ def _parser() -> argparse.ArgumentParser:
 
     video = sub.add_parser("video", aliases=CLI_ALIASES["video"],
         help="Devon Studio: neural + motion-graphics video generation",
-        description=("nm video generate \"<prompt>\" [--backend auto|ltx|wan|motion]\n"
+        description=("nm video generate \"<prompt>\" [--backend auto|ltx|wan|motion|code]\n"
+                     "nm video code map-route \"Lagos to Abuja\" [--seconds N]\n"
+                     "nm video code headline \"Big news\" [--lines \"sub|sub2\"]\n"
+                     "nm video code teardown \"keyboard: keycap, switch, plate, case\"\n"
                      "nm video motion lyric --audio song.mp3 --lyrics \"...\" [--preset neon_pop]\n"
                      "nm video motion visual --audio song.mp3 [--preset phonk]\n"
                      "nm video motion slideshow --images a.png,b.png [--audio song.mp3]\n"
@@ -3059,7 +3062,7 @@ def _parser() -> argparse.ArgumentParser:
     v_gen = v_sub.add_parser("generate", help="generate a clip (neural or motion)")
     v_gen.add_argument("prompt", help="text prompt for the clip")
     v_gen.add_argument("--backend", default="auto",
-                       help="auto|ltx|wan|motion (default: auto)")
+                       help="auto|ltx|wan|motion|code (default: auto)")
     v_gen.add_argument("--mode", default="t2v", help="t2v|i2v")
     v_gen.add_argument("--image", default="",
                        help="input image for i2v mode")
@@ -3073,6 +3076,24 @@ def _parser() -> argparse.ArgumentParser:
     v_gen.add_argument("--lora", action="append", default=None,
                        help="LoRA name or path, optionally NAME:WEIGHT; "
                             "repeatable")
+    v_code = v_sub.add_parser(
+        "code", help="code-video: render a scene format to MP4 (no model)")
+    v_code.add_argument("format", choices=["map-route", "headline",
+                                           "teardown"],
+                        help="the format preset to render")
+    v_code.add_argument(
+        "spec", help="map-route: 'A to B' or 'A, B, C'; headline: the "
+                     "headline text; teardown: 'thing: part, part, …'")
+    v_code.add_argument("--stops", default="",
+                        help="map-route stops, comma-separated (overrides "
+                             "parsing spec)")
+    v_code.add_argument("--lines", default="",
+                        help="headline sub-lines, | separated")
+    v_code.add_argument("--parts", default="",
+                        help="teardown parts, comma-separated (overrides "
+                             "parsing spec)")
+    v_code.add_argument("--seconds", type=float, default=5.0)
+    v_code.add_argument("--out", default="")
     v_mo = v_sub.add_parser("motion", help="motion-studio products (CPU-only)")
     mo_sub = v_mo.add_subparsers(dest="motion_action", required=True)
     mo_ly = mo_sub.add_parser("lyric", help="kinetic lyric video")

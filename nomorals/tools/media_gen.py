@@ -206,20 +206,27 @@ def register(registry: Any) -> None:
                      "fallback otherwise. duration_s in seconds. "
                      "model: a videogen registry model name (optional). "
                      "lora: comma-separated LoRA names, optionally "
-                     "NAME:WEIGHT (optional)."),
+                     "NAME:WEIGHT (optional). "
+                     "backend: auto|ltx|wan|motion|code — 'code' renders a "
+                     "scene spec (scene: a diagram/chart/equation design "
+                     "dict, or an HTML scene) with deterministic seek(t) "
+                     "frames, no model."),
         capability=Capability.FS_WRITE,
     )
     def video_generate(prompt: str, *, duration_s: float = 5.0,
                        width: int = 0, height: int = 0,
                        seed: int = 0, model: str = "",
-                       lora: str = "") -> dict[str, Any]:
-        """Text-to-video via videogen (neural → motion fallback)."""
+                       lora: str = "", backend: str = "",
+                       scene: dict | None = None) -> dict[str, Any]:
+        """Text-to-video via videogen (neural → motion fallback, or code
+        for a scene spec)."""
         from ..media.videogen.pipeline import generate
-        if not (prompt or "").strip():
-            raise ValueError("prompt is required")
+        if not (prompt or "").strip() and scene is None:
+            raise ValueError("prompt is required (or a scene spec)")
         out = _out_dir(context, "videos")
         loras = [s.strip() for s in (lora or "").split(",") if s.strip()]
         result = generate(prompt, duration_s=duration_s, seed=seed,
+                          backend=backend or "auto", scene=scene,
                           out=str(out / "clip.mp4"),
                           model=model or None, lora=loras or None,
                           **({"width": width} if width else {}),
@@ -227,6 +234,7 @@ def register(registry: Any) -> None:
         return {"path": result.path, "engine": result.engine,
                 "routed": result.routed, "note": result.note,
                 "model": result.meta.get("model", ""),
+                "scene_kind": result.meta.get("scene_kind", ""),
                 "prompt": prompt}
 
     @registry.register(

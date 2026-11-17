@@ -207,6 +207,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
     "help", "ping", "search", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
+    "map-route", "headline", "teardown",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
     "rules", "member", "lookup", "glog", "gsettings", "strikes",
@@ -951,6 +952,9 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "spotify": (1, None),    # /spotify <url> — identify on Spotify, fetch the full track elsewhere
     "aio": (1, None),        # /aio <url> [audio] — all-in-one: any supported link, routed by platform
     "video": (0, None),      # /video <query> | download <url> | platforms
+    "map-route": (0, None),  # /map-route <A> to <B> [via <C>…] — code-video route scene (no model)
+    "headline": (0, None),   # /headline <text> [--lines "a|b"] — code-video headline scene
+    "teardown": (0, None),   # /teardown <thing> : <part>, <part>… — code-video teardown scene
     "director": (0, None),   # /director cover|plan|shoot|regen|show — coverage → design → shoot → QA
     "caption": (0, 1),       # /caption [style] — burn AI subtitles into a video (attach or path)
     "vision": (0, None),     # /vision [question] — analyze an image (attach or path/URL)
@@ -4607,6 +4611,27 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/video <query> [platform] | /video download <url> [audio] | /video platforms | /video watch <url|path> [question]",
               "example": "/video lofi beats for studying youtube",
               "related": "/searchdeep · nm video on the console"},
+    "map-route": {"what": "Code-video route scene: a route draws itself — "
+                         "stops become nodes, legs become edges, each "
+                         "revealed in turn. Deterministic seek(t) frames, "
+                         "no video model (videogen code backend).",
+                  "usage": "/map-route <A> to <B> [via <C>…] | /map-route <A>, <B>, <C> [--seconds N]",
+                  "example": "/map-route Lagos to Abuja",
+                  "related": "/headline · /teardown · /video gen"},
+    "headline": {"what": "Code-video headline scene: a newspaper push-in — "
+                        "the headline line is boxed and highlighted, "
+                        "sub-lines follow. Deterministic seek(t) frames, "
+                        "no video model (videogen code backend).",
+                 "usage": "/headline <text> [--lines \"a|b\"] [--seconds N]",
+                 "example": "/headline Devon renders video from code",
+                 "related": "/map-route · /teardown · /video gen"},
+    "teardown": {"what": "Code-video teardown scene: an exploded parts "
+                        "diagram — numbered parts appear in assembly order. "
+                        "Deterministic seek(t) frames, no video model "
+                        "(videogen code backend).",
+                 "usage": "/teardown <thing> : <part>, <part>… [--seconds N]",
+                 "example": "/teardown keyboard : keycap, switch, plate, case",
+                 "related": "/map-route · /headline · /video gen"},
     "director": {"what": "Devon directs: professional script coverage, "
                       "scene/shot breakdown, lighting + camera design "
                       "per shot (primitives composed by style packs — "
@@ -4773,7 +4798,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                         "translate", "tl"]),
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
                            "monitor", "investigate"]),
-    ("media system", ["music", "distribute", "play", "video", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
+    ("media system", ["music", "distribute", "play", "video", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
@@ -5039,7 +5064,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "deliver", "checkpoint", "checkpoints", "rewind", "novel", "books",
       "skills", "delegate", "workflow", "plan", "computer"]),
     ("media system — music · playback · video · podcast",
-     ["music", "play", "video", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
+     ["music", "play", "video", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "zip", "audio", "overview", "character", "audiobook",
       "distribute", "dj", "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "produce", "like", "dislike",
       "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "sham", "musicnote",
       "steal", "sticker", "convert", "gif", "emoji", "customemoji",
@@ -5572,6 +5597,9 @@ LIST_ONELINERS: dict[str, str] = {
     "kitsune": "a kitsune picture",
     "husbando": "a husbando picture",
     "video": "find videos across the web (ranked, enriched) + download",
+    "map-route": "code-video: a route draws itself (no model)",
+    "headline": "code-video: newspaper headline push-in (no model)",
+    "teardown": "code-video: exploded parts diagram (no model)",
     "director": "Devon directs: coverage → breakdown + shot design → shoot → QA",
     "exec": "run code sandboxed: py/js/bash/c/… with real output",
     "zip": "archives: create/list/info/extract (safe against zip-slip)",

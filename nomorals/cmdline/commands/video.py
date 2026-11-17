@@ -1,6 +1,9 @@
 """``nm video`` — Devon Studio on the command line.
 
-    nm video generate "a neon alley in rain" [--backend auto|ltx|wan|motion]
+    nm video generate "a neon alley in rain" [--backend auto|ltx|wan|motion|code]
+    nm video code map-route "Lagos to Abuja" [--seconds N] [--out clip.mp4]
+    nm video code headline "Big news" [--lines "sub|sub2"]
+    nm video code teardown "keyboard: keycap, switch, plate, case"
     nm video motion lyric --audio song.mp3 --lyrics "..." [--preset neon_pop]
     nm video motion visual --audio song.mp3 [--preset phonk] [--images cover.png]
     nm video motion slideshow --images a.png,b.png [--audio song.mp3]
@@ -43,6 +46,47 @@ def _cmd_generate(args: argparse.Namespace, context) -> int:
             seed=args.seed, out=args.out or None,
             model=getattr(args, "model", "") or None,
             lora=getattr(args, "lora", None) or None)
+    except VideogenError as exc:
+        return _err(str(exc))
+    except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
+        return _err(str(exc))
+    return _ok(res.message())
+
+
+def _cmd_code(args: argparse.Namespace, context) -> int:
+    """``nm video code <format> <spec>`` — a format preset to MP4."""
+    from ...media.videogen import VideogenError, render_format
+
+    fmt = getattr(args, "format", "")
+    spec = (getattr(args, "spec", "") or "").strip()
+    params: dict = {}
+    if fmt == "map-route":
+        stops = (getattr(args, "stops", "") or "").strip()
+        if stops:
+            params["stops"] = stops
+        elif spec:
+            params["route"] = spec
+    elif fmt == "headline":
+        if not spec:
+            return _err("usage: nm video code headline \"<text>\" "
+                        "[--lines \"a|b\"]")
+        params["headline"] = spec
+        lines = (getattr(args, "lines", "") or "").strip()
+        if lines:
+            params["lines"] = lines
+    else:  # teardown
+        parts = (getattr(args, "parts", "") or "").strip()
+        if parts and ":" not in spec:
+            spec = f"{spec}: {parts}" if spec else parts
+        thing, sep, rest = spec.partition(":")
+        if not sep or not rest.strip():
+            return _err("usage: nm video code teardown "
+                        "\"<thing>: <part>, <part>, …\"")
+        params["thing"] = thing.strip()
+        params["parts"] = rest
+    try:
+        res = render_format(fmt, duration_s=args.seconds,
+                            out=args.out or None, **params)
     except VideogenError as exc:
         return _err(str(exc))
     except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
@@ -303,6 +347,8 @@ def cmd_video(args: argparse.Namespace, context) -> int:
     action = getattr(args, "video_action", "")
     if action == "generate":
         return _cmd_generate(args, context)
+    if action == "code":
+        return _cmd_code(args, context)
     if action == "motion":
         fn = _MOTION_DISPATCH.get(getattr(args, "motion_action", ""))
         if fn is None:
@@ -317,4 +363,4 @@ def cmd_video(args: argparse.Namespace, context) -> int:
         return _cmd_capability(args, context)
     if action == "list":
         return _cmd_list(args, context)
-    return _err("usage: nm video generate|motion|chain|capability|list ...")
+    return _err("usage: nm video generate|code|motion|chain|capability|list ...")

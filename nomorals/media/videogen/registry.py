@@ -56,8 +56,13 @@ __all__ = [
     "BACKENDS",
 ]
 
-BACKENDS = ("ltx", "wan")
+BACKENDS = ("ltx", "wan", "code")
 
+#: the ``code`` backend renders scene specs (diagram / equation / chart
+#: designs, HTML scenes) with deterministic seek(t) frames — no model,
+#: no VRAM floor, CPU-only. It has no registry models or LoRAs; it is
+#: listed here so capability surfaces and ``--backend`` switches name
+#: the whole ladder, diffusion and code side by side.
 _BACKEND_FLOORS = {"ltx": LTX_MIN_VRAM_GB, "wan": WAN_MIN_VRAM_GB}
 
 #: pipeline ``_class_name`` values in a diffusers ``model_index.json``

@@ -46,14 +46,14 @@ __all__ = ["generate", "request_hero_clip", "capability_report", "VideoResult"]
 @dataclass
 class VideoResult:
     path: str
-    engine: str            # "ltx" | "wan" | "motion"
-    routed: str            # "neural" | "motion"
+    engine: str            # "ltx" | "wan" | "motion" | "code"
+    routed: str            # "neural" | "motion" | "code"
     note: str              # plain-language: why this path
     prompt: str = ""
     meta: dict[str, Any] = field(default_factory=dict)
 
     def message(self) -> str:
-        icon = "🧠" if self.routed == "neural" else "🎞️"
+        icon = {"neural": "🧠", "code": "🧩"}.get(self.routed, "🎞️")
         return (f"{icon} {self.path}\n"
                 f"   engine: {self.engine} ({self.routed})\n"
                 f"   {self.note}")
@@ -98,6 +98,10 @@ def capability_report(prefer: str = "auto") -> str:
         lines.append("   LoRAs: none installed "
                      f"(drop adapters under {_registry.models_root()}"
                      "/loras/<backend>/<name>)")
+    lines.append("   code: deterministic scene rendering (diagram / "
+                 "equation / chart designs + HTML scenes), CPU-only, "
+                 "always available — pass a scene, or render a format "
+                 "(map-route, headline, teardown)")
     return "\n".join(lines)
 
 
@@ -115,6 +119,17 @@ def _resolve_selection(prefer_backend: str, model: Any,
     """
     from . import registry as _registry
     loras = _registry.normalize_loras(lora)
+    if prefer_backend == "code":
+        if model:
+            raise VideogenError(
+                "backend='code' renders a scene spec, not a diffusion "
+                "model — pass scene={...} (a diagram/chart/equation "
+                "design or an HTML scene) instead of model="
+                f"{model!r}")
+        if loras:
+            raise VideogenError(
+                "backend='code' renders a scene spec — LoRAs only apply "
+                "to diffusion backends (ltx/wan)")
     sel: dict[str, Any] = {"backend": None, "source": "", "label": "",
                            "floor": None, "distilled": True,
                            "loras": loras}
@@ -233,12 +248,23 @@ def generate(prompt: str, *, backend: str = "auto",
              fps: float | None = None,
              model: str | None = None,
              lora: Any = None,
+             scene: dict[str, Any] | None = None,
              **kw) -> VideoResult:
     """Generate a video clip — neural when possible, motion otherwise.
 
-    ``backend``: auto | ltx | wan | motion (force the motion studio).
-    ``mode``: t2v | i2v. Raises :class:`VideogenError` only when neural
-    was explicitly required (``allow_fallback=False``) and unavailable.
+    ``backend``: auto | ltx | wan | motion | code (force the code
+    backend). ``mode``: t2v | i2v. Raises :class:`VideogenError` only
+    when neural was explicitly required (``allow_fallback=False``) and
+    unavailable.
+
+    ``scene``: a scene spec for the code backend — an explainer design
+    dict (``{"engine": "diagram" | "equation" | "chart", ...}``) or an
+    HTML scene (``{"html": "<!doctype html>…"}``). A scene IS the
+    code job: ``backend="auto"`` with a scene renders on the code
+    backend, and a free-text prompt with no scene never takes the code
+    rung. A scene conflicts with a diffusion model/LoRA selection and
+    with the ltx/wan/motion backends — those raise, never silently
+    substitute.
 
     ``model``: a registry model name (``ltx-distilled``, ``ltx-base``,
     ``wan-ti2v-5b``, a discovered local model), a local diffusers
@@ -250,8 +276,9 @@ def generate(prompt: str, *, backend: str = "auto",
     (unknown model/LoRA, backend conflict, LoRA/backend mismatch)
     raise — they are caller errors, never silent substitutions.
     """
-    if not (prompt or "").strip() and not image:
-        raise VideogenError("empty prompt and no image — nothing to generate")
+    if not (prompt or "").strip() and not image and not scene:
+        raise VideogenError(
+            "empty prompt, no image and no scene — nothing to generate")
     backend = (backend or "auto").lower()
 
     sel = _resolve_selection(backend, model, lora)
@@ -260,6 +287,53 @@ def generate(prompt: str, *, backend: str = "auto",
             "model/LoRA selection needs a neural backend — "
             "backend='motion' renders with the motion studio, which "
             "has no diffusion model to select")
+    if backend == "motion" and scene is not None:
+        raise VideogenError(
+            "a scene spec renders on the code backend — "
+            "backend='motion' renders with the motion studio, which "
+            "has no scene renderer")
+    if backend in ("ltx", "wan") and scene is not None:
+        raise VideogenError(
+            f"backend={backend!r} is a diffusion backend — a scene spec "
+            "renders on the code backend (backend='code', or 'auto' "
+            "with a scene)")
+    if scene is not None and (sel["backend"] or sel["loras"]):
+        picked = sel["label"] or sel["backend"] or ""
+        if sel["loras"]:
+            picked += (" + LoRA "
+                       + ", ".join(lo["name"] for lo in sel["loras"]))
+        raise VideogenError(
+            "a scene spec renders on the code backend — drop the "
+            f"diffusion selection ({picked})")
+
+    if backend == "code" or scene is not None:
+        if scene is None:
+            raise VideogenError(
+                "backend='code' renders a scene spec — pass scene={...} "
+                "(a diagram/chart/equation design dict, or an HTML "
+                "scene {'html': '<!doctype html>…'})")
+        from .codegen import render_code_scene
+
+        rec = render_code_scene(scene, out, duration=duration_s,
+                                size=size, fps=fps)
+        result = VideoResult(
+            path=rec["path"], engine="code", routed="code",
+            note=(f"code-rendered {rec['kind']} scene: deterministic "
+                  f"seek(t) frames ({rec['frames']} frames, render hash "
+                  f"{rec['render_hash'][:12]}…) — no model, CPU-only; "
+                  f"contact sheet: {rec['contact_sheet']}"),
+            prompt=prompt,
+            meta={"scene_kind": rec["kind"], "source": rec["source"],
+                  "frames": rec["frames"], "fps": rec["fps"],
+                  "duration": rec["duration"],
+                  "render_hash": rec["render_hash"],
+                  "contact_sheet": rec["contact_sheet"],
+                  "deterministic": True})
+        record_ledger({"kind": "videogen.generate", "path": rec["path"],
+                       "engine": "code", "routed": "code",
+                       "scene_kind": rec["kind"],
+                       "render_hash": rec["render_hash"]})
+        return result
 
     if backend != "motion":
         prefer = sel["backend"] or backend

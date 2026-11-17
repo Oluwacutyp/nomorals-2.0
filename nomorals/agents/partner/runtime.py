@@ -9684,6 +9684,8 @@ class PartnerRuntime(
             return self._control_video(command.tail or arg,
                                        chat_key=chat_key,
                                        message=message)
+        if kind in {"map-route", "headline", "teardown"}:
+            return self._control_code_format(kind, command.tail or arg)
         if kind == "director":
             return self._control_director(command.tail or arg)
         if kind == "caption":

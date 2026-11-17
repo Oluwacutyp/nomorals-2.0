@@ -7,6 +7,9 @@ are data). Two engines:
   ~real-time iteration, T2V + I2V + extension.
 - :mod:`wan_backend` — Wan 2.2 TI2V-5B: 720p24 quality finals,
   Apache 2.0, 16GB+ VRAM.
+- :mod:`codegen` — the code backend: deterministic seek(t) scene
+  rendering, no model, CPU-only; :mod:`formats` holds the reusable
+  format presets (``map-route``, ``headline``, ``teardown``).
 
 :mod:`pipeline` is the front door (capability check → neural or honest
 motion-studio fallback); :mod:`chaining` assembles multi-scene films.
@@ -23,6 +26,8 @@ from .capabilities import (
     diffusers_available,
 )
 from .pipeline import generate, request_hero_clip, capability_report, VideoResult
+from .codegen import render_code_scene
+from .formats import build_format, list_formats, render_format
 from .chaining import chain_scenes, ChainReport
 from .autotune import autotune_request, AUTOTUNE
 from .consistency import (
@@ -40,6 +45,10 @@ __all__ = [
     "request_hero_clip",
     "capability_report",
     "VideoResult",
+    "render_code_scene",
+    "build_format",
+    "list_formats",
+    "render_format",
     "chain_scenes",
     "ChainReport",
     "autotune_request",
