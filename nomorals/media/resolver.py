@@ -674,7 +674,7 @@ class SourceResolver:
 
     def _youtube_music_search_many(self, query: str,
                                    limit: int) -> list[ResolvedAudio]:
-        """YouTube Music candidates (yt-dlp ``ytmsearch``).
+        """YouTube Music candidates (music.youtube.com search URL).
 
         YouTube Music's catalog carries the K-pop, J-pop, Latin and
         regional music plain YouTube search misses.
@@ -1496,7 +1496,7 @@ class SourceResolver:
             source_name="YouTube search (yt-dlp)")
 
     def _s_youtube_music_search(self, query: str) -> ResolvedAudio:
-        """YouTube Music search (yt-dlp ``ytmsearch1:``)."""
+        """YouTube Music search (music.youtube.com search URL)."""
         from .playback import PlaybackEngine  # lazy: same layer
 
         try:

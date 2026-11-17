@@ -115,6 +115,29 @@ def _which(names: tuple[str, ...]) -> str:
     return ""
 
 
+def _youtube_search_target(query: str, limit: int,
+                           prefix: str = "ytsearch") -> tuple[str, str]:
+    """(yt-dlp target, cookie-lookup URL) for a YouTube search.
+
+    ``ytmsearch`` is not a scheme current yt-dlp registers — there
+    is no ``youtube:music:search`` extractor (the supported route
+    is the music search URL), so the Music leg searches
+    music.youtube.com instead of building ``ytmsearchN:`` (which
+    yt-dlp rejects as an unknown scheme).  Every other prefix keeps
+    the ``<prefix>N:`` form yt-dlp documents.  The second element
+    is the plain site URL the per-URL cookie helpers key on.
+    """
+    if (prefix or "").strip().lower() == "ytmsearch":
+        from urllib.parse import quote_plus
+
+        return (
+            "https://music.youtube.com/search?q="
+            + quote_plus(query or ""),
+            "https://music.youtube.com/",
+        )
+    return f"{prefix}{limit}:{query}", "https://www.youtube.com/"
+
+
 @dataclass
 class Backend:
     name: str          # mpv | ffplay | aplay | mpg123 | sox | afplay | console
@@ -582,11 +605,16 @@ class PlaybackEngine:
 
     @classmethod
     def _youtube_search_id(cls, query: str, prefix: str = "ytsearch") -> str:
-        """Top video id for a query (yt-dlp ``<prefix>1:``).
+        """Top video id for a query (yt-dlp search).
 
         ``prefix="ytsearch"`` searches YouTube; ``prefix="ytmsearch"``
-        searches YouTube Music — the catalog that carries K-pop,
-        J-pop, Latin and regional music YouTube search misses.
+        searches YouTube Music via the music search URL (``ytmsearch``
+        is not a scheme current yt-dlp registers) — the catalog that
+        carries K-pop, J-pop, Latin and regional music YouTube search
+        misses.  The search is flat (ids only, no per-video page
+        fetch — the surface the bot check hit) and hands yt-dlp the
+        per-URL cookies (Devon's own browser-profile estate export
+        included), not just the user-provided file.
 
         Raises ToolError naming the missing dependency when yt-dlp is
         absent — never a silent empty result.
@@ -594,6 +622,7 @@ class PlaybackEngine:
         query = (query or "").strip()
         if not query:
             raise ToolError("youtube search needs a query")
+        target, cookie_url = _youtube_search_target(query, 1, prefix)
         # python module first, CLI fallback
         try:
             import yt_dlp  # noqa: F401
@@ -608,14 +637,14 @@ class PlaybackEngine:
                 # Suppress yt-dlp's stderr — it writes "ERROR:" lines that
                 # pollute test output and CI logs. We raise ToolError on
                 # failure anyway.
-                from .cookies import ytdlp_cookie_opts as _cookie_opts_fn
+                from .cookies import ytdlp_cookie_opts_for as _cookie_opts_fn
                 from .cookies import ytdlp_hardened_opts as _hardened_opts_fn
                 _opts = _hardened_opts_fn()
-                _opts.update(_cookie_opts_fn())
+                _opts.update(_cookie_opts_fn(cookie_url))
+                _opts["extract_flat"] = True
                 with contextlib.redirect_stderr(io.StringIO()):
                     with yt_dlp.YoutubeDL(_opts) as ydl:
-                        info = ydl.extract_info(f"{prefix}1:{query}",
-                                                download=False)
+                        info = ydl.extract_info(target, download=False)
             except Exception as exc:  # noqa: BLE001
                 raise ToolError(f"youtube search failed: {exc}") from exc
             entries = ((info or {}).get("entries") or [])
@@ -625,10 +654,11 @@ class PlaybackEngine:
         cli = shutil.which("yt-dlp")
         if cli:
             try:
-                from .cookies import ytdlp_cookie_args as _cookie_args_fn
+                from .cookies import ytdlp_cookie_args_for as _cookie_args_fn
                 proc = subprocess.run(
-                    [cli, "--print", "id", "--skip-download"]
-                    + _cookie_args_fn() + [f"{prefix}1:{query}"],
+                    [cli, "--print", "id", "--skip-download",
+                     "--flat-playlist"]
+                    + _cookie_args_fn(cookie_url) + [target],
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             except subprocess.TimeoutExpired as exc:
                 raise ToolError("youtube search timed out") from exc
@@ -652,7 +682,15 @@ class PlaybackEngine:
     @classmethod
     def _youtube_search_many(cls, query: str, limit: int = 8,
                              prefix: str = "ytsearch") -> list[dict[str, Any]]:
-        """Top N results for a query (yt-dlp ``<prefix>N:``).
+        """Top N results for a query (yt-dlp search).
+
+        ``prefix="ytmsearch"`` searches YouTube Music via the music
+        search URL (``ytmsearch`` is not a scheme current yt-dlp
+        registers).  The search is flat (ids and titles only, no
+        per-video page fetch — the surface the bot check hit) and
+        hands yt-dlp the per-URL cookies (Devon's own
+        browser-profile estate export included), not just the
+        user-provided file.
 
         Returns [{video_id, title, duration, uploader}].  Empty list when
         yt-dlp is missing or the search fails — never raises.
@@ -663,6 +701,7 @@ class PlaybackEngine:
         limit = max(1, min(int(limit or 8), 25))
         if not query:
             return []
+        target, cookie_url = _youtube_search_target(query, limit, prefix)
         try:
             import yt_dlp  # noqa: F401
             has_module = True
@@ -674,14 +713,14 @@ class PlaybackEngine:
             import contextlib
             import io
             try:
-                from .cookies import ytdlp_cookie_opts as _cookie_opts_fn2
+                from .cookies import ytdlp_cookie_opts_for as _cookie_opts_fn2
                 from .cookies import ytdlp_hardened_opts as _hardened_opts_fn2
                 _opts2 = _hardened_opts_fn2()
-                _opts2.update(_cookie_opts_fn2())
+                _opts2.update(_cookie_opts_fn2(cookie_url))
+                _opts2["extract_flat"] = True
                 with contextlib.redirect_stderr(io.StringIO()):
                     with yt_dlp.YoutubeDL(_opts2) as ydl:
-                        info = ydl.extract_info(f"{prefix}{limit}:{query}",
-                                                download=False)
+                        info = ydl.extract_info(target, download=False)
                 entries = (info or {}).get("entries") or []
             except Exception as exc:  # noqa: BLE001
                 _log.info("youtube multi-search failed: %s", exc)
@@ -693,11 +732,11 @@ class PlaybackEngine:
             if not cli:
                 return []
             try:
-                from .cookies import ytdlp_cookie_args as _cookie_args_fn2
+                from .cookies import ytdlp_cookie_args_for as _cookie_args_fn2
                 proc = subprocess.run(
                     [cli, "--print", "%(id)s\t%(title)s\t%(duration)s\t"
-                     "%(uploader)s", "--skip-download"]
-                    + _cookie_args_fn2() + [f"{prefix}{limit}:{query}"],
+                     "%(uploader)s", "--skip-download", "--flat-playlist"]
+                    + _cookie_args_fn2(cookie_url) + [target],
                     capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
             except (subprocess.TimeoutExpired, OSError) as exc:
                 _log.info("youtube multi-search failed: %s", exc)
