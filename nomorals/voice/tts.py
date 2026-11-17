@@ -3357,10 +3357,19 @@ class UniversalTTS:
                     heartbeat("voice", True)
                 except Exception as e:
                     record_failure('tts.UniversalTTS._speak_impl:3004', e)
+                # the cached path reports the same honesty fields as
+                # the fresh path — before this, a cache hit silently
+                # dropped native_opts (and speed_dsp), so a repeated
+                # line could not say whether its hint was honored
+                _co, _rs = self._split_synth_opts(
+                    backend, speed=speed, exaggeration=exaggeration,
+                    language=language)
                 return {
                     "path": path, "bytes": written,
                     "sample_rate": sr, "backend": backend.name,
                     "segments": len(segments), "cached": True,
+                    "native_opts": sorted(_co),
+                    "speed_dsp": abs(_rs - 1.0) > 0.02,
                 }
         except Exception as e:
             record_failure('tts.UniversalTTS._speak_impl:3011', e)
@@ -3772,6 +3781,10 @@ class UniversalTTS:
             "backend": backend.name,
             "script": script.text,
             "cues": script.cues,
+            # which per-call opts the backend took natively — mirrors
+            # speak(), so callers can say whether a language hint was
+            # honored or dropped instead of guessing from the audio
+            "native_opts": sorted(synth_opts),
         }
 
     def _post_process(self, result: dict, *,

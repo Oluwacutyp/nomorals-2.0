@@ -125,6 +125,7 @@ def _render_directed_per_segment(text: str, track: Any, tts: Any,
     tp_segments = TagProcessor().parse(text)
     parts: list[tuple[str, float]] = []
     seg_tiers: list[str] = []
+    seg_native: list[bool] = []
     word_index = 0
     for seg in tp_segments:
         if list(seg.tags or []) in (["_sound_"], ["_ambient_"]):
@@ -141,6 +142,8 @@ def _render_directed_per_segment(text: str, track: Any, tts: Any,
                                intensity=intensity)
         parts.append((res["path"], pause_after))
         seg_tiers.append(str(res.get("tier", "")))
+        if "native_language" in res:
+            seg_native.append(res["native_language"])
     tier = (seg_tiers[0] if seg_tiers and all(
         t == seg_tiers[0] for t in seg_tiers) else "mixed")
     result: dict[str, Any] = {
@@ -154,6 +157,12 @@ def _render_directed_per_segment(text: str, track: Any, tts: Any,
     _line_accent = normalize_accent(direction.accent or "")
     if _line_accent:
         result["accent"] = _line_accent
+        # Honest accent report for the stitched line: when every
+        # segment that carried an accent agrees on whether the
+        # backend honored the hint, the line says so too; mixed
+        # segments stay silent rather than claiming one answer.
+        if seg_native and all(v is seg_native[0] for v in seg_native):
+            result["native_language"] = seg_native[0]
     return result
 
 
@@ -249,6 +258,12 @@ def render_emotional(text: str, tts: Any, voice_name: str = "",
                 "delivery": direction.delivery}
             if accent_key:
                 res["accent"] = accent_key
+                # perform() reports which opts the backend took
+                # natively now, so — like the DSP tier — this tier
+                # can say whether the accent hint was honored or
+                # dropped instead of claiming a native accent
+                res["native_language"] = "language" in (
+                    src.get("native_opts") or [])
             return res
         except Exception as exc:  # noqa: BLE001 — fall through honestly
             last_error = exc
@@ -264,6 +279,9 @@ def render_emotional(text: str, tts: Any, voice_name: str = "",
                    "backend": native.get("backend")}
             if accent_key:
                 res["accent"] = accent_key
+                # same honest report as the RVC tier above
+                res["native_language"] = "language" in (
+                    native.get("native_opts") or [])
             return res
         except Exception as exc:  # noqa: BLE001
             last_error = exc
@@ -284,7 +302,7 @@ def render_emotional(text: str, tts: Any, voice_name: str = "",
         if accent_key:
             res["accent"] = accent_key
             # speak() reports which opts the backend took natively,
-            # so here — unlike the perform() tiers — we can say
+            # so here — like the perform() tiers — we can say
             # whether the accent hint was honored or dropped.
             res["native_language"] = "language" in (
                 base.get("native_opts") or [])
