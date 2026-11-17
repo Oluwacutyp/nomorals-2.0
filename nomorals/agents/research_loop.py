@@ -18,8 +18,11 @@ beating on their own:
        hours). A gated-out tick records a skipped run and defers — it
        never burns network/model budget against the owner's wishes.
     2. Pick topics: owner seeds (kv ``research_loop.topics``) plus KG
-       follow-ups (contradicted claims that need fresh evidence), with
-       anti-repeat (no topic researched in the last 3 runs).
+       follow-ups (contradicted claims that need fresh evidence) plus
+       topic-engine suggestions (open questions, KG staleness, world
+       signals, work-generated questions), ranked by the staleness
+       curve — a topic covered recently ranks last, never excluded,
+       so the loop can never starve on an empty pool.
     3. Run each topic through ``ResearchPipeline.run`` (swarm ->
        claims -> KG promotion -> digest -> upgrade tickets).
     4. File every qualifying ticket into the upgrade queue via
@@ -40,6 +43,7 @@ system.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import time
@@ -51,6 +55,7 @@ from ..storage.kv import KVStore
 from .failures import record_failure
 from .features import feature_enabled
 from .notifier import Notifier, _in_quiet_hours_now
+from .topic_engine import TopicEngine, staleness_eligibility, topic_ages
 
 _log = get_logger(__name__)
 
@@ -78,8 +83,11 @@ RESEARCH_LOOP_JOB = "research loop"
 #: kv_store key holding the owner's topic list (JSON).
 _TOPICS_KEY = "research_loop.topics"
 
-#: Never re-research a topic that appeared in the last this many runs.
-_ANTI_REPEAT_RUNS = 3
+#: History window (runs) for the recent-topics read. The old
+#: last-3-runs anti-repeat WALL is gone (owner order 2026-10-21, curve
+#: built 2026-11-17): this window now only bounds how far back the
+#: staleness curve looks, it excludes nothing.
+_RECENT_RUNS_WINDOW = 3
 
 #: Bounded per tick so one cycle can't eat the network budget.
 _MAX_TOPICS_PER_TICK = 2
@@ -269,8 +277,10 @@ def _contradicted_topics(context: Any, limit: int = 4) -> list[str]:
     return out
 
 
-def _recent_topics(context: Any, runs: int = _ANTI_REPEAT_RUNS) -> set[str]:
-    """Topics covered by the last ``runs`` cycles (anti-repeat)."""
+def _recent_topics(context: Any, runs: int = _RECENT_RUNS_WINDOW) -> set[str]:
+    """Topics covered by the last ``runs`` cycles (recent history for
+    the staleness curve — a read, not a gate: nothing here excludes a
+    topic from being picked again)."""
     db = getattr(context, "db", None)
     if db is None:
         return set()
@@ -292,16 +302,40 @@ def _recent_topics(context: Any, runs: int = _ANTI_REPEAT_RUNS) -> set[str]:
 
 def pick_topics(context: Any, limit: int = _MAX_TOPICS_PER_TICK) -> list[str]:
     """Rotate topics: owner seeds first, then KG contradicted-follow-ups,
-    skipping anything covered in the last ``_ANTI_REPEAT_RUNS`` cycles."""
-    recent = _recent_topics(context)
+    then topic-engine suggestions — ranked by the staleness curve, not
+    a wall. A topic covered recently ranks last (its eligibility
+    decays with age, floor 0.15, fully eligible again after 21 days)
+    but is never excluded: when the pool is thin the loop re-researches
+    the least-stale topic instead of skipping with "no fresh topics".
+    The engine is fail-soft — a dead engine leaves owner seeds +
+    contradicted follow-ups untouched."""
+    now = time.time()
+    try:
+        ages = topic_ages(context, now=now)
+    except Exception:  # noqa: BLE001 - curve is advisory, never a gate
+        ages = {}
     candidates: list[str] = []
     for topic in owner_topics(context) + _contradicted_topics(context):
         key = topic.strip().lower()
-        if key and key not in recent and key not in candidates:
+        if key and key not in candidates:
             candidates.append(key)
-        if len(candidates) >= limit:
-            break
-    return candidates
+    try:
+        engine = TopicEngine(context)
+        for topic in engine.suggest(limit=limit, now=now):
+            key = topic.strip().lower()
+            if key and key not in candidates:
+                candidates.append(key)
+    except Exception:  # noqa: BLE001 - engine failure never starves the loop
+        engine = None
+    ranked = sorted(
+        candidates,
+        key=lambda t: -staleness_eligibility(ages.get(t)))
+    picked = ranked[:limit]
+    if engine is not None:
+        # Bookkeeping, not the mission: a failed note never blocks a pick.
+        with contextlib.suppress(Exception):
+            engine.note_picked(picked, now=now)
+    return picked
 
 
 # ── cross-cycle proposal dedupe ────────────────────────────────────────────
@@ -798,6 +832,10 @@ def status(context: Any) -> dict[str, Any]:
             UpgradeQueue(context).list(status="proposed"))
     except Exception as exc:  # noqa: BLE001
         out["errors"]["upgrade_queue"] = f"{type(exc).__name__}: {exc}"
+    try:
+        out["topic_engine"] = TopicEngine(context).stats()
+    except Exception as exc:  # noqa: BLE001
+        out["errors"]["topic_engine"] = f"{type(exc).__name__}: {exc}"
     out["topics"] = owner_topics(context)
     out["signals"] = usefulness_signals(context)
     return out
@@ -857,12 +895,12 @@ def register(registry: Any) -> None:
             "durable job. A tick runs swarm -> digest -> upgrade-queue "
             "proposals (owner approve/deny gate — nothing is auto-applied). "
             "Actions: tick | run | status | ensure | enable | disable | "
-            "topics | set_topics."
+            "topics | set_topics | suggest."
         ),
         capability=Capability.NET_OUT,
         parameters={
             "action": "str — tick | run | status | ensure | enable | disable "
-                      "| topics | set_topics (default status)",
+                      "| topics | set_topics | suggest (default status)",
             "topic": "str (optional) — single topic for action=run",
             "topics": "list (optional) — topic list for action=set_topics",
             "max_topics": "int (optional, default 2) — topics per cycle",
@@ -880,6 +918,9 @@ def register(registry: Any) -> None:
             return {"ok": True, **status(context)}
         if verb == "topics":
             return {"ok": True, "topics": owner_topics(context)}
+        if verb == "suggest":
+            return {"ok": True, "topics": TopicEngine(context).suggest(
+                limit=max_topics or _MAX_TOPICS_PER_TICK)}
         if verb == "set_topics":
             if isinstance(topics, str):
                 topics = [t.strip() for t in topics.split(",") if t.strip()]

@@ -10,8 +10,9 @@ Covers research_loop.py:
     fully-enabled context through. Reuses the existing settings only.
  4. owner_topics falls back to the built-in seeds; set_owner_topics
     persists and validates.
- 5. pick_topics skips topics covered in recent runs (anti-repeat) and
-    surfaces KG contradicted-claim follow-ups.
+ 5. pick_topics ranks topics by the staleness curve (a topic covered
+    recently ranks last, never excluded) and surfaces KG
+    contradicted-claim follow-ups plus topic-engine suggestions.
  6. ResearchLoop.tick defers cleanly (recorded, never raises) when gated;
     with a fake pipeline it runs the full cycle — findings counted,
     tickets filed into the upgrade queue, owner notified, run recorded.
@@ -179,15 +180,16 @@ class TopicsTests(unittest.TestCase):
             rl.set_owner_topics(ctx, ["  ", ""])
 
     def test_anti_repeat(self):
+        # Staleness curve, not a wall (owner order 2026-10-21, built
+        # 2026-11-17): a topic covered 10s ago ranks LAST, never
+        # excluded — the loop can never starve on an empty pool.
         ctx = _ctx()
         rl.set_owner_topics(ctx, ["alpha", "beta", "gamma"])
         rl.record_run(ctx, {"started_at": time.time() - 10,
                             "finished_at": time.time(),
                             "topics": ["alpha"]})
         picked = rl.pick_topics(ctx, limit=3)
-        self.assertNotIn("alpha", picked)
-        self.assertIn("beta", picked)
-        self.assertIn("gamma", picked)
+        self.assertEqual(picked, ["beta", "gamma", "alpha"])
 
     def test_contradicted_kg_followups(self):
         import json
