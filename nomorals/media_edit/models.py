@@ -150,7 +150,7 @@ IMAGE_MODELS: dict[str, dict[str, Any]] = {
         "steps": None,
     },
     "sdxl-base": {
-        "license": "CreativeML Open RAIL-M",
+        "license": "CreativeML Open RAIL++-M",
         "license_note": "broad LoRA ecosystem, modest VRAM",
         "public_ok": True,
         "vram_gb": 8,

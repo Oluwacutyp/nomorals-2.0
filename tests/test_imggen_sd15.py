@@ -136,15 +136,15 @@ def test_registry_classifies_sd15_ldm(model_roots):
     assert e["bytes"] > 0
 
 
-def test_registry_classifies_sdxl_listed_not_loadable(model_roots):
+def test_registry_classifies_sdxl_ldm_loadable(model_roots):
     from nomorals.media.imggen.registry import list_models
 
     ckpt, _home = model_roots
     _write_safetensors(ckpt / "sdxl-base.safetensors", SDXL_KEYS)
     (e,) = list_models()
     assert e["model_class"] == "sdxl"
-    assert e["loadable"] is False
-    assert "SDXL" in e["loadable_reason"]
+    assert e["loadable"] is True
+    assert e["loadable_reason"] == ""
 
 
 def test_registry_classifies_flux_variants(model_roots):
@@ -223,7 +223,7 @@ def test_registry_resolve_by_path_outside_roots(model_roots, tmp_path):
     _write_safetensors(elsewhere, SDXL_KEYS)
     e = resolve(str(elsewhere))
     assert e is not None
-    assert e["model_class"] == "sdxl" and e["loadable"] is False
+    assert e["model_class"] == "sdxl" and e["loadable"] is True
 
 
 def test_registry_resolve_bad_header(model_roots, tmp_path):
@@ -869,15 +869,50 @@ def test_studio_default_picks_sd15_when_only_choice(
     assert isinstance(studio.pipeline(), sdcompat.SD15StudioAdapter)
 
 
+class _RecordingSDXL:
+    """Duck-typed SDXLPipeline stand-in for Studio dispatch tests."""
+
+    def __init__(self):
+        self.device = "cpu"
+        self.tokenizer_mode = "hashing-fallback"
+        self.warnings = ["tokenizer: hashing fallback active — test"]
+        self.calls = []
+
+    def generate(self, prompt, **kwargs):
+        from PIL import Image
+
+        self.calls.append((prompt, kwargs))
+        return [Image.new("RGB", (kwargs.get("width", 64),
+                                  kwargs.get("height", 64)))]
+
+
 @needs_torch
-def test_studio_sdxl_selection_is_honest_error(model_roots):
+def test_studio_dispatches_sdxl_through_adapter(
+        model_roots, monkeypatch, tmp_path):
+    from nomorals.media.imggen import sdxl
     from nomorals.media.imggen.studio import Studio, StudioConfig
 
     ckpt, _home = model_roots
     _write_safetensors(ckpt / "myxl.safetensors", SDXL_KEYS)
+    fake = _RecordingSDXL()
+    monkeypatch.setattr(
+        sdxl.SDXLPipeline, "from_safetensors",
+        classmethod(lambda cls, path, device="": fake))
     studio = Studio(StudioConfig(checkpoint="myxl"))
-    with pytest.raises(ImgGenError, match="SDXL"):
-        studio.pipeline()
+    pipe = studio.pipeline()
+    assert isinstance(pipe, sdxl.SDXLStudioAdapter)
+    out = tmp_path / "out.png"
+    paths = studio.generate("an xl cat", steps=3, width=64, height=64,
+                            seed=5, save_to=str(out))
+    assert paths == [str(out)]
+    assert out.exists()
+    prompt, kwargs = fake.calls[0]
+    assert prompt == "an xl cat"
+    assert kwargs["steps"] == 3 and kwargs["seed"] == 5
+    assert kwargs["width"] == 64 and kwargs["height"] == 64
+    assert studio.last_warnings == fake.warnings
+    sidecar = (tmp_path / "out.png.txt").read_text()
+    assert "warning: tokenizer" in sidecar
 
 
 @needs_torch
@@ -936,16 +971,15 @@ def test_native_backend_ready_with_sd15(model_roots):
 
 
 @needs_torch
-def test_native_backend_not_ready_with_only_sdxl(model_roots):
+def test_native_backend_ready_with_only_sdxl(model_roots):
     from nomorals.media_edit.generate import NativeBackend
 
     ckpt, _home = model_roots
     _write_safetensors(ckpt / "myxl.safetensors", SDXL_KEYS)
-    assert NativeBackend.available() is False
+    assert NativeBackend.available() is True
     ok, reason = NativeBackend.readiness()
-    assert ok is False
-    assert "checkpoint" in reason.lower()
-    assert "SDXL" in reason
+    assert ok is True
+    assert "sdxl" in reason and "myxl" in reason
 
 
 # ---------------------------------------------------------------------------
@@ -1031,7 +1065,7 @@ def test_imggen_checkpoints_lists_registry(model_roots):
     out = _chat_mixin()._control_imggen("checkpoints")
     assert "mysd" in out and "[sd15]" in out and "loadable" in out
     assert "myxl" in out and "[sdxl]" in out
-    assert "not loadable" in out and "SDXL" in out
+    assert "not loadable" not in out
 
 
 # ---------------------------------------------------------------------------

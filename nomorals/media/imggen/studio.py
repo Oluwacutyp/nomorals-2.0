@@ -85,9 +85,9 @@ class Studio:
 
         Accepts a native run name, a registry model name, or a path.
         "" (default) picks the registry's default loadable model —
-        Devon's native class first, then SD1.5. A registered but
-        not-yet-loadable model (SDXL/FLUX in this pass) raises with
-        its registry reason instead of vanishing.
+        Devon's native class first, then SD1.5, then SDXL. A
+        registered but not-yet-loadable model (FLUX in this pass)
+        raises with its registry reason instead of vanishing.
         """
         from .registry import list_models, resolve
 
@@ -120,14 +120,15 @@ class Studio:
             "no native checkpoint yet — train one with "
             "`nm imggen train --data <folder>` (needs torch; "
             "a tiny 64px model trains on CPU in minutes), or drop an "
-            "SD1.5 .safetensors into the imggen checkpoint dir")
+            "SD1.5 or SDXL .safetensors into the imggen checkpoint dir")
 
     def pipeline(self):
         """The resolved pipeline, built once and cached.
 
         Native entries load through the original native loader;
         SD1.5 entries load through Devon's own SD implementation
-        behind the Studio-protocol adapter.
+        behind the Studio-protocol adapter; SDXL entries load
+        through the SDXL loader the same way.
         """
         from .pipeline import load_native_checkpoint
 
@@ -147,7 +148,13 @@ class Studio:
                 self._pipeline = SD15StudioAdapter(
                     SD15Pipeline.from_safetensors(
                         entry["path"], device=self.config.device))
-            else:  # registry said loadable; classes are native|sd15
+            elif entry["model_class"] == "sdxl":
+                from .sdxl import SDXLPipeline, SDXLStudioAdapter
+
+                self._pipeline = SDXLStudioAdapter(
+                    SDXLPipeline.from_safetensors(
+                        entry["path"], device=self.config.device))
+            else:  # registry said loadable; classes are native|sd15|sdxl
                 raise ImgGenError(
                     f"registry marks {entry['name']} "
                     f"({entry['model_class']}) loadable but Studio has "

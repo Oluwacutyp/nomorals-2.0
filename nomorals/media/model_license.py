@@ -127,6 +127,13 @@ MODEL_LICENSES: dict[str, ModelLicense] = {
         "outputs are otherwise the user's to ship.",
         "image generation (SD1.5 family, local weights via imggen)",
         "https://github.com/CompVis/stable-diffusion/blob/main/LICENSE"),
+    "sdxl": ModelLicense(
+        "sdxl", "CreativeML Open RAIL++-M", True,
+        "Use-based restrictions apply (the RAIL++-M conditions travel "
+        "with the weights — no illegal/harmful use categories); "
+        "outputs are otherwise the user's to ship.",
+        "image generation (SDXL family, local weights via imggen)",
+        "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0"),
     "wan": ModelLicense(
         "wan", "Apache-2.0", True,
         "Apache-2.0 — output is yours.",

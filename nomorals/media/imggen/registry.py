@@ -19,10 +19,12 @@ length-prefixed JSON block; reading it loads no tensors):
 - anything else → ``unknown``
 
 Classification is metadata; *loadability* is a separate, honest flag.
-In this pass only Devon's native checkpoints and LDM-format SD1.5
-safetensors can actually load — SDXL/FLUX entries are listed with
-``loadable=False`` and a reason naming the class and the missing
-loader, never silently omitted and never pretended runnable.
+Devon's native checkpoints and LDM-format SD1.5 AND SDXL safetensors
+can actually load — FLUX entries are listed with ``loadable=False``
+and a reason naming the class and the missing loader, never silently
+omitted and never pretended runnable. A diffusers-layout checkpoint
+of either SD class is likewise listed not-loadable with a reason
+naming the one-time convert.
 """
 
 from __future__ import annotations
@@ -44,8 +46,6 @@ _CLASS_ORDER = {"native": 0, "sd15": 1, "sdxl": 2, "flux": 3,
                 "unknown": 4}
 
 _NOT_LOADABLE_REASONS = {
-    "sdxl": "SDXL checkpoints are registered but the SDXL loader "
-            "arrives in a later pass (A2)",
     "flux": "FLUX checkpoints are registered but the FLUX loader "
             "arrives in a later pass (B)",
     "unknown": "unrecognized safetensors layout — cannot classify "
@@ -113,11 +113,15 @@ def _entry_for_safetensors(path: str) -> dict:
                                "from this file",
         }
     model_class, fmt = _classify_keys(keys)
-    loadable = model_class == "sd15" and fmt == _FORMAT_LDM
+    loadable = model_class in ("sd15", "sdxl") and fmt == _FORMAT_LDM
     if loadable:
         reason = ""
     elif model_class == "sd15":
         reason = ("SD1.5 checkpoint in diffusers layout — the loader "
+                  "speaks compvis LDM format; convert the checkpoint "
+                  "to a single LDM .safetensors first")
+    elif model_class == "sdxl":
+        reason = ("SDXL checkpoint in diffusers layout — the loader "
                   "speaks compvis LDM format; convert the checkpoint "
                   "to a single LDM .safetensors first")
     else:
@@ -171,9 +175,10 @@ def list_models() -> list[dict]:
     """All installed image models: native runs + safetensors entries.
 
     Sorted loadable-first (Devon's native class before SD1.5, then
-    the registered-but-not-yet-loadable classes), newest first within
-    a class. Every entry: ``{name, path, model_class, format, bytes,
-    loadable, loadable_reason}`` (native entries also carry ``run``).
+    SDXL, then the registered-but-not-yet-loadable classes), newest
+    first within a class. Every entry: ``{name, path, model_class,
+    format, bytes, loadable, loadable_reason}`` (native entries also
+    carry ``run``).
     """
     from .pipeline import list_native_checkpoints
 

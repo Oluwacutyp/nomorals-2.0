@@ -11,8 +11,13 @@ What this unlocks: any SD1.5 checkpoint becomes a Devon pipeline
 backend with zero diffusers dependency. LoRA adapters in diffusers
 format map onto :mod:`.lora` the same way.
 
-Honest scope: UNet + CLIP-L + VAE only (the SD1.5 trio). SDXL has a
-different UNet and two text encoders — not covered; the error says so.
+Honest scope: the SD1.5 trio (UNet + CLIP-L + VAE) and the building
+blocks SDXL reuses unchanged — the CLIP encoder family (L and bigG
+are the same attention geometry at different widths), the VAE layout
+(SDXL only changes the scale 0.18215 → 0.13025), the resnet /
+attention blocks, and the key mapper. The SDXL-specific pieces —
+its bigger UNet, the dual-encoder conditioner, the label_emb
+micro-conditioning — live in :mod:`.sdxl`, which drives these pieces.
 """
 
 from __future__ import annotations
@@ -215,7 +220,7 @@ class CrossAttnDownBlock(nn.Module):
     """Resnet + transformer pairs (SD down blocks 0–2)."""
 
     def __init__(self, in_ch, out_ch, temb_ch, heads,
-                 layers=2, context_dim=768, down=True):
+                 layers=2, context_dim=768, down=True, depth: int = 1):
         super().__init__()
         self.resnets = nn.ModuleList()
         self.transformers = nn.ModuleList()
@@ -223,7 +228,7 @@ class CrossAttnDownBlock(nn.Module):
             ic = in_ch if i == 0 else out_ch
             self.resnets.append(ResnetBlock(ic, out_ch, temb_ch))
             self.transformers.append(
-                SpatialTransformer(out_ch, heads, 1,
+                SpatialTransformer(out_ch, heads, depth,
                                    context_dim))
         self.downsampler = (nn.Conv2d(out_ch, out_ch, 3, stride=2,
                                       padding=1) if down else None)
@@ -240,7 +245,8 @@ class CrossAttnDownBlock(nn.Module):
 
 class CrossAttnUpBlock(nn.Module):
     def __init__(self, in_ch, out_ch, temb_ch, heads,
-                 layers=3, context_dim=768, upsample: bool = True):
+                 layers=3, context_dim=768, upsample: bool = True,
+                 depth: int = 1):
         super().__init__()
         self.upsample = upsample
         self.resnets = nn.ModuleList()
@@ -249,7 +255,7 @@ class CrossAttnUpBlock(nn.Module):
             ic = in_ch if i == 0 else out_ch
             self.resnets.append(ResnetBlock(ic, out_ch, temb_ch))
             self.transformers.append(
-                SpatialTransformer(out_ch, heads, 1,
+                SpatialTransformer(out_ch, heads, depth,
                                    context_dim))
         # The conv is the LDM upsample conv of this group's last
         # block (output_blocks 2/5/8 ".2.conv"); the final group
@@ -265,6 +271,35 @@ class CrossAttnUpBlock(nn.Module):
         for r, t in zip(self.resnets, self.transformers):
             x = r(x, temb)
             x = t(x, context)
+        if self.upsample:
+            x = F.interpolate(x, scale_factor=2.0, mode="nearest")
+        return self.upsampler(x)
+
+
+class UpBlock(nn.Module):
+    """Resnets only (the last SDXL up block).
+
+    Mirrors DownBlock: SDXL's 320ch up level has no transformer
+    (attention_resolutions [4, 2] excludes the full-resolution
+    level), so there is no SpatialTransformer to build — and no
+    upsample conv either (this is the final level, so the latent
+    stays at full resolution).
+    """
+
+    def __init__(self, in_ch, out_ch, temb_ch, layers=3,
+                 upsample: bool = False):
+        super().__init__()
+        self.upsample = upsample
+        self.resnets = nn.ModuleList(
+            ResnetBlock(in_ch if i == 0 else out_ch, out_ch, temb_ch)
+            for i in range(layers))
+        self.upsampler = (nn.Conv2d(out_ch, out_ch, 3, padding=1)
+                          if upsample else nn.Identity())
+
+    def forward(self, x, skip, temb):
+        x = torch.cat([x, skip], dim=1)
+        for r in self.resnets:
+            x = r(x, temb)
         if self.upsample:
             x = F.interpolate(x, scale_factor=2.0, mode="nearest")
         return self.upsampler(x)
@@ -347,8 +382,13 @@ class SDUNet(nn.Module):
 # ---------------------------------------------------------------------------
 
 class CLIPAttention(nn.Module):
-    def __init__(self, dim=768, heads=12):
+    def __init__(self, dim=768, heads=None):
         super().__init__()
+        # heads defaults to dim // 64 (12 for ViT-L/14's 768, 20 for
+        # ViT-bigG/14's 1280) — the same attention geometry both
+        # encoders share; SDXL's bigG reuses this class unchanged.
+        if heads is None:
+            heads = dim // 64
         self.heads = heads
         self.scale = (dim // heads) ** -0.5
         self.q_proj = nn.Linear(dim, dim)
@@ -380,8 +420,9 @@ class CLIPLayer(nn.Module):
         self.layer_norm1 = nn.LayerNorm(dim)
         self.self_attn = CLIPAttention(dim)
         self.layer_norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(nn.Linear(dim, 3072), nn.GELU(),
-                                 nn.Linear(3072, dim))
+        # MLP is 4× the width (3072 for ViT-L/14, 5120 for bigG).
+        self.mlp = nn.Sequential(nn.Linear(dim, 4 * dim), nn.GELU(),
+                                 nn.Linear(4 * dim, dim))
 
     def forward(self, x):
         x = x + self.self_attn(self.layer_norm1(x))
@@ -436,14 +477,26 @@ class CLIPTextEncoder(nn.Module):
         ids += [49407] * (max_tokens - len(ids))
         return ids[:max_tokens]
 
-    def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+    def forward(self, input_ids: torch.Tensor,
+                return_hidden: bool = False):
+        """Hidden states (default: final-LN output only).
+
+        With ``return_hidden`` also returns the per-layer outputs
+        (before the final layer norm) — SDXL conditions on the
+        *penultimate* layer's output, not the final one.
+        """
         x = self.token_embedding(input_ids)
         pos = torch.arange(self.max_tokens,
                            device=input_ids.device).unsqueeze(0)
         x = x + self.position_embedding(pos)
+        hidden = []
         for layer in self.layers:
             x = layer(x)
-        return self.final_layer_norm(x)
+            hidden.append(x)
+        out = self.final_layer_norm(x)
+        if return_hidden:
+            return out, hidden
+        return out
 
     def encode(self, prompts: list[str]) -> torch.Tensor:
         device = self.token_embedding.weight.device
@@ -455,6 +508,35 @@ class CLIPTextEncoder(nn.Module):
                     for p in prompts]
         ids = torch.tensor(rows, dtype=torch.long, device=device)
         return self(ids)
+
+    def encode_states(self, prompts: list[str]
+                      ) -> tuple[torch.Tensor, torch.Tensor]:
+        """(penultimate hidden states, pooled output) for one encoder.
+
+        Penultimate = the second-to-last layer's output, before the
+        final layer norm — the representation SDXL conditions on.
+        Pooled = the final-LN output at the EOT token, projected
+        through ``self.text_projection`` when attached (CLIP-G);
+        without a projection the raw EOT features are returned and
+        the caller decides (CLIP-L's pooled output is never used).
+        """
+        device = self.token_embedding.weight.device
+        if self.tokenizer is not None:
+            rows = [self.tokenizer.encode(p, self.max_tokens)
+                    for p in prompts]
+        else:
+            rows = [self._hash_tokenize(p, 49408, self.max_tokens)
+                    for p in prompts]
+        ids = torch.tensor(rows, dtype=torch.long, device=device)
+        final, hidden = self(ids, return_hidden=True)
+        penultimate = hidden[-2]
+        eot_pos = ids.argmax(dim=-1)
+        pooled = final[torch.arange(ids.shape[0], device=device),
+                       eot_pos]
+        proj = getattr(self, "text_projection", None)
+        if proj is not None:
+            pooled = proj(pooled)
+        return penultimate, pooled
 
 
 # ---------------------------------------------------------------------------
@@ -535,9 +617,13 @@ class AutoencoderKL(nn.Module):
     levels together and could never have held the real weights.
     """
 
-    def __init__(self, latent_ch: int = 4) -> None:
+    def __init__(self, latent_ch: int = 4, scale: float = 0.18215
+                 ) -> None:
         super().__init__()
         self.latent_ch = latent_ch
+        #: Latent scale factor: 0.18215 for SD1.5, 0.13025 for SDXL
+        #: (the VAEs share the layout; only the scale differs).
+        self.scale = scale
         # Encoder (LDM down.0..3): 3 → 128 → 256 → 512 → 512.
         self.enc_in = nn.Conv2d(3, 128, 3, padding=1)
         self.enc_b1 = nn.Sequential(ResnetVAE(128, 128),
@@ -592,10 +678,10 @@ class AutoencoderKL(nn.Module):
         h = self.enc_b4(h)
         h = self.enc_mid(h)
         mean, logvar = self.quant_conv(h).chunk(2, dim=1)
-        return mean * 0.18215
+        return mean * self.scale
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.post_quant(z / 0.18215)
+        h = self.post_quant(z / self.scale)
         h = self.dec_mid(h)
         h = self.dec_b1(h)
         h = self.dec_b2(h)
@@ -787,15 +873,20 @@ def _map_ldm_unet(state: dict[str, torch.Tensor]):
     return out, mapper.consumed
 
 
-def _map_transformer(state, prefix: str, out_prefix: str, put) -> None:
-    """Map one LDM transformer block → our SpatialTransformer."""
+def _map_transformer(state, prefix: str, out_prefix: str, put,
+                     depth: int = 1) -> None:
+    """Map one LDM transformer block → our SpatialTransformer.
+
+    ``depth`` is the transformer-block count (1 for SD1.5 everywhere;
+    1/2/10 across SDXL's levels).
+    """
     put(prefix + "norm.weight", out_prefix + "norm.weight")
     put(prefix + "norm.bias", out_prefix + "norm.bias")
     put(prefix + "proj_in.weight", out_prefix + "proj_in.weight")
     put(prefix + "proj_in.bias", out_prefix + "proj_in.bias")
     put(prefix + "proj_out.weight", out_prefix + "proj_out.weight")
     put(prefix + "proj_out.bias", out_prefix + "proj_out.bias")
-    for bi in range(1):  # SD1.5 depth=1 per transformer
+    for bi in range(depth):  # SD1.5 depth=1 per transformer
         bp = f"{prefix}transformer_blocks.{bi}."
         bo = f"{out_prefix}blocks.{bi}."
         put(bp + "norm1.weight", bo + "norm1.weight")
@@ -932,21 +1023,26 @@ class SD15Pipeline:
         return [Image.fromarray(arr)]
 
 
-#: CLIP keys present in real checkpoints that Devon's encoder
-#: legitimately has no target for: SD conditions on the transformer's
-#: final-LN sequence output, never on the projected pooled vector,
-#: so text_projection is unused *by architecture* — named here so the
-#: completeness check below can account for it explicitly instead of
-#: dropping it silently.
-_CLIP_KNOWN_UNUSED = {"cond_stage_model.transformer.text_projection"}
-
-
-def _load_ldm_clip(state: dict, enc: CLIPTextEncoder) -> None:
-    """Map cond_stage_model (OpenAI CLIP-L) keys → our encoder.
+def _load_ldm_clip(state: dict, enc: CLIPTextEncoder, *,
+                   root: str = "cond_stage_model.",
+                   layers: int = 12,
+                   map_projection: bool = False) -> None:
+    """Map OpenAI CLIP keys → our encoder.
 
     Complete or explicit: every target parameter must be filled and
-    every cond_stage_model key must be consumed (or named in
-    _CLIP_KNOWN_UNUSED); anything else is an ImgGenError.
+    every ``root`` key must be consumed (or named in
+    ``known_unused``); anything else is an ImgGenError.
+
+    ``root`` is the encoder's key root (``cond_stage_model.`` for
+    SD1.5, ``conditioner.embedders.{0,1}.model.`` for SDXL);
+    ``layers`` is the transformer depth (12 for CLIP-L, 32 for
+    CLIP-G). ``map_projection`` loads the ``text_projection`` weight
+    into ``enc.text_projection`` (CLIP-G's pooled output); without
+    it the projection key is known-unused — SD conditions on the
+    transformer's final-LN sequence output, never on the projected
+    pooled vector, so the projection is unused *by architecture* for
+    CLIP-L and named here so the completeness check can account for
+    it explicitly instead of dropping it silently.
     """
     mapper = _KeyMapper(state)
     mapped = mapper.mapped
@@ -954,10 +1050,10 @@ def _load_ldm_clip(state: dict, enc: CLIPTextEncoder) -> None:
     def put(ldm, ours):
         mapper.put(ldm, ours)
 
-    p = "cond_stage_model.transformer."
+    p = root + "transformer."
     put(p + "token_embedding.weight", "token_embedding.weight")
     put(p + "positional_embedding", "position_embedding.weight")
-    for i in range(12):
+    for i in range(layers):
         lp, op = f"{p}resblocks.{i}.", f"layers.{i}."
         put(lp + "ln_1.weight", op + "layer_norm1.weight")
         put(lp + "ln_1.bias", op + "layer_norm1.bias")
@@ -984,6 +1080,20 @@ def _load_ldm_clip(state: dict, enc: CLIPTextEncoder) -> None:
         put(lp + "mlp.c_fc.bias", op + "mlp.0.bias")
         put(lp + "mlp.c_proj.weight", op + "mlp.2.weight")
         put(lp + "mlp.c_proj.bias", op + "mlp.2.bias")
+    if map_projection:
+        if getattr(enc, "text_projection", None) is None:
+            raise ImgGenError(
+                "CLIP text encoder: map_projection asked but the "
+                "encoder has no text_projection module attached")
+        # The projection key carries a .weight suffix in SDXL
+        # checkpoints; accept the bare form too, never assume.
+        put(root + "text_projection.weight", "text_projection.weight")
+        put(root + "text_projection", "text_projection.weight")
+        if "text_projection.weight" not in mapped:
+            raise ImgGenError(
+                f"CLIP text encoder: no {root}text_projection weight "
+                "in this checkpoint — the pooled output has no "
+                "projection")
     put(p + "ln_final.weight", "final_layer_norm.weight")
     put(p + "ln_final.bias", "final_layer_norm.bias")
     missing, _ = enc.load_state_dict(mapped, strict=False)
@@ -991,8 +1101,10 @@ def _load_ldm_clip(state: dict, enc: CLIPTextEncoder) -> None:
         raise ImgGenError(
             f"CLIP weights incomplete: {len(missing)} missing "
             f"(e.g. {missing[0]})")
-    _check_section(state, "cond_stage_model.", mapper.consumed,
-                   "CLIP text encoder", known_unused=_CLIP_KNOWN_UNUSED)
+    known_unused = set() if map_projection else {
+        root + "text_projection", root + "text_projection.weight"}
+    _check_section(state, root, mapper.consumed,
+                   "CLIP text encoder", known_unused=known_unused)
 
 
 def _load_ldm_vae(state: dict, vae: AutoencoderKL) -> None:

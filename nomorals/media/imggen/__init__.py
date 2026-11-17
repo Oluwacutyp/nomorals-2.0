@@ -13,6 +13,9 @@ Layout:
 - :mod:`.pipeline` — text-to-image inference (requires torch)
 - :mod:`.sdcompat` — Devon's own SD1.5 implementation (UNet/CLIP/VAE)
   loading open .safetensors weights, plus the Studio adapter
+- :mod:`.sdxl` — Devon's own SDXL implementation (bigger UNet, dual
+  CLIP encoders, label_emb micro-conditioning) loading open
+  .safetensors weights, plus the Studio adapter
 - :mod:`.registry` — discovery/classification of every installed
   image model (native runs + safetensors), header inspection only
 - :mod:`.tokenizers` — the real CLIP BPE tokenizer (vocab data is
