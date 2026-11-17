@@ -57,6 +57,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "evidence": [],
     "consensus": [],
     "papergraph": [],
+    "scholar": [],
     "soundtrack": [],
     "soundscape": [],
     "flight": [],
@@ -3726,6 +3727,28 @@ def _parser() -> argparse.ArgumentParser:
                               help="deeper pool: 100 seed references, 50 citers, 60 nodes")
     papergraph_p.add_argument("--json", action="store_true",
                               help="Output as JSON")
+
+    scholar_p = sub.add_parser(
+        "scholar", aliases=CLI_ALIASES["scholar"],
+        help="the full Semantic Scholar record of a paper — TLDR, influential citations, open-access PDF",
+        description=("nm scholar <title or DOI>\\n"
+                     "nm scholar list\\n"
+                     "nm scholar show <id>\\n"
+                     "nm scholar watch <topic>\\n"
+                     "nm scholar feeds\\n"
+                     "nm scholar unwatch <topic>\\n"
+                     "The paper-record organ: the full Semantic Scholar "
+                     "record — authors, venue, year, citation counts, the "
+                     "influential citations named with their intents, a "
+                     "one-line TLDR, fields of study, and the open-access "
+                     "PDF when one exists. A paper with no record is "
+                     "refused honestly, never invented."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    scholar_p.add_argument("scholar_query", nargs="*", default=[],
+                           help="title or DOI, or list|show|watch|feeds|unwatch …")
+    scholar_p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
 
     soundscape_p = sub.add_parser(
         "soundscape", aliases=CLI_ALIASES["soundscape"],

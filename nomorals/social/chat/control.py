@@ -206,7 +206,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: pins the two together — a wave that adds a kind here must add its
 #: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "map-route", "headline", "teardown",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
@@ -431,6 +431,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "evidence": (1, None),  # /evidence <research question> | list | show <id> | table <id> — research answers from real papers (Elicit core)
     "consensus": (1, None),  # /consensus <yes/no research question> [deep] | list | show <id> | meter <id> — what the literature agrees on (Consensus meter)
     "papergraph": (1, None),  # /papergraph <title or DOI> [deep] | list | show <id> | graph <id> — the paper graph around a paper (Connected Papers core)
+    "scholar": (1, None),  # /scholar <title or DOI> | list | show <id> | watch <topic> | feeds | unwatch <topic> — the full Semantic Scholar record of a paper
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
     "searchleads": (0, 0),   # legit paid-task platform report
     "money": (0, None),      # money opportunities hunter: scan|list|new|profile
@@ -2467,6 +2468,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/papergraph <title or DOI> [deep] | list | show <id> | graph <id>",
                 "example": "/papergraph 10.1038/nature12373",
                 "related": "/evidence · /consensus"},
+    "scholar": {"what": "The full record of a paper from Semantic Scholar: authors, venue, year, citation counts, the influential citations named with their intents, a one-line TLDR (Semantic Scholar's own, or one generated locally from the abstract when the API carries none), fields of study, and the open-access PDF when one exists — or an honest 'no open-access PDF' when it does not. Topic feeds watch a subject and surface new papers on the daily tick. A paper with no record is refused honestly — nothing here is invented.",
+                "usage": "/scholar <title or DOI> | list | show <id> | watch <topic> | feeds | unwatch <topic>",
+                "example": "/scholar 10.1038/nature12373",
+                "related": "/evidence · /consensus · /papergraph"},
     "searchdeep": {"what": "deep multi-query research with synthesis (power mode).",
                    "usage": "/searchdeep <query>", "example": "/searchdeep eBPF rootkit detection",
                    "related": "/search /searchhist"},
@@ -4865,7 +4870,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "audit", "whois", "ports",
-                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph"]),
+                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar"]),
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
@@ -5150,7 +5155,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
-      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph"]),
+      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar"]),
     ("wisdom keeper — corpus · history · practice",
      ["wisdom", "wis"]),
     ("building for real — code & missions",
@@ -5349,6 +5354,7 @@ LIST_ONELINERS: dict[str, str] = {
     "evidence": "research answers from real papers — cited extraction table plus what agrees, disagrees and stays unanswered",
     "consensus": "what the literature agrees on — a quality-weighted stance meter over real papers, dissent named by name",
     "papergraph": "the paper graph around a paper — what it cites, what cites it, the clusters, what to read next",
+    "scholar": "the full record of a paper — authors, venue, TLDR, influential citations, open-access PDF",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",
     "books": "story reader + continuer: /books read <url|slug> | part <slug> | contents <slug> | export <slug> [pdf|epub|html] | continue <slug> [n] | sources",

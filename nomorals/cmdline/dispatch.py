@@ -20,6 +20,7 @@ from .commands.airports import _cmd_airports
 from .commands.compute import _cmd_compute
 from .commands.evidence import _cmd_evidence
 from .commands.consensus import _cmd_consensus
+from .commands.scholar import _cmd_scholar
 from .commands.paper_graph import _cmd_paper_graph
 from .commands.soundtrack import _cmd_soundtrack
 from .commands.soundscape import _cmd_soundscape
@@ -574,6 +575,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "compute": _CommandSpec(_cmd_compute),
     "evidence": _CommandSpec(_cmd_evidence),
     "consensus": _CommandSpec(_cmd_consensus),
+    "scholar": _CommandSpec(_cmd_scholar),
     "papergraph": _CommandSpec(_cmd_paper_graph),
     "soundtrack": _CommandSpec(_cmd_soundtrack),
     "soundscape": _CommandSpec(_cmd_soundscape),

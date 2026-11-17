@@ -282,7 +282,7 @@ class TestChatRegistration:
         assert "soundtrack" in CONTROL_COMMANDS
         assert CONTROL_COMMANDS["soundtrack"] == (1, None)
         assert "soundtrack" in PUBLIC_COMMANDS
-        assert len(PUBLIC_COMMANDS) == 273
+        assert len(PUBLIC_COMMANDS) == 274
         assert "soundtrack" in COMMAND_DETAILS
         assert "/soundtrack" in COMMAND_DETAILS["soundtrack"]["usage"]
         assert "soundtrack" in LIST_ONELINERS

@@ -3531,6 +3531,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("burn note job not registered: %s",
                                  exc)
+                # Research: the paper-feed tick (daily 08:00 —
+                # watched topics checked against Semantic Scholar
+                # search; new papers page the owner once each).
+                # Idempotent by name; a stale spec is replaced.
+                try:
+                    from ...research.paper_records import (
+                        ensure_paper_feed_job,
+                    )
+
+                    ensure_paper_feed_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("paper feed job not registered: %s",
+                                 exc)
                 # Social measurement spine (WS3 P1): posted rows get
                 # their real metrics refreshed every 6h, so posting
                 # windows and brief outcomes learn from measured data
@@ -8298,6 +8311,8 @@ class PartnerRuntime(
             return self._control_soundscape(command.tail, message)
         if kind == "papergraph":
             return self._control_papergraph(command.tail, message)
+        if kind == "scholar":
+            return self._control_scholar(command.tail)
         if kind == "burn":
             return self._control_burn(command.tail, message)
         if kind == "arena-research":
@@ -9805,6 +9820,8 @@ class PartnerRuntime(
             return self._control_consensus(command.tail or arg)
         if kind == "papergraph":
             return self._control_papergraph(command.tail or arg, message)
+        if kind == "scholar":
+            return self._control_scholar(command.tail or arg)
         if kind == "director":
             return self._control_director(command.tail or arg)
         if kind == "caption":

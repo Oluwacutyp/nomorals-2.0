@@ -5776,6 +5776,99 @@ class RuntimeMediaMixin:
         except Exception:  # noqa: BLE001 — diagram is additive only
             return
 
+    def _control_scholar(self, tail: str) -> str:
+        """The full Semantic Scholar record of a paper.
+
+        Public. /scholar <title or DOI> fetches the full record —
+        authors, venue, year, citation counts, the influential
+        citations named with their intents, a one-line TLDR
+        (Semantic Scholar's own, or one generated locally from the
+        abstract when the API carries none), fields of study, and
+        the open-access PDF when one exists. /scholar list shows
+        stored records; /scholar show <id> re-renders one;
+        /scholar watch <topic> | feeds | unwatch <topic> manage
+        the topic feeds the daily tick checks for new papers. A
+        paper with no record is refused honestly — nothing here is
+        invented. Never raises: bad input returns usage.
+        """
+        from ...research.paper_records import (
+            ensure_tldr,
+            fetch_influential_citations,
+            fetch_paper_record,
+            format_record_reply,
+            open_record_store,
+        )
+
+        tail = (tail or "").strip()
+        usage = ("usage: /scholar <title or DOI> | list | show <id> | "
+                 "watch <topic> | feeds | unwatch <topic>")
+        if not tail:
+            return usage
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — default home then
+                home = None
+            store = open_record_store(home)
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb in {"help", "--help"}:
+                return usage
+            if verb == "list":
+                rows = store.list()
+                if not rows:
+                    return ("no paper records yet — fetch one with "
+                            "/scholar <title or DOI>")
+                lines = ["paper records:"]
+                for row in rows[:10]:
+                    lines.append(f"  {row['paper_id']} — {row['title']} "
+                                 f"({row.get('year') or '?'})")
+                return "\n".join(lines)
+            if verb == "feeds":
+                feeds = store.feeds()
+                if not feeds:
+                    return ("no topic feeds watched — "
+                            "/scholar watch <topic>")
+                return "watched topics:\n" + "\n".join(
+                    f"  {topic}" for topic in feeds)
+            if verb == "watch":
+                if not rest:
+                    return "usage: /scholar watch <topic>"
+                store.watch(rest)
+                return (f"watching '{rest}' — new papers surface on "
+                        "the daily tick")
+            if verb == "unwatch":
+                if not rest:
+                    return "usage: /scholar unwatch <topic>"
+                if not store.unwatch(rest):
+                    return f"no feed watched for '{rest}'"
+                return f"stopped watching '{rest}'"
+            if verb == "show":
+                if not rest:
+                    return "usage: /scholar show <id>"
+                record = store.get(rest)
+                if record is None:
+                    return f"no stored record '{rest}'"
+                return format_record_reply({"ok": True, "record": record})
+            record, note = fetch_paper_record(tail)
+            if record is None:
+                return note
+            stored = store.get(record.paper_id) if record.paper_id else None
+            if stored is not None and stored.tldr:
+                record = stored
+            else:
+                record = ensure_tldr(record)
+                store.save(record)
+            if record.paper_id:
+                record.influential = fetch_influential_citations(
+                    record.paper_id)
+                store.save(record)
+            return format_record_reply({"ok": True, "record": record})
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"scholar failed: {exc}"
+
     def _control_soundscape(self, tail: str, message: Any = None) -> str:
         """Soundscape machine: compose, tune and play ambient sound.
 

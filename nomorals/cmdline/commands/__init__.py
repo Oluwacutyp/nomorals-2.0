@@ -9,6 +9,7 @@ from .airports import _cmd_airports
 from .flight import _cmd_flight
 from .evidence import _cmd_evidence
 from .consensus import _cmd_consensus
+from .scholar import _cmd_scholar
 from .paper_graph import _cmd_paper_graph
 from .soundtrack import _cmd_soundtrack
 from .soundscape import _cmd_soundscape
@@ -162,6 +163,7 @@ __all__ = [
     "_cmd_soundtrack",
     "_cmd_evidence",
     "_cmd_consensus",
+    "_cmd_scholar",
     "_cmd_paper_graph",
     "_cmd_soundscape",
     "_cmd_book",
