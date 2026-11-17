@@ -552,6 +552,193 @@ class RuntimeMetaMixin:
         except Exception:  # noqa: BLE001 - diagram is additive only
             return
 
+    def _scene_send_file(self, path: str, message: Any,
+                         caption: str) -> str | None:
+        """Send a rendered scene file back in this chat.
+
+        Returns ``None`` when the file went out, else the honest
+        reason it did not (the path is still named, so the owner can
+        open it from the box).
+        """
+        tools = getattr(self.context, "tools", None)
+        if tools is None:
+            return (f"rendered to {path}, but this session has no "
+                    "file-send tool.")
+        chat = message.chat
+        outcome = tools.call(
+            "file_send",
+            platform=str(getattr(chat, "platform", "") or ""),
+            chat_id=str(getattr(chat, "chat_id", "") or ""),
+            path=str(path),
+            caption=caption)
+        if not outcome.ok:
+            return (f"rendered to {path}, but sending it failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        return None
+
+    def _control_scene(self, tail: str, message: Any = None) -> str:
+        """The /scene reply: the interaction half of the visual
+        surface, in chat.
+
+        ``/scene point <x> <y> [label]`` flies the cursor to a
+        normalized 0..1 coordinate, leaves the marker, and sends the
+        scene PNG back. ``/scene tag <text with [POINT:...] tags>``
+        parses the tags out of the text (coordinates are 0..1 in
+        chat), places them, and sends the PNG. ``/scene page`` writes
+        the interactive live page — the flight visible on it — and
+        sends the HTML file. ``/scene clear`` empties the board.
+        ``/scene status`` reports the board, the cursor, the idle
+        trigger and the bridge. ``/scene idle on|off|status`` arms
+        the breakpoint detector. Owner-only. A render or send
+        failure reports in words — never silence, never a fake
+        image.
+        """
+        from ..visuals.annotations import get_board
+        from ..visuals.flight import flight_frames
+        from ..visuals.idle import get_idle_trigger
+        from ..visuals.interactive import page_for_board
+        from ..visuals.render import render_scene as _render_scene
+        from ..visuals.tags import parse_tags, tags_to_annotations
+
+        words = (tail or "").split()
+        verb = words[0].lower() if words else "status"
+        if verb not in ("point", "tag", "clear", "status", "page",
+                        "idle"):
+            return ("usage: /scene point <x> <y> [label] | tag <text "
+                    "with [POINT:...] tags> | clear | status | page | "
+                    "idle [on|off|status]")
+        settings = getattr(self.context, "settings", None)
+        home = getattr(settings, "home", None) if settings is not None else None
+        home = str(home or Path("~/.nomorals").expanduser())
+        board = get_board(home)
+        out_dir = str(Path(home) / "visuals")
+
+        def _send_png(spec: dict[str, Any], caption: str) -> str:
+            if message is None:
+                record = _render_scene(spec, target="chat",
+                                       out_dir=out_dir)
+                return (f"rendered to {record['path']} — run /scene "
+                        "from a chat to have the image sent there.")
+            try:
+                record = _render_scene(spec, target="chat",
+                                       out_dir=out_dir)
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"scene failed: {exc}"
+            failed = self._scene_send_file(record["path"], message,
+                                           caption)
+            if failed is not None:
+                return failed
+            return "scene sent."
+
+        if verb == "point":
+            if len(words) < 3:
+                return "usage: /scene point <x> <y> [label]"
+            try:
+                x, y = float(words[1]), float(words[2])
+            except ValueError:
+                return "/scene point needs numeric x and y (0..1)"
+            if not (0.0 <= x <= 1.0 and 0.0 <= y <= 1.0):
+                return "/scene point coordinates are 0..1"
+            label = " ".join(words[3:])
+            start = (board.cursor[0], board.cursor[1])
+            frames = flight_frames(start, (x, y))
+            board.point(x, y, label=label)
+            board.set_last_flight(frames)
+            spec = board.to_overlay_spec("scene point")
+            if spec is None:
+                return "point placed, but the board is empty."
+            note = _send_png(spec, f"scene point — {label or 'here'}")
+            return (f"pointed at ({x:.2f}, {y:.2f})"
+                    + (f" — {label}" if label else "")
+                    + f" — flight {frames[-1]['t']:.2f}s. {note}")
+        if verb == "tag":
+            text = (tail or "")[len(words[0]):].strip()
+            if not text:
+                return ("usage: /scene tag <text with [POINT:...] tags> "
+                        "— coordinates are 0..1 in chat")
+            parsed = parse_tags(text)
+            if not parsed.tags and not parsed.none:
+                return ("no tags parsed — kept the text as-is: "
+                        f"{parsed.text}")
+            for ann in tags_to_annotations(parsed.tags):
+                board.create(
+                    kind=ann["kind"], x=ann["x"], y=ann["y"],
+                    w=ann.get("w", 0.0), h=ann.get("h", 0.0),
+                    points=ann.get("points", ()),
+                    shape=ann.get("shape", ""),
+                    text=ann.get("text", ""),
+                    screen=ann.get("screen", 1))
+            points_tags = [t for t in parsed.tags if t.kind == "point"]
+            if points_tags:
+                first = points_tags[0]
+                start = (board.cursor[0], board.cursor[1])
+                frames = flight_frames(start, (first.x, first.y))
+                board.move_cursor(first.x, first.y, first.screen)
+                board.set_last_flight(frames)
+            spec = board.to_overlay_spec("scene tags")
+            if spec is None:
+                return f"tags placed: {parsed.text}"
+            note = _send_png(spec, "scene tags")
+            return (f"{len(parsed.tags)} tag(s) placed"
+                    + (" — [POINT:none]" if parsed.none else "")
+                    + f". {note}")
+        if verb == "clear":
+            cleared = board.clear()
+            board.set_last_flight([])
+            return f"board cleared — {cleared} annotation(s) removed."
+        if verb == "page":
+            path = page_for_board(board, title="scene",
+                                  out_dir=out_dir)
+            if path is None:
+                return ("nothing live on the board — place an "
+                        "annotation first (/scene point or /scene tag).")
+            if message is None:
+                return f"live page written to {path}"
+            failed = self._scene_send_file(
+                path, message,
+                "live scene page — open it in a browser to see the "
+                "flight")
+            if failed is not None:
+                return failed
+            return "live page sent — open it to see the flight."
+        if verb == "idle":
+            trigger = get_idle_trigger(home)
+            sub = words[1].lower() if len(words) > 1 else "status"
+            if sub == "on":
+                trigger.arm()
+                return "idle trigger on — I speak up at the next pause."
+            if sub == "off":
+                trigger.disarm()
+                return "idle trigger off."
+            if sub != "status":
+                return "usage: /scene idle [on|off|status]"
+            idle = trigger.idle_seconds()
+            idle_text = ("never acted" if idle is None
+                         else f"{idle:.0f}s since your last message")
+            return ("idle trigger: "
+                    f"{'on' if trigger.armed else 'off'}, {idle_text}")
+        # verb == "status"
+        from ..visuals.bridge import bridge_fingerprint
+
+        counts: dict[str, int] = {}
+        for ann in board.list():
+            counts[ann.state] = counts.get(ann.state, 0) + 1
+        trigger = get_idle_trigger(home)
+        fingerprint = bridge_fingerprint(home)
+        lines = [
+            "scene board:",
+            f"  annotations: {len(board.list())} "
+            f"({counts.get('armed', 0)} armed, "
+            f"{counts.get('completed', 0)} completed, "
+            f"{counts.get('missed', 0)} missed)",
+            f"  cursor: ({board.cursor[0]:.2f}, {board.cursor[1]:.2f}) "
+            f"screen {board.cursor[2]}",
+            f"  idle trigger: {'on' if trigger.armed else 'off'}",
+            ("  bridge: token "
+             + (f"set ({fingerprint})" if fingerprint else "not set")),
+        ]
+        return "\n".join(lines)
+
     def _control_arena_research(self, tail: str,
                                  message: Any = None) -> str:
         """The /arena-research reply: Devon researching herself, on

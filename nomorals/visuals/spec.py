@@ -213,11 +213,51 @@ def _validate_overlay(spec: dict[str, Any]) -> dict[str, Any]:
         if kind not in ANNOTATION_KINDS:
             _fail(field, f"kind must be one of {ANNOTATION_KINDS}, "
                          f"got {kind!r}")
+        # Sized annotations (the Clicky interaction half): a rect or
+        # highlight carries its size, a scribble its path, a shape
+        # its arrow/curve kind + endpoints, every annotation its
+        # screen. All optional — an unsized annotation keeps the
+        # renderer's fixed size, exactly as before.
+        width = item.get("w", 0.0)
+        height = item.get("h", 0.0)
+        if width is None:
+            width = 0.0
+        if height is None:
+            height = 0.0
+        raw_points = item.get("points") or []
+        if not isinstance(raw_points, list):
+            _fail(field + ".points", "must be a list of [x, y] pairs")
+        points: list[list[float]] = []
+        for j, pair in enumerate(raw_points):
+            if (not isinstance(pair, (list, tuple)) or len(pair) != 2):
+                _fail(field + f".points[{j}]",
+                      "must be an [x, y] pair")
+            points.append([
+                _coord(pair[0], field + f".points[{j}][0]"),
+                _coord(pair[1], field + f".points[{j}][1]"),
+            ])
+        shape = str(item.get("shape", ""))
+        if shape and shape not in ("arrow", "curve"):
+            _fail(field + ".shape",
+                  "must be 'arrow' or 'curve', got "
+                  f"{shape!r}")
+        screen = item.get("screen", 1)
+        try:
+            screen = int(screen)
+        except (TypeError, ValueError):
+            _fail(field + ".screen", f"must be an int >= 1, got {screen!r}")
+        if screen < 1:
+            _fail(field + ".screen", f"must be an int >= 1, got {screen}")
         annotations.append({
             "x": _coord(item.get("x"), field + ".x"),
             "y": _coord(item.get("y"), field + ".y"),
             "text": str(item.get("text", "")),
             "kind": kind,
+            "w": _coord(width, field + ".w"),
+            "h": _coord(height, field + ".h"),
+            "points": points,
+            "shape": shape,
+            "screen": screen,
         })
     out: dict[str, Any] = {"annotations": annotations}
     if spec.get("background") is not None:

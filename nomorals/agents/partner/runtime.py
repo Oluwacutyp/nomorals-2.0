@@ -991,6 +991,21 @@ class PartnerRuntime(
             message.meta["received_at"] = time.time()
         except Exception as e:  # noqa: BLE001 - a stamp must never break intake
             record_failure("runtime.PartnerRuntime.on_message:stamp", e)
+        # Visual idle trigger (scout 17, A9): an owner DM is user
+        # activity — stamp it so the breakpoint detector can fire at
+        # the next natural pause. Groups never stamp (the detector is
+        # about the owner's own pauses, not group traffic). Best
+        # effort; a stamp must never break intake.
+        try:
+            if self._is_owner_pump(message):
+                from ..visuals.idle import get_idle_trigger
+
+                settings = getattr(self.context, "settings", None)
+                home = (getattr(settings, "home", None)
+                        if settings is not None else None)
+                get_idle_trigger(home).note_activity()
+        except Exception:  # noqa: BLE001 - stamping never breaks intake
+            pass
         key = message.chat.key
         with self._queue_guard:
             queue = self._queues.setdefault(key, deque())
@@ -4142,6 +4157,20 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "distill tick job not registered: %s", exc)
+                # Visual idle trigger (scout 17, A9): one durable
+                # "visual idle tick" job (every 5m) driving the
+                # danpeg-style breakpoint detector — a pause after
+                # owner activity, firing at most once per pause, never
+                # while the owner is simply AFK. On a fire with open
+                # work, one Notifier note names it; with nothing open
+                # the tick stays silent. Idempotent; best-effort.
+                try:
+                    from ...visuals.idle import ensure_visual_idle_job
+
+                    ensure_visual_idle_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "visual idle tick job not registered: %s", exc)
                 # Mission render queue (audit gap R2-33): one durable
                 # "render tick" job (every 5m) advancing non-terminal
                 # render-tagged missions one stage (proxy, then full)
@@ -9271,6 +9300,14 @@ class PartnerRuntime(
                 # the answer; the diagram is additive.
                 self._maybe_send_impossible_diagram(reply, message)
             return reply
+        if kind == "scene":
+            # Clicky interaction mechanisms (scout 17, A9) — the
+            # visual surface's interaction half: tags, flight,
+            # annotations, the live page, the idle trigger.
+            # Owner-only, like /impossible.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_scene(command.tail or arg, message)
         if kind == "immune":
             # Defensive immune system — owner-only, like /learn.
             if message is not None and not self._is_operator(message):

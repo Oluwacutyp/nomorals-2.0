@@ -896,6 +896,25 @@ def register(registry: Any) -> None:
                     "error": f"distill tick failed: {exc}"}
 
     @registry.register(
+        "__visual_idle_tick__",
+        description="Run one visual idle tick: when the owner has gone idle after acting (danpeg's acted-since-last-check gate — a pause can never fire twice, and an AFK owner never fires at all), and a workflow or plan is still open, publish exactly one note naming it. Scheduler-internal; runs every ~5m. Routine and silent — a tick with nothing open pings nobody.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _visual_idle_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..visuals.idle import run_visual_idle_tick_once
+
+        try:
+            settings = getattr(_context, "settings", None)
+            home = getattr(settings, "home", None) if settings else None
+            return run_visual_idle_tick_once(
+                home, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"visual idle tick failed: {exc}"}
+
+    @registry.register(
         "__render_tick__",
         description="Run one render tick: every non-terminal render-tagged "
         "mission advances exactly one stage (proxy, then full) through "

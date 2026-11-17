@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import html as _html
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -114,10 +115,30 @@ if (spec.kind === 'overlay') {{
   for (const an of spec.annotations) {{
     const x = an.x * W, y = an.y * H;
     if (an.kind === 'rect') {{
-      ctx.strokeRect(x - 80, y - 50, 160, 100);
+      const w = (an.w || 0.125) * W, h = (an.h || 0.139) * H;
+      ctx.strokeRect(x - w / 2, y - h / 2, w, h);
     }} else if (an.kind === 'highlight') {{
-      ctx.fillStyle = '#FBBF2433'; ctx.fillRect(x - 100, y - 45, 200, 90);
+      const w = (an.w || 0.156) * W, h = (an.h || 0.125) * H;
+      ctx.fillStyle = '#FBBF2433'; ctx.fillRect(x - w / 2, y - h / 2, w, h);
       ctx.fillStyle = '#38BDF8';
+    }} else if (an.kind === 'scribble' && an.points && an.points.length > 1) {{
+      ctx.beginPath();
+      ctx.moveTo(an.points[0][0] * W, an.points[0][1] * H);
+      for (let i = 1; i < an.points.length; i++) ctx.lineTo(an.points[i][0] * W, an.points[i][1] * H);
+      ctx.stroke();
+    }} else if (an.kind === 'shape' && an.points && an.points.length > 1) {{
+      const x2 = an.points[1][0] * W, y2 = an.points[1][1] * H;
+      const a = Math.atan2(y2 - y, x2 - x);
+      if (an.shape === 'curve') {{
+        const mx = (x + x2) / 2, my = (y + y2) / 2 - 30;
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.quadraticCurveTo(mx, my, x2, y2); ctx.stroke();
+      }} else {{
+        ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x2, y2); ctx.stroke();
+      }}
+      ctx.beginPath(); ctx.moveTo(x2, y2);
+      ctx.lineTo(x2 - 14 * Math.cos(a - 0.4), y2 - 14 * Math.sin(a - 0.4));
+      ctx.lineTo(x2 - 14 * Math.cos(a + 0.4), y2 - 14 * Math.sin(a + 0.4));
+      ctx.closePath(); ctx.fill();
     }} else if (an.kind === 'caption') {{
       ctx.fillStyle = '#1E1E2E'; ctx.fillRect(x - 10, y - 34, 220, 40);
       ctx.fillStyle = '#F8FAFC'; ctx.font = '18px sans-serif';
@@ -217,20 +238,38 @@ def _overlay_png(spec: dict[str, Any], path: Path,
         x, y = int(ann["x"] * width), int(ann["y"] * height)
         kind = ann["kind"]
         if kind == "rect":
-            draw.rectangle([x - 80, y - 50, x + 80, y + 50],
+            w = int((ann.get("w") or 0.125) * width)
+            h = int((ann.get("h") or 0.139) * height)
+            draw.rectangle([x - w // 2, y - h // 2,
+                            x + w // 2, y + h // 2],
                            outline="#38BDF8", width=3)
         elif kind == "highlight":
-            draw.rectangle([x - 100, y - 45, x + 100, y + 45],
+            w = int((ann.get("w") or 0.156) * width)
+            h = int((ann.get("h") or 0.125) * height)
+            draw.rectangle([x - w // 2, y - h // 2,
+                            x + w // 2, y + h // 2],
                            fill=(251, 191, 36, 51))
+        elif kind == "scribble" and len(ann.get("points") or []) > 1:
+            pts = [(int(px * width), int(py * height))
+                   for px, py in ann["points"]]
+            draw.line(pts, fill="#38BDF8", width=3)
+        elif kind == "shape" and len(ann.get("points") or []) > 1:
+            x2 = int(ann["points"][1][0] * width)
+            y2 = int(ann["points"][1][1] * height)
+            draw.line([(x, y), (x2, y2)], fill="#38BDF8", width=3)
+            angle = math.atan2(y2 - y, x2 - x)
+            head = [(x2, y2),
+                    (int(x2 - 14 * math.cos(angle - 0.4)),
+                     int(y2 - 14 * math.sin(angle - 0.4))),
+                    (int(x2 - 14 * math.cos(angle + 0.4)),
+                     int(y2 - 14 * math.sin(angle + 0.4)))]
+            draw.polygon(head, fill="#38BDF8")
         elif kind == "caption":
             draw.rectangle([x - 10, y - 34, x + 210, y + 6],
                            fill="#1E1E2E")
             draw.text((x, y - 26), ann["text"], fill="#F8FAFC")
             continue
-        elif kind == "shape":
-            draw.ellipse([x - 70, y - 40, x + 70, y + 40],
-                         outline="#38BDF8", width=3)
-        else:  # cursor / scribble
+        else:  # cursor
             draw.ellipse([x - 16, y - 16, x + 16, y + 16],
                          outline="#38BDF8", width=3)
             draw.ellipse([x - 4, y - 4, x + 4, y + 4],
@@ -288,8 +327,11 @@ def render_text(spec: dict[str, Any]) -> str:
                  f"{len(validated['annotations'])} annotations)"]
         for ann in validated["annotations"]:
             text = f" — {ann['text']}" if ann["text"] else ""
+            size = ""
+            if ann.get("w") or ann.get("h"):
+                size = f" {ann.get('w', 0):.2f}x{ann.get('h', 0):.2f}"
             lines.append(f"  ({ann['x']:.2f}, {ann['y']:.2f}) "
-                         f"{ann['kind']}{text}")
+                         f"{ann['kind']}{size}{text}")
         return "\n".join(lines)
     lines = [f"Scene: {title} (scene · "
              f"{len(validated['objects'])} objects)"]
