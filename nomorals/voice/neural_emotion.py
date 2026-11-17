@@ -30,6 +30,7 @@ from typing import Any, Callable, Optional
 
 from ..core.logging_setup import get_logger
 from . import rvc_bridge
+from .accent import accent_language_hint, normalize_accent
 from .emotion_dsp import shape_for_direction
 from .nl_director import Direction, parse_direction
 
@@ -142,10 +143,18 @@ def _render_directed_per_segment(text: str, track: Any, tts: Any,
         seg_tiers.append(str(res.get("tier", "")))
     tier = (seg_tiers[0] if seg_tiers and all(
         t == seg_tiers[0] for t in seg_tiers) else "mixed")
-    return {"ok": True, "path": _stitch_wavs(parts), "tier": tier,
-            "segment_tiers": seg_tiers, "emotion": direction.emotion,
-            "delivery": direction.delivery, "segments": len(parts),
-            "directed": "per-segment", "track": track.to_dict()}
+    result: dict[str, Any] = {
+        "ok": True, "path": _stitch_wavs(parts), "tier": tier,
+        "segment_tiers": seg_tiers, "emotion": direction.emotion,
+        "delivery": direction.delivery, "segments": len(parts),
+        "directed": "per-segment", "track": track.to_dict()}
+    # Whole-line accent, when one was directed: each segment's own
+    # accent already rode its flat render (and the track carries the
+    # per-cue accents); this mirrors emotion/delivery at the top.
+    _line_accent = normalize_accent(direction.accent or "")
+    if _line_accent:
+        result["accent"] = _line_accent
+    return result
 
 
 def render_emotional(text: str, tts: Any, voice_name: str = "",
@@ -172,6 +181,27 @@ def render_emotional(text: str, tts: Any, voice_name: str = "",
     # onto the same scale so every tier pushes equally hard.
     if isinstance(direction, Direction) and direction.intensity == 3:
         direction.intensity = max(1, min(5, round(intensity / 2)))
+
+    # Accent: the one Direction field no tier consumed. The accent
+    # rides the source render's language hint — perform()/speak()
+    # already plumb ``language`` through to backends that declare it
+    # (chatterbox-multilingual honors language_id natively, other
+    # backends drop the hint silently) — so one expressive source
+    # render carries BOTH the emotional performance and the accent,
+    # and RVC preserves the style (accent) while swapping the tone
+    # color (identity). No separate accent-first chain: rendering the
+    # accent via convert_accent would call speak(mood="") and strip
+    # the emotion from the source, and DSP-shaping emotion onto the
+    # source before RVC would fight the director's performance and
+    # demote the tier's emotion from neural to suggestive. An unknown
+    # accent normalizes to "" and the line renders direction-only.
+    accent_key = normalize_accent(direction.accent or "")
+    accent_hint = accent_language_hint(accent_key)
+    # The hint only rides the call when one exists: an accent-less
+    # render passes exactly the kwargs it always did, so duck-typed
+    # engines implementing the old perform()/speak() signature keep
+    # working untouched.
+    lang_kw = {"language": accent_hint} if accent_hint else {}
 
     # Per-segment directed render: inline direction tags anchor
     # direction to word ranges. When the text carries its own tags,
@@ -205,14 +235,21 @@ def render_emotional(text: str, tts: Any, voice_name: str = "",
                     f"no RVC model for voice '{model_name}'")
             # Expressive source render: the director's perform() on the
             # *default* voice — identity comes from RVC, so the source
-            # voice doesn't matter, the performance does.
+            # voice doesn't matter, the performance does. The accent
+            # hint rides the same render: the performance is acted in
+            # the target accent's language, and RVC keeps the accent
+            # while swapping the speaker.
             src = tts.perform(text, mood=direction.emotion or "neutral",
-                              intensity=intensity)
+                              intensity=intensity, **lang_kw)
             src_path = src["path"]
             conv = rvc_bridge.convert(src_path, model)
-            return {"ok": True, "path": conv["path"], "tier": "rvc",
-                    "model": model.name, "emotion": direction.emotion,
-                    "delivery": direction.delivery}
+            res: dict[str, Any] = {
+                "ok": True, "path": conv["path"], "tier": "rvc",
+                "model": model.name, "emotion": direction.emotion,
+                "delivery": direction.delivery}
+            if accent_key:
+                res["accent"] = accent_key
+            return res
         except Exception as exc:  # noqa: BLE001 — fall through honestly
             last_error = exc
             _log.info("neural emotion: rvc tier unavailable: %s", exc)
@@ -222,24 +259,36 @@ def render_emotional(text: str, tts: Any, voice_name: str = "",
         try:
             native = tts.perform(text, voice_name=voice_name or None,
                                  mood=direction.emotion or "neutral",
-                                 intensity=intensity)
-            return {"ok": True, "path": native["path"], "tier": "native",
-                    "backend": native.get("backend")}
+                                 intensity=intensity, **lang_kw)
+            res = {"ok": True, "path": native["path"], "tier": "native",
+                   "backend": native.get("backend")}
+            if accent_key:
+                res["accent"] = accent_key
+            return res
         except Exception as exc:  # noqa: BLE001
             last_error = exc
             _log.info("neural emotion: native tier unavailable: %s", exc)
 
     # Tier 3 — honest DSP
     if "dsp" in tiers:
-        base = tts.speak(text, voice_name=voice_name or None)
+        base = tts.speak(text, voice_name=voice_name or None,
+                         **lang_kw)
         with wave.open(base["path"], "rb") as w:
             sr = w.getframerate()
             samples = array("h", w.readframes(w.getnframes()))
         shaped = shape_for_direction(samples, sr, direction)
         out = tempfile.mktemp(prefix="emo_", suffix=".wav")
         _write_wav(out, shaped, sr)
-        return {"ok": True, "path": out, "tier": "dsp",
-                "note": "DSP shaping — suggestive, not neural"}
+        res = {"ok": True, "path": out, "tier": "dsp",
+               "note": "DSP shaping — suggestive, not neural"}
+        if accent_key:
+            res["accent"] = accent_key
+            # speak() reports which opts the backend took natively,
+            # so here — unlike the perform() tiers — we can say
+            # whether the accent hint was honored or dropped.
+            res["native_language"] = "language" in (
+                base.get("native_opts") or [])
+        return res
 
     raise RuntimeError(
         f"no emotion tier available (last error: {last_error})")

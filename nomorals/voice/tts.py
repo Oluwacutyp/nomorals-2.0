@@ -3819,7 +3819,11 @@ class UniversalTTS:
 
         - ``direction``: "[said angrily]" → neural emotion when RVC is
           available (tier reported), else native tags, else honest DSP.
-        - ``accent``: "british" → accent-first render + RVC identity.
+          A direction tag may carry its own accent ("[said angrily in
+          British accent]") — the emotion render realizes it.
+        - ``accent``: "british" → folds into the direction when one is
+          given (emotion + accent in one render), else accent-first
+          render + RVC identity.
         - ``ambient``: "light rain" → procedural ambience mixed under.
         - ``room``: "hall" → parametric reverb.
         - mastering always runs unless disabled.
@@ -3828,9 +3832,24 @@ class UniversalTTS:
         """
         result: dict[str, Any] = {}
         if direction:
+            from .accent import normalize_accent
             from .neural_emotion import render_emotional
-            result = render_emotional(text, self, voice_name or "",
-                                      direction=direction)
+            from .nl_director import parse_direction
+            if accent:
+                # Direction + accent combine now: the explicit accent
+                # folds into the direction, so the emotion render
+                # carries it too — the structured argument wins over
+                # whatever the free-form tag said. Before this, passing
+                # both meant the accent was silently dropped.
+                parsed = parse_direction(direction)
+                accent_key = normalize_accent(accent)
+                if accent_key:
+                    parsed.accent = accent_key
+                result = render_emotional(text, self, voice_name or "",
+                                          direction=parsed)
+            else:
+                result = render_emotional(text, self, voice_name or "",
+                                          direction=direction)
         elif accent:
             from .accent import convert_accent
             result = convert_accent(text, self, accent,

@@ -37,6 +37,7 @@ _log = get_logger(__name__)
 __all__ = [
     "ACCENTS",
     "normalize_accent",
+    "accent_language_hint",
     "convert_accent",
     "list_accents",
 ]
@@ -109,6 +110,10 @@ def list_accents() -> list[dict[str, str]]:
 def normalize_accent(accent: str) -> str:
     """Normalize free text to a known accent key ("" when unknown)."""
     a = (accent or "").lower().strip().replace(" ", "_").replace("-", "_")
+    if not a:
+        # "" is a substring of every accent name — without this guard
+        # the fallback below normalizes empty input to south_african
+        return ""
     # drop a trailing "_accent": "nigerian pidgin accent" → head matching
     core = a[:-7] if a.endswith("_accent") else a
     if core in ACCENTS:
@@ -122,6 +127,20 @@ def normalize_accent(accent: str) -> str:
         if known in core or core in known:
             return known
     return ""
+
+
+def accent_language_hint(accent: str) -> str:
+    """BCP-47 language hint for an accent ("" when unknown).
+
+    The hint is what multilingual backends render natively
+    (``en-NG``, ``yo``, …) — the accent mechanism the emotion tiers
+    ride on. Unknown accents get "" so callers pass nothing rather
+    than a guessed language.
+    """
+    accent_key = normalize_accent(accent)
+    if not accent_key:
+        return ""
+    return _ACCENT_HINTS.get(accent_key, {}).get("hint", "")
 
 
 def _write_wav(path: str, samples: array, sr: int) -> None:
