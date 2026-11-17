@@ -18,6 +18,7 @@ import random
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 from ..core.ids import new_id
@@ -31,6 +32,7 @@ __all__ = ["Notifier", "notify", "notify_doc", "resolve_gateway",
            "DeliveryOutcome",
            "ATTEMPT_SENT", "ATTEMPT_FAILED", "ATTEMPT_SKIPPED",
            "STATE_DIGEST", "STATE_LOGGED", "STATE_HELD_BRAIN",
+           "STATE_HELD_FOCUS",
            "STATE_SUPERSEDED"]
 
 
@@ -77,6 +79,33 @@ def resolve_brain_gate(context: Any) -> Any | None:
     return None
 
 
+def _focus_priority(decision: Any, alert_hints: Any,
+                    critical: bool) -> str:
+    """Priority for the focus policy, from what the publish already
+    knows — nothing invented.  The alert policy's own escalation
+    judgement is the signal: a page the policy escalated (failure /
+    actionable / recurrence, ``decision.escalated``) is ``urgent`` and
+    interrupts even during focus; everything else is ``normal`` and
+    waits for the digest.  Hinted publishes without a decision fall
+    back to the hints themselves (``failed`` / ``actionable`` →
+    urgent).  ``critical`` is ``safety`` — moot in practice, since
+    critical bypasses the gate entirely.
+    """
+    if critical:
+        return "safety"
+    if decision is not None and getattr(decision, "escalated", False):
+        return "urgent"
+    if isinstance(alert_hints, dict):
+        failed = bool(alert_hints.get("failed"))
+        actionable = bool(alert_hints.get("actionable"))
+    elif alert_hints is not None:
+        failed = bool(getattr(alert_hints, "failed", False))
+        actionable = bool(getattr(alert_hints, "actionable", False))
+    else:
+        return "normal"
+    return "urgent" if failed or actionable else "normal"
+
+
 #: proactive notification kinds -> PartnerSettings toggle each one obeys.
 #: Only these kinds go through the proactive gate; every other kind keeps
 #: the historical behavior (feature flag ``notifier`` only).
@@ -95,6 +124,12 @@ STATE_HELD_QUIET = "held-quiet-hours"
 #: not go out on the owner's personal surfaces.  Stored, visible on
 #: /notify like every other held state, never redelivered stale.
 STATE_HELD_BRAIN = "held-brain-degraded"
+#: Focus gate (audit R3-55): a publish that would otherwise page
+#: now, held because a focus session is in progress and the
+#: interruption policy says it is not worth interrupting for.
+#: Stored, visible on /notify like every other held state, never
+#: redelivered stale — the owner reads it on the digest.
+STATE_HELD_FOCUS = "held-focus"
 STATE_DISABLED = "disabled"        # proactive master/kind switch off
 STATE_MUTED = "muted"              # feature flag ``notifier`` off
 STATE_DEDUPED = "deduped"
@@ -356,6 +391,17 @@ class Notifier:
         ``"disabled"`` / ``"held-quiet-hours"`` — so the owner can see
         what didn't go out and why.
 
+        Focus gate (audit R3-55): a publish that would otherwise page
+        now is held when a focus session is in progress and the
+        interruption policy (``focus.interruption.should_interrupt``
+        over ``autonomy.interruption.assess_worth``) says it is not
+        worth interrupting for — stored with ``delivery_state``
+        ``"held-focus"`` (or ``"logged"`` when the policy says drop),
+        visible on ``/notify``, never redelivered stale.  Escalated
+        pages (failure / actionable / recurrence) and ``critical``
+        publishes still interrupt; with no session the gate is a
+        no-op.
+
         ``output_kind`` / ``output_meta`` describe the output being
         pushed (e.g. ``"scheduled"`` + ``{"job": "memory-consolidation"}``)
         so delivery attaches ADAPTIVE buttons about that output. A push
@@ -599,6 +645,20 @@ class Notifier:
                                 nid=str(result.get("id") or ""),
                                 detail="brain competence gate hold")
                             return result
+            # Focus gate (audit R3-55): a page that would otherwise
+            # go out now is held when a focus session is in progress
+            # and the interruption policy says it is not worth
+            # interrupting for.  Only critical bypasses it — the
+            # same precedent as the quiet-hours gate above (force
+            # does not bypass quiet hours, so it does not bypass
+            # focus either).  The gate itself is a no-op with no
+            # session, no home path, or any failure inside it.
+            if not critical:
+                held = self._focus_gate(
+                    kind, title, body, decision=decision,
+                    alert_hints=alert_hints, doc_json=doc_json)
+                if held is not None:
+                    return held
         nid = new_id()
         if self.gateway is None:
             # no chat gateway at all — still try the Termux system
@@ -720,6 +780,63 @@ class Notifier:
         except Exception as exc:  # noqa: BLE001 - the gate never loses an alert
             record_failure("notifier.decide_publish", exc)
             return None
+
+    def _focus_gate(self, kind: str, title: str, body: str, *,
+                    decision: Any, alert_hints: Any,
+                    doc_json: str = "") -> dict[str, Any] | None:
+        """Focus gate (audit R3-55): consult the interruption policy
+        before paging the owner during a focus session.
+
+        Returns the stored held/logged result when the policy says
+        the publish is not worth interrupting for, or ``None`` to
+        deliver as decided.  A worth-it interruption delivered
+        during focus is logged on the session (``timer.interrupt``)
+        — the session's interruption counter had no production
+        caller before this lane.
+
+        Fail-open by design: no focus session, no home path, or any
+        failure in the gate means "deliver as decided" — an alert is
+        never lost because the focus check broke.  Never raises.
+        """
+        try:
+            from ..autonomy.interruption import assess_worth
+            from ..focus.interruption import should_interrupt
+            from ..focus.sessions import FocusTimer
+        except Exception:  # noqa: BLE001 - no policy available, deliver
+            return None
+        home = getattr(self.settings, "home_path", None)
+        if home is None:
+            return None
+        try:
+            timer = FocusTimer(str(Path(home) / "data" / "focus.json"))
+            if timer.active() is None:
+                return None
+            verdict = should_interrupt(
+                "", {"title": title, "kind": kind,
+                     "priority": _focus_priority(
+                         decision, alert_hints, critical=False),
+                     "urgency": 0.5, "importance": 0.5},
+                {"now": time.time()}, timer=timer, assess_fn=assess_worth)
+        except Exception as exc:  # noqa: BLE001 - fail open, deliver
+            _log.debug("notifier: focus gate failed, delivering as "
+                       "decided: %s", exc)
+            return None
+        if verdict["worth_it"]:
+            try:
+                timer.interrupt(note=title)
+            except Exception:  # noqa: BLE001 - logging never blocks
+                _log.debug("notifier: focus session interrupt log "
+                           "failed", exc_info=True)
+            return None
+        state = (STATE_HELD_FOCUS if verdict["decision"] == "defer"
+                 else STATE_LOGGED)
+        result = self._store(kind, title, body, delivered=0,
+                             delivery_state=state, doc_json=doc_json)
+        result["attempts"] = []
+        self._ack_decision(decision, state,
+                           nid=str(result.get("id") or ""),
+                           detail=verdict["reason"])
+        return result
 
     def _ack_decision(self, decision: Any, state: str, *,
                       nid: str = "", channel: str = "",
