@@ -41,13 +41,13 @@ def _cmd_doc(args: Any, context: Any) -> int:
 
 
 def _doc_parse(args: Any, rest: list[str]) -> int:
-    from ...documents import parse_path
+    from ...documents.expose import read_document
 
     if not rest:
         print("usage: nm doc parse <file> [--json]", file=sys.stderr)
         return 2
     try:
-        doc = parse_path(rest[0])
+        doc = read_document(path=rest[0])
     except Exception as exc:  # noqa: BLE001 - fail fast with the real error
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
@@ -68,8 +68,7 @@ def _doc_parse(args: Any, rest: list[str]) -> int:
 
 
 def _doc_convert(args: Any, rest: list[str]) -> int:
-    from ...documents import (parse_path, to_csv, to_html, to_markdown,
-                              to_pdf, to_pptx, to_text, to_xlsx)
+    from ...documents.expose import convert_document, read_document
 
     if not rest:
         print("usage: nm doc convert <file> --to "
@@ -77,18 +76,17 @@ def _doc_convert(args: Any, rest: list[str]) -> int:
               file=sys.stderr)
         return 2
     target = (getattr(args, "to", "") or "").lower()
-    converters = {"md": to_markdown, "html": to_html, "txt": to_text,
-                  "csv": to_csv}
-    if target in ("pdf", "xlsx", "pptx"):
-        convert = {"pdf": to_pdf, "xlsx": to_xlsx, "pptx": to_pptx}[target]
-    else:
-        convert = converters.get(target)
-    if convert is None:
+    # CLI spellings → the facade's convert targets. The facade owns the
+    # dispatch table; the CLI only maps its short names onto it.
+    targets = {"md": "markdown", "html": "html", "txt": "text",
+               "pdf": "pdf", "csv": "csv", "xlsx": "xlsx", "pptx": "pptx"}
+    facade_target = targets.get(target)
+    if facade_target is None:
         print(f"unknown target format: {target or '(none)'}", file=sys.stderr)
         return 2
     try:
-        doc = parse_path(rest[0])
-        out = convert(doc)
+        doc = read_document(path=rest[0])
+        out = convert_document(doc, facade_target)
     except Exception as exc:  # noqa: BLE001 - fail fast with the real error
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
@@ -144,13 +142,14 @@ def _doc_search(args: Any, rest: list[str]) -> int:
 
 
 def _doc_show(args: Any, rest: list[str]) -> int:
-    from ...documents import full_text, parse_path
+    from ...documents import full_text
+    from ...documents.expose import read_document
 
     if not rest:
         print("usage: nm doc show <file>", file=sys.stderr)
         return 2
     try:
-        doc = parse_path(rest[0])
+        doc = read_document(path=rest[0])
     except Exception as exc:  # noqa: BLE001 - fail fast with the real error
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
@@ -159,15 +158,15 @@ def _doc_show(args: Any, rest: list[str]) -> int:
 
 
 def _doc_diff(args: Any, rest: list[str]) -> int:
-    from ...documents import compare_documents, parse_path
+    from ...documents.expose import compare_document_pair, read_document
 
     if len(rest) < 2:
         print("usage: nm doc diff <file-a> <file-b> [--json]", file=sys.stderr)
         return 2
     try:
-        first = parse_path(rest[0])
-        second = parse_path(rest[1])
-        result = compare_documents(first, second)
+        first = read_document(path=rest[0])
+        second = read_document(path=rest[1])
+        result = compare_document_pair(first, second)
     except Exception as exc:  # noqa: BLE001 - fail fast with the real error
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
@@ -191,7 +190,8 @@ def _doc_diff(args: Any, rest: list[str]) -> int:
 
 
 def _doc_summarize(args: Any, rest: list[str]) -> int:
-    from ...documents import keywords, parse_path, summarize
+    from ...documents import keywords
+    from ...documents.expose import read_document, summarize_document
 
     if not rest:
         print("usage: nm doc summarize <file> [--sentences N] [--json]",
@@ -203,8 +203,8 @@ def _doc_summarize(args: Any, rest: list[str]) -> int:
         print("error: --sentences must be an integer", file=sys.stderr)
         return 2
     try:
-        doc = parse_path(rest[0])
-        lines = summarize(doc, sentences=count)
+        doc = read_document(path=rest[0])
+        lines = summarize_document(doc, sentences=count)
         words = keywords("\n".join(lines), top_n=10)
     except Exception as exc:  # noqa: BLE001 - fail fast with the real error
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
