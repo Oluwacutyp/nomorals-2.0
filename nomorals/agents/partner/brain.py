@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import threading
 import time
 from typing import Any, Callable
@@ -44,6 +45,198 @@ def _style_overrides_for(chat_key: str) -> dict[str, Any]:
     except Exception as e:
         record_failure("brain._style_overrides_for", e)
         return {}
+
+
+# ── calibrated abstention (owner phase: the gate's first consumer) ──
+# The abstention discipline lives in ``llm/abstention.py``; these
+# helpers measure the gate's inputs from one ordinary turn.  Nothing
+# here invents a confidence: every number is measured from the turn's
+# own text and the evidence it actually retrieved — the calibration
+# loop's own rule (trajectory rows carry no stated confidence, and
+# inventing one would be fake data) applies to brain answers too.
+
+#: Words that carry no knowledge content in a question: question
+#: words, auxiliaries, articles, prepositions, pronouns, knowledge
+#: verbs ("tell", "explain"), and the social-opener tokens ("up",
+#: "new", "going") that make "what's up?" and "how are you?" greetings
+#: rather than knowledge questions.  A question with no word left
+#: after removing them asks about nothing in particular.
+_ABSTAIN_STOPWORDS = frozenset((
+    "what", "why", "how", "when", "where", "who", "which", "whose", "whom",
+    "is", "are", "was", "were", "do", "does", "did", "can", "could", "will",
+    "would", "should", "shall", "may", "might", "must",
+    "am", "be", "been", "being", "have", "has", "had", "get", "got",
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "at", "for",
+    "with", "by", "about", "as", "it", "its", "this", "that", "these",
+    "those", "there", "here",
+    "i", "you", "he", "she", "we", "they", "me", "him", "her", "us", "them",
+    "my", "your", "his", "our", "their", "mine", "yours", "ours",
+    "please", "tell", "explain", "describe", "summarise", "summarize",
+    "list", "show", "know", "remember", "recall",
+    "up", "new", "going", "doing", "happening",
+    "s", "not", "no", "yes",
+))
+
+#: Imperative knowledge starts ("tell me about X", "explain Y").
+_ABSTAIN_KNOWLEDGE_VERBS = (
+    "tell me", "explain", "describe", "summarise", "summarize", "list ",
+)
+
+#: Polite prefixes stripped before the knowledge-verb check, so "can
+#: you explain X" reads as the knowledge request it is.
+_ABSTAIN_POLITE_PREFIXES = ("can you ", "could you ", "please ")
+
+#: Her-directed question starts — questions about her own plans,
+#: feelings, or actions ("are you coming?", "do you want to go?").
+#: These are not knowledge questions: she answers them from her own
+#: state, not from retrieved evidence.
+_ABSTAIN_HER_DIRECTED_RE = re.compile(
+    r"^\s*(?:are you|do you (?:want|like|need|mind)|can you|could you"
+    r"|will you|would you|should you)\b",
+    re.IGNORECASE)
+#: ...except the knowledge-seeking "do you" forms, which stay gated.
+_ABSTAIN_KNOWLEDGE_DO_YOU_RE = re.compile(
+    r"^\s*do you (?:know|remember|recall|have)\b", re.IGNORECASE)
+
+#: Opinion-seeking questions ("what do you think?", "how do you
+#: feel?") — the answer is her stance, not a retrievable fact, so
+#: they are not knowledge questions either.  Same category as the
+#: her-directed exclusion: the answer comes from her, not from
+#: evidence.  A question framed as an opinion ("do you think the
+#: venue is booked?") is left to the model for the same reason.
+_ABSTAIN_OPINION_RE = re.compile(
+    r"\byou (?:think|feel|reckon)\b", re.IGNORECASE)
+
+#: Question-word / auxiliary starts (mirrors the shape of
+#: ``memory.extract._looks_like_question``).
+_ABSTAIN_QUESTION_START_RE = re.compile(
+    r"^\s*(?:what|why|how|when|where|who|which|do|does|did|can|could"
+    r"|will|would|should|is|are|was|were)\b",
+    re.IGNORECASE)
+
+
+def _stem(word: str) -> str:
+    """Light lexical stem: strip one inflectional suffix, then a
+    trailing "e" — so "decide"/"decided"/"deciding" all read "decid"
+    and "venue"/"venues" both read "venu".  Deterministic, no NLTK;
+    applied to both sides of every overlap, so over-stemming can only
+    match words that stem identically."""
+    w = word
+    if len(w) > 4 and w.endswith("ing"):
+        w = w[:-3]
+    elif len(w) > 3 and (w.endswith("ed") or w.endswith("es")):
+        w = w[:-2]
+    elif len(w) > 2 and w.endswith("s"):
+        w = w[:-1]
+    if len(w) > 3 and w.endswith("e"):
+        w = w[:-1]
+    return w
+
+
+def _content_words(text: str) -> list[str]:
+    """The question's content words: lowercase word tokens minus the
+    stopwords above, in order, duplicates kept."""
+    words = re.findall(r"[a-z0-9]+", (text or "").lower())
+    return [w for w in words if w not in _ABSTAIN_STOPWORDS]
+
+
+def _is_knowledge_question(text: str) -> bool:
+    """True when the text asks a knowledge question — the only turns
+    the abstention gate applies to.
+
+    Shape mirrors ``memory.extract._looks_like_question`` (ends with
+    "?" or starts with a question word / auxiliary), plus the
+    imperative knowledge starts, plus polite-prefixed knowledge
+    requests ("can you explain X").  Three exclusions keep the gate
+    off social turns: her-directed questions ("are you coming?")
+    answer from her own state, opinion questions ("what do you
+    think?") answer from her stance, and a question with no content
+    word left ("how are you?", "what's up?") is a greeting, not a
+    question about something.  Known residual, named not hidden:
+    polite action requests ("could you send me the file?") bypass
+    the gate by the her-directed rule even when the file's contents
+    would be knowledge — a future pass can fold them in.
+    """
+    stripped = (text or "").strip()
+    if not stripped:
+        return False
+    lowered = stripped.lower()
+    for prefix in _ABSTAIN_POLITE_PREFIXES:
+        if lowered.startswith(prefix):
+            rest = lowered[len(prefix):]
+            if (rest.startswith(_ABSTAIN_KNOWLEDGE_VERBS)
+                    or _ABSTAIN_QUESTION_START_RE.match(rest)):
+                return bool(_content_words(stripped))
+            break
+    if (_ABSTAIN_HER_DIRECTED_RE.match(stripped)
+            and not _ABSTAIN_KNOWLEDGE_DO_YOU_RE.match(stripped)):
+        return False
+    if _ABSTAIN_OPINION_RE.search(stripped):
+        return False
+    question_shaped = (
+        stripped.endswith("?")
+        or bool(_ABSTAIN_QUESTION_START_RE.match(stripped))
+        or lowered.startswith(_ABSTAIN_KNOWLEDGE_VERBS))
+    if not question_shaped:
+        return False
+    return bool(_content_words(stripped))
+
+
+def _abstention_confidence(
+    question: str, evidence_texts: list[str] | tuple[str, ...],
+) -> tuple[float, int]:
+    """(confidence, evidence_count) for one knowledge question,
+    measured from the turn — the research formula, generalized.
+
+    ``strength`` is the best single evidence item's coverage of the
+    question's content words (research's top-score term, lexical
+    instead of BM25); ``coverage`` is how many evidence items back
+    the answer, capped at three (research's ``n_docs / 3``);
+    ``source_quality`` is the documented 0.8 default — the evidence
+    here is the owner's own retrieved records, first-party by
+    construction.  No evidence at all scores 0.16: below the hard
+    floor, so it abstains.
+    """
+    from ...llm.abstention import calibrate_confidence
+
+    evidence = [str(t) for t in (evidence_texts or []) if str(t).strip()]
+    content = [_stem(w) for w in _content_words(question)]
+    if not content:
+        return 0.0, len(evidence)
+    strength = 0.0
+    for item in evidence:
+        item_stems = {_stem(w) for w in
+                      re.findall(r"[a-z0-9]+", item.lower())}
+        if not item_stems:
+            continue
+        hit = len(set(content) & item_stems) / len(set(content))
+        strength = max(strength, hit)
+    coverage = min(1.0, len(evidence) / 3.0)
+    confidence = calibrate_confidence(strength, coverage)
+    return confidence, len(evidence)
+
+
+def _parts_from_tool_loop_result(result: Any, *, is_owner: bool) -> list[str]:
+    """``ToolLoopResult`` -> reply parts, the conversion that used to
+    live inline in :meth:`PartnerBrain.generate_with_tools`.
+
+    A failed loop with no answer is one honest error part; an empty
+    answer with no failure is no parts at all (the caller falls
+    through to the single-shot responder); a degraded loop appends
+    its note for the owner only.
+    """
+    if result is None:
+        return []
+    if not getattr(result, "ok", True) and not getattr(result, "answer", ""):
+        _log.warning("tool loop failed: %s", getattr(result, "error", ""))
+        return [f"couldn't do that: {getattr(result, 'error', '')}"]
+    parts = [result.answer] if getattr(result, "answer", "") else []
+    if (getattr(result, "degraded", False)
+            and getattr(result, "degrade_note", "") and is_owner):
+        # The owner sees the degradation honestly; outsiders get the
+        # clean surface.
+        parts.append(f"⏬ {result.degrade_note}")
+    return parts
 
 
 class PartnerBrain:
@@ -571,13 +764,19 @@ class PartnerBrain:
         history: list[Any] | tuple[Any, ...] = (),
         gate_mode: str = "open",
         is_owner: bool = True,
-    ) -> list[str]:
+    ) -> Any:
         """Generate a reply via the tool-calling loop.
 
         The LLM sees the full tool registry and dynamically selects tools
         from plain language — no hardcoded intent routing. Gating is
         enforced at execution: restricted actors get a filtered tool list
         AND capability denial at call time.
+
+        Returns the raw ``ToolLoopResult`` — the caller converts it to
+        parts with :func:`_parts_from_tool_loop_result` and reads its
+        ``trace`` observations as the answer's tool grounding for the
+        abstention gate.  (It used to return the parts directly; the
+        result carries the grounding the gate needs.)
         """
         from ...core.policy import CapabilitySet, Capability
         loop = self._tool_loop()
@@ -620,15 +819,7 @@ class PartnerBrain:
             capabilities=capabilities,
             loop_ctx=loop_ctx,
         )
-        if not result.ok and not result.answer:
-            _log.warning("tool loop failed: %s", result.error)
-            return [f"couldn't do that: {result.error}"]
-        parts = [result.answer] if result.answer else []
-        if result.degraded and result.degrade_note and is_owner:
-            # The owner sees the degradation honestly; outsiders get the
-            # clean surface.
-            parts.append(f"⏬ {result.degrade_note}")
-        return parts
+        return result
 
     def _note_reply(self, bundle: Any, chat: ChatRef) -> None:
         """Record the reply for the status beacon (which model answered,
@@ -810,6 +1001,74 @@ class PartnerBrain:
         return PresenceOutcome(parts=parts, degraded=degraded,
                                degraded_note=degraded_note)
 
+    def _apply_abstention_gate(
+        self,
+        parts: list[str],
+        message: ChatMessage,
+        bundle: Any,
+        *,
+        evidence_texts: list[str] | tuple[str, ...],
+    ) -> tuple[list[str], bool]:
+        """Calibrated-abstention gate for one model-produced reply.
+
+        The first live consumer of ``CalibratedAbstention``
+        (cognition/calibration_loop.py:40): when the turn asked a
+        knowledge question and the answer has no grounding behind it
+        — no recalled memories, no proactive lines, no media notes,
+        no tool observations — the reply is replaced with
+        ``ABSTAIN_TEXT``, which names what would help ("tell me where
+        to look") instead of fabricating.  The threshold comes from
+        the persisted calibration (``threshold_for`` on
+        ``cog_calibration_thresholds`` for the ("chat", model) slice;
+        base 0.55 when the loop has recorded none) — never a hardcoded
+        number in the wiring.
+
+        Returns ``(parts, abstained)``.  Never raises and never
+        breaks a reply: any failure inside the gate fails open to the
+        original parts.  The gate does not apply to the deterministic
+        STT-failure reply (no model call happened) or to a template
+        fallback bundle (already an honest non-answer), nor to turns
+        that are not knowledge questions.
+        """
+        try:
+            from ...cognition.calibration_loop import threshold_for
+            from ...llm.abstention import ABSTAIN_TEXT, CalibratedAbstention
+        except Exception as exc:  # noqa: BLE001 - gate must never break a reply
+            record_failure("brain._apply_abstention_gate.import", exc)
+            return parts, False
+        try:
+            model = str(getattr(bundle, "model", "") or "")
+            if model == "stt-failure":
+                return parts, False
+            if bool(getattr(bundle, "fallback", False)):
+                return parts, False
+            text = str(message.text or "")
+            if not _is_knowledge_question(text):
+                return parts, False
+            confidence, evidence_count = _abstention_confidence(
+                text, evidence_texts)
+            threshold = threshold_for(
+                self.context.db, "chat", model or "unknown")
+            gate = CalibratedAbstention(threshold=threshold)
+            reply, decision = gate.wrap(
+                "\n".join(parts), confidence,
+                evidence_count=evidence_count, question=text)
+            if decision.answered:
+                return parts, False
+            _log.info(
+                "abstaining in %s: %s (confidence %.2f, threshold %.2f)",
+                message.chat.key, decision.reason, confidence, threshold)
+            try:
+                metrics = getattr(self.context, "metrics", None)
+                if metrics is not None:
+                    metrics.incr("brain.abstention", 1)
+            except Exception:
+                pass
+            return [decision.abstention_text or ABSTAIN_TEXT], True
+        except Exception as exc:  # noqa: BLE001 - the gate never breaks a reply
+            record_failure("brain._apply_abstention_gate", exc)
+            return parts, False
+
     def _generate_and_persist(self, message: ChatMessage, flags: dict[str, Any]) -> tuple[list[str], bool, str]:
         """Generate one reply; returns ``(parts, degraded, note)``.
 
@@ -933,10 +1192,11 @@ class PartnerBrain:
         # single-shot path (the loop is available via generate_with_tools
         # when explicitly invoked). If the loop fails, we fall back to
         # single-shot rather than dropping the reply.
+        tool_loop_result: Any = None
         tool_loop_parts: list[str] | None = None
         if untranscribed_guard_parts is None and is_owner and not restricted:
             try:
-                tool_loop_parts = self.generate_with_tools(
+                tool_loop_result = self.generate_with_tools(
                     message,
                     context_lines=(list(background_lines) + list(continuity)
                                    + list(proactive_lines)),
@@ -944,8 +1204,11 @@ class PartnerBrain:
                     gate_mode=gate_mode,
                     is_owner=True,
                 )
+                tool_loop_parts = _parts_from_tool_loop_result(
+                    tool_loop_result, is_owner=True)
             except Exception as exc:  # noqa: BLE001 — fall back, never drop
                 _log.warning("tool loop failed, falling back: %s", exc)
+                tool_loop_result = None
                 tool_loop_parts = None
         # Interactive budget: the provider chain behind router.chat can stall
         # for minutes; the chat thread gets INTERACTIVE_REPLY_TIMEOUT_S and
@@ -978,7 +1241,25 @@ class PartnerBrain:
 
         # Persist + downstream hooks.
         parts = bundle.parts
-        if getattr(bundle, "degraded", False) and not restricted:
+        # Calibrated abstention — the gate's first live consumer
+        # (cognition/calibration_loop.py:40).  A model-produced answer
+        # to a knowledge question with no grounding abstains instead
+        # of fabricating.  Runs BEFORE the persist tail, so the
+        # persisted turn and training pair record the abstention, not
+        # the fabrication; and before the failover note, so an
+        # abstention never carries a degradation footnote.
+        tool_observations: list[str] = []
+        if tool_loop_result is not None:
+            for _step in (getattr(tool_loop_result, "trace", None) or []):
+                for _obs in (getattr(_step, "observations", None) or []):
+                    if str(_obs).strip():
+                        tool_observations.append(str(_obs))
+        parts, _abstained = self._apply_abstention_gate(
+            parts, message, bundle,
+            evidence_texts=(list(memories) + list(proactive_lines)
+                            + list(media_notes) + tool_observations))
+        if (getattr(bundle, "degraded", False) and not restricted
+                and not _abstained):
             # Provider failover: the owner sees WHICH provider failed and
             # WHAT fallback ran — the final answer alone would hide the
             # degradation. Restricted (non-owner) chats keep the human
