@@ -5644,6 +5644,138 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"consensus failed: {exc}"
 
+    def _control_papergraph(self, tail: str, message: Any = None) -> str:
+        """The paper graph around a paper (Connected Papers core).
+
+        Public. /papergraph <title or DOI> resolves the seed paper
+        against the open scholarly corpus (OpenAlex, Semantic Scholar
+        fallback), counts the citation neighbourhood from reference
+        sets (co-citation + bibliographic coupling, pure counting),
+        and reports the clusters and the reading order — what to read
+        next and why. The diagram is drawn as a PNG and sent in chat
+        beside the text, fail-open: a failed render or send never
+        takes the answer away. /papergraph list shows past graphs;
+        /papergraph show <id> re-renders one; /papergraph graph <id>
+        sends just the diagram. "deep" (or --deep) asks for the
+        deeper pool (100 seed references, 50 citers, 60 nodes).
+        Never raises: bad input returns usage.
+        """
+        from ...research.paper_graph import (
+            build_graph,
+            format_graph_reply,
+            open_graph_store,
+        )
+
+        tail = (tail or "").strip()
+        usage = ("usage: /papergraph <title or DOI> [deep] | list | "
+                 "show <id> | graph <id>")
+        if not tail:
+            return usage
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — default home then
+                home = None
+            from pathlib import Path
+
+            home_path = (Path(home) if home else
+                         Path("~/.nomorals").expanduser())
+            store = open_graph_store(home)
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb in {"help", "--help"}:
+                return usage
+            if verb == "list":
+                reviews = store.list()
+                if not reviews:
+                    return "no paper graphs yet — map one with " \
+                           "/papergraph <title or DOI>"
+                lines = ["paper graphs:"]
+                for review in reviews[:10]:
+                    lines.append(
+                        f"  {review['id']} — {review['seed']} "
+                        f"({review['nodes']} papers)")
+                return "\n".join(lines)
+            if verb in {"show", "graph"}:
+                if not rest:
+                    return f"usage: /papergraph {verb} <id>"
+                review = store.get(rest)
+                if review is None:
+                    return f"no paper graph “{rest}”"
+                if verb == "show":
+                    return format_graph_reply({**review, "ok": True})
+                return self._send_papergraph_diagram(review, message,
+                                                     home_path)
+            depth = "quick"
+            query = tail
+            if verb == "deep":
+                depth = "deep"
+                query = rest
+            elif tail.lower().endswith(" --deep"):
+                depth = "deep"
+                query = tail[:-len(" --deep")].strip()
+            if not query:
+                return usage
+            answer = build_graph(home, query, store=store, depth=depth)
+            reply = format_graph_reply(answer)
+            if answer.get("ok"):
+                self._maybe_send_papergraph_diagram(answer, message,
+                                                    home_path)
+            return reply
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"papergraph failed: {exc}"
+
+    def _send_papergraph_diagram(self, review: dict[str, Any],
+                                 message: Any, home_path: Any) -> str:
+        """Render a stored graph's diagram and send the PNG in chat.
+
+        The diagram is the answer for /papergraph graph, so a
+        failure is reported in words with the reason named — never
+        silence, never a fake image.
+        """
+        from ...research.paper_graph import PaperGraph, graph_diagram
+        from ...visuals.render import render_png
+
+        graph = PaperGraph.from_dict(review.get("graph") or {})
+        visuals_dir = home_path / "visuals"
+        try:
+            visuals_dir.mkdir(parents=True, exist_ok=True)
+            path = render_png(
+                graph_diagram(graph),
+                visuals_dir / f"paper-graph-{review['id']}.png")
+        except Exception as exc:  # noqa: BLE001 — honest refusal
+            return f"graph failed: {exc}"
+        if message is None:
+            return (f"rendered to {path} — run /papergraph graph from "
+                    "a chat to have the image sent there.")
+        failed = self._scene_send_file(
+            str(path), message,
+            f"paper graph — “{graph.seed_title}”")
+        if failed is not None:
+            return failed
+        return "paper graph sent."
+
+    def _maybe_send_papergraph_diagram(self, answer: dict[str, Any],
+                                       message: Any,
+                                       home_path: Any) -> None:
+        """After a fresh /papergraph map, send the diagram beside the text.
+
+        Fail-open by design: the text is the answer and is already
+        returned; anything missing here (no chat, a failed render)
+        simply means no diagram — never an exception into the reply
+        path.
+        """
+        try:
+            if not answer.get("ok") or message is None:
+                return
+            self._send_papergraph_diagram(
+                {"id": answer.get("review_id", ""),
+                 "graph": answer.get("graph") or {}}, message, home_path)
+        except Exception:  # noqa: BLE001 — diagram is additive only
+            return
+
     def _control_soundscape(self, tail: str, message: Any = None) -> str:
         """Soundscape machine: compose, tune and play ambient sound.
 

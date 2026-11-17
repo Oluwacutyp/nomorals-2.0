@@ -8296,6 +8296,8 @@ class PartnerRuntime(
             return self._control_flight(command.tail, message)
         if kind == "soundscape":
             return self._control_soundscape(command.tail, message)
+        if kind == "papergraph":
+            return self._control_papergraph(command.tail, message)
         if kind == "burn":
             return self._control_burn(command.tail, message)
         if kind == "arena-research":
@@ -9801,6 +9803,8 @@ class PartnerRuntime(
             return self._control_evidence(command.tail or arg)
         if kind == "consensus":
             return self._control_consensus(command.tail or arg)
+        if kind == "papergraph":
+            return self._control_papergraph(command.tail or arg, message)
         if kind == "director":
             return self._control_director(command.tail or arg)
         if kind == "caption":

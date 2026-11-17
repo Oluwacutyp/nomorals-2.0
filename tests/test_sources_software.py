@@ -395,7 +395,7 @@ def test_chat_command_registered():
     assert "alternatives" in CONTROL_COMMANDS
     assert CONTROL_COMMANDS["alternatives"] == (1, None)
     assert "alternatives" in PUBLIC_COMMANDS
-    assert len(PUBLIC_COMMANDS) == 272
+    assert len(PUBLIC_COMMANDS) == 273
     assert "alternatives" in COMMAND_DETAILS
     assert "alternatives" in LIST_ONELINERS
     assert "alternatives" in [c for _, kinds in LIST_GROUPS

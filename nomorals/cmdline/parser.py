@@ -56,6 +56,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "compute": [],
     "evidence": [],
     "consensus": [],
+    "papergraph": [],
     "soundtrack": [],
     "soundscape": [],
     "flight": [],
@@ -3700,6 +3701,31 @@ def _parser() -> argparse.ArgumentParser:
                              help="deeper set: 25 papers instead of 10")
     consensus_p.add_argument("--json", action="store_true",
                              help="Output as JSON")
+
+    papergraph_p = sub.add_parser(
+        "papergraph", aliases=CLI_ALIASES["papergraph"],
+        help="the paper graph around a paper — neighbourhood, clusters, reading order",
+        description=("nm papergraph <title or DOI> [--deep]\\\\n"
+                     "nm papergraph list\\\\n"
+                     "nm papergraph show <id>\\\\n"
+                     "nm papergraph graph <id>\\\\n"
+                     "The paper-graph organ: the seed paper is resolved "
+                     "against the open scholarly corpus (OpenAlex, "
+                     "Semantic Scholar fallback), the citation "
+                     "neighbourhood is counted from reference sets "
+                     "(co-citation + bibliographic coupling, pure "
+                     "counting, deterministic), and the answer names the "
+                     "clusters and the reading order — what to read next "
+                     "and why. A seed with no paper is refused honestly, "
+                     "never invented."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    papergraph_p.add_argument("paper_graph_query", nargs="*", default=[],
+                              help="title or DOI, or list|show|graph …")
+    papergraph_p.add_argument("--deep", action="store_true",
+                              help="deeper pool: 100 seed references, 50 citers, 60 nodes")
+    papergraph_p.add_argument("--json", action="store_true",
+                              help="Output as JSON")
 
     soundscape_p = sub.add_parser(
         "soundscape", aliases=CLI_ALIASES["soundscape"],
