@@ -8212,6 +8212,8 @@ class PartnerRuntime(
             return self._control_museum(command.tail, message)
         if kind == "analytics":
             return self._control_analytics(command.tail, message)
+        if kind == "airports":
+            return self._control_airports(command.tail, message)
         if kind == "arena-research":
             return self._control_arena_research(command.tail, message)
         if kind == "community":

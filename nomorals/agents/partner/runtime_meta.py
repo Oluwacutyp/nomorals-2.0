@@ -416,6 +416,69 @@ class RuntimeMetaMixin:
                     f"(it is kept at {target}.)")
         return summary
 
+    def _control_airports(self, tail: str, message: Any = None) -> str:
+        """The /airports reply: the airport→country table, in chat.
+
+        The chat twin of ``nm airports`` (airport refresh ship
+        0bd2bd1f): ``/airports`` shows the loaded table (IATA codes,
+        countries), the last refresh, and the next monthly run;
+        ``/airports refresh`` runs one refresh tick now. The same
+        ``refresh_airports`` / ``read_refresh_state`` pair the console
+        command calls, so chat and console answer from the same state
+        and the same words. A failed refresh reports the reason and
+        leaves the old table in place; the handler never raises.
+        Owner-only. Nothing here needs a live chat — no file is sent
+        back — so ``message`` is accepted and ignored."""
+        from ...travel.airports import (
+            airport_countries_count,
+            airport_country_count,
+        )
+        from ...travel.refresh import (
+            AIRPORTS_REFRESH_SPEC,
+            AIRPORTS_SOURCE_URL,
+            next_refresh_run,
+            read_refresh_state,
+            run_airport_refresh_tick_once,
+        )
+
+        words = (tail or "").split()
+        verb = words[0].lower() if words else "status"
+        if verb not in ("status", "refresh"):
+            return "usage: /airports [status | refresh]"
+        if verb == "status":
+            try:
+                rows = airport_country_count()
+                countries = airport_countries_count()
+            except Exception as exc:  # noqa: BLE001 - status never crashes chat
+                return f"airport table unavailable: {exc}"
+            lines = [f"airport table: {rows} IATA codes, "
+                     f"{countries} countries"]
+            state = read_refresh_state(self.context)
+            if state is None:
+                lines.append("last refresh: never")
+            elif state.get("ok"):
+                lines.append(
+                    f"last refresh: {time.strftime('%Y-%m-%d %H:%M', time.localtime(float(state.get('ran_at') or 0.0)))}"
+                    f" — {state.get('rows', 0)} rows, "
+                    f"{state.get('countries', 0)} countries")
+            else:
+                lines.append(
+                    f"last refresh: {time.strftime('%Y-%m-%d %H:%M', time.localtime(float(state.get('ran_at') or 0.0)))}"
+                    f" — failed: {state.get('error') or 'unknown error'}")
+            lines.append(f"source: {AIRPORTS_SOURCE_URL}")
+            lines.append(f"schedule: {AIRPORTS_REFRESH_SPEC}")
+            lines.append(f"next run: {next_refresh_run()}")
+            return "\n".join(lines)
+        try:
+            out = run_airport_refresh_tick_once(context=self.context)
+        except Exception as exc:  # noqa: BLE001 - refresh never crashes chat
+            return f"refresh failed: {exc}"
+        if out.get("ok"):
+            return (f"refreshed: {out.get('rows', 0)} IATA codes, "
+                    f"{out.get('countries', 0)} countries, "
+                    f"{out.get('dropped', 0)} rows dropped")
+        return f"refresh failed: {out.get('error') or 'unknown error'}"
+
     def _control_arena_research(self, tail: str,
                                  message: Any = None) -> str:
         """The /arena-research reply: Devon researching herself, on

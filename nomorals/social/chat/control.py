@@ -395,6 +395,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
     "museum": (0, 2),  # /museum | /museum send <id> — the Museum census over every system (audit R3-73, owner-only)
     "analytics": (0, None),  # /analytics [status | tables | query "<select sql>" | export <table> [csv|parquet] | export query "<select sql>" [csv|parquet]] — analytical queries + exports over the live store (R3-59; owner-only)
+    "airports": (0, 1),  # /airports [status | refresh] — the airport→country table: rows, last refresh, next run, refresh on demand (airport refresh 0bd2bd1f; owner-only)
     "arena-research": (0, 2),  # /arena-research [status | tick | survey | proposals | ensure | enable | disable] — Devon researching herself (owner phase 2026-10-21 item 2, owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
@@ -2335,6 +2336,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "analytics": {"what": "analytical queries + exports over the live store — the chat twin of `nm analytics` (audit R3-59): /analytics shows the backend + stats, /analytics tables lists every live table with row counts, /analytics query runs a read-only query (SELECT/WITH only, 100 rows shown), /analytics export writes a whole table or a query's rows to a file under <home>/exports/ and sends it back to this chat (CSV on any backend; Parquet needs DuckDB and refuses honestly on the SQLite passthrough, naming the backend — never a CSV with a .parquet name). A query export is capped at 1000 rows and says so when the cap bites. Read-only throughout — nothing here writes the store. Owner-only.",
              "usage": "/analytics | /analytics tables | /analytics query \"<select sql>\" | /analytics export <table> [csv|parquet] | /analytics export query \"<select sql>\" [csv|parquet]", "example": "/analytics   ·   /analytics tables   ·   /analytics query \"SELECT kind, COUNT(*) AS n FROM memories GROUP BY kind\"   ·   /analytics export memories   ·   /analytics export query \"SELECT * FROM memories\" parquet",
              "related": "/db /decisions"},
+    "airports": {"what": "the airport→country table — the chat twin of `nm airports` (airport refresh 0bd2bd1f): /airports shows the loaded table (IATA codes, countries), the last refresh, and the next monthly run; /airports refresh runs one refresh tick now. A failed refresh reports the reason and leaves the old table in place. Owner-only.",
+             "usage": "/airports | /airports status | /airports refresh", "example": "/airports   ·   /airports refresh",
+             "related": "/trip /analytics"},
     "arena-research": {"what": "Devon researching herself — the arena researcher surveys the live system (organs, wiring, dead/decorative paths, weak spots) with file:line evidence, mines state of the art per organ through the research pipeline, and files RANKED improvement proposals into the upgrade queue for the owner's word. Never auto-approved, never auto-applied: the owner decides, the organ proposes. /arena-research shows the status (job, gates, last run, pending proposals); tick runs one cycle now; survey lists the current ranked findings without filing; proposals lists what this organ filed. Owner-only.",
              "usage": "/arena-research | /arena-research tick | /arena-research survey | /arena-research proposals | /arena-research ensure | /arena-research enable | /arena-research disable", "example": "/arena-research   ·   /arena-research tick   ·   /arena-research proposals",
              "related": "/research /proposals"},
@@ -5020,7 +5024,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
      ["status", "ping", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
-      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "analytics", "arena-research", "profile", "mind",
+      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "analytics", "airports", "arena-research", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
       "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",

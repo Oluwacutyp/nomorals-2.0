@@ -53,6 +53,7 @@ __all__ = [
     "DATA_PATH",
     "build_mapping",
     "ensure_airport_refresh_job",
+    "next_refresh_run",
     "read_refresh_state",
     "refresh_airports",
     "render_mapping",
@@ -79,6 +80,26 @@ AIRPORTS_REFRESH_TOOL = "__airport_refresh_tick__"
 AIRPORTS_REFRESH_SPEC = "cron 0 4 1 * *"
 
 _STATE_NAME = "airports_refresh.json"
+
+
+def next_refresh_run(now: float | None = None) -> str:
+    """Next monthly run, from AIRPORTS_REFRESH_SPEC: 04:00 on the 1st.
+
+    The spec is monthly by construction ("cron 0 4 1 * *"), so the
+    next run is the 1st of this month at 04:00 local when that is
+    still ahead, else the 1st of next month. Returned as
+    "YYYY-MM-DD HH:MM" local time, the same shape the status lines
+    use for the last run.
+    """
+    current = time.localtime(now if now is not None else time.time())
+    year, month = current.tm_year, current.tm_mon
+    if current.tm_mday > 1 or (current.tm_mday == 1
+                               and (current.tm_hour, current.tm_min) >= (4, 0)):
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return time.strftime("%Y-%m-%d %H:%M",
+                         (year, month, 1, 4, 0, 0, 0, 0, -1))
 
 #: Validation floors, set well below the seed table (9,053 rows / 239
 #: countries) and far above any degenerate dump: a dump that lost
