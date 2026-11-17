@@ -754,6 +754,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "provision": (0, None),  # /provision [service] | login <service> <username> — Devon fetches missing API keys herself (owner only)
     "models": (0, None),     # /models [all|status|learners|<name>] — install every missing model on this box (owner only)
     "mcp": (0, None),        # /mcp [status|list|tools [server]|call <server> <tool> [json]|close [server]] — the MCP client: call external MCP servers (owner only)
+    "a2a": (0, None),        # /a2a [status|list|card <agent>|send <agent> <text> [--wait N] [--skill id]|task <agent> <task-id>|cancel <agent> <task-id>|close [agent]] — the A2A client: delegate tasks to peer agents (owner only)
     "llmguard": (0, None),   # /llmguard [status|recent [n]] — the LLM I/O guardrails: input / output / dialogue rails on the brain's call path (owner only). NOT the ad-spend /guardrails command.
     "prompt": (0, None),      # /prompt [status [task]|list] — the DSPy-style prompt compiler: compiled prompts per task with their before/after grades (owner only, list-only)
     "pair": (0, None),        # /pair [whatsapp <number> [label]|code|start|stop|restart|remove <id>] — pairing-with-code account pool (§15; owner only)
@@ -3718,6 +3719,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
             "usage": "/mcp | /mcp list | /mcp tools [server] | /mcp call <server> <tool> [json-args] | /mcp close [server]",
             "example": "/mcp tools context7",
             "related": "/models /connectors /provision"},
+    "a2a": {"what": "the A2A client: delegate tasks to peer agents over Agent2Agent — she fetches a peer's Agent Card, sends it a message, and follows the task it opens until the artifacts come back. A2A is peer work (delegation to a specialist that owns its domain, collaboration across organizations, exchange) — never a substitute for a skill Devon builds herself; she builds every skill, and A2A is the reach-out rung beside them. Agents are opt-in in config (a2a.enabled + a2a.agents.<name>.enabled); nothing connects until enabled. Owner only.",
+            "usage": "/a2a | /a2a list | /a2a card <agent> | /a2a send <agent> <text> [--wait N] [--skill id] | /a2a task <agent> <task-id> | /a2a cancel <agent> <task-id> | /a2a close [agent]",
+            "example": "/a2a card fake",
+            "related": "/mcp /models /connectors"},
     "llmguard": {"what": "the LLM I/O guardrails: the input / output / dialogue rails on the brain's call path. Input rails catch prompt-injection phrases in tool/system input and credential-shaped strings leaking into a prompt (redacted, never sent); an input still over the serving window after fitting is blocked in plain words. Output rails redact credential-shaped strings from a reply, journal malformed tool-call shapes, and cut runaway replies at the length limit. The dialogue rail stops the brain repeating the same answer over and over. Per-rail on/off lives in config ([guardrails]); this command only reports. These are I/O hygiene — never a content filter: they never judge what the owner may ask or what Devon may say. Owner only. (Not the ad-spend /guardrails command.)",
             "usage": "/llmguard | /llmguard status | /llmguard recent [n]",
             "example": "/llmguard status",
@@ -4802,7 +4807,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
     ("execution · archives · builders", ["exec", "zip", "apps", "fix", "deliver"]),
-    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
+    ("tools & automation", ["schedule", "db", "artifact", "api", "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion",
                             "gcal", "trello", "proxy", "workspace", "record",
                             "macro", "file", "publish", "notify", "proactive", "mission",
                             "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "research", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "guardrails", "competitor", "cost", "panel",
@@ -5135,7 +5140,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
-      "connectors", "provision", "models", "mcp", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe",
+      "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "worldmodel", "glossary", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
     ("platform control — updates & restarts",
@@ -5619,6 +5624,7 @@ LIST_ONELINERS: dict[str, str] = {
     "provision": "self-provisioning: /provision [service] — Devon fetches a missing API key herself (login or account creation; key validated + vaulted, request retried); /provision login <service> <username> hands her an existing login",
     "models": "install every missing model: /models installs all of them (character voice/face, DJ madmom, voice STT/TTS, image, small-ML) that fit this box; /models status shows installed vs missing; /models learners shows the journal-trained learners' status (owner only)",
     "mcp": "the MCP client: /mcp status shows which external servers are enabled and connected; /mcp tools [server] lists a server's tools; /mcp call <server> <tool> [json-args] calls one (Context7, GitHub, Playwright, Serena, Graphify, Blender — opt-in in config, owner only)",
+    "a2a": "the A2A client: /a2a status shows which peer agents are enabled and connected; /a2a card <agent> shows the agent's skills; /a2a send <agent> <text> [--wait N] [--skill id] delegates a task to a peer agent (opt-in in config, owner only; peer work — never a substitute for a skill Devon builds herself)",
     "llmguard": "the LLM I/O guardrails: /llmguard status shows each rail on/off plus how many inputs/outputs it allowed, redacted, or blocked; /llmguard recent [n] shows the latest rail findings (owner only; per-rail on/off is in config [guardrails])",
     "prompt": "the prompt compiler: /prompt status shows every compiled task with its version and before/after grades (base grade -> demo grade, validated or not); /prompt list shows the compiled tasks (owner only; compiling happens through `nm prompt compile`)",
     "pair": "pairing-with-code pool: /pair whatsapp <number> [label] — pair a WhatsApp account by 8-char code (own bridge session each); /pair telegram <number> pairs Telegram by login code into the same pool; /pair lists the pool with Registered/Connected/Dropped counts (owner only)",

@@ -387,6 +387,80 @@ class MCPSettings:
 
 
 @dataclass
+class A2AAgentEntry:
+    """One A2A agent entry in the ``a2a.agents`` TOML table.
+
+    An agent is a base URL (the Agent Card lives at
+    ``<url>/.well-known/agent-card.json``). ``enabled`` is per-agent
+    and defaults to False: nothing connects unless the operator
+    enables it in config. ``api_key_env`` names ONE environment
+    variable holding a bearer/API-key token for a card that demands
+    one (the value comes from the process environment / vault at
+    call time — never from the config file itself, so no token ever
+    lands in a TOML). An agent whose card demands OAuth2, OpenID
+    Connect, or mutual TLS is refused in words: Devon cannot
+    complete those flows unattended.
+    """
+
+    url: str = ""
+    enabled: bool = False
+    timeout_s: float = 0.0  # 0 = the a2a.default_timeout_s
+    api_key_env: str = ""
+    notes: str = ""
+
+
+@dataclass
+class A2ASettings:
+    """The A2A CLIENT (Devon talking to other agents over A2A).
+
+    Master switch ``enabled`` is False by default and every known
+    agent is disabled by default: the client connects to nothing
+    until the operator opts in, per agent, in config. ``agents``
+    is a TOML table keyed by agent name; a new name adds an agent.
+    There are NO shipped default agents — no public A2A endpoint
+    is stable enough to ship as a default. See
+    ``nomorals/tools/a2a_client.py`` (DEFAULT_A2A_AGENTS).
+    """
+
+    enabled: bool = False
+    default_timeout_s: float = 30.0
+    max_payload_bytes: int = 1_000_000
+    max_agents: int = 8
+    agents: dict[str, A2AAgentEntry] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        # _build passes the TOML table through as plain dicts; coerce
+        # each entry to A2AAgentEntry here (unknown keys are a config
+        # error, never silently dropped — a mistyped agent entry must
+        # not vanish into a default).
+        coerced: dict[str, A2AAgentEntry] = {}
+        for name, entry in dict(self.agents).items():
+            if isinstance(entry, A2AAgentEntry):
+                coerced[name] = entry
+                continue
+            if not isinstance(entry, dict):
+                from nomorals.core.errors import ConfigError
+                raise ConfigError(
+                    f"a2a.agents.{name} must be a table, got "
+                    f"{type(entry).__name__}")
+            unknown = set(entry) - {
+                "url", "enabled", "timeout_s", "api_key_env", "notes"}
+            if unknown:
+                from nomorals.core.errors import ConfigError
+                raise ConfigError(
+                    f"a2a.agents.{name}: unknown key(s) "
+                    f"{sorted(unknown)}")
+            coerced[name] = A2AAgentEntry(
+                url=str(entry.get("url") or ""),
+                enabled=bool(entry.get("enabled", False)),
+                timeout_s=float(entry.get("timeout_s") or 0.0),
+                api_key_env=str(entry.get("api_key_env") or ""),
+                notes=str(entry.get("notes") or ""),
+            )
+        self.agents = coerced
+
+
+@dataclass
 class GuardrailSettings:
     """LLM I/O guardrails (input / output / dialogue rails on the
     brain's call path — see ``nomorals/llm/guardrails.py``).
@@ -1010,6 +1084,7 @@ class Settings:
     training: TrainingSettings = field(default_factory=TrainingSettings)
     tools: ToolSettings = field(default_factory=ToolSettings)
     mcp: MCPSettings = field(default_factory=MCPSettings)
+    a2a: A2ASettings = field(default_factory=A2ASettings)
     guardrails: GuardrailSettings = field(default_factory=GuardrailSettings)
     prompt_compiler: PromptCompilerSettings = field(
         default_factory=PromptCompilerSettings)

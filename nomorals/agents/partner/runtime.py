@@ -10210,6 +10210,9 @@ class PartnerRuntime(
         if kind == "mcp":
             return self._control_mcp(command.tail or arg,
                                      chat_key=chat_key)
+        if kind == "a2a":
+            return self._control_a2a(command.tail or arg,
+                                     chat_key=chat_key)
         if kind == "llmguard":
             # LLM I/O guardrails — owner-only. The _is_control_command
             # gate already routes CONTROL_COMMANDS kinds for the

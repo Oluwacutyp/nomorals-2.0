@@ -595,7 +595,7 @@ class ToolRegistry:
         import importlib as _importlib
 
         for _name in (
-            "archive", "attacker", "audio", "browser",
+            "a2a_client", "archive", "attacker", "audio", "browser",
             "braineval",
             "accounts",
             "backup", "build_app", "captcha", "cipher", "code_executor", "compress",

@@ -744,6 +744,18 @@ class RuntimeMemoryMixin:
         from ...tools.mcp_client import control_mcp
         return control_mcp(tail or "", self.settings)
 
+    def _control_a2a(self, tail: str, *, chat_key: str = "") -> str:
+        """The A2A client in chat. Owner-only.
+
+        /a2a — status · /a2a list — agents · /a2a card <agent> — the
+        card · /a2a send <agent> <text> [--wait N] [--skill id] —
+        one delegation · /a2a task <agent> <task-id> — state +
+        answer · /a2a cancel <agent> <task-id> — cancel · /a2a
+        close [agent] — drop connections.
+        """
+        from ...tools.a2a_client import control_a2a
+        return control_a2a(tail or "", self.settings)
+
     def _control_llmguard(self, tail: str, *, chat_key: str = "") -> str:
         """The LLM I/O guardrails in chat. Owner-only.
 
