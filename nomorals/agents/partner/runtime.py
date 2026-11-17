@@ -558,6 +558,19 @@ class PartnerRuntime(
             max_workers=max(1, int(max_chats)),
             thread_name_prefix="partner-chat",
         )
+        # Owner-priority lane (2026-11-16): one worker reserved for the
+        # owner's own chats. The main pool above caps how many chats run
+        # at once, so when every worker is busy answering groups the
+        # owner's own command would queue behind them; this pool is the
+        # guarantee it never does. Fixed at 1 on purpose: the owner is
+        # one person, so one dedicated worker is exactly the guarantee,
+        # and a bigger reservation would just be main-pool workers by
+        # another name on a box where RAM is the wall. Routing is in
+        # _is_owner_pump; shutdown is in stop().
+        self._owner_pool = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="partner-owner",
+        )
         self._queues: dict[str, deque[ChatMessage]] = {}
         self._draining: dict[str, bool] = {}
         self._queue_guard = threading.Lock()
@@ -940,6 +953,32 @@ class PartnerRuntime(
 
         release_thread_connection(getattr(self.context, "db", None))
 
+    def _is_owner_pump(self, message: ChatMessage) -> bool:
+        """True when this message's pump rides the reserved owner pool.
+
+        The owner chat is a DM with the owner, judged by the runtime's
+        own operator test (:meth:`_is_operator`) — the gateway's
+        ``is_owner`` verdict (including DB-registered owner chats), the
+        WhatsApp self-chat stamp, the sender-id allowlist, and the
+        configured ``partner.owner_chats`` keys. That keeps one owner
+        definition for queueing, gating and command power.
+
+        Two deliberate exclusions, both pinned by test:
+        - Groups are never owner pumps, even when the owner is the one
+          speaking in them. A pump drains its whole chat queue, so a
+          group pump parked on the owner pool would let that group's
+          other members ride it — and a busy group could park the one
+          owner worker, which is the exact failure this lane fixes.
+        - The owner's DM on the gated public bot is not an owner pump
+          either: :meth:`_is_operator` vetoes the gated surface for
+          everyone including the owner, and queue priority follows
+          that same surface rule.
+        """
+        chat = getattr(message, "chat", None)
+        if chat is None or str(getattr(chat, "kind", "") or "") != ChatKind.DM:
+            return False
+        return self._is_operator(message)
+
     def on_message(self, message: ChatMessage) -> None:
         # /ping stage stamp: the moment the runtime took this message
         # in (receipt). The platform's own timestamp on the message is
@@ -956,8 +995,12 @@ class PartnerRuntime(
             self._draining[key] = True
         if draining:
             return  # a pump is already working this chat; it will pick the message up
+        # Owner chats ride the reserved owner pool (see _is_owner_pump);
+        # everything else rides the main pool. One _pump, one queue per
+        # chat either way — per-chat FIFO is unchanged.
+        pool = self._owner_pool if self._is_owner_pump(message) else self._pool
         try:
-            self._track_inflight(self._pool.submit(self._pump, key))
+            self._track_inflight(pool.submit(self._pump, key))
         except RuntimeError:
             # The pool is shut down (runtime stopping): reset the flag or
             # the queued message is orphaned — no pump will ever pick it up.
@@ -4967,6 +5010,7 @@ class PartnerRuntime(
         # StorageError("database is closed") and drops the reply.
         self._drain_chat_pool()
         self._pool.shutdown(wait=False)
+        self._owner_pool.shutdown(wait=False)
         # final beacon, marked stopped — `nm status` then reports a clean
         # "stopped" instead of "went stale"
         try:
