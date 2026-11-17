@@ -25,8 +25,9 @@ from ...core.errors import ToolError
 from ...core.ids import new_short_id
 from ...core.logging_setup import get_logger
 from ...storage.kv import KVStore
-from .vault import TrialVault
 from .failures import record_failure
+from .identity import TrialIdentityBinder, is_binder_draft
+from .vault import TrialVault
 
 _log = get_logger(__name__)
 
@@ -182,6 +183,7 @@ class TrialFlow:
         self.settings = getattr(context, "settings", None)
         self.db = getattr(context, "db", None)
         home = getattr(self.settings, "home", "~/.nomorals") if self.settings else "~/.nomorals"
+        self._trial_home = home
         self.vault = TrialVault(home)
         # sender(platform, chat_key, text) -> SendResult-like; injected for tests.
         self._sender = sender
@@ -466,7 +468,13 @@ class TrialFlow:
             if entry.get("unreadable"):
                 # An entry EXISTS but cannot be verified — fail closed.
                 return ("unknown", None)
-            return ("found", ("trial", str(entry.get("login") or "?")))
+            if is_binder_draft(entry, key):
+                # A sealed binder draft is an identity awaiting its
+                # signup, not a completed account — it does not block
+                # a trial; the bound identity is reused instead.
+                entry = None
+            else:
+                return ("found", ("trial", str(entry.get("login") or "?")))
         if self.db is None:
             # Personal vault never checked — absence unproven.
             return ("unknown", None)
@@ -1854,26 +1862,46 @@ class TrialFlow:
         """Mint (or re-fetch) the disposable persona for a trial signup.
 
         The single construction path for disposable identities, used by
-        :meth:`assist` and :meth:`confirm_signup`.  Delegates to the
-        vault-side :class:`IdentityBank` — the same persona is reused for
+        :meth:`assist` and :meth:`confirm_signup`. The identity itself
+        is minted through the sealed :class:`TrialIdentityBinder` — one
+        synthetic identity per service, stored sealed in the TrialVault
+        — and bridged into an :class:`IdentityBank` Persona (the shape
+        the signup driver reads) via ``Persona.from_trial_identity``
+        + ``IdentityBank.adopt``. The same bound identity is reused for
         the service's retries (same name on the form, same username
-        attempts, same temp email).  Uses temp/disposable contacts —
-        NEVER the owner's real details.  Returns ``(persona,
+        attempts, same temp email). Uses temp/disposable contacts —
+        NEVER the owner's real details. Returns ``(persona,
         identity_dict)`` with name, email slot, persona_id, and the
         generated flag.
         """
+        from ...accounts.identity_bank import Persona
+
         bank = self._identity_bank()
-        persona = bank.get(persona_id) if persona_id else None
-        if persona is None:
-            persona = bank.get_or_mint(platform)
-        identity = {
+        if persona_id:
+            persona = bank.get(persona_id)
+            if persona is not None:
+                return persona, {
+                    "name": persona.name,
+                    "email": persona.email
+                            or "(temp address minted at signup)",
+                    "disposable": "true",
+                    "platform": platform,
+                    "persona_id": persona.id,
+                }
+        # Mint (or re-fetch the bound one) through the sealed binder —
+        # never straight from the bank: the binder is the minting
+        # source, the bank is only the driver's working store.
+        binder = TrialIdentityBinder(self._trial_home)
+        identity = binder.bind(platform)
+        persona = Persona.from_trial_identity(identity)
+        bank.adopt(persona)
+        return persona, {
             "name": persona.name,
             "email": persona.email or "(temp address minted at signup)",
             "disposable": "true",
             "platform": platform,
             "persona_id": persona.id,
         }
-        return persona, identity
 
     def _identity_bank(self):
         """Vault-side identity bank (vault when an owner credential
@@ -1968,6 +1996,11 @@ class TrialFlow:
             raise ToolError(f"no stored trial account for {platform!r} (try /trial list)")
         if entry.get("unreadable"):
             raise ToolError(f"{platform}: stored credential is unreadable (key/tamper)")
+        if is_binder_draft(entry, platform):
+            raise ToolError(
+                f"no completed trial account for {platform!r} yet — the "
+                "identity is drafted but the signup is not finished. "
+                f"Run /trial assist {platform} to drive it.")
         secret = entry["secret"]
         body = (
             f"trial account — {entry['platform']}\n"
@@ -2046,12 +2079,24 @@ class TrialFlow:
             when = time.strftime("%Y-%m-%d", time.localtime(row.get("saved_at", 0)))
             stale = ("  ⚠️ saved over 90 days ago — consider rotating"
                      if row.get("stale") else "")
-            lines.append(f"  {row['platform']}: {row['login']}  (saved {when}){stale}")
+            if is_binder_draft(row, row["platform"]):
+                lines.append(
+                    f"  {row['platform']}: identity drafted — signup not "
+                    f"complete (bound {when})")
+            else:
+                lines.append(f"  {row['platform']}: {row['login']}  (saved {when}){stale}")
         return "\n".join(lines)
 
     def remove(self, platform: str) -> str:
+        entry = self.vault.get(platform)
         if self.vault.delete(platform):
             self._audit("delete", platform, "deleted")
+            if is_binder_draft(entry, platform):
+                # Retiring the draft retires the bound identity: the
+                # next trial for this service mints a fresh one.
+                return (f"deleted trial identity draft for "
+                        f"{platform.lower()} — a fresh identity will be "
+                        "minted on the next assist.")
             return f"deleted trial account for {platform.lower()}."
         self._audit("delete", platform, "not found")
         return f"no stored trial account for {platform.lower()}."

@@ -250,6 +250,60 @@ class Persona:
             metadata=dict(data.get("metadata") or {}),
         )
 
+    @classmethod
+    def from_trial_identity(cls, identity: dict[str, Any], *,
+                            rng: random.Random | None = None) -> Persona:
+        """Build a driver-ready Persona from a sealed binder identity.
+
+        Takes a plain identity dict — the shape
+        :func:`nomorals.agents.trial.identity.generate_trial_identity`
+        returns — so this module stays trial-agnostic (no import of the
+        trial package). Identity fields (name, email, phone, password,
+        username) come from the binder; the form-filling remainder
+        (dob, address, bio, username/handle variants) comes from this
+        module's own generators. The id is deterministic from the
+        binder identity (``persona-trial-<service>-<username>``) so
+        re-deriving the same bound identity yields the same bank row
+        instead of orphan rows.
+        """
+        rng = rng or random.Random()
+        service = str(identity.get("service") or "").strip().lower()
+        first = str(identity.get("first_name") or "Trial")
+        last = str(identity.get("last_name") or "Demo")
+        username = str(identity.get("username") or "")
+        email = str(identity.get("email") or "")
+        variants = ([username] + _username_variants(first, last, rng)
+                    if username else _username_variants(first, last, rng))
+        seen: set[str] = set()
+        username_variants = [v for v in variants
+                             if not (v in seen or seen.add(v))]
+        handles = ([username] + _handle_variants(first, last, rng)
+                   if username else _handle_variants(first, last, rng))
+        seen = set()
+        handle_variants = [h for h in handles
+                           if not (h in seen or seen.add(h))]
+        return cls(
+            id=(f"persona-trial-{service}-{username}" if username
+                else new_id("persona")),
+            service=service,
+            first_name=first,
+            last_name=last,
+            username_variants=username_variants,
+            handle_variants=handle_variants,
+            dob=_adult_dob(rng),
+            address=_ng_address(rng),
+            phone=str(identity.get("phone") or ""),
+            bio=_persona_bio(rng),
+            locale="ng_yoruba",
+            email=email,
+            email_provider=email.split("@")[1] if "@" in email else "",
+            password=str(identity.get("password") or ""),
+            disposable=True,
+            created_at=float(identity.get("created_at") or time.time()),
+            metadata={"pool": "trial-identity", "disposable": True,
+                      "trial_binder": True},
+        )
+
 
 def _username_variants(first: str, last: str, rng: random.Random) -> list[str]:
     """Deterministic-per-persona username candidates, most-likely first."""
@@ -430,6 +484,16 @@ class IdentityBank:
             if now - persona.created_at < REUSE_WINDOW_SECONDS:
                 return persona
         return self.mint(service, rng=rng, locale=locale)
+
+    def adopt(self, persona: Persona) -> Persona:
+        """Store a persona minted elsewhere so the driver can resolve
+        it by id — e.g. a persona built from a sealed trial-binder
+        identity via :meth:`Persona.from_trial_identity`. The bank
+        stays the working store; the minting source stays the caller.
+        """
+        self._save(persona)
+        _log.info("adopted persona %s for %s", persona.id, persona.service)
+        return persona
 
     def get(self, persona_id: str) -> Persona | None:
         """Fetch a persona by id (vault or table backend)."""

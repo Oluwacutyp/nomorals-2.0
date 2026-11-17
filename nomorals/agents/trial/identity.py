@@ -57,6 +57,45 @@ SYNTHETIC_DOMAINS: tuple[str, ...] = (
     "mail.tm",
 )
 
+#: note stored on a binder entry in the TrialVault — the marker the
+#: trial flow uses to tell a sealed identity draft apart from a
+#: completed account stored under the same key space.
+TRIAL_IDENTITY_NOTE = "trial identity — synthetic, disposable"
+
+
+def is_binder_draft(entry: dict[str, Any] | None, service: str) -> bool:
+    """True when a TrialVault entry is a sealed binder-identity draft.
+
+    A binder entry carries the opaque ``trial-<service>-<hex>`` handle
+    as its login, the binder note, and — when the entry was read with
+    its secret unsealed — identity JSON naming the service. A completed
+    account has a real login, an owner note, and a plain password
+    secret. Either marker suffices: the note covers ``list()`` rows
+    (no secret present); the secret shape covers entries whose note
+    was altered.
+    """
+    if not isinstance(entry, dict):
+        return False
+    service = str(service or "").strip().lower()
+    if not service:
+        return False
+    login = str(entry.get("login") or "")
+    if not login.startswith(f"trial-{service}-"):
+        return False
+    if entry.get("note") == TRIAL_IDENTITY_NOTE:
+        return True
+    secret = entry.get("secret")
+    if isinstance(secret, str):
+        try:
+            data = json.loads(secret)
+        except ValueError:
+            return False
+        return (isinstance(data, dict)
+                and data.get("service") == service
+                and data.get("disposable") is True)
+    return False
+
+
 _FIRST_NAMES: tuple[str, ...] = (
     "Adaeze", "Chiamaka", "Tunde", "Funke", "Emeka", "Zainab",
     "Kunle", "Ngozi", "Ibrahim", "Yetunde", "Olumide", "Amina",
@@ -152,7 +191,7 @@ class TrialIdentityBinder:
         identity = generate_trial_identity(service, rng=rng)
         handle = f"trial-{service}-{secrets.token_hex(4)}"
         self.vault.store(service, handle, json.dumps(identity),
-                          note="trial identity — synthetic, disposable")
+                          note=TRIAL_IDENTITY_NOTE)
         _log.info("bound trial identity for %s", service)
         return identity
 
