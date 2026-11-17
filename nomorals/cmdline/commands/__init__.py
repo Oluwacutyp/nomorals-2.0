@@ -7,6 +7,7 @@ from .autonomy import _cmd_autonomy, _set_daily_call_cap
 from .av import _cmd_av
 from .airports import _cmd_airports
 from .flight import _cmd_flight
+from .evidence import _cmd_evidence
 from .soundtrack import _cmd_soundtrack
 from .soundscape import _cmd_soundscape
 from .burn import _cmd_burn
@@ -157,6 +158,7 @@ __all__ = [
     "_cmd_braineval",
     "_cmd_sandbox",
     "_cmd_soundtrack",
+    "_cmd_evidence",
     "_cmd_soundscape",
     "_cmd_book",
     "_cmd_account",

@@ -18,6 +18,7 @@ from .commands.autonomy import _cmd_autonomy
 from .commands.av import _cmd_av
 from .commands.airports import _cmd_airports
 from .commands.compute import _cmd_compute
+from .commands.evidence import _cmd_evidence
 from .commands.soundtrack import _cmd_soundtrack
 from .commands.soundscape import _cmd_soundscape
 from .commands.flight import _cmd_flight
@@ -569,6 +570,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "av": _CommandSpec(_cmd_av),
     "airports": _CommandSpec(_cmd_airports),
     "compute": _CommandSpec(_cmd_compute),
+    "evidence": _CommandSpec(_cmd_evidence),
     "soundtrack": _CommandSpec(_cmd_soundtrack),
     "soundscape": _CommandSpec(_cmd_soundscape),
     "flight": _CommandSpec(_cmd_flight),

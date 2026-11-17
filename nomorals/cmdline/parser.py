@@ -54,6 +54,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "av": [],
     "airports": [],
     "compute": [],
+    "evidence": [],
     "soundtrack": [],
     "soundscape": [],
     "flight": [],
@@ -3648,6 +3649,29 @@ def _parser() -> argparse.ArgumentParser:
                               help="scene note for add")
     soundtrack_p.add_argument("--json", action="store_true",
                               help="Output as JSON")
+
+    evidence_p = sub.add_parser(
+        "evidence", aliases=CLI_ALIASES["evidence"],
+        help="research answers from real papers — claim, method, result, stance",
+        description=("nm evidence <research question> [--limit N]\\n"
+                     "nm evidence list\\n"
+                     "nm evidence show <id>\\n"
+                     "nm evidence table <id>\\n"
+                     "The evidence organ: the question is asked of the "
+                     "open scholarly corpus (OpenAlex, Semantic Scholar, "
+                     "arXiv), the paper set is screened, a cited "
+                     "extraction table is built per paper, and the "
+                     "synthesis names what agrees, what disagrees and "
+                     "what is still unanswered. A question with no papers "
+                     "is refused honestly, never invented."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    evidence_p.add_argument("evidence_query", nargs="*", default=[],
+                            help="research question, or list|show|table …")
+    evidence_p.add_argument("--limit", type=int, default=10,
+                            help="max papers in the set")
+    evidence_p.add_argument("--json", action="store_true",
+                            help="Output as JSON")
 
     soundscape_p = sub.add_parser(
         "soundscape", aliases=CLI_ALIASES["soundscape"],

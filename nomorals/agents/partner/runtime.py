@@ -9797,6 +9797,8 @@ class PartnerRuntime(
             return self._control_breach(command.tail or arg)
         if kind == "soundtrack":
             return self._control_soundtrack(command.tail or arg)
+        if kind == "evidence":
+            return self._control_evidence(command.tail or arg)
         if kind == "director":
             return self._control_director(command.tail or arg)
         if kind == "caption":

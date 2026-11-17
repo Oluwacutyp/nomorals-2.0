@@ -5491,6 +5491,83 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"soundtrack failed: {exc}"
 
+    def _control_evidence(self, tail: str) -> str:
+        """Research answers from real papers (Elicit core).
+
+        Public. /evidence <research question> asks the open scholarly
+        corpus (OpenAlex, Semantic Scholar, arXiv), screens the paper
+        set, extracts a cited table per paper (claim, method, result,
+        stance — every cell quotes its paper verbatim) and synthesises
+        what agrees, what disagrees and what is still unanswered.
+        /evidence list shows past reviews; /evidence show <id>
+        re-renders one; /evidence table <id> re-exports its CSV.
+        A question with no papers is refused honestly — nothing is
+        ever invented. Never raises: bad input returns usage.
+        """
+        from ...research.extraction import (
+            EvidenceTable,
+            answer_question,
+            export_csv,
+            format_evidence_reply,
+            open_review_store,
+        )
+
+        tail = (tail or "").strip()
+        usage = ("usage: /evidence <research question> | list | "
+                 "show <id> | table <id>")
+        if not tail:
+            return usage
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — default home then
+                home = None
+            store = open_review_store(home)
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb in {"help", "--help"}:
+                return usage
+            if verb == "list":
+                reviews = store.list()
+                if not reviews:
+                    return "no evidence reviews yet — ask me a research " \
+                           "question with /evidence <question>"
+                lines = ["evidence reviews:"]
+                for review in reviews[:10]:
+                    lines.append(
+                        f"  {review['id']} — {review['question']} "
+                        f"({review['papers_included']} papers)")
+                return "\n".join(lines)
+            if verb in {"show", "table"}:
+                if not rest:
+                    return f"usage: /evidence {verb} <id>"
+                review = store.get(rest)
+                if review is None:
+                    return f"no evidence review “{rest}”"
+                if verb == "show":
+                    return format_evidence_reply({**review, "ok": True})
+                table = EvidenceTable.from_dict(review.get("table") or {})
+                path = review.get("csv_path") or ""
+                if not path:
+                    from ...research.extraction import (
+                        TABLE_DIRNAME,
+                        _default_home,
+                    )
+
+                    path = export_csv(
+                        table, _default_home(home) / TABLE_DIRNAME
+                        / f"{rest}.csv")
+                    review["csv_path"] = path
+                    store.save(review)
+                return (f"extraction table for “{review['question']}”: "
+                        f"{len(table.cells)} cells over "
+                        f"{len(table.paper_set.papers)} papers — {path}")
+            return format_evidence_reply(answer_question(home, tail))
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"evidence failed: {exc}"
+
     def _control_soundscape(self, tail: str, message: Any = None) -> str:
         """Soundscape machine: compose, tune and play ambient sound.
 

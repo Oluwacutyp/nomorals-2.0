@@ -626,6 +626,7 @@ class ToolRegistry:
             "soundtrack",  # soundtrack index (TuneFind core)
             "soundscape",  # soundscape machine (MyNoise core)
             "burn_note",  # burn-after-reading notes (Privnote build-new)
+            "evidence",  # research answers from real papers (Elicit core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",
