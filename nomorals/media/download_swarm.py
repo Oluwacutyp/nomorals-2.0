@@ -97,6 +97,14 @@ DEFAULT_WORKERS = 4
 #: it for resume.
 STALE_RUNNING_S = 300.0
 
+#: One lock for every queue instance in this process: the runtime's
+#: pool and the per-call command queues open the SAME file through
+#: different instances, so a cancel issued by one must be visible
+#: to the other — the lock makes reload → mutate → save atomic
+#: across instances (the two runtimes on the box use different
+#: homes, hence different queue files, so this stays in-process).
+_QUEUE_LOCK = threading.Lock()
+
 
 class _RangeRefused(Exception):
     """The server will not honour byte ranges for this file."""
@@ -216,6 +224,7 @@ class SwarmReport:
     error: str = ""
     refused_reason: str = ""
     segment_attempts: int = 0
+    cancelled: bool = False
 
 
 @dataclass
@@ -353,7 +362,9 @@ class SwarmDownloader:
     # ── one segment ──────────────────────────────────────────────────
 
     def _fetch_segment(self, url: str, dest: Path, seg: _Segment,
-                       segment_retries: int) -> str:
+                       segment_retries: int,
+                       should_stop: Callable[[], bool] | None = None
+                       ) -> str:
         """Fetch one range into its part file.
 
         Returns ``(sha256, attempts_made)``.  Retries a transport
@@ -361,7 +372,8 @@ class SwarmDownloader:
         not honour the range on the next try either.  A short or
         over-long landing is the same refusal (the length is the
         range contract, checked here so transports that cannot see
-        the HTTP status are still caught).
+        the HTTP status are still caught).  ``should_stop`` is the
+        cooperative cancel: a retry never starts after it fires.
         """
         part = self._segment_path(dest, seg.index)
         attempts = 0
@@ -387,6 +399,12 @@ class SwarmDownloader:
             except _RangeRefused:
                 raise
             except Exception as exc:  # noqa: BLE001 — retry, then fail
+                if should_stop is not None and should_stop():
+                    # Cancelled while retrying: stop here, do not
+                    # start another fetch after the stop.  The
+                    # cancellation is deliberate, not caused by the
+                    # transport failure, so it carries no cause.
+                    raise CancelledError("swarm cancelled") from None
                 if attempts > segment_retries:
                     raise
                 _log.info("swarm segment %d attempt %d failed (%s) — "
@@ -400,7 +418,8 @@ class SwarmDownloader:
                  segment_retries: int = SEGMENT_RETRIES,
                  progress: Callable[[int, int | None], None] | None = None,
                  tracker: Any | None = None,
-                 executor: ThreadPoolExecutor | None = None
+                 executor: ThreadPoolExecutor | None = None,
+                 should_stop: Callable[[], bool] | None = None
                  ) -> SwarmReport:
         """Fetch *url* to *dest* with parallel range workers.
 
@@ -408,9 +427,25 @@ class SwarmDownloader:
         why the swarm declined (the caller falls back to the
         single-stream kit); ``error`` names why a started swarm
         failed (the partial state stays on disk for resume).
+        ``should_stop`` is cooperative cancellation: when it
+        returns True the download stops at the next segment
+        boundary — in-flight segments finish, none start after —
+        the part files are discarded, and the report carries
+        ``cancelled=True``.
         """
         dest_p = Path(dest)
         report = SwarmReport()
+
+        def _stopped() -> bool:
+            # A broken stop check never stops a download.
+            if should_stop is None:
+                return False
+            try:
+                return bool(should_stop())
+            except Exception as e:  # noqa: BLE001
+                record_failure("SwarmDownloader.should_stop", e)
+                return False
+
         try:
             head = self._head(url)
         except Exception as exc:  # noqa: BLE001 — no HEAD, no swarm
@@ -536,18 +571,37 @@ class SwarmDownloader:
         _emit_progress()
         _emit_segments()
 
+        if _stopped():
+            # Cancelled before the first segment started — nothing
+            # to resume, so the attempt leaves nothing behind.
+            self._discard_state(dest_p, len(ranges))
+            report.cancelled = True
+            report.error = "swarm cancelled"
+            return report
+
         own_executor = executor is None
         pool = executor or ThreadPoolExecutor(
             max_workers=n_workers, thread_name_prefix="swarm")
         refused: str | None = None
         failed: Exception | None = None
+        cancelled = False
         futures: dict = {}
         try:
             todo = [s for s in segments if not s.complete]
 
             def _run(seg: _Segment) -> _Segment:
+                if _stopped():
+                    # The stop landed before this segment started:
+                    # never fetch it.  CancelledError is the loop's
+                    # existing "skip this segment" signal — and the
+                    # check lives here, in the worker, because the
+                    # executor promotes a queued segment the moment
+                    # a worker frees up, before the controlling
+                    # loop can cancel it.
+                    raise CancelledError("swarm cancelled")
                 digest, made = self._fetch_segment(
-                    url, dest_p, seg, segment_retries)
+                    url, dest_p, seg, segment_retries,
+                    should_stop=_stopped)
                 attempts[0] += made
                 seg.sha256 = digest
                 seg.complete = True
@@ -555,6 +609,12 @@ class SwarmDownloader:
 
             futures = {pool.submit(_run, seg): seg for seg in todo}
             for fut in as_completed(futures):
+                if _stopped():
+                    # Cooperative stop: the next segment boundary
+                    # is here — in-flight segments finish in the
+                    # finally below, none start after.
+                    cancelled = True
+                    break
                 try:
                     seg = fut.result()
                 except _RangeRefused as exc:
@@ -568,18 +628,28 @@ class SwarmDownloader:
                 _note_completed(seg)
         finally:
             # Let every in-flight segment write land before any
-            # cleanup deletes part files — nothing is cancelled:
-            # a segment that has not started yet still lands bytes
-            # the partial state wants for resume, and a refused
-            # range fails fast on its own.  A caller-owned executor
-            # is never shut down.  Segments that finished after the
-            # loop broke early on a refusal/failure are swept up
-            # here, so the partial state records everything that
-            # actually landed — the wait is the point: a done()
-            # peek here would run before the in-flight segments
-            # finish and record nothing.
+            # cleanup deletes part files.  On a cooperative cancel
+            # a segment that has not started yet is cancelled here
+            # (it never starts); one already in flight runs to its
+            # boundary and its landing is recorded — the whole
+            # attempt is discarded below either way, so the
+            # recording is only bookkeeping.  Without a cancel
+            # nothing is cancelled: a segment that has not started
+            # yet still lands bytes the partial state wants for
+            # resume, and a refused range fails fast on its own.  A
+            # caller-owned executor is never shut down.  Segments
+            # that finished after the loop broke early on a
+            # refusal/failure are swept up here, so the partial
+            # state records everything that actually landed — the
+            # wait is the point: a done() peek here would run
+            # before the in-flight segments finish and record
+            # nothing.
             for fut in futures:
                 if fut.cancelled():
+                    continue
+                if cancelled and fut.cancel():
+                    # Never started, and now never will: the
+                    # boundary for this segment is "not started".
                     continue
                 try:
                     seg = fut.result()
@@ -591,6 +661,13 @@ class SwarmDownloader:
                 pool.shutdown(wait=True)
         report.segment_attempts = attempts[0]
         report.segments_done = sum(1 for s in segments if s.complete)
+        if cancelled:
+            # The part files are resume bait no longer — the job
+            # was cancelled, so the attempt leaves nothing behind.
+            self._discard_state(dest_p, len(ranges))
+            report.cancelled = True
+            report.error = "swarm cancelled"
+            return report
         if refused is not None:
             # Ranges are not honoured at all — the part files are
             # useless, so the attempt leaves nothing behind.
@@ -604,6 +681,13 @@ class SwarmDownloader:
             return report
 
         # ── reassembly: part files in order, one streaming hash ──
+        if _stopped():
+            # Cancelled while the segments were landing: the file
+            # must not land after the owner stopped it.
+            self._discard_state(dest_p, len(ranges))
+            report.cancelled = True
+            report.error = "swarm cancelled"
+            return report
         digest = hashlib.sha256()
         try:
             with dest_p.open("wb") as out:
@@ -652,11 +736,22 @@ class SwarmQueue:
                  *, context: Any = None) -> None:
         self.path = Path(path).expanduser() if path is not None \
             else default_queue_path(context)
-        self._lock = threading.Lock()
+        # One lock for every instance in this process (see
+        # _QUEUE_LOCK): the pool and the command layer open the same
+        # file through different instances.
+        self._lock = _QUEUE_LOCK
         self._jobs: list[dict[str, Any]] = []
         self._load()
 
     def _load(self) -> None:
+        """Re-read the queue file into memory.
+
+        Called by every public method before it touches ``_jobs``:
+        the pool and the command layer open the same file through
+        different instances, so a mutation by one (a cancel, a
+        mark) must be visible to the other without a restart.  A
+        missing file keeps the in-memory jobs; a corrupt file is
+        quarantined beside itself and the queue starts empty."""
         if not self.path.is_file():
             return
         try:
@@ -694,6 +789,7 @@ class SwarmQueue:
         dest_s = str(dest)
         now = time.time()
         with self._lock:
+            self._load()
             for job in self._jobs:
                 if job.get("url") == url and job.get("dest") == dest_s \
                         and job.get("status") in ("queued", "running"):
@@ -712,6 +808,7 @@ class SwarmQueue:
 
     def get(self, job_id: str) -> dict[str, Any] | None:
         with self._lock:
+            self._load()
             for job in self._jobs:
                 if job.get("id") == job_id:
                     return dict(job)
@@ -719,6 +816,7 @@ class SwarmQueue:
 
     def list_jobs(self, status: str | None = None) -> list[dict[str, Any]]:
         with self._lock:
+            self._load()
             jobs = [dict(j) for j in self._jobs]
         if status:
             jobs = [j for j in jobs if j.get("status") == status]
@@ -726,8 +824,17 @@ class SwarmQueue:
 
     def mark(self, job_id: str, status: str, **fields: Any) -> bool:
         with self._lock:
+            self._load()
             for job in self._jobs:
                 if job.get("id") == job_id:
+                    # Cancelled is terminal: a job the owner stopped
+                    # never moves back to running/done/failed — a
+                    # mark that lands after a cancel is a no-op, so
+                    # a cancelled job is never drained or reported
+                    # as finished by a stale caller.
+                    if job.get("status") == "cancelled" \
+                            and status != "cancelled":
+                        return False
                     job["status"] = status
                     job["updated_ts"] = time.time()
                     for key, value in fields.items():
@@ -736,6 +843,32 @@ class SwarmQueue:
                     return True
         return False
 
+    def cancel(self, job_id: str) -> str:
+        """Cancel a queued or running job.
+
+        Queued → ``cancelled`` (the pump never runs it); running →
+        ``cancelled`` (the in-flight download stops at its next
+        segment boundary — see ``SwarmPool``).  Durable: the new
+        status is written atomically, so a fresh queue instance
+        sees it.  Returns ``"cancelled"``, ``"not-found"``,
+        ``"already-cancelled"`` or ``"finished"`` (done/failed) —
+        the caller renders the outcome in words.
+        """
+        with self._lock:
+            self._load()
+            for job in self._jobs:
+                if job.get("id") == job_id:
+                    status = str(job.get("status") or "")
+                    if status == "cancelled":
+                        return "already-cancelled"
+                    if status in ("done", "failed"):
+                        return "finished"
+                    job["status"] = "cancelled"
+                    job["updated_ts"] = time.time()
+                    self._save()
+                    return "cancelled"
+        return "not-found"
+
     def status_text(self) -> str:
         """One plain-text rendering of the queue for /download swarm."""
         jobs = self.list_jobs()
@@ -743,11 +876,15 @@ class SwarmQueue:
         for job in jobs:
             counts[job.get("status", "?")] = \
                 counts.get(job.get("status", "?"), 0) + 1
-        lines = [f"download swarm — {len(jobs)} job(s): "
-                 f"{counts.get('queued', 0)} queued, "
-                 f"{counts.get('running', 0)} running, "
-                 f"{counts.get('done', 0)} done, "
-                 f"{counts.get('failed', 0)} failed"]
+        lines = []
+        summary = (f"download swarm — {len(jobs)} job(s): "
+                   f"{counts.get('queued', 0)} queued, "
+                   f"{counts.get('running', 0)} running, "
+                   f"{counts.get('done', 0)} done, "
+                   f"{counts.get('failed', 0)} failed")
+        if counts.get("cancelled"):
+            summary += f", {counts['cancelled']} cancelled"
+        lines.append(summary)
         if not jobs:
             lines.append("nothing queued — /download <url> --swarm "
                          "queues a large file here")
@@ -806,13 +943,17 @@ class SwarmPool:
                     ) -> dict[str, Any] | None:
         """Drain the oldest queued job to done/failed.  None when
         the queue is empty.  The job's own worker count wins over
-        the pool's when it names one."""
-        pending = self.queue.list_jobs("queued")
-        if not pending:
+        the pool's when it names one.  A job cancelled between the
+        listing and the mark is skipped, not drained — ``mark``
+        refuses to move a cancelled job to running, so the race
+        closes here."""
+        for job in self.queue.list_jobs("queued"):
+            job_id = str(job["id"])
+            if not self.queue.mark(job_id, "running"):
+                continue
+            break
+        else:
             return None
-        job = pending[0]
-        job_id = str(job["id"])
-        self.queue.mark(job_id, "running")
         report = self._downloader.download(
             str(job["url"]), Path(str(job["dest"])),
             workers=job.get("workers") or self._workers,
@@ -821,8 +962,13 @@ class SwarmPool:
                              else (min_swarm_bytes
                                    if min_swarm_bytes is not None
                                    else DEFAULT_MIN_SWARM_BYTES)),
-            executor=self._executor)
-        if report.ok:
+            executor=self._executor,
+            should_stop=lambda: self._is_cancelled(job_id))
+        if report.cancelled:
+            # The downloader already discarded the part files; the
+            # job just needs its terminal status.
+            self.queue.mark(job_id, "cancelled", error="")
+        elif report.ok:
             self.queue.mark(
                 job_id, "done", segments_done=report.segments_done,
                 segments_total=report.segments_total,
@@ -838,6 +984,13 @@ class SwarmPool:
                             segments_total=report.segments_total,
                             error=report.error or "swarm failed")
         return self.queue.get(job_id)
+
+    def _is_cancelled(self, job_id: str) -> bool:
+        """True when the job has been cancelled — read fresh from
+        the durable queue, so a cancel issued through another
+        queue instance (the command layer) is seen here."""
+        job = self.queue.get(job_id)
+        return bool(job) and job.get("status") == "cancelled"
 
     def start(self) -> None:
         """Start the daemon pump.  A second start is a no-op."""

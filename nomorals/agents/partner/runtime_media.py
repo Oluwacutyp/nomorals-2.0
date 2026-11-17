@@ -1350,6 +1350,10 @@ class RuntimeMediaMixin:
         /download swarm          → the swarm queue's state (queued /
                                     running / done / failed, with
                                     segment counts)
+        /download swarm cancel <job-id|title> → stop a queued or
+                                    running swarm job (part files
+                                    discarded, a queued job never
+                                    runs)
 
         In chat the download runs as a background job (owner decision
         2026-10-19): the handler returns an ack immediately and the
@@ -1363,7 +1367,9 @@ class RuntimeMediaMixin:
                     "/download status — the source registry's growth "
                     "state (seeds, grown sources, health, candidates).\n"
                     "/download swarm — the download swarm's queue "
-                    "(large files fetched in parallel segments).")
+                    "(large files fetched in parallel segments).\n"
+                    "/download swarm cancel <job-id> — stop a "
+                    "queued or running swarm job.")
         words = tail.split()
         if words and words[0].lower() == "cancel":
             return self._cancel_download_job(
@@ -1372,6 +1378,9 @@ class RuntimeMediaMixin:
             return self._download_sources_status()
         if words and words[0].lower() == "swarm" and len(words) == 1:
             return self._download_swarm_status()
+        if words and len(words) >= 2 and words[0].lower() == "swarm" \
+                and words[1].lower() == "cancel":
+            return self._download_swarm_cancel(" ".join(words[2:]))
         audio_only = any(w.lower() in ("audio", "--audio", "-a") for w in words)
         swarm = any(w.lower() in ("swarm", "--swarm") for w in words)
         url = " ".join(w for w in words
@@ -1434,6 +1443,96 @@ class RuntimeMediaMixin:
             return SwarmQueue(context=self.context).status_text()
         except Exception as exc:  # noqa: BLE001 — status never raises
             return f"couldn't read the swarm queue: {exc}"
+
+    def _download_swarm_cancel(self, arg: str) -> str:
+        """/download swarm cancel <job-id|title> — stop a swarm job.
+
+        Queued jobs never run; running jobs stop at their next
+        segment boundary and their part files are discarded, never
+        left as resume bait.  Resolution is by the queue's own ids
+        (``sw-…``) or the file name, exact first, then a unique
+        substring — the same shape as /download cancel's title
+        resolution, but over the swarm queue (which is global, not
+        per-chat; the whole /download surface is owner-only, so no
+        chat-ownership check applies here).  Unknown and finished
+        ids refuse in words.  Never raises.
+        """
+        from ...media.download_swarm import SwarmQueue
+
+        arg = (arg or "").strip()
+        if not arg:
+            return ("usage: /download swarm cancel <job-id> — name "
+                    "the job the way /download swarm lists it (its "
+                    "id, or the file name), and I'll stop it.")
+        try:
+            queue = SwarmQueue(context=self.context)
+        except Exception as exc:  # noqa: BLE001 — cancel never raises
+            return f"couldn't read the swarm queue: {exc}"
+        job, ambiguous = self._resolve_swarm_job(queue, arg)
+        if ambiguous:
+            return (f"more than one swarm job matches “{arg[:60]}” — "
+                    "name the job id from /download swarm.")
+        if job is None:
+            return (f"no swarm job matching “{arg[:60]}” — it may "
+                    "already have finished, or the id is wrong.")
+        job_id = str(job.get("id") or "")
+        status = str(job.get("status") or "")
+        if status in ("done", "failed"):
+            return (f"swarm job {job_id} already finished ({status}) "
+                    "— nothing left to cancel.")
+        if status == "cancelled":
+            return f"swarm job {job_id} is already cancelled."
+        outcome = queue.cancel(job_id)
+        if outcome == "cancelled":
+            if status == "running":
+                return (f"🛑 swarm job {job_id} cancelled — it stops "
+                        "at its next segment boundary and its part "
+                        "files are discarded.")
+            return (f"🛑 swarm job {job_id} cancelled — it was still "
+                    "queued, so it will never run.")
+        if outcome == "already-cancelled":
+            return f"swarm job {job_id} is already cancelled."
+        if outcome == "finished":
+            return (f"swarm job {job_id} finished before the "
+                    "cancellation landed.")
+        return (f"no swarm job matching “{arg[:60]}” — it may "
+                "already have finished, or the id is wrong.")
+
+    def _resolve_swarm_job(self, queue: Any, arg: str
+                           ) -> tuple[Any | None, bool]:
+        """Resolve an id, file name, or unique substring to one
+        swarm job.  Returns (job, ambiguous) — (None, False) when
+        nothing matches, (None, True) when several do.  Never
+        raises."""
+        from pathlib import Path
+
+        try:
+            norm = " ".join(arg.split()).lower()
+            jobs = queue.list_jobs()
+
+            def _title(job: Any) -> str:
+                return Path(str(job.get("dest") or "")).name.lower()
+
+            for job in jobs:
+                if str(job.get("id") or "").lower() == norm:
+                    return job, False
+            for job in jobs:
+                if _title(job) and _title(job) == norm:
+                    return job, False
+            hits = [job for job in jobs
+                    if norm in _title(job)
+                    or norm in str(job.get("url") or "").lower()
+                    or norm in str(job.get("id") or "").lower()]
+            if len(hits) == 1:
+                return hits[0], False
+            if len(hits) > 1:
+                return None, True
+            return None, False
+        except Exception as exc:  # noqa: BLE001 — resolution never raises
+            record_failure(
+                "runtime_media.RuntimeMediaMixin._resolve_swarm_job",
+                exc)
+            return None, False
 
     def _download_sources_status(self) -> str:
         """/download status — the source registry's growth state

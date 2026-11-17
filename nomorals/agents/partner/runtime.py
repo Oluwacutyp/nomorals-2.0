@@ -582,6 +582,10 @@ class PartnerRuntime(
         self._inflight: set[Future] = set()
         self._inflight_guard = threading.Lock()
         self._autonomy: Any = None
+        #: The download swarm's shared pool (daemon pump over the
+        #: durable queue).  Built in start(), torn down in stop();
+        #: None until the first boot.
+        self._swarm_pool: Any = None
         #: THE autonomy side-ledger handle (idle clock + pattern /
         #: interest writers). One lazily-opened Database for the whole
         #: process, via autonomy.idle.workspace_db — never a fresh
@@ -4197,6 +4201,20 @@ class PartnerRuntime(
                               migrated)
             except Exception as exc:  # noqa: BLE001 - sync is optional
                 _log.warning("people migration failed: %s", exc)
+        # Download swarm: the durable queue's daemon pump.  A queued
+        # swarm job drains on its own clock once the pump runs —
+        # without this, a job only moves when a /download --swarm
+        # call happens to run process_one in-band.  The pump is its
+        # own daemon thread by design (download_swarm.SwarmPool),
+        # not a scheduler tick — a tick would be a duplicate system.
+        # Failure-isolated like the recovery blocks around it: a
+        # failure here never blocks boot, and the pump restarts from
+        # the durable queue on the next boot.
+        if not self.dry_run:
+            try:
+                self._start_download_swarm_pool()
+            except Exception as exc:  # noqa: BLE001 - swarm is optional
+                _log.warning("download swarm pump not started: %s", exc)
         # Self-update crash recovery: an update interrupted mid-run
         # (crash / power loss) leaves a journal with no terminal
         # event; replay it once here so a run that died at/after a
@@ -4957,6 +4975,43 @@ class PartnerRuntime(
         finally:
             self.stop()
 
+    def _start_download_swarm_pool(self) -> None:
+        """Boot the download swarm's daemon pump.
+
+        One shared SwarmPool over the durable queue: crash-orphaned
+        running jobs are re-queued for resume first, then the pump
+        drains queued jobs on its own clock.  A second call is a
+        no-op (SwarmPool.start guards it).  Never raises — a failure
+        leaves _swarm_pool None and is recorded, so boot continues.
+        """
+        from ...media.download_swarm import SwarmPool, SwarmQueue, default_queue_path
+
+        try:
+            queue = SwarmQueue(default_queue_path(self.context))
+            self._swarm_pool = SwarmPool(queue, context=self.context)
+            self._swarm_pool.resume_stale()
+            self._swarm_pool.start()
+            _log.info("download swarm pump started (queue: %s)",
+                      queue.path)
+        except Exception as exc:  # noqa: BLE001 - boot never dies here
+            record_failure(
+                "runtime.PartnerRuntime.start:swarm_pool", exc)
+            self._swarm_pool = None
+
+    def _stop_download_swarm_pool(self) -> None:
+        """Stop the download swarm's daemon pump.  Idempotent — a
+        second call is a no-op.  Runs after the chat pool drains, so
+        no in-flight download outlives the runtime's shutdown."""
+        pool = getattr(self, "_swarm_pool", None)
+        self._swarm_pool = None
+        if pool is None:
+            return
+        try:
+            pool.close()
+        except Exception as exc:  # noqa: BLE001 - best-effort teardown
+            record_failure(
+                "runtime.PartnerRuntime.stop:swarm_pool", exc)
+
     def stop(self) -> None:
         self._stopped.set()
         if getattr(self, "_arena", None) is not None:
@@ -5011,6 +5066,7 @@ class PartnerRuntime(
         self._drain_chat_pool()
         self._pool.shutdown(wait=False)
         self._owner_pool.shutdown(wait=False)
+        self._stop_download_swarm_pool()
         # final beacon, marked stopped — `nm status` then reports a clean
         # "stopped" instead of "went stale"
         try:
