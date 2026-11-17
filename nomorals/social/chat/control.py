@@ -206,7 +206,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: pins the two together — a wave that adds a kind here must add its
 #: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "map-route", "headline", "teardown",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
@@ -432,6 +432,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "consensus": (1, None),  # /consensus <yes/no research question> [deep] | list | show <id> | meter <id> — what the literature agrees on (Consensus meter)
     "papergraph": (1, None),  # /papergraph <title or DOI> [deep] | list | show <id> | graph <id> — the paper graph around a paper (Connected Papers core)
     "scholar": (1, None),  # /scholar <title or DOI> | list | show <id> | watch <topic> | feeds | unwatch <topic> — the full Semantic Scholar record of a paper
+    "readpaper": (1, None),  # /readpaper <DOI or title> | text <pasted paper> | list | show <id> | ask <id> <question> | explain <id> <equation 1|table 1> | cite <id> [style] | paraphrase <text> — read a paper and explain it in plain language
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
     "searchleads": (0, 0),   # legit paid-task platform report
     "money": (0, None),      # money opportunities hunter: scan|list|new|profile
@@ -2472,6 +2473,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/scholar <title or DOI> | list | show <id> | watch <topic> | feeds | unwatch <topic>",
                 "example": "/scholar 10.1038/nature12373",
                 "related": "/evidence · /consensus · /papergraph"},
+    "readpaper": {"what": "Read a paper and explain it in plain language: give it a DOI, a title, pasted text, or a file path and get what it asks, what it did, what it found — every finding quoted verbatim from the paper — why it matters, and the hard parts (equations, tables) unpacked into named symbols and compared columns. Ask questions against the paper's own sentences, cite it in APA / MLA / Chicago / BibTeX, and paraphrase a span more simply without losing a number or a name. The full text comes from the open-access PDF when one exists, else the arXiv PDF, else the abstract — and the reply says which. An unknown paper, or a question the paper does not cover, is refused honestly — nothing here is invented.",
+                "usage": "/readpaper <DOI or title> | text <pasted paper> | list | show <id> | ask <id> <question> | explain <id> <equation 1|table 1> | cite <id> [apa|mla|chicago|bibtex] | paraphrase <text>",
+                "example": "/readpaper 10.1038/nature12373",
+                "related": "/scholar · /evidence · /consensus · /papergraph"},
     "searchdeep": {"what": "deep multi-query research with synthesis (power mode).",
                    "usage": "/searchdeep <query>", "example": "/searchdeep eBPF rootkit detection",
                    "related": "/search /searchhist"},
@@ -4870,7 +4875,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "audit", "whois", "ports",
-                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar"]),
+                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper"]),
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
@@ -5155,7 +5160,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
-      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar"]),
+      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper"]),
     ("wisdom keeper — corpus · history · practice",
      ["wisdom", "wis"]),
     ("building for real — code & missions",
@@ -5355,6 +5360,7 @@ LIST_ONELINERS: dict[str, str] = {
     "consensus": "what the literature agrees on — a quality-weighted stance meter over real papers, dissent named by name",
     "papergraph": "the paper graph around a paper — what it cites, what cites it, the clusters, what to read next",
     "scholar": "the full record of a paper — authors, venue, TLDR, influential citations, open-access PDF",
+    "readpaper": "read a paper and explain it in plain language — findings quoted verbatim, equations and tables unpacked, questions answered from the paper itself",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",
     "books": "story reader + continuer: /books read <url|slug> | part <slug> | contents <slug> | export <slug> [pdf|epub|html] | continue <slug> [n] | sources",

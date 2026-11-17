@@ -5869,6 +5869,156 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"scholar failed: {exc}"
 
+    def _control_readpaper(self, tail: str) -> str:
+        """Read a paper and explain it in plain language.
+
+        Public. /readpaper <DOI or title> reads the paper — the
+        open-access PDF when one exists, the arXiv PDF, or the
+        abstract when the full text is not openly available — and
+        explains it: what it asks, what it did, what it found
+        (every finding quoted verbatim), why it matters, and the
+        hard parts (equations, tables) unpacked. /readpaper text
+        <pasted paper> reads pasted text. /readpaper ask <id>
+        <question> answers against the stored paper's own
+        sentences; /readpaper explain <id> <equation 1|table 1>
+        unpacks one hard part; /readpaper cite <id> [style]
+        cites it (apa|mla|chicago|bibtex); /readpaper paraphrase
+        <text> says it more simply without losing a number or a
+        name. /readpaper list | show <id> recall stored readings.
+        An unknown paper, or a question the paper does not cover,
+        is refused honestly — nothing here is invented. Never
+        raises: bad input returns usage.
+        """
+        from ...research.paper_reader import (
+            PaperText,
+            ask_paper,
+            explain_span,
+            format_citation,
+            format_reading_reply,
+            open_reading_store,
+            paraphrase_span,
+            read_paper,
+        )
+
+        tail = (tail or "").strip()
+        usage = ("usage: /readpaper <DOI or title> | text <pasted paper> "
+                 "| list | show <id> | ask <id> <question> | explain <id> "
+                 "<equation 1|table 1> | cite <id> [apa|mla|chicago|bibtex] "
+                 "| paraphrase <text>")
+        if not tail:
+            return usage
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — default home then
+                home = None
+            store = open_reading_store(home)
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb in {"help", "--help"}:
+                return usage
+            if verb == "list":
+                rows = store.list()
+                if not rows:
+                    return ("no paper readings yet — read one with "
+                            "/readpaper <DOI or title>")
+                lines = ["paper readings:"]
+                for row in rows[:10]:
+                    lines.append(f"  {row['reading_id']} — {row['title']} "
+                                 f"({row.get('year') or '?'})")
+                return "\n".join(lines)
+            if verb == "show":
+                if not rest:
+                    return "usage: /readpaper show <id>"
+                row = store.get(rest)
+                if row is None:
+                    return f"no stored reading '{rest}'"
+                return format_reading_reply(
+                    {"ok": True,
+                     "reading_id": row["paper"]["paper_id"],
+                     "paper": row["paper"],
+                     "explanation": row["explanation"]})
+            if verb == "ask":
+                sub = rest.split(None, 1)
+                if len(sub) < 2:
+                    return "usage: /readpaper ask <id> <question>"
+                row = store.get(sub[0])
+                if row is None:
+                    return (f"no stored reading '{sub[0]}' — read the "
+                            "paper first")
+                result = ask_paper(PaperText.from_dict(row["paper"]),
+                                   sub[1])
+                if not result.get("ok"):
+                    return result.get("error") or \
+                        "the paper does not cover that"
+                store.log_question(sub[0], sub[1], result["answer"])
+                lines = [result["answer"]]
+                for quote in result.get("quotes") or []:
+                    lines.append(f"  “{quote}”")
+                return "\n".join(lines)
+            if verb == "explain":
+                sub = rest.split(None, 1)
+                if len(sub) < 2:
+                    return ("usage: /readpaper explain <id> "
+                            "<equation 1|table 1>")
+                row = store.get(sub[0])
+                if row is None:
+                    return (f"no stored reading '{sub[0]}' — read the "
+                            "paper first")
+                result = explain_span(PaperText.from_dict(row["paper"]),
+                                      sub[1])
+                if not result.get("ok"):
+                    return result.get("error") or \
+                        "no such span in this paper"
+                part = result["explanation"]
+                lines = [f"{part.span_ref} ({part.kind}): "
+                         f"{part.plain_text}"]
+                for quote in part.grounded_quotes:
+                    lines.append(f"  “{quote}”")
+                return "\n".join(lines)
+            if verb == "cite":
+                sub = rest.split(None, 1)
+                if not sub:
+                    return ("usage: /readpaper cite <id> "
+                            "[apa|mla|chicago|bibtex]")
+                row = store.get(sub[0])
+                if row is None:
+                    return (f"no stored reading '{sub[0]}' — read the "
+                            "paper first")
+                from ...research.paper_records import PaperRecord
+
+                record = PaperRecord.from_dict(row["paper"])
+                try:
+                    return format_citation(
+                        record,
+                        sub[1].strip().lower() if len(sub) > 1 else "apa")
+                except ValueError as exc:
+                    return str(exc)
+            if verb == "paraphrase":
+                if not rest:
+                    return "usage: /readpaper paraphrase <text>"
+                result = paraphrase_span(rest)
+                if not result.get("ok"):
+                    return result.get("error") or "nothing to paraphrase"
+                reply = result["paraphrase"]
+                if result.get("method") == "quoted":
+                    reply += ("\n(kept verbatim — a simpler version "
+                              "would lose a number or a name)")
+                return reply
+            if verb == "text":
+                if not rest:
+                    return "usage: /readpaper text <pasted paper>"
+                result = read_paper(rest, home=home)
+                return result.get("reply") or result.get("error") or \
+                    "paper read failed"
+            result = read_paper(tail, home=home)
+            return result.get("reply") or result.get("error") or \
+                "paper read failed"
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"readpaper failed: {exc}"
+
     def _control_soundscape(self, tail: str, message: Any = None) -> str:
         """Soundscape machine: compose, tune and play ambient sound.
 

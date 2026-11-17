@@ -58,6 +58,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "consensus": [],
     "papergraph": [],
     "scholar": [],
+    "readpaper": [],
     "soundtrack": [],
     "soundscape": [],
     "flight": [],
@@ -3749,6 +3750,30 @@ def _parser() -> argparse.ArgumentParser:
                            help="title or DOI, or list|show|watch|feeds|unwatch …")
     scholar_p.add_argument("--json", action="store_true",
                            help="Output as JSON")
+
+    readpaper_p = sub.add_parser(
+        "readpaper", aliases=CLI_ALIASES["readpaper"],
+        help="read a paper and explain it in plain language — findings quoted verbatim, equations and tables unpacked",
+        description=("nm readpaper <DOI or title>\\n"
+                     "nm readpaper text <pasted paper text>\\n"
+                     "nm readpaper list\\n"
+                     "nm readpaper show <id>\\n"
+                     "nm readpaper ask <id> <question>\\n"
+                     "nm readpaper explain <id> <equation 1|table 1>\\n"
+                     "nm readpaper cite <id> [apa|mla|chicago|bibtex]\\n"
+                     "nm readpaper paraphrase <text>\\n"
+                     "The paper-reader organ: what the paper asks, what "
+                     "it did, what it found (every finding quoted "
+                     "verbatim), why it matters, and the hard parts "
+                     "unpacked. A paper with no record, or a question "
+                     "the paper does not cover, is refused honestly, "
+                     "never invented."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    readpaper_p.add_argument("readpaper_query", nargs="*", default=[],
+                             help="DOI or title, or list|show|ask|explain|cite|paraphrase|text …")
+    readpaper_p.add_argument("--json", action="store_true",
+                             help="Output as JSON")
 
     soundscape_p = sub.add_parser(
         "soundscape", aliases=CLI_ALIASES["soundscape"],

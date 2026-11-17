@@ -8313,6 +8313,8 @@ class PartnerRuntime(
             return self._control_papergraph(command.tail, message)
         if kind == "scholar":
             return self._control_scholar(command.tail)
+        if kind == "readpaper":
+            return self._control_readpaper(command.tail)
         if kind == "burn":
             return self._control_burn(command.tail, message)
         if kind == "arena-research":
@@ -9822,6 +9824,8 @@ class PartnerRuntime(
             return self._control_papergraph(command.tail or arg, message)
         if kind == "scholar":
             return self._control_scholar(command.tail or arg)
+        if kind == "readpaper":
+            return self._control_readpaper(command.tail or arg)
         if kind == "director":
             return self._control_director(command.tail or arg)
         if kind == "caption":

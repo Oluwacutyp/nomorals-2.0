@@ -22,6 +22,7 @@ from .commands.evidence import _cmd_evidence
 from .commands.consensus import _cmd_consensus
 from .commands.scholar import _cmd_scholar
 from .commands.paper_graph import _cmd_paper_graph
+from .commands.paper_reader import _cmd_readpaper
 from .commands.soundtrack import _cmd_soundtrack
 from .commands.soundscape import _cmd_soundscape
 from .commands.flight import _cmd_flight
@@ -577,6 +578,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "consensus": _CommandSpec(_cmd_consensus),
     "scholar": _CommandSpec(_cmd_scholar),
     "papergraph": _CommandSpec(_cmd_paper_graph),
+    "readpaper": _CommandSpec(_cmd_readpaper),
     "soundtrack": _CommandSpec(_cmd_soundtrack),
     "soundscape": _CommandSpec(_cmd_soundscape),
     "flight": _CommandSpec(_cmd_flight),

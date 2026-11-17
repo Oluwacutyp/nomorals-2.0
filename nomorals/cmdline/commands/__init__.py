@@ -11,6 +11,7 @@ from .evidence import _cmd_evidence
 from .consensus import _cmd_consensus
 from .scholar import _cmd_scholar
 from .paper_graph import _cmd_paper_graph
+from .paper_reader import _cmd_readpaper
 from .soundtrack import _cmd_soundtrack
 from .soundscape import _cmd_soundscape
 from .burn import _cmd_burn
@@ -165,6 +166,7 @@ __all__ = [
     "_cmd_consensus",
     "_cmd_scholar",
     "_cmd_paper_graph",
+    "_cmd_readpaper",
     "_cmd_soundscape",
     "_cmd_book",
     "_cmd_account",
