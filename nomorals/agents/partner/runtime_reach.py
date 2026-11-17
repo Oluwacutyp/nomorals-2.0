@@ -1163,13 +1163,37 @@ class RuntimeReachMixin:
         path = self.context.settings.home_path / "data" / "people.sqlite"
         return PersonStore(path)
 
+    def _sync_people_from_tracker(self, store: Any = None) -> int:
+        """Copy every JSON-tracker contact into the people spine.
+
+        One-shot-able and idempotent: ``migrate_from_relationships``
+        inserts only persons not already in the store and appends
+        only notes not already present, so re-running (at boot, or
+        via ``/people migrate``) is a cheap no-op when nothing
+        changed. The tracker is still the live feed — the triage
+        hook notes every inbound message into it — so this runs at
+        every boot, not once behind a marker: a once-marker would
+        freeze the spine at first boot while the tracker keeps
+        growing. Returns the number of persons newly inserted.
+        """
+        from ...people.migrate import migrate_from_relationships
+        from ...social.relationships import RelationshipTracker
+
+        tracker = RelationshipTracker(
+            path=str(self.context.settings.home_path / "data"
+                     / "social_relationships.json"))
+        if store is None:
+            with self._people_store() as own:
+                return migrate_from_relationships(tracker, own)
+        return migrate_from_relationships(tracker, store)
+
     @staticmethod
     def _slug(name: str) -> str:
         slug = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
         return slug or ""
 
     def _control_people(self, tail: str, *, chat_key: str = "") -> str:
-        """The people spine: /people list | show <name> | add <name> | note <name> <text>."""
+        """The people spine: /people list | show <name> | add <name> | note <name> <text> | migrate."""
         parts = (tail or "").strip().split(None, 1)
         verb = parts[0].lower() if parts else "list"
         rest = parts[1] if len(parts) > 1 else ""
@@ -1247,8 +1271,17 @@ class RuntimeReachMixin:
                         return f"{len(found)} matches for {name!r} — be more specific."
                     store.add_note(found[0]["person_id"], text)
                     return f"noted on {found[0].get('display_name')}: {text[:120]}"
+                if verb == "migrate":
+                    count = self._sync_people_from_tracker(store)
+                    if count == 0:
+                        return ("nothing new to migrate — the spine is "
+                                "already caught up with the tracker.")
+                    noun = "person" if count == 1 else "people"
+                    return (f"migrated {count} {noun} from the old "
+                            "tracker — /people list shows them now.")
                 return ("usage: /people list [n] · /people show <name>\n"
-                        "       /people add <name> · /people note <name> <text>")
+                        "       /people add <name> · /people note <name> <text>\n"
+                        "       /people migrate — copy the old tracker into the spine")
         except Exception as exc:  # noqa: BLE001 - sqlite errors surface honestly
             return f"people failed: {exc}"[:500]
 

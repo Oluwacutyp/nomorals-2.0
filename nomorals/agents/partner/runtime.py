@@ -4138,6 +4138,22 @@ class PartnerRuntime(
                     self.context, gateway=self.gateway)
             except Exception as exc:  # noqa: BLE001 - recovery is optional
                 _log.warning("trial assist recovery failed: %s", exc)
+        # People spine: the JSON relationship tracker is still the
+        # live feed (the triage hook notes every inbound message
+        # into it) while the SQLite spine starts empty — sync the
+        # tracker into the spine here so the history moves without
+        # the owner remembering a verb. Idempotent — a second run
+        # inserts nothing new — so it runs at every boot and keeps
+        # the spine caught up. Same guarantee class as the trial
+        # recovery above: a failure inside never blocks boot.
+        if not self.dry_run:
+            try:
+                migrated = self._sync_people_from_tracker()
+                if migrated:
+                    _log.info("people spine: migrated %d from tracker",
+                              migrated)
+            except Exception as exc:  # noqa: BLE001 - sync is optional
+                _log.warning("people migration failed: %s", exc)
         # Self-update crash recovery: an update interrupted mid-run
         # (crash / power loss) leaves a journal with no terminal
         # event; replay it once here so a run that died at/after a
