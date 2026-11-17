@@ -375,6 +375,13 @@ MODULE_PINS: dict[str, int] = {
     # used by the partner runtime (L5) + cmdline (L7). L5.
     "nomorals.os.snapshots": 5,
     "nomorals.os.update": 5,
+    # os.verifiers is a leaf verification library (lint / git-clean /
+    # disk-space gates + the unittest/docs verifiers): it imports core
+    # (L1) only, plus stdlib. The os/ package (L6) is too coarse a
+    # unit for it — its only static importer is the L5 update service
+    # (the pre-update gates, audit R2-38); the agent tool surface
+    # reaches it dynamically (importlib, unscanned). L5.
+    "nomorals.os.verifiers": 5,
 }
 
 #: Grandfathered upward imports.  Each entry is an (importer, target) dotted

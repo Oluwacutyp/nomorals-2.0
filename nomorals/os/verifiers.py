@@ -412,8 +412,16 @@ class CompositeVerifier:
             results.append((vname, verdict))
         passed = (all(v.passed for _, v in results) if self.mode == "all"
                   else any(v.passed for _, v in results))
-        lines = [f"{'PASS' if v.passed else 'FAIL'} {name}"
-                 for name, v in results]
+        lines = []
+        for name, v in results:
+            lines.append(f"{'PASS' if v.passed else 'FAIL'} {name}")
+            if not v.passed and v.details:
+                # A refusal must carry the reason, not just the gate
+                # name: "FAIL git_clean" alone never says what is
+                # dirty. (Audit R2-38: the update refusal names the
+                # failing gate AND why it failed.)
+                for detail_line in str(v.details).splitlines():
+                    lines.append(f"    {detail_line}")
         details = (f"composite({self.mode}) "
                    f"{sum(v.passed for _, v in results)}/{len(results)} passed"
                    + ("\n" + "\n".join(lines) if lines else ""))

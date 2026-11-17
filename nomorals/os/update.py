@@ -112,6 +112,7 @@ from ..core.filelock import lock_exclusive_nb, unlock as _unlock_file
 from ..core.logging_setup import get_logger
 from .snapshots import SnapshotError, SnapshotManager, SnapshotRefused
 from .verify_install import verify_install
+from .verifiers import Verdict, gate_registry
 
 __all__ = [
     "HealthCheckFn",
@@ -492,6 +493,7 @@ class UpdateManager:
         advisory_checks: list[HealthCheckFn] | None = None,
         git_bin: str = "git",
         verifier: Any | None = None,
+        pre_update_gates: Any | None = None,
         quiesce: QuiesceFn | None = None,
     ) -> None:
         self.repo_dir = Path(repo_dir)
@@ -519,6 +521,24 @@ class UpdateManager:
             self._verifier = verify_install
         else:
             self._verifier = None
+        # Pre-update gates (audit R2-38): the cheap pre-flight checks
+        # (lint the tree, working tree clean, enough disk) that used
+        # to exist only as a registry nobody called. Same idiom as
+        # the verifier above: the production construction (no
+        # injected health checks) gets the real
+        # ``pre_update_gates`` composite; an injected construction's
+        # gates are scripted wholes and gets one only when it passes
+        # a gate explicitly. The gates run as step 0.65 of _run,
+        # before quiesce/snapshot/pull — they are NOT the post-pull
+        # _verifier above, whose landed-state checks they cannot
+        # replace (different contract, different job).
+        if pre_update_gates is not None:
+            self._pre_update_gates = pre_update_gates
+        elif health_checks is None:
+            registry = gate_registry()
+            self._pre_update_gates = registry.get("pre_update_gates")
+        else:
+            self._pre_update_gates = None
         if health_checks is not None:
             self.health_checks = list(health_checks)
             # Injected gates (tests, embedders) get no advisory checks
@@ -667,6 +687,47 @@ class UpdateManager:
                            "ts": time.time(), "error": report.error})
             self._append_history(report)
             return report
+
+        # Step 0.65: pre-update gates — the OS gate registry's
+        # ``pre_update_gates`` composite (lint + git_clean +
+        # disk_space) runs BEFORE anything is stopped, snapshotted
+        # or pulled, so a refusal changes nothing on disk and stops
+        # nothing that is running. The preflights above still win
+        # for the cases they cover (colliding edits get the specific
+        # collision message, a measured disk shortage gets the
+        # measured numbers); the gates catch the remainder — any
+        # tracked modification, code that does not compile, the flat
+        # disk floor. A gate that raises is a failed gate, never a
+        # pass: a safety gate that cannot run must not green-light
+        # the pull. Scoped to pull runs: a --no-pull run applies
+        # migrations without touching the tree, so there is nothing
+        # for these gates to guard there.
+        if pull and self._pre_update_gates is not None:
+            try:
+                verdict = self._pre_update_gates.verify(
+                    {"root": str(self.repo_dir),
+                     "repo_dir": str(self.repo_dir),
+                     "path": str(self.repo_dir)})
+            except Exception as exc:  # noqa: BLE001 - fail closed
+                verdict = Verdict(
+                    passed=False,
+                    details=f"pre-update gates could not run: "
+                            f"{type(exc).__name__}: {exc}")
+            report.record("pre_update_gates", verdict.passed,
+                          verdict.details)
+            self._journal({"run_id": run_id, "event": "step",
+                           "step": "pre_update_gates", "ts": time.time(),
+                           "ok": verdict.passed,
+                           "detail": verdict.details})
+            if not verdict.passed:
+                report.error = (
+                    "pre-update gates refused this update:\n"
+                    + verdict.details)
+                report.seconds = time.time() - started
+                self._journal({"run_id": run_id, "event": "aborted",
+                               "ts": time.time(), "error": report.error})
+                self._append_history(report)
+                return report
 
         # Step 0.75: quiesce — stop the children that execute files
         # from the tree BEFORE anything tries to replace those files.
