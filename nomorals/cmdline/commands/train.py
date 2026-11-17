@@ -47,6 +47,28 @@ def _cmd_train(args, context):
                 f"{runs.get('promoted', 0)} promoted, "
                 f"{runs.get('rejected', 0)} rejected, "
                 f"{runs.get('gate_passed', 0)} passed the gate")
+            # Per-run detail (the aggregates above are the summary; the
+            # runs themselves carry the story). Omitted when there are none.
+            recent = runs.get("recent", []) or []
+            if recent:
+                import time
+
+                lines.append("  recent runs:")
+                for run in recent:
+                    name = str(run.get("name") or "unnamed")
+                    status_text = str(run.get("status") or "pending")
+                    gate = run.get("gate_passed")
+                    gate_text = (" — gate passed" if gate is True
+                                 else " — gate failed" if gate is False
+                                 else "")
+                    created = float(run.get("created_at") or 0.0)
+                    when = (time.strftime("%Y-%m-%d %H:%M",
+                                          time.localtime(created))
+                            if created else "unknown time")
+                    error = str(run.get("error") or "")
+                    error_text = (f" — {error[:120]}" if error else "")
+                    lines.append(f"    {when}  {name} — {status_text}"
+                                 f"{gate_text}{error_text}")
         _emit(args, status, "\n".join(lines))
         return 0
 

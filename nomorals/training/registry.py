@@ -49,6 +49,10 @@ class RunStatus:
 #: Valid promotion stages for :meth:`TrainingRegistry.promote`.
 PROMOTION_STAGES = ("shadow", "canary", "full")
 
+#: How many recent runs :meth:`TrainingRegistry.stats` carries in its
+#: "recent" key — the per-run detail behind `nm train status`.
+RECENT_RUNS = 5
+
 
 @dataclass
 class TrainingRun:
@@ -118,6 +122,23 @@ class TrainingRun:
 
     def to_dict(self) -> dict[str, Any]:
         return self.to_row()
+
+
+def _run_detail(run: TrainingRun) -> dict[str, Any]:
+    """The per-run record :meth:`TrainingRegistry.stats` carries in "recent".
+
+    Only the fields a status reader needs to judge a run — no config,
+    metrics, or model paths, which stay behind `registry.list()`.
+    """
+    return {
+        "name": run.name,
+        "status": run.status,
+        "gate_passed": run.gate_passed,
+        "created_at": run.created_at,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "error": run.error,
+    }
 
 
 def _decode(raw: Any) -> dict[str, Any]:
@@ -575,6 +596,9 @@ class TrainingRegistry:
             for r in all_rows:
                 key = str(r.get("status"))
                 by_status[key] = by_status.get(key, 0) + 1
+            recent_rows = sorted(
+                all_rows, key=lambda r: r.get("created_at") or 0,
+                reverse=True)[:RECENT_RUNS]
             return {
                 "total": len(all_rows),
                 "by_status": by_status,
@@ -582,9 +606,15 @@ class TrainingRegistry:
                 "rejected": by_status.get(RunStatus.REJECTED, 0),
                 "gate_passed": sum(
                     1 for r in all_rows if r.get("gate_passed") == 1),
+                "recent": [_run_detail(TrainingRun.from_row(self._dec(r)))
+                           for r in recent_rows],
             }
         rows = self.db.query("SELECT status, COUNT(*) AS n FROM training_runs GROUP BY status")
         by_status = {r["status"]: int(r["n"]) for r in rows}
+        recent_rows = self.db.query(
+            "SELECT * FROM training_runs ORDER BY created_at DESC LIMIT ?",
+            (RECENT_RUNS,),
+        )
         return {
             "total": int(self.db.scalar("SELECT COUNT(*) FROM training_runs", default=0) or 0),
             "by_status": by_status,
@@ -595,4 +625,6 @@ class TrainingRegistry:
                     "SELECT COUNT(*) FROM training_runs WHERE gate_passed = 1", default=0
                 ) or 0
             ),
+            "recent": [_run_detail(TrainingRun.from_row(dict(r)))
+                       for r in recent_rows],
         }
