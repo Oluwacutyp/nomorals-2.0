@@ -2,6 +2,7 @@
 malware scanning.
 
 - dns_leak_check: "is my DNS leaking?" — nonce-probe technique.
+- net_leak_check: "is my real IP leaking?" — STUN srflx + IPv6 egress.
 - strip_exif: remove GPS/camera/timestamps from an image before sending.
 - exif_report: what metadata an image carries (awareness, not removal).
 - av_scan: scan a file or folder for malware (Windows Defender, ClamAV,
@@ -52,6 +53,26 @@ def register(registry: Any) -> None:
         from ..security.dnsleak import check_dns_leak
         try:
             rep = check_dns_leak(expected_asn=expected_asn)
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": str(exc)}
+        return {"ok": True, **rep.to_dict()}
+
+    @registry.register(
+        "net_leak_check",
+        description=(
+            "Check whether the real IP leaks via WebRTC/STUN or IPv6 "
+            "egress. ('is my IP leaking?', 'webrtc leak test', 'am I "
+            "leaking my real IP'). STUN Binding Request + IPv6 egress "
+            "probe, pure stdlib. No API key. Result carries verdict "
+            "'leak' / 'clean' / 'inconclusive' — inconclusive means the "
+            "check could not measure the path, never clean."
+        ),
+        capability=Capability.NET_OUT,
+    )
+    def net_leak_check(*, expected_ip: str = "") -> dict[str, Any]:
+        from ..security.netleak import check_net_leak
+        try:
+            rep = check_net_leak(expected_ip=expected_ip)
         except Exception as exc:  # noqa: BLE001
             return {"ok": False, "error": str(exc)}
         return {"ok": True, **rep.to_dict()}

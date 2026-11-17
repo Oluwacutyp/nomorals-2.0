@@ -233,13 +233,26 @@ class NetLeakReport:
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "ok": self.ok, "http_public_ip": self.http_public_ip,
+            "ok": self.ok, "verdict": self.verdict,
+            "http_public_ip": self.http_public_ip,
             "stun_ip": self.stun_ip, "stun_server": self.stun_server,
             "local_ips": self.local_ips, "ipv6_egress": self.ipv6_egress,
             "ipv6_local": self.ipv6_local, "webrtc_leak": self.webrtc_leak,
             "webrtc_detail": self.webrtc_detail, "ipv6_leak": self.ipv6_leak,
             "local_exposure": self.local_exposure, "note": self.note,
         }
+
+    @property
+    def verdict(self) -> str:
+        """One-word verdict — the same rule as ``format_report``'s
+        headline, in one place so the tool result and the rendering
+        cannot drift apart. ``"inconclusive"`` means the check could
+        not measure the path (e.g. STUN unreachable) — never clean."""
+        if self.webrtc_leak:
+            return "leak"
+        if self.ok and self.stun_ip:
+            return "clean"
+        return "inconclusive"
 
 
 def check_net_leak(*, expected_ip: str = "",
@@ -324,9 +337,9 @@ def format_report(rep: NetLeakReport) -> str:
     # was unreachable the check measured nothing on that path — the
     # note below already says "treat as unknown, not clean", so the
     # headline must not claim NO LEAK from the HTTP address alone.
-    verdict = ("✅ NO LEAK" if rep.ok and not rep.webrtc_leak and rep.stun_ip
-               else "🚨 LEAK DETECTED" if rep.webrtc_leak
-               else "⚠️ INCONCLUSIVE")
+    # The rule lives on NetLeakReport.verdict (single source).
+    verdict = {"leak": "🚨 LEAK DETECTED", "clean": "✅ NO LEAK",
+               "inconclusive": "⚠️ INCONCLUSIVE"}[rep.verdict]
     L.append(f"🌐 WebRTC/IPv6 leak check — {verdict}")
     if rep.http_public_ip:
         L.append(f"   HTTP egress: {rep.http_public_ip}")
