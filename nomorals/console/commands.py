@@ -89,9 +89,23 @@ def complete(prefix: str) -> list[str]:
 class ConsoleCommands:
     """Intercept console lines. ``handle`` returns text to print, or None."""
 
-    def __init__(self, snapshot_provider: SnapshotProvider) -> None:
+    def __init__(self, snapshot_provider: SnapshotProvider,
+                 cmdline_dispatch: Callable[[str], str] | None = None,
+                 cmdline_commands: list[str] | None = None) -> None:
+        """Create the console command handler.
+
+        ``cmdline_dispatch`` / ``cmdline_commands`` are the injected
+        ``nm`` cmdline dispatch and its command table (audit R3-64):
+        when given, the GodConsole routes typed commands through
+        :class:`~nomorals.console.tui_facade.TUIFacade` (cmdline names
+        first, console natives after). When omitted the console is
+        exactly as before -- this is an L5 fallback surface and must
+        not import L7 cmdline dispatch itself.
+        """
         self._snapshot = snapshot_provider
         self._history: list[str] = []  # commands typed this session
+        self._cmdline_dispatch = cmdline_dispatch
+        self._cmdline_commands = cmdline_commands
 
     def handle(self, text: str) -> str | None:
         """Return text to print for a console command, or None (→ brain)."""
@@ -184,18 +198,39 @@ class ConsoleCommands:
                 + render_dashboard(self._safe_snapshot())
             )
 
+    def _build_god_console(self):
+        """Build the fullscreen console (no run loop).
+
+        When a cmdline dispatch was injected, the console's input
+        handler is the TUIFacade: known ``nm`` commands run through
+        the cmdline dispatch, everything else through the console
+        handler -- one routing place for both terminal surfaces
+        (audit R3-64). Without an injected dispatch the console is
+        built exactly as before.
+        """
+        from .godconsole import GodConsole
+        from .tui_facade import TUIFacade
+
+        console = GodConsole(
+            snapshot=self._safe_snapshot,
+            on_command=self._handle_console_command,
+            completer=complete,
+            highlighter=self.highlight,
+        )
+        if self._cmdline_dispatch is not None:
+            facade = TUIFacade(
+                godconsole=console,
+                cmdline_dispatch=self._cmdline_dispatch,
+                cmdline_commands=self._cmdline_commands,
+                console_dispatch=self._handle_console_command,
+            )
+            console._on_command = facade.run_command
+        return console
+
     def _god_console(self) -> str:
         """Launch the god-tier fullscreen interactive console."""
         try:
-            from .godconsole import GodConsole
-
-            console = GodConsole(
-                snapshot=self._safe_snapshot,
-                on_command=self._handle_console_command,
-                completer=complete,
-                highlighter=self.highlight,
-            )
-            return console.run()
+            return self._build_god_console().run()
         except Exception as exc:  # noqa: BLE001
             return paint(f"console failed ({exc})", WARN)
 

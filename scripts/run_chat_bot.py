@@ -534,7 +534,36 @@ def main() -> int:
                 from nomorals.console import ConsoleCommands
 
                 snapshot = _build_snapshot_provider(runtime, context, boot_mono, history)
-                commands = ConsoleCommands(snapshot)
+                # The GodConsole routes typed commands through TUIFacade
+                # (audit R3-64): known nm commands run the cmdline
+                # dispatch, console natives keep the console handler.
+                # Cmdline is optional here too -- if it ever fails to
+                # import, the console stays console-only. The table is
+                # the full typed-name set: registry keys + every alias
+                # value (an alias typed in the console must route to
+                # cmdline, not fall through to the brain).
+                cmdline_dispatch = None
+                cmdline_commands = None
+                try:
+                    from nomorals.cmdline.dispatch import (
+                        _COMMANDS,
+                        run_command_string,
+                    )
+                    from nomorals.cmdline.parser import CLI_ALIASES
+
+                    cmdline_dispatch = run_command_string
+                    cmdline_commands = sorted(
+                        set(_COMMANDS)
+                        | {a for vs in CLI_ALIASES.values() for a in vs}
+                    )
+                except Exception:  # noqa: BLE001 - cmdline wiring is optional
+                    log.debug("cmdline dispatch unavailable for console",
+                              exc_info=True)
+                commands = ConsoleCommands(
+                    snapshot,
+                    cmdline_dispatch=cmdline_dispatch,
+                    cmdline_commands=cmdline_commands,
+                )
                 local = None
                 try:
                     local = runtime.gateway.adapters.get("local")

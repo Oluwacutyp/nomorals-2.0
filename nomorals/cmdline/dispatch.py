@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
+import shlex
 import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
@@ -194,6 +197,98 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
+
+
+# Commands that must never run inside the GodConsole: they take over the
+# terminal, block the console loop, or restart the bot process. The
+# refusal names the command and the reason (see _terminal_refusal).
+TERMINAL_COMMANDS = ("run", "serve", "tui")
+
+
+def _terminal_refusal(argv: list[str]) -> str | None:
+    """Why ``argv`` must not run inside the GodConsole, or None if safe.
+
+    ``run`` starts an orchestrator goal and blocks until it finishes;
+    ``serve`` starts the HTTP server and blocks forever; ``stream``
+    defaults to ``serve``; ``tui`` nests a curses screen inside the
+    console's raw-mode screen; ``update`` prompts on stdin (which the
+    console owns) and then pulls + restarts the bot. The safe siblings
+    (``stream status``, ``update --check-only``) are allowed through.
+    """
+    if not argv:
+        return None
+    first = argv[0].lower()
+    if first in TERMINAL_COMMANDS:
+        reasons = {
+            "run": "it runs an agent goal to completion and blocks the console",
+            "serve": "it starts the HTTP server and blocks forever",
+            "tui": "it launches the curses TUI nested inside the console",
+        }
+        return (
+            f"'{first}' cannot be run inside the console: "
+            f"{reasons[first]}. Run it from a real terminal instead."
+        )
+    if first == "stream" and (len(argv) < 2 or argv[1].lower() != "status"):
+        return (
+            "'stream' cannot be run inside the console: it starts the "
+            "streaming server and blocks forever. 'stream status' is fine, "
+            "and 'stream serve' belongs in a real terminal."
+        )
+    if first == "update" and "--check-only" not in argv:
+        return (
+            "'update' cannot be run inside the console: it asks for "
+            "confirmation on stdin and then pulls and restarts the bot. "
+            "'update --check-only' is fine."
+        )
+    return None
+
+
+def run_command_string(cmd: str) -> str:
+    """Run one ``nm ...`` command line and return its output as text.
+
+    The GodConsole renders a string, so this is the string->string
+    adapter over the print-based cmdline dispatch: shlex-split, parse
+    with the real parser, run ``_dispatch`` with stdout/stderr
+    captured, and return the captured text (plus an exit-code line
+    when the command failed). Deliberately does NOT call ``main()``:
+    ``main()`` reconfigures logging (``force=True``) and installs a
+    SIGTERM handler, both wrong inside the already-running bot
+    process. Never raises: parse failures, handler exceptions and
+    interrupts all come back as text.
+    """
+    if not isinstance(cmd, str) or not cmd.strip():
+        return ""
+    try:
+        argv = shlex.split(cmd.strip())
+    except ValueError as exc:
+        return f"could not parse command: {exc}"
+    if argv and argv[0].lower() == "nm":
+        argv = argv[1:]
+    refusal = _terminal_refusal(argv)
+    if refusal is not None:
+        return refusal
+    if not argv:
+        return ""
+    out = io.StringIO()
+    err = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+            args = _parser().parse_args(argv)
+            rc = _dispatch(args)
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 2
+        text = (out.getvalue() + err.getvalue()).strip()
+        if code == 0:
+            return text
+        return f"{text}\n(exit code: {code})".strip() if text else f"(exit code: {code})"
+    except KeyboardInterrupt:
+        return "interrupted"
+    except Exception as exc:  # noqa: BLE001 - adapter must never raise into the console
+        return f"error: {type(exc).__name__}: {exc}"
+    text = (out.getvalue() + err.getvalue()).strip()
+    if rc != 0:
+        text = f"{text}\n(exit code: {rc})".strip() if text else f"(exit code: {rc})"
+    return text
 
 
 def _attach_cli_session(context: Any) -> None:

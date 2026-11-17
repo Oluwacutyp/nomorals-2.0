@@ -54,11 +54,28 @@ class TUIFacade:
     def __init__(self, *,
                  godconsole: Any | None = None,
                  cmdline_dispatch: Callable[[str], Any] | None = None,
-                 console_commands: Sequence[str] | None = None) -> None:
+                 console_commands: Sequence[str] | None = None,
+                 cmdline_commands: Sequence[str] | None = None,
+                 console_dispatch: Callable[[str], Any] | None = None) -> None:
+        """Create a facade.
+
+        ``cmdline_dispatch`` is a callable taking a command string and
+        returning a string; ``cmdline_commands`` is the table of
+        cmdline command names it serves (a name not in the table never
+        reaches it -- without a table the cmdline half stays inert, as
+        before). ``console_dispatch`` is the explicit console-native
+        handler; when it is not given, the facade falls back to the
+        godconsole's live ``_on_command`` attribute (the dynamic
+        lookup the pre-wiring tests pin).
+        """
         self._godconsole = godconsole
         self._cmdline_dispatch = cmdline_dispatch
         self._console_commands = list(console_commands or
                                       ("help", "status", "events", "clear", "view"))
+        self._cmdline_commands = (
+            list(cmdline_commands) if cmdline_commands is not None else None
+        )
+        self._console_dispatch = console_dispatch
 
     # ── GodConsole passthrough ─────────────────────────────────────────────
     @property
@@ -86,7 +103,7 @@ class TUIFacade:
     def list_commands(self) -> list[str]:
         """Union of cmdline commands + console-native commands, sorted."""
         try:
-            cli = set(cmdline_commands())
+            cli = set(cmdline_commands(self._cmdline_commands))
         except Exception as e:
             record_failure('tui_facade.TUIFacade.list_commands', e)
             cli = set()
@@ -95,20 +112,34 @@ class TUIFacade:
     def run_command(self, cmd: str) -> Any:
         """Route ``cmd``: cmdline dispatch when it knows the command,
         else the GodConsole ``on_command`` handler. Same result as
-        calling the underlying handler directly (passthrough)."""
-        name = (cmd or "").strip().split()[0] if (cmd or "").strip() else ""
+        calling the underlying handler directly (passthrough).
+
+        A leading ``nm`` token is stripped first (the console owner
+        types ``nm status`` out of habit); the stripped command is
+        what both dispatches see. An explicitly injected
+        ``console_dispatch`` takes priority over the godconsole's live
+        ``_on_command`` attribute -- without it, installing the facade
+        as ``_on_command`` would recurse into itself.
+        """
+        stripped = (cmd or "").strip()
+        tokens = stripped.split()
+        if tokens and tokens[0].lower() == "nm":
+            stripped = " ".join(tokens[1:])
+        name = stripped.split()[0] if stripped else ""
         if self._cmdline_dispatch is not None:
             try:
-                known = set(cmdline_commands())
+                known = set(cmdline_commands(self._cmdline_commands))
             except Exception as e:
                 record_failure('tui_facade.TUIFacade.run_command', e)
                 known = set()
             if name in known:
-                return self._cmdline_dispatch(cmd)
+                return self._cmdline_dispatch(stripped)
+        if self._console_dispatch is not None:
+            return self._console_dispatch(stripped)
         handler = getattr(self.godconsole, "_on_command", None)
         if handler is not None:
-            return handler(cmd)
-        return f"echo: {cmd}"
+            return handler(stripped)
+        return f"echo: {stripped}"
 
     def run(self) -> str:
         """Run the fullscreen console (GodConsole passthrough)."""
