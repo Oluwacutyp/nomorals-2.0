@@ -3254,6 +3254,85 @@ def _parser() -> argparse.ArgumentParser:
     f_sc.add_argument("--out", default="",
                       help="where to write (default: ./<name>.format.json)")
 
+    board = sub.add_parser("board",
+        help="Whiteboard: boards of shapes, arrows, text and strokes",
+        description=("nm board new <title> [--theme clean|sketch] [--diagram-file spec.json]\n"
+                     "nm board add <board> <type> <label> [--x N] [--y N] [--w N] [--h N] [--color #hex] [--points \"x,y;x,y\"]\n"
+                     "nm board move <board> <shape> <x> <y>\n"
+                     "nm board remove <board> <shape>\n"
+                     "nm board bind <board> <from> <to> [--label text]\n"
+                     "nm board unbind <board> <binding>\n"
+                     "nm board undo|redo <board>\n"
+                     "nm board show <board> [--json] | nm board list [--json]\n"
+                     "nm board delete <board>\n"
+                     "nm board render <board> [--theme clean|sketch] [--out path.png] [--size WxH]\n"
+                     "nm board page <board> [--out path.html]"),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    b_sub = board.add_subparsers(dest="board_action", required=True)
+    b_new = b_sub.add_parser("new", help="make a board")
+    b_new.add_argument("title", help="board title")
+    b_new.add_argument("--theme", default="clean",
+                       help="clean|sketch (default: clean)")
+    b_new.add_argument("--diagram-file", default="",
+                       help="diagram-spec JSON (nodes + edges) to build "
+                            "the board from")
+    b_add = b_sub.add_parser("add", help="add a shape")
+    b_add.add_argument("board_ref", help="board id or unique prefix")
+    b_add.add_argument("shape_type",
+                       help="rect|ellipse|arrow|text|image|sticky|draw")
+    b_add.add_argument("label", help="shape text or arrow label")
+    b_add.add_argument("--x", type=float, default=None)
+    b_add.add_argument("--y", type=float, default=None)
+    b_add.add_argument("--w", type=float, default=None)
+    b_add.add_argument("--h", type=float, default=None)
+    b_add.add_argument("--color", default="",
+                       help="shape colour, #rrggbb")
+    b_add.add_argument("--points", default="",
+                       help="draw shape points, \"x,y;x,y\"")
+    b_move = b_sub.add_parser("move", help="move a shape")
+    b_move.add_argument("board_ref", help="board id or unique prefix")
+    b_move.add_argument("shape_ref", help="shape id or unique prefix")
+    b_move.add_argument("x", type=float)
+    b_move.add_argument("y", type=float)
+    b_rm = b_sub.add_parser("remove", help="remove a shape")
+    b_rm.add_argument("board_ref", help="board id or unique prefix")
+    b_rm.add_argument("shape_ref", help="shape id or unique prefix")
+    b_bind = b_sub.add_parser("bind", help="connect two shapes")
+    b_bind.add_argument("board_ref", help="board id or unique prefix")
+    b_bind.add_argument("from_ref", help="shape id or unique prefix")
+    b_bind.add_argument("to_ref", help="shape id or unique prefix")
+    b_bind.add_argument("--label", default="")
+    b_unbind = b_sub.add_parser("unbind", help="drop a binding")
+    b_unbind.add_argument("board_ref", help="board id or unique prefix")
+    b_unbind.add_argument("binding_ref",
+                          help="binding id or unique prefix")
+    b_undo = b_sub.add_parser("undo", help="step one op back")
+    b_undo.add_argument("board_ref", help="board id or unique prefix")
+    b_redo = b_sub.add_parser("redo", help="step one undone op forward")
+    b_redo.add_argument("board_ref", help="board id or unique prefix")
+    b_show = b_sub.add_parser("show", help="report a board")
+    b_show.add_argument("board_ref", help="board id or unique prefix")
+    b_show.add_argument("--json", action="store_true")
+    b_list = b_sub.add_parser("list", help="list boards")
+    b_list.add_argument("--json", action="store_true")
+    b_del = b_sub.add_parser("delete", help="delete a board")
+    b_del.add_argument("board_ref", help="board id or unique prefix")
+    b_render = b_sub.add_parser("render", help="render a board to PNG")
+    b_render.add_argument("board_ref", help="board id or unique prefix")
+    b_render.add_argument("--theme", default="",
+                          help="clean|sketch (default: the board theme)")
+    b_render.add_argument("--out", default="",
+                          help="PNG path (default: <home>/boards/)")
+    b_render.add_argument("--size", default="",
+                          help="WxH, e.g. 1280x720")
+    b_render.add_argument("--json", action="store_true")
+    b_page = b_sub.add_parser(
+        "page", help="write the editable live page")
+    b_page.add_argument("board_ref", help="board id or unique prefix")
+    b_page.add_argument("--out", default="",
+                        help="HTML path (default: <home>/boards/)")
+
     director = sub.add_parser("director",
         help="Devon directs: coverage -> breakdown + design -> shoot -> QA",
         description=("nm director cover <script-file>\n"

@@ -70,6 +70,7 @@ from .commands.hub import _cmd_hub
 from .commands.imggen import cmd_imggen
 from .commands.shorts import cmd_shorts
 from .commands.video import cmd_video
+from .commands.board import cmd_board
 from .commands.director import cmd_director
 from .commands.improve import _cmd_improve
 from .commands.inbox import _cmd_inbox
@@ -546,6 +547,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "imggen": _CommandSpec(cmd_imggen),
     "shorts": _CommandSpec(cmd_shorts),
     "video": _CommandSpec(cmd_video),
+    "board": _CommandSpec(cmd_board),
     "director": _CommandSpec(cmd_director),
     "inbox": _CommandSpec(_cmd_inbox),
     "learn": _CommandSpec(_cmd_learn),

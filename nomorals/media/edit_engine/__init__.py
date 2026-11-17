@@ -73,6 +73,20 @@ from .document import (
     transcript_document,
     voiceover_document,
 )
+from .board import (
+    THEMES,
+    BoardBinding,
+    BoardDocument,
+    BoardError,
+    BoardShape,
+    BoardStore,
+    SHAPE_TYPES,
+    board_from_diagram,
+    board_live_html,
+    default_boards_dir,
+    render_board,
+    write_board_page,
+)
 from .scene import SCENE_KINDS, Scene, scenes_to_edit_spec
 from .scene3d import (
     ANIMATED_PROPS,
@@ -244,6 +258,12 @@ __all__ = [
     "TRACK_KINDS", "DocTrack", "Document", "UndoStack", "diff_documents",
     "image_document", "audio_document", "voiceover_document",
     "transcript_document",
+    # whiteboard organ (52-websites #18 Excalidraw + #44 Tldraw) —
+    # the editable cousin of the document: shapes, strokes, text
+    "THEMES", "SHAPE_TYPES", "BoardShape", "BoardBinding",
+    "BoardDocument", "BoardError", "BoardStore", "board_from_diagram",
+    "board_live_html", "default_boards_dir", "render_board",
+    "write_board_page",
     # render queue first-class (2.4)
     "RenderFailure", "RenderQueue", "Segment", "resolve_render_profile",
     "segments_for_ranges", "RENDER_PROXY_HEIGHT",

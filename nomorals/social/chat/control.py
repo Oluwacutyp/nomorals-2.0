@@ -682,6 +682,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "immune": (0, None),      # /immune status|scan|antibodies|corpus|feeds|mark-fp|quarantine|disarm|arrest|fever|drift|casefile — defensive immune system (owner-only)
     "impossible": (0, None),  # /impossible solve <problem> | status | attempt | dossier | queue | charter | lattice | examples — always-on conceive-and-solve (owner-only)
     "scene": (0, None),  # /scene point <x> <y> [label] | tag <text> | clear | status | page | idle — Clicky interaction mechanisms on the scene organ (owner-only)
+    "board": (0, None),  # /board new <title> | add <board> <type> <label> [x y w h] | move | remove | bind | undo | redo | show | list | render | page — whiteboard organ (owner-only)
     "tour": (0, 1),         # /tour — smoke-test every command; /tour <cmd> deep-probes one
     "heal": (0, 1),         # /heal [--dry] | /heal <cmd> — self-healing loop: diagnose + auto-fix broken commands
     "ekiti": (0, None),       # /ekiti converse <text> | debate <topic> | say <text> | check "<expected>" | tones
@@ -2474,6 +2475,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/scene point <x> <y> [label] | tag <text with [POINT:...] tags> | clear | status | page | idle [on|off|status]",
                 "example": "/scene point 0.5 0.3 the button",
                 "related": "/impossible /video"},
+    "board": {"what": "The whiteboard: boards of shapes, arrows, text, sticky notes and freehand strokes the owner and the brain draw on as data, rendered to PNG or to a live page they can keep drawing on. Owner only.",
+                "usage": "/board new <title> [--theme sketch|clean] | add <board> <type> <label> [x y w h] | move <board> <shape> <x> <y> | remove <board> <shape> | bind <board> <from> <to> [label] | undo|redo <board> | show <board> | list | render <board> [--theme sketch] | page <board>",
+                "example": "/board new launch plan",
+                "related": "/scene /impossible"},
     "learn": {"what": "one front door over learn/ — Socratic/direct tutoring, quiz formats, FSRS flashcards from the mistake notebook, BKT mastery, and WAEC/JAMB syllabus. Owner only.",
                 "usage": "/learn tutor [guide me] <topic> | answer <text> | hint | status | stop | /learn quiz formats | /learn flashcards due | stats | list | review <id> <1-4> | export <path> | /learn mastery [weakest] | /learn waec <subject> | waec grade <pct> | /learn jamb <subject> | jamb formats",
                 "example": "/learn tutor guide me fractions",
@@ -4810,7 +4815,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "identity", "book", "books", "features",
                            "checkpoint", "checkpoints", "rewind", "novel"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene",
+                           "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board",
                            "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
                           "balances", "goal", "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
@@ -5148,7 +5153,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
-      "immune", "impossible", "scene", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
+      "immune", "impossible", "scene", "board", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -5706,6 +5711,7 @@ LIST_ONELINERS: dict[str, str] = {
     "immune": "defensive immune system: /immune status|scan|antibodies|corpus|feeds|mark-fp|quarantine|disarm|arrest|fever|drift|casefile",
     "impossible": "Impossible Made Possible: /impossible solve <problem> | status | attempt | dossier | queue | charter | lattice | examples",
     "scene": "Clicky interaction mechanisms: /scene point <x> <y> [label] | tag <text> | clear | status | page | idle",
+    "board": "Whiteboard: /board new <title> [--theme sketch] | add <board> <type> <label> [x y w h] | move | remove | bind | undo | redo | show | list | render | page",
     "like": "last production was good: /like [notes…]",
     "novel": "webnovel tracker: /novel follow <url|title> | list | read <slug> [ch] | continue <slug> [n]",
     "produce": "compose original music, taste-aware: /produce [spotify-url|vibe words…]",

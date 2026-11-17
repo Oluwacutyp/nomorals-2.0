@@ -739,6 +739,288 @@ class RuntimeMetaMixin:
         ]
         return "\n".join(lines)
 
+    def _control_board(self, tail: str, message: Any = None) -> str:
+        """The /board reply: the whiteboard organ, in chat.
+
+        ``/board new <title> [--theme sketch]`` makes a board.
+        ``/board add <board> <type> <label> [x y w h]`` adds a shape
+        (coordinates optional — shapes auto-place on a grid).
+        ``/board move <board> <shape> <x> <y>`` moves one.
+        ``/board remove <board> <shape>`` deletes one (its bindings
+        drop with it). ``/board bind <board> <from> <to> [label]``
+        connects two shapes with an arrow. ``/board undo|redo
+        <board>`` steps the op history. ``/board show <board>`` and
+        ``/board list`` read boards. ``/board render <board>
+        [--theme sketch]`` sends the PNG; ``/board page <board>``
+        sends the editable live page. Boards and shapes take an id or
+        a unique id prefix. Owner-only. A failure reports in words —
+        never silence, never a fake image.
+        """
+        import shlex
+
+        from ...media.edit_engine.board import (
+            SHAPE_TYPES,
+            BoardStore,
+            render_board,
+            write_board_page,
+        )
+
+        usage = ("usage: /board new <title> [--theme sketch|clean] | "
+                 "add <board> <type> <label> [x y w h] | move <board> "
+                 "<shape> <x> <y> | remove <board> <shape> | bind "
+                 "<board> <from> <to> [label] | undo|redo <board> | "
+                 "show <board> | list | render <board> [--theme sketch] "
+                 "| page <board>")
+        try:
+            words = shlex.split(tail or "")
+        except ValueError:
+            return usage
+        verb = words[0].lower() if words else "list"
+        if verb not in ("new", "add", "move", "remove", "bind",
+                        "unbind", "undo", "redo", "show", "list",
+                        "render", "page"):
+            return usage
+        settings = getattr(self.context, "settings", None)
+        home = getattr(settings, "home", None) if settings is not None else None
+        home = str(home or Path("~/.nomorals").expanduser())
+        store = BoardStore(home=home)
+        out_dir = str(Path(home) / "boards")
+
+        def _find_board(ref: str):
+            found = store.matches(ref)
+            if not found:
+                return None, f"no board {ref!r} — try /board list."
+            if len(found) > 1:
+                return None, (f"board {ref!r} matches {len(found)} "
+                              "boards — use the full id.")
+            doc = store.load(found[0])
+            if doc is None:
+                return None, f"board {ref!r} could not be read."
+            return doc, None
+
+        def _find_shape(doc, ref: str):
+            if doc.shape(ref) is not None:
+                return doc.shape(ref), None
+            hits = [s for s in doc.shapes if s.id.startswith(ref)]
+            if len(hits) == 1:
+                return hits[0], None
+            if not hits:
+                return None, f"no shape {ref!r} on this board."
+            return None, (f"shape {ref!r} matches {len(hits)} shapes "
+                          "— use the full id.")
+
+        def _send(path: str, caption: str) -> str:
+            if message is None:
+                return f"written to {path} — run /board from a chat " \
+                    "to have the file sent there."
+            failed = self._scene_send_file(path, message, caption)
+            if failed is not None:
+                return failed
+            return "sent."
+
+        if verb == "list":
+            rows = store.list_boards()
+            if not rows:
+                return ("no boards yet — /board new <title> makes "
+                        "one.")
+            lines = ["boards:"]
+            for row in rows:
+                lines.append(
+                    f"  {row['id'][:8]}  {row['title'] or '(untitled)'}"
+                    f" — {row['shapes']} shape(s), "
+                    f"{row['bindings']} binding(s), {row['theme']}")
+            return "\n".join(lines)
+        if verb == "new":
+            theme = "clean"
+            title_parts: list[str] = []
+            i = 1
+            while i < len(words):
+                if words[i] == "--theme" and i + 1 < len(words):
+                    theme = words[i + 1].lower()
+                    i += 2
+                    continue
+                title_parts.append(words[i])
+                i += 1
+            if theme not in ("clean", "sketch"):
+                return "/board new theme must be clean or sketch."
+            from ...media.edit_engine.board import BoardDocument
+
+            doc = BoardDocument.create(" ".join(title_parts),
+                                       theme=theme)
+            store.save(doc)
+            return (f"board {doc.id[:8]} — "
+                    f"{doc.title or '(untitled)'} ({theme}). "
+                    f"Add a shape: /board add {doc.id[:8]} rect "
+                    f"\"First box\"")
+        # Every other verb names a board first.
+        if len(words) < 2:
+            return usage
+        doc, error = _find_board(words[1])
+        if doc is None:
+            return error or usage
+        if verb == "show":
+            lines = [f"board {doc.id[:8]} — "
+                     f"{doc.title or '(untitled)'} ({doc.theme}, "
+                     f"v{doc.version}):"]
+            for shape in doc.shapes:
+                label = (shape.props.get("text", "")
+                         or shape.props.get("label", ""))
+                lines.append(
+                    f"  {shape.id[:8]}  {shape.type} "
+                    f"({shape.x:.0f}, {shape.y:.0f}) "
+                    f"{shape.w:.0f}x{shape.h:.0f}"
+                    + (f" — {label}" if label else ""))
+            for binding in doc.bindings:
+                lines.append(
+                    f"  ↳ {binding.arrow_shape[:8]} binds "
+                    f"{binding.from_shape[:8]} → "
+                    f"{binding.to_shape[:8]}"
+                    + (f" — {binding.label}" if binding.label else ""))
+            if not doc.shapes:
+                lines.append("  (empty — add a shape to draw on it)")
+            return "\n".join(lines)
+        if verb == "add":
+            if len(words) < 4:
+                return ("usage: /board add <board> <type> <label> "
+                        "[x y w h]")
+            shape_type = words[2].lower()
+            if shape_type not in SHAPE_TYPES:
+                return (f"shape type must be one of "
+                        f"{list(SHAPE_TYPES)}, got {shape_type!r}")
+            label = words[3]
+            numbers: list[float] = []
+            for raw in words[4:8]:
+                try:
+                    numbers.append(float(raw))
+                except ValueError:
+                    return f"/board add needs numeric x y w h, got {raw!r}"
+            count = len(doc.shapes)
+            x = numbers[0] if len(numbers) > 0 else 40.0 + (count % 4) * 260.0
+            y = numbers[1] if len(numbers) > 1 else 40.0 + (count // 4) * 200.0
+            shape: dict[str, Any] = {"type": shape_type, "x": x, "y": y}
+            if len(numbers) > 2:
+                shape["w"] = numbers[2]
+            if len(numbers) > 3:
+                shape["h"] = numbers[3]
+            if shape_type in ("rect", "ellipse", "text", "sticky"):
+                shape["props"] = {"text": label}
+            elif shape_type == "arrow":
+                shape["props"] = {"label": label}
+            try:
+                created = doc.add_shape(shape)
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"board add failed: {exc}"
+            store.save(doc)
+            return (f"added {created.type} {created.id[:8]} "
+                    f"({created.x:.0f}, {created.y:.0f}) to board "
+                    f"{doc.id[:8]}.")
+        if verb == "move":
+            if len(words) < 5:
+                return "usage: /board move <board> <shape> <x> <y>"
+            shape, error = _find_shape(doc, words[2])
+            if shape is None:
+                return error or usage
+            try:
+                x, y = float(words[3]), float(words[4])
+            except ValueError:
+                return "/board move needs numeric x and y"
+            try:
+                doc.update_shape(shape.id, x=x, y=y)
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"board move failed: {exc}"
+            store.save(doc)
+            return (f"moved {shape.id[:8]} to ({x:.0f}, {y:.0f}).")
+        if verb == "remove":
+            if len(words) < 3:
+                return "usage: /board remove <board> <shape>"
+            shape, error = _find_shape(doc, words[2])
+            if shape is None:
+                return error or usage
+            try:
+                result = doc.remove_shape(shape.id)
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"board remove failed: {exc}"
+            store.save(doc)
+            dropped = result.get("removed_bindings") or []
+            return (f"removed {shape.id[:8]}"
+                    + (f" — {len(dropped)} binding(s) dropped with it"
+                       if dropped else "."))
+        if verb == "bind":
+            if len(words) < 4:
+                return ("usage: /board bind <board> <from> <to> "
+                        "[label]")
+            src, error = _find_shape(doc, words[2])
+            if src is None:
+                return error or usage
+            dst, error = _find_shape(doc, words[3])
+            if dst is None:
+                return error or usage
+            label = " ".join(words[4:])
+            try:
+                binding = doc.bind(src.id, dst.id, label=label)
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"board bind failed: {exc}"
+            store.save(doc)
+            return (f"bound {src.id[:8]} → {dst.id[:8]} "
+                    f"(arrow {binding.arrow_shape[:8]}).")
+        if verb == "unbind":
+            if len(words) < 3:
+                return "usage: /board unbind <board> <binding>"
+            binding = doc.binding(words[2])
+            if binding is None:
+                hits = [b for b in doc.bindings
+                        if b.id.startswith(words[2])]
+                if len(hits) == 1:
+                    binding = hits[0]
+                else:
+                    return f"no binding {words[2]!r} on this board."
+            try:
+                doc.unbind(binding.id)
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"board unbind failed: {exc}"
+            store.save(doc)
+            return f"unbound {binding.id[:8]} (the arrow stays)."
+        if verb == "undo":
+            try:
+                doc.undo()
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"board undo failed: {exc}"
+            store.save(doc)
+            return f"undid — {len(doc.shapes)} shape(s) now."
+        if verb == "redo":
+            try:
+                doc.redo()
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"board redo failed: {exc}"
+            store.save(doc)
+            return f"redid — {len(doc.shapes)} shape(s) now."
+        if verb == "render":
+            theme = doc.theme
+            for i, word in enumerate(words):
+                if word == "--theme" and i + 1 < len(words):
+                    theme = words[i + 1].lower()
+            if theme not in ("clean", "sketch"):
+                return "/board render theme must be clean or sketch."
+            try:
+                record = render_board(doc, theme=theme,
+                                      out_dir=out_dir)
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"board render failed: {exc}"
+            note = _send(record["path"],
+                         f"board — {doc.title or doc.id[:8]}")
+            return (f"board rendered ({record['shapes']} shape(s), "
+                    f"{record['theme']} theme). {note}")
+        if verb == "page":
+            try:
+                path = write_board_page(
+                    doc, Path(out_dir) / f"board-{doc.id[:8]}.html")
+            except Exception as exc:  # noqa: BLE001 - honest refusal
+                return f"board page failed: {exc}"
+            note = _send(path, f"board — {doc.title or doc.id[:8]} "
+                               "(open it to keep drawing)")
+            return f"live board page written. {note}"
+        return usage
+
     def _control_arena_research(self, tail: str,
                                  message: Any = None) -> str:
         """The /arena-research reply: Devon researching herself, on

@@ -9308,6 +9308,13 @@ class PartnerRuntime(
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
             return self._control_scene(command.tail or arg, message)
+        if kind == "board":
+            # Whiteboard organ (52-websites #18 + #44) — boards of
+            # shapes the owner draws on as data. Owner-only, like
+            # /scene.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_board(command.tail or arg, message)
         if kind == "immune":
             # Defensive immune system — owner-only, like /learn.
             if message is not None and not self._is_operator(message):
