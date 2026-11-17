@@ -48,6 +48,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "sandbox": ["sb"],
     "apps": ["ap"],
     "arena": ["ar"],
+    "arena-research": [],
     "autonomy": ["auto"],
     "bet": ["bt"],
     "apk": [],
@@ -845,6 +846,15 @@ def _parser() -> argparse.ArgumentParser:
     rl.add_argument("--max-topics", type=int, default=0,
                     help="tick: max topics per cycle (default: loop default)")
     rl.add_argument("--json", action="store_true", help="Output as JSON")
+    ar = sub.add_parser("arena-research", aliases=CLI_ALIASES["arena-research"],
+                        help="arena researcher: Devon surveying herself — status, tick, survey, proposals")
+    ar.add_argument("action", nargs="?", default="status",
+                    choices=["status", "tick", "survey", "proposals",
+                             "ensure", "enable", "disable"],
+                    help="Action to perform")
+    ar.add_argument("--max-proposals", type=int, default=0,
+                    help="tick: max proposals filed per cycle (default: organ default)")
+    ar.add_argument("--json", action="store_true", help="Output as JSON")
     code = sub.add_parser("code", aliases=CLI_ALIASES["code"],
         help="Coding agent: run a task, review diffs, run tests",
         description=("nm code \"<task>\" [--file F] [--accept CMD] [--max-iters N] [--root DIR]\n"

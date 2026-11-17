@@ -3733,6 +3733,18 @@ class PartnerRuntime(
                     ensure_research_job(self.context)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("research loop job not registered: %s", exc)
+                # Arena researcher (owner phase 2026-10-21 item 2):
+                # one durable "arena researcher" job (every
+                # NM_ARENA_RESEARCHER_HOURS, default 24h) ticking the
+                # live survey -> rank -> upgrade-queue cycle. Idempotent;
+                # the organ itself re-checks the research feature flag,
+                # the proactive master switch, and quiet hours.
+                try:
+                    from ..arena_researcher import ensure_arena_researcher_job
+                    ensure_arena_researcher_job(self.context)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("arena researcher job not registered: %s",
+                                 exc)
                 # Memory consolidation cadence: THE single durable
                 # "memory-consolidation" job (every
                 # consolidation_interval_seconds, default 1h) running the
@@ -8153,6 +8165,8 @@ class PartnerRuntime(
             return self._control_digest(command.tail, message)
         if kind == "museum":
             return self._control_museum(command.tail, message)
+        if kind == "arena-research":
+            return self._control_arena_research(command.tail, message)
         if kind == "community":
             return self._control_community(command.tail, message)
         if kind == "gbackup":

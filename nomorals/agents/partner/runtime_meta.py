@@ -257,6 +257,95 @@ class RuntimeMetaMixin:
         return (f"📎 sent {card.get('title')} [{card.get('id')}] — "
                 f"{name} ({size_kb} KB)")
 
+    def _control_arena_research(self, tail: str,
+                                 message: Any = None) -> str:
+        """The /arena-research reply: Devon researching herself, on
+        demand. A thin dispatch to the same ``arena_researcher`` tool
+        the brain uses (owner phase 2026-10-21 item 2) — no survey,
+        ranking, or queue construction duplicated here, so the
+        command's output is the tool's output.
+
+        ``/arena-research`` (no args) shows the status: job, gates,
+        last run, pending proposals. ``tick`` runs one cycle now and
+        reports what it found and filed. ``survey`` lists the current
+        ranked findings without filing anything. ``proposals`` lists
+        what this organ filed. ``ensure`` / ``enable`` / ``disable``
+        manage the durable job. A tool failure is an honest refusal
+        in words, never silence and never a fake status. Nothing is
+        ever auto-applied from here — proposals wait for the owner's
+        word in the upgrade queue."""
+        words = (tail or "").split()
+        verb = words[0].lower() if words else "status"
+        if verb not in ("status", "tick", "survey", "proposals", "ensure",
+                        "enable", "disable"):
+            return ("usage: /arena-research [status | tick | survey | "
+                    "proposals | ensure | enable | disable]")
+        outcome = self.context.tools.call("arena_researcher",
+                                          action=verb)
+        if not outcome.ok:
+            return ("arena researcher failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        value = outcome.value or {}
+        if verb == "status":
+            job = value.get("job") or {}
+            gates = value.get("gates") or {}
+            last = value.get("last_run") or {}
+            lines = ["arena researcher:",
+                     f"  job: {'scheduled' if job.get('scheduled') else 'not scheduled'}"
+                     + (f", every {job.get('interval_hours')}h"
+                        if job.get("scheduled") else "")
+                     + ("" if job.get("enabled", True) else " (disabled)"),
+                     f"  gates: feature={'on' if gates.get('feature_research') else 'off'}, "
+                     f"proactive={'on' if gates.get('proactive_master') else 'off'}, "
+                     f"quiet_hours={'yes' if gates.get('quiet_hours') else 'no'}",
+                     "  last run: "
+                     + ("never" if not last else
+                        ("ok" if last.get("ok")
+                         else "deferred: " + str(
+                             last.get("skipped_reason")
+                             or last.get("error") or ""))),
+                     f"  pending proposals: {value.get('pending_proposals', 0)}"]
+            if last:
+                lines.append(
+                    f"  last cycle: {last.get('findings_count', 0)} "
+                    f"finding(s), {last.get('proposals_created', 0)} "
+                    "filed")
+            return "\n".join(lines)
+        if verb == "tick":
+            return (f"tick {'ok' if value.get('ok') else 'deferred'}"
+                    + (f" — {value.get('skipped_reason')}"
+                       if value.get("skipped_reason") else "")
+                    + f" — findings {value.get('findings_count', 0)}, "
+                      f"proposals {value.get('proposals_created', 0)}"
+                      f" ({value.get('proposals_deduped', 0)} deduped)")
+        if verb == "survey":
+            findings = value.get("findings") or []
+            if not findings:
+                return "arena survey: no findings — the tree is clean"
+            lines = [f"arena survey: {len(findings)} finding(s)"]
+            for f in findings[:10]:
+                lines.append(f"  · [{f.get('kind')}] {f.get('path')}:"
+                             f"{f.get('line')} — {f.get('evidence')}")
+            if len(findings) > 10:
+                lines.append(f"  … and {len(findings) - 10} more")
+            return "\n".join(lines)
+        if verb == "proposals":
+            rows = value.get("proposals") or []
+            if not rows:
+                return "arena researcher: no proposals filed yet"
+            lines = [f"arena proposals: {len(rows)}"]
+            for r in rows[:10]:
+                lines.append(f"  · [{r.get('status')}] {r.get('title')}")
+            if len(rows) > 10:
+                lines.append(f"  … and {len(rows) - 10} more")
+            return "\n".join(lines)
+        if verb == "ensure":
+            return (f"arena researcher job: "
+                    f"{'already scheduled' if value.get('already_scheduled') else 'scheduled'} "
+                    f"(every {value.get('interval_hours')}h)")
+        return (f"arena researcher job "
+                f"{'enabled' if verb == 'enable' else 'disabled'}")
+
     def _control_ping(self, message: Any = None) -> str:
         """The life of the /ping message itself, stage by stage.
 

@@ -137,6 +137,130 @@ def _cmd_research_loop(args: argparse.Namespace, context: Any) -> int:
     return 2
 
 
+def _cmd_arena_research(args: argparse.Namespace, context: Any) -> int:
+    """`nm arena-research <action>` — the arena researcher CLI.
+
+    Mirrors the ``arena_researcher`` tool's actions (status|tick|
+    survey|proposals|ensure|enable|disable) against the real organ
+    module, so the console and the tool/agent surface stay in lockstep.
+    """
+    from ...agents import arena_researcher as armod
+
+    action = (getattr(args, "action", "status") or "status").strip().lower()
+
+    if action == "status":
+        data = armod.status(context)
+        job = data.get("job") or {}
+        gates = data.get("gates") or {}
+        last = data.get("last_run") or {}
+        signals = data.get("signals") or {}
+        last_line = "never"
+        if last:
+            ts = last.get("started_at", 0) or 0
+            last_line = (f"{time.strftime('%Y-%m-%d %H:%M', time.localtime(ts))} "
+                         f"({'ok' if last.get('ok') else 'deferred: ' + str(last.get('skipped_reason') or last.get('error') or '')})"
+                         if ts else "recorded")
+        lines = [
+            "arena researcher:",
+            f"  job: {'scheduled' if job.get('scheduled') else 'not scheduled'}"
+            + (f", every {job.get('interval_hours')}h" if job.get("scheduled") else "")
+            + ("" if job.get("enabled", True) else " (disabled)"),
+            f"  gates: feature={'on' if gates.get('feature_research') else 'off'}, "
+            f"proactive={'on' if gates.get('proactive_master') else 'off'}, "
+            f"quiet_hours={'yes' if gates.get('quiet_hours') else 'no'}",
+            f"  last run: {last_line}",
+            f"  pending proposals: {data.get('pending_proposals', 0)}",
+            f"  signals: proposed {signals.get('proposed', 0)}, "
+            f"approved {signals.get('approved', 0)}, "
+            f"denied {signals.get('denied', 0)}, "
+            f"pending {signals.get('pending', 0)}",
+        ]
+        if last:
+            lines.append(
+                f"  last cycle: {last.get('findings_count', 0)} finding(s), "
+                f"{last.get('proposals_created', 0)} filed")
+        if data.get("errors"):
+            lines.append(
+                "  ⚠ probes failed: "
+                + ", ".join(f"{k} ({v})" for k, v in
+                            sorted(data["errors"].items()))
+                + " — affected values above are defaults")
+        _emit(args, data, "\n".join(lines))
+        return 0
+
+    if action == "tick":
+        max_proposals = int(getattr(args, "max_proposals", 0) or 0)
+        loop = armod.ArenaResearcher(
+            context, max_proposals=max_proposals or None)
+        result = loop.tick()
+        ok = bool(result.get("ok"))
+        text = (f"tick {'ok' if ok else 'deferred'}"
+                + (f" — {result.get('skipped_reason')}" if result.get("skipped_reason") else "")
+                + f" — findings {result.get('findings_count', 0)}, "
+                  f"proposals {result.get('proposals_created', 0)}"
+                  f" ({result.get('proposals_deduped', 0)} deduped)")
+        _emit(args, result, text)
+        return 0
+
+    if action == "survey":
+        from ...agents.research_digest import repo_root
+
+        root = repo_root()
+        findings = [f for f in armod.survey_repo(root)
+                    if armod.verify_anchor(root, f["path"], f["line"])]
+        ranked = armod.rank_findings(findings)
+        lines = [f"arena survey: {len(ranked)} finding(s)"]
+        for f in ranked[:20]:
+            lines.append(f"  · [{f.get('kind')}] {f.get('path')}:"
+                         f"{f.get('line')} — {f.get('evidence')}")
+        if len(ranked) > 20:
+            lines.append(f"  … and {len(ranked) - 20} more")
+        _emit(args, {"findings": ranked}, "\n".join(lines))
+        return 0
+
+    if action == "proposals":
+        from ...agents.upgrade_queue import UpgradeQueue
+
+        rows = [r for r in UpgradeQueue(context).list()
+                if r.get("source") == armod.SOURCE]
+        lines = [f"arena proposals: {len(rows)}"]
+        for r in rows[:20]:
+            lines.append(f"  · [{r.get('status')}] {r.get('title')}")
+        if len(rows) > 20:
+            lines.append(f"  … and {len(rows) - 20} more")
+        _emit(args, {"proposals": rows}, "\n".join(lines))
+        return 0
+
+    if action == "ensure":
+        result = armod.ensure_arena_researcher_job(context)
+        _emit(args, result,
+              f"arena researcher job: {'already scheduled' if result.get('already_scheduled') else 'scheduled'} "
+              f"(every {result.get('interval_hours')}h)")
+        return 0
+
+    if action in ("enable", "disable"):
+        from ...agents.scheduler import Scheduler
+
+        sched = Scheduler(context)
+        jobs = [j for j in sched.list_jobs()
+                if j.get("name") == armod.ARENA_RESEARCHER_JOB]
+        if not jobs:
+            armod.ensure_arena_researcher_job(context)
+            jobs = [j for j in sched.list_jobs()
+                    if j.get("name") == armod.ARENA_RESEARCHER_JOB]
+            if not jobs:
+                print(f"arena-research {action}: job registration failed",
+                      file=sys.stderr)
+                return 1
+        row = sched.set_enabled(jobs[0]["id"], action == "enable")
+        _emit(args, {"enabled": action == "enable", "job": row},
+              f"arena researcher job {'enabled' if action == 'enable' else 'disabled'}")
+        return 0
+
+    print(f"arena-research: unknown action {action}", file=sys.stderr)
+    return 2
+
+
 def _cmd_kg(args: argparse.Namespace, context: Any) -> int:
     """Knowledge graph maintenance from the operator's seat."""
     from ...agents.kg import KnowledgeGraph

@@ -394,6 +394,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "computer": (0, None),  # /computer [status|open|close|view|watch|unwatch|takeover|handback|stop|resume] — Devon's own desktop: persistent sessions she drives herself; owner watch (live stream) + takeover; sticky owner stop. Owner-only.
     "doctor": (0, 0),  # /doctor — system health: registry + config + stores + adapters + providers (owner-only)
     "museum": (0, 2),  # /museum | /museum send <id> — the Museum census over every system (audit R3-73, owner-only)
+    "arena-research": (0, 2),  # /arena-research [status | tick | survey | proposals | ensure | enable | disable] — Devon researching herself (owner phase 2026-10-21 item 2, owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
     # /say is ONE command with three forms (single registry entry — a
@@ -2330,6 +2331,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "museum": {"what": "the Museum census over every system — ApkForge builds, library books/digests/sources, characters' learned state, TrendOps renders — as browsable cards (id/title/kind/shelf/path/sendable). Read-only: the same census the brain's museum_census tool returns, on demand instead of volunteered. A failing shelf reports a named error and never kills the other shelves. /museum <shelf> shows only that shelf's cards — same card lines, filtered; an unknown shelf name is refused in words naming the shelves that hold cards. /museum send <id> delivers one sendable card back to this chat through the file-send path (exact id or unique prefix); exhibit-only cards — digests, sources — are refused in words, never shipped as their store file. Owner-only.",
              "usage": "/museum | /museum <shelf> | /museum send <id>", "example": "/museum library-books   ·   /museum send library-book:<slug>",
              "related": "/apk /books"},
+    "arena-research": {"what": "Devon researching herself — the arena researcher surveys the live system (organs, wiring, dead/decorative paths, weak spots) with file:line evidence, mines state of the art per organ through the research pipeline, and files RANKED improvement proposals into the upgrade queue for the owner's word. Never auto-approved, never auto-applied: the owner decides, the organ proposes. /arena-research shows the status (job, gates, last run, pending proposals); tick runs one cycle now; survey lists the current ranked findings without filing; proposals lists what this organ filed. Owner-only.",
+             "usage": "/arena-research | /arena-research tick | /arena-research survey | /arena-research proposals | /arena-research ensure | /arena-research enable | /arena-research disable", "example": "/arena-research   ·   /arena-research tick   ·   /arena-research proposals",
+             "related": "/research /proposals"},
     "style": {"what": "inspect + tune the mined style profile for this chat — the numbers Devon replies with (emoji budget, length target, sections/lists/markup), measured from YOUR own messages, never other people's. /style shows the live profile + any overrides + where each override came from; /style <field> <value> sets an override delta (emoji_cap 0..3, target_chars, max_chars, sections/lists/markup on|off); /style reset clears this chat's overrides; /style list shows every chat with overrides. Owner-only.",
              "usage": "/style  ·  /style <emoji_cap|target_chars|max_chars|sections|lists|markup> <value> [target]  ·  /style reset [target]  ·  /style list  ·  a target is a chat name, a phone number, or a full key (platform:chat_id)",
              "example": "/style   ·   /style emoji_cap 0   ·   /style target_chars 200   ·   /style reset",
@@ -5012,7 +5016,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
      ["status", "ping", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
-      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "profile", "mind",
+      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "arena-research", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
       "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",

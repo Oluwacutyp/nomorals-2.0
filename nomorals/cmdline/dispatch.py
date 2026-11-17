@@ -89,7 +89,7 @@ from .commands.queue import _cmd_queue
 from .commands.sent import _cmd_sent
 from .commands.recover import _cmd_recover
 from .commands.repo import _cmd_repo
-from .commands.research import _cmd_cookies, _cmd_kg, _cmd_research_loop, _cmd_structure
+from .commands.research import _cmd_arena_research, _cmd_cookies, _cmd_kg, _cmd_research_loop, _cmd_structure
 from .commands.room import _cmd_room
 from .commands.security import (
     _cmd_cipher,
@@ -487,6 +487,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "kg": _CommandSpec(_cmd_kg),
     "simulate": _CommandSpec(_cmd_simulate),
     "research-loop": _CommandSpec(_cmd_research_loop),
+    "arena-research": _CommandSpec(_cmd_arena_research),
     "code": _CommandSpec(_cmd_code),
     "graph": _CommandSpec(_cmd_graph),
     "trace": _CommandSpec(_cmd_trace),

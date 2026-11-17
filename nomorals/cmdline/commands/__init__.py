@@ -79,7 +79,7 @@ from .sources import _cmd_sources
 from .project import _cmd_project
 from .queue import _cmd_queue
 from .recover import _cmd_recover
-from .research import _cmd_cookies, _cmd_kg, _cmd_research_loop, _cmd_structure
+from .research import _cmd_arena_research, _cmd_cookies, _cmd_kg, _cmd_research_loop, _cmd_structure
 from .room import _cmd_room, _room_obj
 from .security import _cmd_cipher, _cmd_crack, _cmd_decode, _cmd_monitor, _cmd_osint, _cmd_watch
 from .serve import _cmd_serve
@@ -223,6 +223,7 @@ __all__ = [
     "_cmd_queue",
     "_cmd_sent",
     "_cmd_research_loop",
+    "_cmd_arena_research",
     "_cmd_kg",
     "_cmd_cookies",
     "_cmd_structure",
