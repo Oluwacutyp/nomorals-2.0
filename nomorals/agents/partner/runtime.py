@@ -3483,6 +3483,17 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("av sweep job not registered: %s",
                                  exc)
+                # Security: the daily breach watch (05:00 local — the
+                # owner's watched addresses against HaveIBeenPwned; a
+                # NEW breach pages him once, clean days are silent).
+                # Idempotent by name; a stale spec is replaced.
+                try:
+                    from ...security.breach import ensure_breach_watch_job
+
+                    ensure_breach_watch_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("breach watch job not registered: %s",
+                                 exc)
                 # Travel: the monthly airport dataset refresh (1st
                 # 04:00 local — the 03:00 slot is the backup drill's;
                 # the IATA→country table, rebuilt from the canonical
@@ -9765,6 +9776,8 @@ class PartnerRuntime(
             return self._control_alternatives(command.tail or arg)
         if kind == "compute":
             return self._control_compute(command.tail or arg)
+        if kind == "breach":
+            return self._control_breach(command.tail or arg)
         if kind == "director":
             return self._control_director(command.tail or arg)
         if kind == "caption":

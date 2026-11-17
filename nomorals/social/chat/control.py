@@ -962,6 +962,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "headline": (0, None),   # /headline <text> [--lines "a|b"] — code-video headline scene
     "teardown": (0, None),   # /teardown <thing> : <part>, <part>… — code-video teardown scene
     "videocall": (0, None),  # /videocall <room> | status | stop | snapshot — LiveKit video: Devon publishes her video in a room and watches it (owner-only)
+    "breach": (0, None),  # /breach <email|domain> | password <password> | watch add|remove|list|status|check — breach exposure (owner-only)
     "director": (0, None),   # /director cover|plan|shoot|regen|show — coverage → design → shoot → QA
     "caption": (0, 1),       # /caption [style] — burn AI subtitles into a video (attach or path)
     "vision": (0, None),     # /vision [question] — analyze an image (attach or path/URL)
@@ -4683,6 +4684,20 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                   "usage": "/videocall <room> [--source title|image|scene] [--image PATH] [--seconds N] | /videocall status | /videocall stop | /videocall snapshot [identity]",
                   "example": "/videocall studio --source scene",
                   "related": "/video watch · /video gen · nm voice live video"},
+    "breach": {"what": "Breach exposure: has this email or password "
+                      "appeared in a known breach? An email/domain check "
+                      "goes to the official HaveIBeenPwned v3 API "
+                      "(key-gated, NM_OSINT_HIBP_KEY) and names every "
+                      "breach with its date and the data classes it "
+                      "exposed. A password check uses Pwned Passwords "
+                      "k-anonymity — only the first 5 characters of the "
+                      "password's SHA-1 ever leave this box. The watch "
+                      "keeps the owner's own addresses and pages him "
+                      "when a new breach names one. Owner-only, asked "
+                      "in his DM and answered there.",
+               "usage": "/breach <email|domain> | /breach password <password> | /breach watch add <email> | remove <email> | list | status | check",
+               "example": "/breach ada@example.com",
+               "related": "/lookup · /investigate · nm breach"},
     "director": {"what": "Devon directs: professional script coverage, "
                       "scene/shot breakdown, lighting + camera design "
                       "per shot (primitives composed by style packs — "
@@ -4848,7 +4863,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                         "vision", "voices", "clonevoice", "sing",
                         "translate", "tl"]),
     ("decoding & crypto", ["decode", "cookies", "cookielab", "structure", "cipher",
-                           "monitor", "investigate"]),
+                           "monitor", "investigate", "breach"]),
     ("media system", ["music", "distribute", "play", "video", "videocall", "map-route", "headline", "teardown", "explore", "director", "hub", "podcast", "dj", "produce", "like", "dislike", "cookies",
                       "download", "tiktok", "ttdl", "instagram", "spotify", "aio", "shorts", "trendops", "caption", "imggen", "poster", "trellis", "unirig", "blender", "sham", "musicnote",
                       "steal", "sticker", "convert", "gif", "emoji", "customemoji", "emojiart", "react"]),
@@ -5185,7 +5200,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("tools & automation",
      ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
-      "monitor", "investigate", "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
+      "monitor", "investigate", "breach", "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe",
       "guardrails", "content", "drafts", "day", "calendar", "repurpose", "engage", "cases", "runs", "craft", "worldmodel", "glossary", "read",
       "tempmail", "checkmail", "vnumber", "checksms", "browser", "paper", "backup"]),
@@ -5651,6 +5666,7 @@ LIST_ONELINERS: dict[str, str] = {
     "husbando": "a husbando picture",
     "video": "find videos across the web (ranked, enriched) + download",
     "videocall": "LiveKit video: Devon publishes her video in a room and watches it (owner only)",
+    "breach": "breach exposure: has this email or password been in a breach (owner only)",
     "map-route": "code-video: a route draws itself (no model)",
     "headline": "code-video: newspaper headline push-in (no model)",
     "teardown": "code-video: exploded parts diagram (no model)",

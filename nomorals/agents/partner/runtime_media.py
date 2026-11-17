@@ -5276,6 +5276,117 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"compute failed: {exc}"
 
+    def _control_breach(self, tail: str) -> str:
+        """Breach exposure: /breach <email|domain> | password <pw> | watch ….
+
+        Owner-only. An email/domain check names every breach with its
+        date and the data classes it exposed (HIBP v3, key-gated). A
+        password check is Pwned Passwords k-anonymity — only 5 hash
+        characters leave the box; the password itself is never stored.
+        The watch keeps the owner's own addresses and pages him when
+        a new breach names one. Never raises: bad input returns usage.
+        """
+        from ...security.breach import (
+            BreachWatchStore,
+            check_account,
+            check_password,
+            format_breach_reply,
+            run_breach_watch_tick_once,
+        )
+
+        tail = (tail or "").strip()
+        if not tail:
+            return ("usage: /breach <email|domain> | /breach password "
+                    "<password> | /breach watch add <email> | remove "
+                    "<email> | list | status | check")
+        parts = tail.split(None, 1)
+        verb = parts[0].lower()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        if verb == "password":
+            if not rest:
+                return "usage: /breach password <password>"
+            return format_breach_reply(check_password(rest))
+        if verb == "watch":
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — watch needs a home
+                home = None
+            if home is None:
+                return "breach watch failed: no home directory"
+            from pathlib import Path
+
+            path = Path(home) / "data" / "breach_watch.json"
+            store = BreachWatchStore(path)
+            wparts = rest.split(None, 1)
+            wverb = wparts[0].lower() if wparts else "list"
+            warg = wparts[1].strip() if len(wparts) > 1 else ""
+            if wverb == "add":
+                if not warg or "@" not in warg:
+                    return "usage: /breach watch add <email>"
+                if store.add(warg):
+                    return (f"watching {warg.lower()} — a new breach "
+                            "naming it pages you once.")
+                return f"{warg.lower()} is already watched."
+            if wverb == "remove":
+                if store.remove(warg):
+                    return f"no longer watching {warg.lower()}."
+                return f"{warg.lower()} was not watched."
+            if wverb == "list":
+                watched = store.list_watched()
+                if not watched:
+                    return ("no watched addresses yet — /breach watch "
+                            "add <email> to watch one.")
+                return "watched addresses:\n" + "\n".join(
+                    f"  • {addr}" for addr in watched)
+            if wverb == "status":
+                watched = store.list_watched()
+                last = store.last_check()
+                lines = [f"watched: {len(watched)} address(es)"]
+                for addr in watched:
+                    seen = store.seen_names(addr)
+                    lines.append(f"  • {addr} — {len(seen)} known "
+                                 f"breach(es)")
+                if last:
+                    import datetime
+
+                    lines.append("last check: " + datetime.datetime.fromtimestamp(
+                        last).strftime("%Y-%m-%d %H:%M"))
+                else:
+                    lines.append("last check: never")
+                return "\n".join(lines)
+            if wverb == "check":
+                result = run_breach_watch_tick_once(
+                    context=self, notifier=None, state_path=path)
+                if not result.get("ok"):
+                    return ("breach watch check failed: "
+                            f"{result.get('error') or 'unknown error'}")
+                new = result.get("new") or []
+                if not new:
+                    return (f"watch check done — {len(result.get('checked') or [])} "
+                            "address(es) checked, nothing new.")
+                return ("new breach(es) on watched addresses:\n" + "\n".join(
+                    f"  • {name}" for name in new))
+            return ("usage: /breach watch add <email> | remove <email> | "
+                    "list | status | check")
+        if verb in {"help", "--help"}:
+            return ("usage: /breach <email|domain> | /breach password "
+                    "<password> | /breach watch add <email> | remove "
+                    "<email> | list | status | check")
+        try:
+            key = ""
+            try:
+                settings = getattr(self, "settings", None)
+                osint = getattr(settings, "osint", None) \
+                    if settings is not None else None
+                key = str(getattr(osint, "hibp_key", "") or "") \
+                    if osint is not None else ""
+            except Exception:  # noqa: BLE001 — no key is an honest refusal
+                key = ""
+            return format_breach_reply(check_account(tail, key=key))
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"breach check failed: {exc}"
+
     def _control_code_format(self, kind: str, tail: str) -> str:
         """Code-video format commands: /map-route, /headline, /teardown.
 

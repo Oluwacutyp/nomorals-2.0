@@ -734,6 +734,29 @@ def register(registry: Any) -> None:
                     "error": f"av sweep tick failed: {exc}"}
 
     @registry.register(
+        "__breach_watch_tick__",
+        description="Run one breach-watch tick (52-websites #23): check "
+        "every watched address against HaveIBeenPwned and publish "
+        "through the Notifier exactly once when a NEW breach names "
+        "one. Scheduler-internal; runs daily 05:00 local. Routine "
+        "and silent — a clean day, or a day with nothing new, "
+        "publishes nothing. Without an HIBP key the tick reports "
+        "ok False and publishes nothing.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _breach_watch_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..security.breach import run_breach_watch_tick_once
+
+        try:
+            return run_breach_watch_tick_once(
+                context=_context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"breach watch tick failed: {exc}"}
+
+    @registry.register(
         "__airport_refresh_tick__",
         description="Run one airport dataset refresh tick (R3-67 "
         "remainder): fetch the canonical OurAirports dump, rebuild "

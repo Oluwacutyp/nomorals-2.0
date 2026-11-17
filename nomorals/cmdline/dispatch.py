@@ -19,6 +19,7 @@ from .commands.av import _cmd_av
 from .commands.airports import _cmd_airports
 from .commands.compute import _cmd_compute
 from .commands.flight import _cmd_flight
+from .commands.breach import _cmd_breach
 from .commands.backup import _cmd_backup
 from .commands.benchmark import _cmd_benchmark
 from .commands.bet import _cmd_bet
@@ -566,6 +567,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "airports": _CommandSpec(_cmd_airports),
     "compute": _CommandSpec(_cmd_compute),
     "flight": _CommandSpec(_cmd_flight),
+    "breach": _CommandSpec(_cmd_breach),
     "benchmark": _CommandSpec(_cmd_benchmark),
 }
 

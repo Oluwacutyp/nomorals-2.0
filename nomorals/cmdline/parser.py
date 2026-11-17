@@ -55,6 +55,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "airports": [],
     "compute": [],
     "flight": [],
+    "breach": [],
     "bet": ["bt"],
     "apk": [],
     "re": [],
@@ -3630,6 +3631,23 @@ def _parser() -> argparse.ArgumentParser:
     flight_p.add_argument("flight_rest", nargs="*", default=[],
                           help="action arguments (destination, expect-epoch, box)")
     flight_p.add_argument("--json", action="store_true",
+                          help="Output as JSON")
+
+    breach_p = sub.add_parser(
+        "breach", aliases=CLI_ALIASES["breach"],
+        help="breach exposure: email/domain via HIBP, password via Pwned Passwords k-anonymity, watch",
+        description=("nm breach <email|domain> | nm breach password <password> | nm breach watch add|remove|list|status|check [--json]\n"
+                     "The breach organ: an account check names every breach "
+                     "with its date and the data classes it exposed "
+                     "(official HIBP v3, key-gated NM_OSINT_HIBP_KEY); a "
+                     "password check sends only 5 hash characters to the "
+                     "Pwned Passwords range service; the watch pages the "
+                     "owner when a new breach names a watched address."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    breach_p.add_argument("target", nargs="+",
+                          help="email, domain, 'password <password>', or 'watch …'")
+    breach_p.add_argument("--json", action="store_true",
                           help="Output as JSON")
 
     focus_p = sub.add_parser("focus", aliases=CLI_ALIASES["focus"],

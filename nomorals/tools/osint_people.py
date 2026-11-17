@@ -311,7 +311,13 @@ def breach_check(context: Any, target: str) -> dict[str, Any]:
     Free non-commercial tier is 5k requests/month with a key
     (https://haveibeenpwned.com/API/Key).  Without a key this returns an
     honest note, not a guess.
+
+    Thin surface over :mod:`nomorals.security.breach` — the organ owns
+    the HTTP shape; this keeps the tool's return (checked/pwned/count/
+    breaches/note) and adds each breach's data classes.
     """
+    from ..security.breach import check_account
+
     s = getattr(context, "settings", None)
     osint = getattr(s, "osint", None) if s else None
     key = str(getattr(osint, "hibp_key", "") if osint else "") or ""
@@ -325,40 +331,23 @@ def breach_check(context: Any, target: str) -> dict[str, Any]:
                        "~/.nomorals/.env (free, 5k calls/month, "
                        "non-commercial)"),
         }
-    is_domain = "@" not in target
-    if is_domain:
-        url = f"https://haveibeenpwned.com/api/v3/breacheddomain/{urllib.parse.quote(target)}"
-    else:
-        url = f"https://haveibeenpwned.com/api/v3/breachedaccount/{urllib.parse.quote(target)}?truncateResponse=true"
-    try:
-        request = urllib.request.Request(url, headers={
-            "User-Agent": _UA, "hibp-api-key": key,
-            "Accept": "application/json",
-        })
-        with urllib.request.urlopen(request, timeout=20) as response:
-            import json
-
-            data = json.loads(response.read().decode("utf-8", "replace"))
-    except urllib.error.HTTPError as exc:
-        if exc.code == 404:
-            return {"checked": True, "pwned": False,
-                    "breaches": [], "note": "not found in HIBP data"}
-        raise ToolError(f"HIBP returned {exc.code}") from exc
-    except (urllib.error.URLError, TimeoutError, OSError, ValueError) as exc:
-        raise ToolError(f"HIBP lookup failed: {exc}") from exc
+    result = check_account(target, key=key)
+    if not result.get("ok"):
+        raise ToolError(str(result.get("error") or "HIBP lookup failed"))
     breaches = [
-        {"name": str(b.get("Name") or b.get("Title") or ""),
-         "date": str(b.get("BreachDate") or b.get("PublishedDate") or "")[:10],
-         "title": str(b.get("Title") or "")}
-        for b in (data if isinstance(data, list) else data.get("Breaches", []))
+        {"name": str(b.get("name") or ""),
+         "date": str(b.get("date") or ""),
+         "title": str(b.get("name") or ""),
+         "data_classes": list(b.get("data_classes") or [])}
+        for b in result.get("breaches", [])
     ]
     return {
         "checked": True,
         "pwned": bool(breaches),
         "count": len(breaches),
         "breaches": breaches[:40],
-        "note": "breach names/dates only — the official API never exposes "
-                "credential content",
+        "note": "breach names, dates and data classes — the official API "
+                "never exposes credential content",
     }
 
 
@@ -602,7 +591,7 @@ def register(registry: Any) -> None:
         description=(
             "Is this email/domain in known breaches? Official HIBP v3 API, "
             "key-gated (NM_OSINT_HIBP_KEY, free non-commercial). Returns "
-            "breach names/dates only."
+            "breach names, dates and the data classes each breach exposed."
         ),
         capability=Capability.NET_OUT,
         parameters={"target": "str — email or domain"},
