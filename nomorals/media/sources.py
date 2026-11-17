@@ -395,7 +395,132 @@ class NetNaijaSource(BaseScrapeSource):
             _log.info("netnaija: download_url failed for %s: %s",
                       candidate.url[:80], exc)
             return ""
+            
 
+class MP3PMSource(BaseScrapeSource):
+    """MP3.pm — mobile-first MP3 archive.  Server-rendered charts and
+    per-song pages carrying a direct file; search is XHR-only, so the
+    JSON endpoint is read directly.
+
+    PINNED-BY-PROBE: ``_SEARCH_API`` is the shape
+    ``tools/probe_new_sources.py`` finds.  If every probe template
+    misses, copy the XHR from DevTools and fix the constant here —
+    do not invent a schema.
+    """
+
+    name = "mp3pm"
+    _BASE = "https://mp3.pm"
+    _SEARCH_API = "https://mp3.pm/api/search?q={q}"
+
+    def search(self, query: str, limit: int = 5) -> list[SourceCandidate]:
+        out: list[SourceCandidate] = []
+        try:
+            raw = self._get(self._SEARCH_API.format(
+                q=urllib.parse.quote_plus(query)))
+        except Exception as exc:  # noqa: BLE001 — never raises
+            _log.info("mp3pm: search failed: %s", exc)
+            return out
+        if not raw:
+            return out
+
+        rows: list[dict[str, Any]] = []
+        try:
+            data = json.loads(raw)
+            seq = data.get("songs") or data.get("results") or data
+            if isinstance(seq, list):
+                rows = [r if isinstance(r, dict) else {"url": r} for r in seq]
+        except (json.JSONDecodeError, AttributeError):
+            # HTML shell fallback: scrape song anchors, invent nothing
+            for href in re.findall(
+                    r'https://[a-z0-9\-]+\.mp3\.pm/song/[^"\']+', raw):
+                rows.append({"url": href})
+
+        seen: set[str] = set()
+        for row in rows:
+            url = str(row.get("url") or row.get("link") or "")
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            slug = url.rstrip("/").rsplit("/", 1)[-1]
+            out.append(SourceCandidate(
+                source=self.name,
+                title=self._clean(str(row.get("title") or "").replace("-", " ")
+                                  or slug.replace("-", " ")),
+                artist=self._clean(str(row.get("artist") or "")),
+                url=url,
+                extra={"page": url}))
+            if len(out) >= limit:
+                break
+        return out
+
+    def download_url(self, candidate: SourceCandidate) -> str:
+        if candidate.direct_url:
+            return candidate.direct_url
+        try:
+            html = self._get(candidate.url)
+            if not html:
+                return ""
+            direct = self._direct_media_links(html, candidate.url)
+            return direct[0] if direct else ""
+        except Exception as exc:  # noqa: BLE001
+            _log.info("mp3pm: download_url failed for %s: %s",
+                      candidate.url[:80], exc)
+            return ""
+
+
+class MP3JuiceSource(BaseScrapeSource):
+    """MP3Juice mirror (service-et-reception.fr).  Keyless anonymous
+    POST with the form field ``query`` returns server-rendered rows
+    carrying ``data-id``; a download endpoint then serves the file.
+
+    PINNED-BY-PROBE: ``_DOWNLOAD_PATHS`` is a guess list — the probe
+    disambiguates which one the site actually answers.
+    """
+
+    name = "mp3juice"
+    _BASE = "https://service-et-reception.fr"
+    _DOWNLOAD_PATHS = ("/download?id={}", "/api/mp3/{}", "/download/{}")
+
+    def _post(self, path: str, form: dict[str, str]) -> str:
+        body = urllib.parse.urlencode(form).encode()
+        req = urllib.request.Request(
+            self._BASE + path, data=body,
+            headers={"User-Agent": _UA, "Referer": self._BASE + "/",
+                     "Content-Type": "application/x-www-form-urlencoded"})
+        with urllib.request.urlopen(req, timeout=self._timeout) as r:
+            return r.read().decode("utf-8", "replace")
+
+    def search(self, query: str, limit: int = 5) -> list[SourceCandidate]:
+        out: list[SourceCandidate] = []
+        try:
+            html = self._post("/", {"query": query})   # POST, not GET
+        except Exception as exc:  # noqa: BLE001
+            _log.info("mp3juice: search failed: %s", exc)
+            return out
+        ids = re.findall(r'data-id="(\d+)"', html)
+        titles = [self._clean(re.sub(r"<[^>]+>", "", t))
+                  for t in re.findall(r"<h3[^>]*>(.*?)</h3>", html, re.S)]
+        for n, sid in enumerate(ids[:limit]):
+            out.append(SourceCandidate(
+                source=self.name,
+                title=titles[n] if n < len(titles) else "",
+                url=f"{self._BASE}/?id={sid}",
+                extra={"id": sid}))
+        return out
+
+    def download_url(self, candidate: SourceCandidate) -> str:
+        sid = str(candidate.extra.get("id") or "")
+        if not sid:
+            return ""
+        for path in self._DOWNLOAD_PATHS:
+            try:
+                html = self._post(path.format(sid), {})
+            except Exception:
+                continue
+            direct = self._direct_media_links(html, self._BASE + "/")
+            if direct:
+                return direct[0]
+        return ""
 
 # ── Boomplay ──────────────────────────────────────────────────────────────
 
