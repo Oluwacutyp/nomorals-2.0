@@ -20,6 +20,9 @@ Layout:
   transformer, T5-XXL + CLIP-L encoders, diffusers-layout VAE,
   flow-match Euler) loading BFL single-file .safetensors weights,
   plus the Studio adapter
+- :mod:`.dtype` — dtype / quantization / profile-aware defaults
+  (fp32/fp16/bf16, dynamic int8, weights-only fit estimates, the
+  honest refusals); the one place those decisions live
 - :mod:`.registry` — discovery/classification of every installed
   image model (native runs + safetensors), header inspection only
 - :mod:`.tokenizers` — the real CLIP BPE tokenizer (vocab data is

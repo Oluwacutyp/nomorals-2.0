@@ -5853,6 +5853,7 @@ class RuntimeMediaMixin:
         """Devon's own image studio in chat.
 
         /imggen <prompt> [--seed N] [--ar 16:9] [--negative "..."]
+            [--dtype bf16] [--quant int8]
         /imggen upscale <path> [--scale 2]
         /imggen checkpoints | /imggen dashboard <run>
         """
@@ -5860,7 +5861,8 @@ class RuntimeMediaMixin:
         if not ref:
             return ("imggen — Devon's own image studio:\n"
                     "/imggen <prompt> [--seed N] [--ar 16:9] "
-                    "[--negative \"...\"]\n"
+                    "[--negative \"...\"] [--dtype bf16] "
+                    "[--quant int8]\n"
                     "/imggen upscale <path> [--scale 2]\n"
                     "/imggen checkpoints\n"
                     "/imggen dashboard <run>")
@@ -5885,6 +5887,13 @@ class RuntimeMediaMixin:
                         f"• {e['name']} [{e['model_class']}]: "
                         f"{e['path']} ({e['bytes'] / 1e6:.1f} MB) "
                         f"— {status}")
+                # Readiness names the model that would actually load,
+                # at which dtype/quant, on which device.
+                from ...media.imggen.studio import Studio
+
+                ok, line = Studio().readiness()
+                lines.append("readiness: " + line if ok
+                             else f"readiness: not ready — {line}")
                 return "\n".join(lines)
             if action == "dashboard":
                 from ...media.imggen.studio import training_dashboard
@@ -5930,6 +5939,12 @@ class RuntimeMediaMixin:
                     kwargs["negative_prompt"] = toks[i + 1]; i += 2
                 elif t == "--steps" and i + 1 < len(toks):
                     kwargs["steps"] = int(toks[i + 1]); i += 2
+                elif t == "--dtype" and i + 1 < len(toks):
+                    kwargs["dtype"] = toks[i + 1]
+                    i += 2
+                elif t == "--quant" and i + 1 < len(toks):
+                    kwargs["quant"] = toks[i + 1]
+                    i += 2
                 else:
                     prompt_toks.append(t); i += 1
             prompt = " ".join(prompt_toks).strip()

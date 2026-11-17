@@ -2833,6 +2833,14 @@ def _parser() -> argparse.ArgumentParser:
                         choices=["ddim", "ddpm", "flow"])
     ig_gen.add_argument("--checkpoint", default="")
     ig_gen.add_argument("--device", default="")
+    ig_gen.add_argument("--dtype", default="",
+                        choices=["", "fp32", "fp16", "bf16"],
+                        help="weights dtype (default: profile default — "
+                             "bf16 on CUDA, fp32 on CPU)")
+    ig_gen.add_argument("--quant", default="",
+                        choices=["", "none", "int8"],
+                        help="dynamic int8 quantization of Linear "
+                             "modules (CPU only)")
     ig_i2i = ig_sub.add_parser("img2img", help="prompt-guided edit of an image")
     ig_i2i.add_argument("image", help="input image path")
     ig_i2i.add_argument("prompt", help="edit prompt")
@@ -2841,6 +2849,10 @@ def _parser() -> argparse.ArgumentParser:
     ig_i2i.add_argument("--seed", type=int, default=None)
     ig_i2i.add_argument("--checkpoint", default="")
     ig_i2i.add_argument("--device", default="")
+    ig_i2i.add_argument("--dtype", default="",
+                        choices=["", "fp32", "fp16", "bf16"])
+    ig_i2i.add_argument("--quant", default="",
+                        choices=["", "none", "int8"])
     ig_inp = ig_sub.add_parser("inpaint", help="regenerate masked regions")
     ig_inp.add_argument("image", help="input image path")
     ig_inp.add_argument("mask", help="mask path (white = repaint)")
@@ -2849,6 +2861,10 @@ def _parser() -> argparse.ArgumentParser:
     ig_inp.add_argument("--seed", type=int, default=None)
     ig_inp.add_argument("--checkpoint", default="")
     ig_inp.add_argument("--device", default="")
+    ig_inp.add_argument("--dtype", default="",
+                        choices=["", "fp32", "fp16", "bf16"])
+    ig_inp.add_argument("--quant", default="",
+                        choices=["", "none", "int8"])
     ig_out = ig_sub.add_parser("outpaint", help="extend the canvas")
     ig_out.add_argument("image", help="input image path")
     ig_out.add_argument("prompt", help="outpaint prompt")
@@ -2860,6 +2876,10 @@ def _parser() -> argparse.ArgumentParser:
     ig_out.add_argument("--seed", type=int, default=None)
     ig_out.add_argument("--checkpoint", default="")
     ig_out.add_argument("--device", default="")
+    ig_out.add_argument("--dtype", default="",
+                        choices=["", "fp32", "fp16", "bf16"])
+    ig_out.add_argument("--quant", default="",
+                        choices=["", "none", "int8"])
     ig_up = ig_sub.add_parser("upscale", help="upscale an image")
     ig_up.add_argument("image", help="input image path")
     ig_up.add_argument("--scale", type=float, default=2.0)

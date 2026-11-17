@@ -2,6 +2,7 @@
 
     nm imggen generate "a danfo bus at sunset" [--steps 50] [--seed 42]
                      [--ar 16:9] [--negative "blurry"] [--batch 4]
+                     [--dtype bf16] [--quant int8]
     nm imggen img2img in.png "make it sunset" --strength 0.6
     nm imggen inpaint in.png mask.png "a cat"
     nm imggen outpaint in.png "city skyline" --right 200
@@ -37,9 +38,13 @@ def _err(msg: str) -> int:
 def _studio(args) -> object:
     from ...media.imggen.studio import Studio, StudioConfig
 
+    # getattr defaults: not every subcommand defines --dtype/--quant
+    # (train, merge, dashboard, masks, checkpoints don't render).
     return Studio(StudioConfig(
-        checkpoint=args.checkpoint or "",
-        device=args.device or "",
+        checkpoint=getattr(args, "checkpoint", "") or "",
+        device=getattr(args, "device", "") or "",
+        dtype=getattr(args, "dtype", "") or "",
+        quant=getattr(args, "quant", "") or "",
     ))
 
 
@@ -253,6 +258,16 @@ def _cmd_imggen_checkpoints(args: argparse.Namespace, context) -> int:
         for c in cks:
             mb = c["bytes"] / 1e6
             print(f"{c['run']}: {c['path']} ({mb:.1f} MB)")
+    # Readiness names the model that would actually load, at which
+    # dtype/quant, on which device — the choice is visible here,
+    # not only at render time. JSON output stays machine-clean.
+    if not args.json:
+        try:
+            ok, line = _studio(args).readiness()
+        except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
+            return _err(str(exc))
+        print("readiness: " + line if ok
+              else f"readiness: not ready — {line}")
     return 0
 
 

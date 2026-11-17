@@ -834,7 +834,7 @@ def _hash_tokenize_t5(text, vocab_size, max_tokens):
     return ids + [0] * (max_tokens - len(ids))
 
 
-def _load_hf_t5(state):
+def _load_hf_t5(state, dtype: str | None = None):
     """Map transformers T5EncoderModel keys -> T5TextEncoder.
 
     Renames are exactly two: the ``encoder.`` prefix, and
@@ -842,8 +842,11 @@ def _load_hf_t5(state):
     gated-gelu in v1.1, whatever transformers calls it). Sizes are
     read off the checkpoint itself (XXL for a real T5-XXL file) so
     the loader matches the weights, not an assumption.
-    Completeness is enforced both ways.
+    Completeness is enforced both ways. ``dtype`` casts the
+    encoder before its weights load (see dtype.cast_module).
     """
+    from .dtype import cast_module
+
     shared = state.get("shared.weight")
     if shared is None:
         raise ImgGenError(
@@ -876,6 +879,8 @@ def _load_hf_t5(state):
     enc = T5TextEncoder(d_model=d_model, d_ff=d_ff,
                         num_heads=num_heads, num_layers=num_layers,
                         vocab_size=vocab_size)
+    if dtype:
+        cast_module(enc, dtype)
     mapper = _KeyMapper(state)
     put = mapper.put
     put("shared.weight", "shared.weight")
@@ -940,7 +945,7 @@ def load_t5_tokenizer(t5_path):
         "spiece.model next to the T5 file)")
 
 
-def _load_hf_clip(state):
+def _load_hf_clip(state, dtype: str | None = None):
     """Map transformers CLIPTextModel keys -> CLIPTextEncoder.
 
     The pooled output is the EOT hidden state through
@@ -948,8 +953,11 @@ def _load_hf_clip(state):
     keeps a zero bias, as A2 did for CLIP-G). Sizes are read off
     the checkpoint itself (768-wide, 12 layers for a real CLIP-L
     file) so the loader matches the weights, not an assumption.
-    Completeness is enforced both ways.
+    Completeness is enforced both ways. ``dtype`` casts the
+    encoder before its weights load (see dtype.cast_module).
     """
+    from .dtype import cast_module
+
     tok = state.get("text_model.embeddings.token_embedding.weight")
     if tok is None:
         raise ImgGenError(
@@ -970,6 +978,8 @@ def _load_hf_clip(state):
     num_layers = max(layer_idxs) + 1
     enc = CLIPTextEncoder(dim=dim, layers=num_layers)
     enc.text_projection = nn.Linear(dim, dim)
+    if dtype:
+        cast_module(enc, dtype)
     mapper = _KeyMapper(state)
     put = mapper.put
     put("text_model.embeddings.token_embedding.weight",
@@ -1222,13 +1232,19 @@ class FLUXPipeline:
     sampled by rectified flow (FlowMatchScheduler, Euler)."""
 
     def __init__(self, transformer, t5, clip, vae, device="cpu",
-                 warnings=None):
+                 warnings=None, dtype: str = "fp32",
+                 quant: str = "none"):
         self.transformer = transformer
         self.t5 = t5
         self.clip = clip
         self.vae = vae
         self.device = device or "cpu"
         self.warnings = list(warnings or [])
+        #: The dtype the weights were cast to before loading, and the
+        #: quantization applied after ("none" | "int8"). The adapter
+        #: and Studio report these; the sidecar records them.
+        self.dtype = dtype
+        self.quant = quant
         self.scheduler = FlowMatchScheduler()
 
     @property
@@ -1241,15 +1257,35 @@ class FLUXPipeline:
 
     @classmethod
     def from_safetensors(cls, path, device="", *, t5_path=None,
-                         clip_path=None, vae_path=None):
+                         clip_path=None, vae_path=None, dtype="",
+                         quant=""):
+        """Load a FLUX .safetensors checkpoint (BFL single-file layout).
+
+        ``dtype`` ("fp32"/"fp16"/"bf16", "" = profile default) is
+        cast into each module *before* its weights load;
+        ``quant="int8"`` applies torch dynamic quantization to the
+        Linear modules after the load (CPU only — see
+        dtype.validate_request). Both are resolved and validated
+        before the file is touched.
+        """
+        from .dtype import resolve_request
+
+        want_dtype, want_quant, _device = resolve_request(
+            dtype, quant, device=device)
         state = load_safetensors(path)
         return cls._from_state(state, path, device,
                                t5_path=t5_path, clip_path=clip_path,
-                               vae_path=vae_path)
+                               vae_path=vae_path, dtype=want_dtype,
+                               quant=want_quant)
 
     @classmethod
     def _from_state(cls, state, path, device="", *, t5_path=None,
-                    clip_path=None, vae_path=None):
+                    clip_path=None, vae_path=None, dtype="",
+                    quant=""):
+        from .dtype import cast_module, quantize_linear_int8, resolve_request
+
+        want_dtype, want_quant, _device = resolve_request(
+            dtype, quant, device=device)
         keys = set(state)
         has_bfl = any(
             k.startswith("double_blocks.")
@@ -1300,12 +1336,14 @@ class FLUXPipeline:
             vae_state = load_safetensors(vae_source)
         mapped, _consumed = _map_bfl_transformer(state)
         transformer = FluxTransformer()
+        cast_module(transformer, want_dtype)
         transformer.load_state_dict(mapped, strict=True)
-        t5 = _load_hf_t5(t5_state)
-        clip = _load_hf_clip(clip_state)
+        t5 = _load_hf_t5(t5_state, dtype=want_dtype)
+        clip = _load_hf_clip(clip_state, dtype=want_dtype)
         vae = AutoencoderKL(latent_ch=16, scale=FLUX_VAE_SCALE,
                             shift=FLUX_VAE_SHIFT, decoder_resnets=2,
                             diffusers_layout=True)
+        cast_module(vae, want_dtype)
         _load_diffusers_vae(vae_state, vae)
         warnings = []
         t5_tok, t5_warn = load_t5_tokenizer(t5_source)
@@ -1325,13 +1363,19 @@ class FLUXPipeline:
                 "CLIP tokenizer: no vocab.json + merges.txt next "
                 "to the CLIP-L file — hashing fallback for the "
                 "pooled vector (reduced prompt fidelity)")
-        device = device or "cpu"
+        device = device or _device
         transformer.to(device)
         t5.to(device)
         clip.to(device)
         vae.to(device)
-        return cls(transformer, t5, clip, vae, device=device,
-                   warnings=warnings)
+        pipe = cls(transformer, t5, clip, vae, device=device,
+                   warnings=warnings, dtype=want_dtype,
+                   quant=want_quant)
+        if want_quant == "int8":
+            pipe.transformer = quantize_linear_int8(pipe.transformer)
+            pipe.t5 = quantize_linear_int8(pipe.t5)
+            pipe.clip = quantize_linear_int8(pipe.clip)
+        return pipe
 
     def generate(self, prompt, *, steps=28, guidance_scale=3.5,
                  seed=None, width=1024, height=1024,
@@ -1407,6 +1451,16 @@ class FLUXStudioAdapter:
         self._pipe = pipe
         self.last_warnings = []
         self.device = getattr(pipe, "device", "cpu")
+
+    @property
+    def dtype(self) -> str:
+        """The dtype the pipeline's weights were cast to."""
+        return getattr(self._pipe, "dtype", "fp32")
+
+    @property
+    def quant(self) -> str:
+        """The quantization applied to the pipeline ("none"|"int8")."""
+        return getattr(self._pipe, "quant", "none")
 
     @property
     def unet(self):

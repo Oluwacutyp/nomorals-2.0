@@ -60,6 +60,9 @@ class StudioConfig:
     lora: str = ""            # LoRA adapter name to apply
     lora_scale: float = 1.0
     device: str = ""
+    dtype: str = ""           # "fp32"|"fp16"|"bf16"; "" = profile default
+                              # (bf16 on CUDA, fp32 on CPU)
+    quant: str = ""           # "none"|"int8"; "" = none
 
 
 class Studio:
@@ -78,6 +81,11 @@ class Studio:
         #: or "forwarded <url>" when the job routed to the attested
         #: forwarded GPU. ``generate_document`` names it in the rung.
         self.last_route: str = "local"
+        #: The dtype/quant the cached pipeline was actually built
+        #: with ("" until a pipeline is built). The sidecar records
+        #: these for local renders.
+        self.last_dtype: str = ""
+        self.last_quant: str = ""
 
     # -- pipeline ----------------------------------------------------
     def _resolve_entry(self) -> dict:
@@ -124,6 +132,32 @@ class Studio:
             "SD1.5, SDXL or FLUX .safetensors into the imggen "
             "checkpoint dir")
 
+    def _effective_dtype_quant(self, entry: dict) -> tuple[str, str]:
+        """(dtype, quant) this Studio will load ``entry`` with.
+
+        Config "" means the profile default (bf16 on CUDA, fp32 on
+        CPU — see dtype.resolve_request). A native checkpoint is
+        fp32-only: an explicit dtype/quant on one is refused by
+        name instead of silently ignored. The combination is
+        validated (fp16 needs CUDA, int8 is CPU-only) before any
+        weight is touched, so the refusal is cheap.
+        """
+        from .dtype import normalize_dtype, normalize_quant, resolve_request
+
+        want_dtype = normalize_dtype(self.config.dtype)
+        want_quant = normalize_quant(self.config.quant)
+        if entry["model_class"] == "native" and (
+                want_dtype is not None or want_quant != "none"):
+            raise ImgGenError(
+                "native checkpoints are fp32-only — dtype/quant "
+                "do not apply to Devon's own tiny trained models; "
+                "pick an SD1.5, SDXL or FLUX checkpoint for dtype "
+                "selection")
+        dtype, quant, _device = resolve_request(
+            self.config.dtype, self.config.quant,
+            device=self.config.device)
+        return dtype, quant
+
     def pipeline(self):
         """The resolved pipeline, built once and cached.
 
@@ -135,40 +169,70 @@ class Studio:
         """
         from .pipeline import load_native_checkpoint
 
-        key = (self.config.checkpoint, self.config.device)
+        entry = self._resolve_entry()
+        dtype, quant = self._effective_dtype_quant(entry)
+        key = (self.config.checkpoint, self.config.device, dtype,
+               quant)
         if self._pipeline is None or self._pipeline_key != key:
             if not TORCH_AVAILABLE:
                 raise ImgGenError(
                     "native image generation needs torch: "
                     "pip install torch")
-            entry = self._resolve_entry()
             if entry["model_class"] == "native":
                 self._pipeline = load_native_checkpoint(
                     entry["path"], device=self.config.device)
-            elif entry["model_class"] == "sd15":
-                from .sdcompat import SD15Pipeline, SD15StudioAdapter
+            elif entry["model_class"] in ("sd15", "sdxl", "flux"):
+                # VRAM fit check BEFORE loading: a FLUX bf16 load is
+                # ~34 GB of weights — refusing here beats an OOM
+                # mid-load. The device is CUDA when explicitly
+                # requested, or when auto and a local GPU was
+                # detected; detect_gpu() never raises and probes
+                # torch only in a subprocess, so this stays safe
+                # when torch is absent. Unknown VRAM is "not
+                # verified", never an invented number.
+                from ...core.gpu import detect_gpu
+                from .dtype import check_fit
 
-                self._pipeline = SD15StudioAdapter(
-                    SD15Pipeline.from_safetensors(
-                        entry["path"], device=self.config.device))
-            elif entry["model_class"] == "sdxl":
-                from .sdxl import SDXLPipeline, SDXLStudioAdapter
+                info = detect_gpu()
+                device = self.config.device
+                is_cuda = (device.startswith("cuda")
+                           or (not device
+                               and info.path == "local"))
+                if is_cuda:
+                    fits, reason = check_fit(
+                        entry["model_class"], dtype, quant,
+                        vram_gb=info.vram_gb)
+                    if not fits:
+                        raise ImgGenError(reason)
+                if entry["model_class"] == "sd15":
+                    from .sdcompat import SD15Pipeline, SD15StudioAdapter
 
-                self._pipeline = SDXLStudioAdapter(
-                    SDXLPipeline.from_safetensors(
-                        entry["path"], device=self.config.device))
-            elif entry["model_class"] == "flux":
-                from .flux import FLUXPipeline, FLUXStudioAdapter
+                    self._pipeline = SD15StudioAdapter(
+                        SD15Pipeline.from_safetensors(
+                            entry["path"], device=self.config.device,
+                            dtype=dtype, quant=quant))
+                elif entry["model_class"] == "sdxl":
+                    from .sdxl import SDXLPipeline, SDXLStudioAdapter
 
-                self._pipeline = FLUXStudioAdapter(
-                    FLUXPipeline.from_safetensors(
-                        entry["path"], device=self.config.device))
+                    self._pipeline = SDXLStudioAdapter(
+                        SDXLPipeline.from_safetensors(
+                            entry["path"], device=self.config.device,
+                            dtype=dtype, quant=quant))
+                else:
+                    from .flux import FLUXPipeline, FLUXStudioAdapter
+
+                    self._pipeline = FLUXStudioAdapter(
+                        FLUXPipeline.from_safetensors(
+                            entry["path"], device=self.config.device,
+                            dtype=dtype, quant=quant))
             else:  # registry said loadable; classes are native|sd15|sdxl|flux
                 raise ImgGenError(
                     f"registry marks {entry['name']} "
                     f"({entry['model_class']}) loadable but Studio has "
                     f"no loader for that class")
             self._pipeline_key = key
+            self.last_dtype = dtype
+            self.last_quant = quant
         return self._pipeline
 
     def _gate(self, capability: str, min_profile: str = "laptop") -> None:
@@ -201,6 +265,30 @@ class Studio:
         except ImgGenError as exc:
             return False, str(exc)
         return True, ""
+
+    def readiness(self) -> tuple[bool, str]:
+        """(ready, line) for display: checkpoint + dtype/quant + device.
+
+        Without torch: (False, "torch is not installed on this
+        box"). Otherwise the resolved registry entry plus the
+        effective dtype/quant, e.g.
+        ``sd15 at bf16, quant none, on cuda`` — the choice is
+        always visible, never silent. A refusal (unknown dtype,
+        fp16 on CPU, native + dtype) returns (False, reason).
+        """
+        if not TORCH_AVAILABLE:
+            return False, "torch is not installed on this box"
+        try:
+            entry = self._resolve_entry()
+            dtype, quant = self._effective_dtype_quant(entry)
+        except ImgGenError as exc:
+            return False, str(exc)
+        from .dtype import describe_load
+
+        device = self.config.device or "auto"
+        line = describe_load(entry["model_class"], dtype, quant,
+                             device)
+        return True, (f"{entry['name']} — {line}")
 
     def _generate_remote(self, prompt: str, *, save_to, local_reason,
                          **kwargs) -> list[str]:
@@ -268,6 +356,27 @@ class Studio:
         save_to = kwargs.pop("save_to", None)
         allow_remote = kwargs.pop("allow_remote", True)
         aspect = kwargs.pop("aspect_ratio", None)
+        # dtype/quant per render: validated BEFORE the torch check,
+        # so a bad dtype is refused by name instead of hiding
+        # behind "torch is not installed". Applied to this Studio's
+        # config (dataclasses.replace) so the pipeline build below
+        # picks them up — and the choice sticks for later renders
+        # on this Studio.
+        req_dtype = kwargs.pop("dtype", None)
+        req_quant = kwargs.pop("quant", None)
+        explicit = bool(req_dtype) or bool(req_quant)
+        if explicit:
+            import dataclasses
+
+            from .dtype import resolve_request
+
+            resolve_request(req_dtype or self.config.dtype,
+                            req_quant or self.config.quant,
+                            device=self.config.device)
+            self.config = dataclasses.replace(
+                self.config,
+                dtype=req_dtype or self.config.dtype,
+                quant=req_quant or self.config.quant)
         if aspect:
             aw, ah = resolve_aspect_ratio(str(aspect))
             kwargs.setdefault("width", aw)
@@ -276,6 +385,12 @@ class Studio:
         batch = kwargs.get("batch_size", 1)
         if (not ready and allow_remote
                 and (batch == 1 or batch is None)):
+            if explicit:
+                raise ImgGenError(
+                    "dtype/quant cannot be forwarded — the "
+                    "forwarded GPU renders with its own dtype; "
+                    "render locally or drop the dtype/quant "
+                    "request")
             from .remote import remote_available
 
             ok, _why = remote_available()
@@ -535,11 +650,19 @@ class Studio:
             img.save(name)
             # Sidecar prompt for reproducibility — plus any standing
             # disclosures from the pipeline (e.g. tokenizer fallback),
-            # so a saved image never hides how it was made.
+            # so a saved image never hides how it was made. Local
+            # renders also record the dtype/quant the pipeline was
+            # built with; forwarded renders name their own dtype on
+            # the far side, so nothing is recorded here.
             with open(name + ".txt", "w") as f:
                 f.write(prompt)
                 for w in self.last_warnings:
                     f.write(f"\nwarning: {w}")
+                if (self._pipeline is not None
+                        and self.last_route == "local"
+                        and self.last_dtype):
+                    f.write(f"\ndtype: {self.last_dtype} · "
+                            f"quant: {self.last_quant or 'none'}")
             paths.append(name)
         return paths
 

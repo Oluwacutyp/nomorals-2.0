@@ -704,8 +704,12 @@ def test_studio_dispatches_flux_without_torch(
             self.calls = []
 
         @classmethod
-        def from_safetensors(cls, path, device=""):
-            return cls(path, device)
+        def from_safetensors(cls, path, device="", *, dtype="",
+                             quant=""):
+            pipe = cls(path, device)
+            pipe.dtype = dtype
+            pipe.quant = quant
+            return pipe
 
         def generate(self, prompt, **kwargs):
             self.calls.append((prompt, kwargs))

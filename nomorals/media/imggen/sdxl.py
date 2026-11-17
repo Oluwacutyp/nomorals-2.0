@@ -309,7 +309,8 @@ def _map_ldm_sdxl_unet(state: dict[str, torch.Tensor]):
     return out, mapper.consumed
 
 
-def _load_ldm_xl_conditioner(state: dict[str, torch.Tensor]):
+def _load_ldm_xl_conditioner(state: dict[str, torch.Tensor],
+                             dtype: str | None = None):
     """Load SDXL's two text encoders from conditioner.embedders.*.
 
     embedders.0 = OpenAI CLIP ViT-L/14 (12 layers, 768) — its
@@ -318,12 +319,20 @@ def _load_ldm_xl_conditioner(state: dict[str, torch.Tensor]):
     its text_projection IS the pooled output and is loaded. Returns
     (enc_l, enc_g). Each encoder is completeness-checked by
     :func:`._load_ldm_clip`: every target filled, every key consumed.
+    ``dtype`` casts each encoder before its weights load (see
+    dtype.cast_module).
     """
+    from .dtype import cast_module
+
     enc_l = CLIPTextEncoder()
+    if dtype:
+        cast_module(enc_l, dtype)
     _load_ldm_clip(state, enc_l, root="conditioner.embedders.0.model.",
                    layers=12)
     enc_g = CLIPTextEncoder(dim=1280, layers=32)
     enc_g.text_projection = nn.Linear(1280, 1280)
+    if dtype:
+        cast_module(enc_g, dtype)
     _load_ldm_clip(state, enc_g, root="conditioner.embedders.1.model.",
                    layers=32, map_projection=True)
     return enc_l, enc_g
@@ -345,13 +354,19 @@ class SDXLPipeline:
 
     def __init__(self, unet: SDXLUNet, text_encoder_l: CLIPTextEncoder,
                  text_encoder_g: CLIPTextEncoder, vae: AutoencoderKL,
-                 timesteps: int = 1000, device: str = "") -> None:
+                 timesteps: int = 1000, device: str = "",
+                 dtype: str = "fp32", quant: str = "none") -> None:
         self.unet = unet.eval()
         self.text_encoder_l = text_encoder_l.eval()
         self.text_encoder_g = text_encoder_g.eval()
         self.vae = vae.eval()
         self.device = device or ("cuda" if torch.cuda.is_available()
                                  else "cpu")
+        #: The dtype the weights were cast to before loading, and the
+        #: quantization applied after ("none" | "int8"). Adapters and
+        #: Studio report these; the sidecar records them.
+        self.dtype = dtype
+        self.quant = quant
         for m in (self.unet, self.text_encoder_l, self.text_encoder_g,
                   self.vae):
             m.to(self.device)
@@ -386,15 +401,34 @@ class SDXLPipeline:
             "or in ~/.devon-models/tokenizer/ for true CLIP BPE."]
 
     @classmethod
-    def from_safetensors(cls, path: str, device: str = ""
+    def from_safetensors(cls, path: str, device: str = "",
+                         *, dtype: str = "", quant: str = ""
                          ) -> SDXLPipeline:
-        """Load an SDXL .safetensors checkpoint (compvis key format)."""
+        """Load an SDXL .safetensors checkpoint (compvis key format).
+
+        ``dtype`` ("fp32"/"fp16"/"bf16", "" = profile default) is
+        cast into each module *before* its weights load;
+        ``quant="int8"`` applies torch dynamic quantization to the
+        Linear modules after the load (CPU only — see
+        dtype.validate_request). Both are resolved and validated
+        before the file is touched.
+        """
+        from .dtype import resolve_request
+
+        want_dtype, want_quant, _device = resolve_request(
+            dtype, quant, device=device)
         state = load_safetensors(path)
-        return cls._from_state(state, path, device=device)
+        return cls._from_state(state, path, device=device,
+                               dtype=want_dtype, quant=want_quant)
 
     @classmethod
-    def _from_state(cls, state, path: str, device: str = ""
+    def _from_state(cls, state, path: str, device: str = "",
+                    *, dtype: str = "", quant: str = ""
                     ) -> SDXLPipeline:
+        from .dtype import cast_module, quantize_linear_int8, resolve_request
+
+        want_dtype, want_quant, _device = resolve_request(
+            dtype, quant, device=device)
         keys = set(state)
         is_ldm = any(k.startswith("model.diffusion_model.")
                      for k in keys)
@@ -417,6 +451,7 @@ class SDXLPipeline:
                 "loader needs conditioner.embedders.0/1 + label_emb; "
                 "load it with SD15Pipeline instead")
         unet = SDXLUNet()
+        cast_module(unet, want_dtype)
         mapped, consumed = _map_ldm_sdxl_unet(state)
         missing, _unexpected = unet.load_state_dict(mapped, strict=False)
         if missing:
@@ -425,7 +460,8 @@ class SDXLPipeline:
                 f"(e.g. {missing[0]}); is this really SDXL?")
         _check_section(state, "model.diffusion_model.", consumed,
                        f"{path} (UNet)")
-        enc_l, enc_g = _load_ldm_xl_conditioner(state)
+        enc_l, enc_g = _load_ldm_xl_conditioner(state,
+                                                dtype=want_dtype)
         # Real CLIP BPE if vocab data sits near the checkpoint; the
         # hashing fallback otherwise — disclosed via .warnings.
         from .tokenizers import load_clip_tokenizer
@@ -433,8 +469,17 @@ class SDXLPipeline:
         enc_l.tokenizer = load_clip_tokenizer(path)
         enc_g.tokenizer = load_clip_tokenizer(path)
         vae = AutoencoderKL(scale=0.13025)
+        cast_module(vae, want_dtype)
         _load_ldm_vae(state, vae)
-        return cls(unet, enc_l, enc_g, vae, device=device)
+        pipe = cls(unet, enc_l, enc_g, vae, device=device,
+                   dtype=want_dtype, quant=want_quant)
+        if want_quant == "int8":
+            pipe.unet = quantize_linear_int8(pipe.unet)
+            pipe.text_encoder_l = quantize_linear_int8(
+                pipe.text_encoder_l)
+            pipe.text_encoder_g = quantize_linear_int8(
+                pipe.text_encoder_g)
+        return pipe
 
     def _encode(self, prompt: str, negative_prompt: str = "",
                 width: int = 1024, height: int = 1024):
@@ -549,6 +594,16 @@ class SDXLStudioAdapter:
     @property
     def warnings(self) -> list[str]:
         return list(self._pipe.warnings)
+
+    @property
+    def dtype(self) -> str:
+        """The dtype the pipeline's weights were cast to."""
+        return getattr(self._pipe, "dtype", "fp32")
+
+    @property
+    def quant(self) -> str:
+        """The quantization applied to the pipeline ("none"|"int8")."""
+        return getattr(self._pipe, "quant", "none")
 
     @property
     def controlnets(self) -> dict:

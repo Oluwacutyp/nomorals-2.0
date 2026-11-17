@@ -951,12 +951,18 @@ class SD15Pipeline:
 
     def __init__(self, unet: SDUNet, text_encoder: CLIPTextEncoder,
                  vae: AutoencoderKL, timesteps: int = 1000,
-                 device: str = "") -> None:
+                 device: str = "", dtype: str = "fp32",
+                 quant: str = "none") -> None:
         self.unet = unet.eval()
         self.text_encoder = text_encoder.eval()
         self.vae = vae.eval()
         self.device = device or ("cuda" if torch.cuda.is_available()
                                  else "cpu")
+        #: The dtype the weights were cast to before loading, and the
+        #: quantization applied after ("none" | "int8"). Adapters and
+        #: Studio report these; the sidecar records them.
+        self.dtype = dtype
+        self.quant = quant
         for m in (self.unet, self.text_encoder, self.vae):
             m.to(self.device)
             for p in m.parameters():
@@ -981,8 +987,24 @@ class SD15Pipeline:
             "or in ~/.devon-models/tokenizer/ for true CLIP BPE."]
 
     @classmethod
-    def from_safetensors(cls, path: str, device: str = "") -> "SD15Pipeline":
-        """Load an SD1.5 .safetensors checkpoint (compvis key format)."""
+    def from_safetensors(cls, path: str, device: str = "",
+                         *, dtype: str = "", quant: str = ""
+                         ) -> "SD15Pipeline":
+        """Load an SD1.5 .safetensors checkpoint (compvis key format).
+
+        ``dtype`` ("fp32"/"fp16"/"bf16", "" = profile default) is
+        cast into each module *before* its weights load, so the
+        file's tensors are copied down to the target dtype instead
+        of building a full fp32 copy first. ``quant="int8"`` applies
+        torch dynamic quantization to the Linear modules after the
+        load (CPU only — see dtype.validate_request). Both are
+        resolved and validated before the file is touched, so a bad
+        request refuses without loading anything.
+        """
+        from .dtype import cast_module, quantize_linear_int8, resolve_request
+
+        want_dtype, want_quant, _device = resolve_request(
+            dtype, quant, device=device)
         state = load_safetensors(path)
         keys = set(state)
         is_ldm = any(k.startswith("model.diffusion_model.") for k in keys)
@@ -998,6 +1020,7 @@ class SD15Pipeline:
                 "compvis LDM format first (one-time script; the loader "
                 "speaks LDM natively)")
         unet = SDUNet()
+        cast_module(unet, want_dtype)
         mapped, consumed = _map_ldm_unet(state)
         missing, _unexpected = unet.load_state_dict(mapped, strict=False)
         if missing:
@@ -1007,6 +1030,7 @@ class SD15Pipeline:
         _check_section(state, "model.diffusion_model.", consumed,
                        f"{path} (UNet)")
         text_encoder = CLIPTextEncoder()
+        cast_module(text_encoder, want_dtype)
         _load_ldm_clip(state, text_encoder)
         # Real CLIP BPE if vocab data sits near the checkpoint; the
         # hashing fallback otherwise — disclosed via .warnings.
@@ -1014,8 +1038,15 @@ class SD15Pipeline:
 
         text_encoder.tokenizer = load_clip_tokenizer(path)
         vae = AutoencoderKL()
+        cast_module(vae, want_dtype)
         _load_ldm_vae(state, vae)
-        return cls(unet, text_encoder, vae, device=device)
+        pipe = cls(unet, text_encoder, vae, device=device,
+                   dtype=want_dtype, quant=want_quant)
+        if want_quant == "int8":
+            pipe.unet = quantize_linear_int8(pipe.unet)
+            pipe.text_encoder = quantize_linear_int8(
+                pipe.text_encoder)
+        return pipe
 
     @torch.no_grad()
     def generate(self, prompt: str, steps: int = 30,
@@ -1273,6 +1304,16 @@ class SD15StudioAdapter:
     @property
     def warnings(self) -> list[str]:
         return list(self._pipe.warnings)
+
+    @property
+    def dtype(self) -> str:
+        """The dtype the pipeline's weights were cast to."""
+        return getattr(self._pipe, "dtype", "fp32")
+
+    @property
+    def quant(self) -> str:
+        """The quantization applied to the pipeline ("none"|"int8")."""
+        return getattr(self._pipe, "quant", "none")
 
     @property
     def controlnets(self) -> dict:
