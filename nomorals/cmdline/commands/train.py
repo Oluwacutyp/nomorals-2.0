@@ -59,11 +59,17 @@ def _cmd_train(args, context):
         def _n(count: int, word: str) -> str:
             return f"{count} {word}" + ("s" if count != 1 else "")
 
+        # The skip is honest, never silent: when any dialog was refused
+        # by the Tier-3 exclusion filter, the summary names the count.
+        # Byte-identical to before when nothing was excluded.
+        parts = [f"{stats.pii_scrubbed} PII scrubbed",
+                 f"{stats.duplicates} duplicates"]
+        if stats.excluded:
+            parts.append(f"{_n(stats.excluded, 'dialog')} skipped as excluded")
         summary = (f"{_n(stats.dialogs, 'dialog')}, "
                    f"{_n(stats.messages, 'message')} -> "
                    f"{_n(stats.examples, 'example')} "
-                   f"({stats.pii_scrubbed} PII scrubbed, "
-                   f"{stats.duplicates} duplicates)")
+                   f"({', '.join(parts)})")
         if not stats.examples:
             _emit(args, payload,
                   f"telegram export: no examples harvested — {summary} "

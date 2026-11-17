@@ -59,6 +59,7 @@ class ExportStats:
     examples: int = 0
     pii_scrubbed: int = 0
     duplicates: int = 0
+    excluded: int = 0
 
     def to_dict(self) -> dict[str, int]:
         return {
@@ -67,6 +68,7 @@ class ExportStats:
             "examples": self.examples,
             "pii_scrubbed": self.pii_scrubbed,
             "duplicates": self.duplicates,
+            "excluded": self.excluded,
         }
 
 
@@ -237,8 +239,19 @@ def export_telegram(
                     break
                 if wanted and str(dialog.id) not in wanted:
                     continue
-                seen += 1
                 title = (dialog.title or f"chat-{dialog.id}").strip()
+                blocked, reason = is_excluded_dialog(title, chat_id=str(dialog.id))
+                if blocked:
+                    # Tier-3 hard exclusion beats --only-chats: the dialog
+                    # is refused before any message is read, and does not
+                    # consume the max_dialogs budget (a refusal is not a
+                    # harvest). The reason names the marker, never content.
+                    stats.excluded += 1
+                    _log.info(
+                        "telegram export: skipping excluded dialog %s (%s)",
+                        dialog.id, reason)
+                    continue
+                seen += 1
                 entries: list[tuple[bool, str]] = []
                 # reverse=True => oldest first, which is the order the
                 # conversation windowing below expects.
