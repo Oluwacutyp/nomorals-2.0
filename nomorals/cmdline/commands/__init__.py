@@ -8,6 +8,7 @@ from .av import _cmd_av
 from .airports import _cmd_airports
 from .flight import _cmd_flight
 from .soundtrack import _cmd_soundtrack
+from .burn import _cmd_burn
 from .backup import _cmd_backup
 from .benchmark import _BuildersBuildBackend, _cmd_benchmark
 from .bet import _cmd_bet
@@ -174,6 +175,7 @@ __all__ = [
     "_cmd_av",
     "_cmd_airports",
     "_cmd_flight",
+    "_cmd_burn",
     "_cmd_data",
     "_cmd_decisions",
     "_cmd_focus",

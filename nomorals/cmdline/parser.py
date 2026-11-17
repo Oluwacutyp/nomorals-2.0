@@ -57,6 +57,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "soundtrack": [],
     "flight": [],
     "breach": [],
+    "burn": [],
     "bet": ["bt"],
     "apk": [],
     "re": [],
@@ -3687,6 +3688,28 @@ def _parser() -> argparse.ArgumentParser:
                           help="email, domain, 'password <password>', or 'watch …'")
     breach_p.add_argument("--json", action="store_true",
                           help="Output as JSON")
+
+    burn_p = sub.add_parser(
+        "burn", aliases=CLI_ALIASES["burn"],
+        help="burn-after-reading notes: seal a note, read it once, it is gone",
+        description=("nm burn seal <text...> [--expire 1h|1d|7d|30d|never] [--password WORD]\\n"
+                     "nm burn read <code> [--password WORD]\\n"
+                     "nm burn list\\n"
+                     "nm burn purge <note-id>\\n"
+                     "nm burn tick\\n"
+                     "A note is sealed under a fresh random key; the "
+                     "link carries the key and never lives in storage. "
+                     "The first read shows the text and destroys it — "
+                     "a second read finds nothing. A wrong code or "
+                     "password refuses and leaves the note sealed."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    burn_p.add_argument("burn_action", nargs="?", default="",
+                        help="seal | read | list | purge | tick")
+    burn_p.add_argument("burn_rest", nargs="*", default=[],
+                        help="action arguments (text, code, note id)")
+    burn_p.add_argument("--json", action="store_true",
+                        help="Output as JSON")
 
     focus_p = sub.add_parser("focus", aliases=CLI_ALIASES["focus"],
         help="focus sessions: start, pause, resume, stop, status, today, week, month",

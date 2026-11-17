@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any
@@ -677,6 +678,116 @@ class RuntimeMetaMixin:
         if map_path:
             return text + f"\nmap: {map_path}"
         return text
+
+    def _control_burn(self, tail: str, message: Any = None) -> str:
+        """The /burn reply: seal and read burn-after-reading notes.
+
+        ``/burn seal <text> [--expire 1h|1d|7d|30d|never]
+        [--password WORD]`` seals a note under a fresh random key
+        and hands back the link — the key travels inside the link
+        and never lives in storage. ``/burn read <code>
+        [--password WORD]`` reads it once and burns it; a second
+        read finds nothing. ``/burn list`` lists live notes as
+        metadata only, never contents; ``/burn purge <id>`` deletes
+        an unread note early. Owner-only. A wrong code or a wrong
+        password refuses and leaves the note sealed; only a
+        successful read burns it. The honest limit is stated in
+        the seal reply: anyone holding the link can read it once,
+        so the link is the key — keep it off public chats.
+        """
+        from ...memory.ephemeral_notes import (
+            BurnNoteStore,
+            list_notes,
+            parse_expiry,
+            purge_note,
+            read_note,
+            seal_note,
+        )
+
+        context = getattr(self, "context", None)
+        settings = getattr(context, "settings", None) if context else None
+        home = getattr(settings, "home", None) if settings else None
+        home = str(home or "~/.nomorals")
+
+        def _flag(rest: str, flag: str) -> tuple[str, str | None]:
+            match = re.search(rf"\s{re.escape(flag)}\s+(\S+)\s*$", rest)
+            if not match:
+                return rest, None
+            return rest[:match.start()].strip(), match.group(1)
+
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else ""
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        try:
+            store = BurnNoteStore(home)
+        except Exception as exc:  # noqa: BLE001 - burn never crashes chat
+            return f"burn notes unavailable: {exc}"
+        if verb == "seal":
+            if not rest:
+                return ("usage: /burn seal <text> "
+                        "[--expire 1h|1d|7d|30d|never] [--password WORD]")
+            rest, expire = _flag(rest, "--expire")
+            rest, password = _flag(rest, "--password")
+            if not rest:
+                return ("usage: /burn seal <text> "
+                        "[--expire 1h|1d|7d|30d|never] [--password WORD]")
+            try:
+                seconds = parse_expiry(expire if expire else None)
+                sealed = seal_note(store, rest, expires_in_s=seconds,
+                                   password=password or None)
+            except ValueError as exc:
+                return str(exc)
+            lines = ["sealed — read once with:",
+                     f"/burn read {sealed['link']}"]
+            expires_at = sealed["expires_at"]
+            when = ("never" if expires_at is None else
+                    time.strftime("%Y-%m-%d %H:%M",
+                                  time.localtime(expires_at)))
+            lines.append(f"expires: {when}"
+                         + (" · password-gated"
+                            if sealed["has_password"] else ""))
+            lines.append("anyone holding the link can read it once — "
+                         "the link is the key, so keep it off public "
+                         "chats.")
+            return "\n".join(lines)
+        if verb == "read":
+            if not rest:
+                return "usage: /burn read <code> [--password WORD]"
+            code, password = _flag(rest, "--password")
+            if not code:
+                return "usage: /burn read <code> [--password WORD]"
+            try:
+                out = read_note(store, code.split()[0],
+                                password=password or None)
+            except Exception as exc:  # noqa: BLE001 - read never crashes chat
+                return f"cannot read: {exc}"
+            if not out.get("ok"):
+                return f"cannot read: {out.get('error')}"
+            return f"{out['text']}\n— note burned: it is gone now."
+        if verb == "list":
+            notes = list_notes(store)
+            if not notes:
+                return "no live burn notes."
+            lines = ["live burn notes:"]
+            for meta in notes:
+                expires_at = meta["expires_at"]
+                when = ("never" if expires_at is None else
+                        time.strftime("%Y-%m-%d %H:%M",
+                                      time.localtime(expires_at)))
+                lines.append(f"• {meta['note_id']} · expires {when}"
+                             + (" · password-gated"
+                                if meta["has_password"] else ""))
+            return "\n".join(lines)
+        if verb == "purge":
+            if not rest:
+                return "usage: /burn purge <note-id>"
+            if purge_note(store, rest.split()[0]):
+                return f"purged {rest.split()[0]}."
+            return f"no live note {rest.split()[0]}."
+        return ("usage: /burn seal <text> [--expire 1h|1d|7d|30d|never] "
+                "[--password WORD] | /burn read <code> [--password WORD] "
+                "| /burn list | /burn purge <note-id>")
+
 
     def _impossible_diagram(self, claim_id: str,
                             message: Any = None) -> str:

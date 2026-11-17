@@ -624,6 +624,7 @@ class ToolRegistry:
             "compute",  # computational answers (WolframAlpha + CAS ladder)
             "breach",  # breach exposure (Pwned Passwords + HIBP watcher)
             "soundtrack",  # soundtrack index (TuneFind core)
+            "burn_note",  # burn-after-reading notes (Privnote build-new)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",

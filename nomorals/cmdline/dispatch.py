@@ -21,6 +21,7 @@ from .commands.compute import _cmd_compute
 from .commands.soundtrack import _cmd_soundtrack
 from .commands.flight import _cmd_flight
 from .commands.breach import _cmd_breach
+from .commands.burn import _cmd_burn
 from .commands.backup import _cmd_backup
 from .commands.benchmark import _cmd_benchmark
 from .commands.bet import _cmd_bet
@@ -570,6 +571,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "soundtrack": _CommandSpec(_cmd_soundtrack),
     "flight": _CommandSpec(_cmd_flight),
     "breach": _CommandSpec(_cmd_breach),
+    "burn": _CommandSpec(_cmd_burn),
     "benchmark": _CommandSpec(_cmd_benchmark),
 }
 

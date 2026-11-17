@@ -808,6 +808,25 @@ def register(registry: Any) -> None:
                     "error": f"flight track tick failed: {exc}"}
 
     @registry.register(
+        "__burn_note_tick__",
+        description="Run one burn-note sweep (Privnote build-new): "
+        "delete expired unread burn notes from the durable store "
+        "and log each burn with its reason. Scheduler-internal; "
+        "runs hourly. Routine and silent — a run with nothing "
+        "expired deletes nothing, and a live note is never touched.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _burn_note_tick_tool() -> dict[str, Any]:
+        from ..memory.ephemeral_notes import run_burn_note_tick_once
+
+        try:
+            return run_burn_note_tick_once(context=_context)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"burn note tick failed: {exc}"}
+
+    @registry.register(
         "__group_ritual_tick__",
         description="Run one group ritual tick (audit gap R2-29): "
         "every themed community group with a ritual due within a "

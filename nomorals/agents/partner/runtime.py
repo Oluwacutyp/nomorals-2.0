@@ -3518,6 +3518,19 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("flight track job not registered: %s",
                                  exc)
+                # Memory: the burn-note sweep (hourly — expired
+                # unread notes are deleted; a live note is never
+                # touched). Idempotent by name; a stale spec is
+                # replaced.
+                try:
+                    from ...memory.ephemeral_notes import (
+                        ensure_burn_note_job,
+                    )
+
+                    ensure_burn_note_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("burn note job not registered: %s",
+                                 exc)
                 # Social measurement spine (WS3 P1): posted rows get
                 # their real metrics refreshed every 6h, so posting
                 # windows and brief outcomes learn from measured data
@@ -8281,6 +8294,8 @@ class PartnerRuntime(
             return self._control_airports(command.tail, message)
         if kind == "flight":
             return self._control_flight(command.tail, message)
+        if kind == "burn":
+            return self._control_burn(command.tail, message)
         if kind == "arena-research":
             return self._control_arena_research(command.tail, message)
         if kind == "community":

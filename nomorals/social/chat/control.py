@@ -398,6 +398,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "analytics": (0, None),  # /analytics [status | tables | query "<select sql>" | export <table> [csv|parquet] | export query "<select sql>" [csv|parquet]] — analytical queries + exports over the live store (R3-59; owner-only)
     "airports": (0, 1),  # /airports [status | refresh] — the airport→country table: rows, last refresh, next run, refresh on demand (airport refresh 0bd2bd1f; owner-only)
     "flight": (0, None),  # /flight <flight> | /flight watch <flight> [destination] [expect-epoch] | /flight unwatch <flight> | /flight watches | /flight area <IATA | lat_min lon_min lat_max lon_max> — live flight tracking from the open ADS-B feeds: position, altitude, speed, heading, ETA + a track map she draws, plus watches that ping on landing/diversion/delay (FlightRadar24 build-new; owner-only)
+    "burn": (0, None),  # /burn seal <text> [--expire 1h|1d|7d|30d|never] [--password WORD] | /burn read <code> [--password WORD] | /burn list | /burn purge <note-id> — burn-after-reading notes: sealed under a fresh key, the link carries the key, the first read shows it and destroys it (Privnote build-new; owner-only)
     "arena-research": (0, 2),  # /arena-research [status | tick | survey | proposals | ensure | enable | disable] — Devon researching herself (owner phase 2026-10-21 item 2, owner-only)
     "model": (0, 6),  # provider + up to 5 fallback providers
     "providers": (0, 0),  # /providers — probe the whole chain, live or why not
@@ -2355,6 +2356,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "flight": {"what": "live flight tracking — where a flight is RIGHT NOW, from the open ADS-B feeds (OpenSky), never the schedule: /flight BA249 reports the live position, altitude, speed, heading, ETA and data age, and sends the track map she draws herself; /flight area LOS lists live aircraft over an airport (or a lat/lon box); /flight watch BA249 LHR arms a watch that pings when the flight lands, diverts, runs late or vanishes, /flight unwatch drops it, /flight watches lists the armed watches. A down or empty feed is reported in words with the reason — a position is never invented. Owner-only.",
              "usage": "/flight <flight> | /flight watch <flight> [destination] [expect-epoch] | /flight unwatch <flight> | /flight watches | /flight area <IATA | lat_min lon_min lat_max lon_max>", "example": "/flight BA249   ·   /flight watch BA249 LHR   ·   /flight area LOS",
              "related": "/airports /trip"},
+    "burn": {"what": "burn-after-reading notes — seal a note under a fresh random key and get a link that carries the key: /burn seal <text> seals it (optional --expire 1h|1d|7d|30d|never, default 30 days; optional --password WORD adds a second gate); /burn read <code> reads it once and destroys it, a second read finds nothing; /burn list lists live notes as metadata only, never contents; /burn purge <id> deletes an unread note early. A wrong code or password refuses and leaves the note sealed; only a successful read burns it. Anyone holding the link can read it once — the link is the key, so keep it off public chats. Owner-only.",
+             "usage": "/burn seal <text> [--expire 1h|1d|7d|30d|never] [--password WORD] | /burn read <code> [--password WORD] | /burn list | /burn purge <note-id>", "example": "/burn seal meet at six   ·   /burn read burn:abc123:KEY   ·   /burn list",
+             "related": "/vault /will"},
     "arena-research": {"what": "Devon researching herself — the arena researcher surveys the live system (organs, wiring, dead/decorative paths, weak spots) with file:line evidence, mines state of the art per organ through the research pipeline, and files RANKED improvement proposals into the upgrade queue for the owner's word. Never auto-approved, never auto-applied: the owner decides, the organ proposes. /arena-research shows the status (job, gates, last run, pending proposals); tick runs one cycle now; survey lists the current ranked findings without filing; proposals lists what this organ filed. Owner-only.",
              "usage": "/arena-research | /arena-research tick | /arena-research survey | /arena-research proposals | /arena-research ensure | /arena-research enable | /arena-research disable", "example": "/arena-research   ·   /arena-research tick   ·   /arena-research proposals",
              "related": "/research /proposals"},
@@ -5120,7 +5124,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("her day — state & control",
      ["status", "ping", "platforms", "mood", "stage", "model", "providers", "say", "power",
       "proposals", "approve", "deny", "start", "stop", "quit",
-      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "analytics", "airports", "flight", "arena-research", "profile", "mind",
+      "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "analytics", "airports", "flight", "burn", "arena-research", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
       "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
