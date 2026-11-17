@@ -1587,6 +1587,8 @@ MUSIC_SOURCE_DOMAINS: dict[str, str | None] = {
     "notjustok-search": "notjustok.com",
     "tooxclusive-search": "tooxclusive.com",
     "mdundo-search": "play.mdundo.com",
+    "mp3pm-search": "mp3.pm",
+    "mp3juice-search": "service-et-reception.fr",
     "soundcloud-search": "soundcloud.com",
     "bandcamp-search": "bandcamp.com",
     "youtube-search": "youtube.com",
