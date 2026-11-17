@@ -75,6 +75,25 @@ _LOCK_RETRY_MAX_DELAY_S = 2.0
 #: it must fail fast with the holder named instead of hanging the
 #: process.
 _WRITE_LOCK_TIMEOUT_S = 30.0
+#: Bound (seconds) for how long one transaction may hold the writer
+#: before the actor's watchdog rolls it back (see
+#: :meth:`_WriterActor._maybe_reap_stale_txn`). Surveyed 2026-11-17 over
+#: all 304 ``transaction()`` blocks in the repo: no block does network,
+#: subprocess, sleep, LLM, or retry work; the largest live bodies are
+#: tens of DML statements (one news batch, one file's code-graph rows,
+#: one research session's chunks); the longest OBSERVED transaction
+#: anywhere was the Oct-20 scheduler holder at ~27s. 300s is 10x the
+#: victim timeout and >10x that longest observation, with margin for a
+#: big-table migration DDL on the small EC2 box — while still clearing
+#: any wedge ~9x faster than the 2800s one seen live. A legitimate
+#: transaction longer than this fails LOUDLY (the owner is told its
+#: transaction was lost) instead of corrupting: the rollback is atomic
+#: and the work is retried, never half-applied.
+_STALE_TXN_REAP_S = 300.0
+#: How often (seconds) the writer actor wakes from its queue wait to run
+#: the stale-transaction check, so a wedge is reaped within
+#: ``_STALE_TXN_REAP_S + _WATCHDOG_POLL_S`` even when the actor is idle.
+_WATCHDOG_POLL_S = 5.0
 
 
 def _lock_retry_delay(attempt: int) -> float:
@@ -498,15 +517,48 @@ class Database:
         return actor is not None and actor.txn_owner == threading.get_ident()
 
     def _check_txn_generation(self) -> None:
-        """Fail loudly if the writer actor was restarted mid-transaction."""
+        """Fail loudly if the writer actor was restarted mid-transaction.
+
+        Also the loud end of a watchdog reap: the reaper bumps the writer
+        epoch exactly like a restart moves it, so the owner's next routed
+        call — or the ``transaction()`` exit check — raises here instead
+        of continuing outside the transaction it thought it held. The
+        message names which of the two took the transaction, because
+        "restarted" would send the owner hunting a restart that never
+        happened.
+        """
 
         if getattr(self._depth, "value", 0) <= 0:
             return
         actor = self._writer_actor
         gen = getattr(self._txn_gen, "value", None)
         if actor is not None and gen is not None and gen != actor.generation:
+            if actor.generation_reason == "watchdog":
+                raise StorageError(
+                    "transaction was rolled back by the stale-transaction "
+                    "watchdog; the transaction was lost")
             raise StorageError(
                 "writer actor was restarted; the transaction was lost")
+
+    def _invalidate_writer_generation(self, reason: str) -> None:
+        """Advance the writer epoch, invalidating every open transaction.
+
+        Called by the writer actor's stale-transaction reaper (and only
+        there): after the reaper rolls a transaction back, the owner's
+        next routed call — or its ``transaction()`` exit — must fail
+        loudly via :meth:`_check_txn_generation` instead of continuing
+        outside the transaction it thought it held. The actor and its
+        connection stay alive; only the epoch moves, exactly as a
+        restart moves it, and the invariant
+        ``actor.generation == _writer_generation`` is kept so a later
+        real restart can never reuse a bumped value.
+        """
+
+        with self._writer_lock:
+            self._writer_generation += 1
+            actor = self._writer_actor
+            if actor is not None:
+                actor.note_generation_bump(self._writer_generation, reason)
 
     def _holder_timeout_error(self, what: str) -> StorageError:
         """The bounded-acquire error, naming the holder like c5bebb95."""
@@ -862,7 +914,12 @@ class Database:
             self._depth.value = depth + 1
             try:
                 yield self
-            except Exception:
+            except BaseException:  # noqa: BLE001 — rollback, then re-raise
+                # BaseException, not Exception: a KeyboardInterrupt /
+                # SystemExit / CancelledError escaping the body must
+                # roll the savepoint back like any other failure —
+                # skipping this arm used to leave the savepoint (and
+                # the outer transaction) open on the writer forever.
                 self.execute(f"ROLLBACK TO {savepoint}")
                 self.execute(f"RELEASE {savepoint}")
                 self._depth.value = depth
@@ -884,11 +941,19 @@ class Database:
         self._bump_stat("transactions")
         try:
             yield self
-        except Exception:
+        except BaseException:  # noqa: BLE001 — rollback, then re-raise
+            # BaseException, not Exception: see the savepoint arm above.
             self._actor_close("rollback")
             raise
         else:
             self._actor_close("commit")
+            # The close job is best-effort and reads the CURRENT writer
+            # epoch, so a transaction the watchdog rolled back (or a
+            # restart swallowed mid-body) would otherwise exit normally
+            # here: the close fails inside the actor as "no transaction
+            # is active" and is swallowed as a warning. Fail loudly
+            # instead — the work did not commit.
+            self._check_txn_generation()
         finally:
             self._depth.value = 0
             self._txn_gen.value = None
@@ -932,7 +997,11 @@ class Database:
             self._bump_stat("transactions")
             try:
                 yield self
-            except Exception:
+            except BaseException:  # noqa: BLE001 — rollback, then re-raise
+                # BaseException, not Exception: same hole as transaction()
+                # — a BaseException escaping the body must roll back,
+                # not leave the connection in-transaction while the
+                # write lock is released in the finally below.
                 self._safe("ROLLBACK")
                 raise
             else:
@@ -1560,6 +1629,13 @@ class _WriterActor:
         self._txn_since: float = 0.0
         self._current: tuple[_WriteJob, float] | None = None
         self._generation = generation
+        # Why the epoch last moved: "restart" (a fresh actor after a
+        # restart — the default, since every new actor is born of one)
+        # or "watchdog" (the stale-transaction reaper rolled a
+        # transaction back without restarting anything). Read by
+        # Database._check_txn_generation so the owner's loud error names
+        # the real cause.
+        self._generation_reason = "restart"
         self._dead = False
         self._dead_error: str | None = None
         self._started = threading.Event()
@@ -1576,6 +1652,18 @@ class _WriterActor:
     @property
     def generation(self) -> int:
         return self._generation
+
+    @property
+    def generation_reason(self) -> str:
+        with self._state_lock:
+            return self._generation_reason
+
+    def note_generation_bump(self, generation: int, reason: str) -> None:
+        """Adopt a new writer epoch (see Database._invalidate_writer_generation)."""
+
+        with self._state_lock:
+            self._generation = generation
+            self._generation_reason = reason
 
     @property
     def thread_ident(self) -> int | None:
@@ -1683,29 +1771,110 @@ class _WriterActor:
             self._fail_all(StorageError(f"database writer actor died: {exc}"))
             _log.error("writer actor died: %s", exc, exc_info=True)
 
+    def _maybe_reap_stale_txn(self) -> bool:
+        """Roll back a transaction that can never close cleanly.
+
+        Two triggers, one action. The owner thread is DEAD (it opened
+        the transaction and exited without closing — the wedge shape
+        fix (a) closes for ``transaction()`` bodies, but a manual BEGIN
+        has no such arm), or the transaction has been held longer than
+        ``_STALE_TXN_REAP_S`` — live owner or not. The second trigger
+        is the one that clears the 2026-11-17 wedge: its owner,
+        ``chat-telegram``, was alive and still dispatching inbound
+        2800s in, so no liveness check could ever have freed it.
+
+        The rollback runs here, on the actor thread, directly on the
+        writer connection — the actor's own close path, same shape as
+        ``_apply``'s poison rollback. NEVER via ``conn.interrupt()``:
+        interrupting an idle writer would poison the next writer's
+        statement (see ``Database.interrupt_thread``). A thread blocked
+        inside its ``with`` body is alive and is never reaped before
+        its time; only a dead owner or an over-age transaction is.
+
+        After a successful rollback the writer epoch is bumped (see
+        ``Database._invalidate_writer_generation``) so the owner fails
+        loudly on its next routed call or at its ``transaction()``
+        exit, instead of continuing outside the transaction it thought
+        it held. Returns True when a transaction was rolled back.
+        """
+
+        with self._state_lock:
+            owner = self._txn_owner
+            owner_name = self._txn_owner_name
+            held_s = (time.monotonic() - self._txn_since
+                      if owner is not None else 0.0)
+        if owner is None:
+            return False
+        dead = not any(t.ident == owner for t in threading.enumerate())
+        stale = held_s > _STALE_TXN_REAP_S
+        if not dead and not stale:
+            return False
+        trigger = "owner thread is dead" if dead else "held past the limit"
+        _log.warning(
+            "writer actor: rolling back transaction held by thread %s "
+            "(ident %s) for %.1fs — %s",
+            owner_name or "?", owner, held_s, trigger)
+        conn = self._db._writer_conn
+        if conn is None:
+            return False
+        try:
+            conn.execute("ROLLBACK")
+        except sqlite3.Error as exc:
+            _log.warning("writer actor: stale-transaction rollback failed: %s",
+                         exc)
+        # Trust SQLite's state, never the actor's assumption: if the
+        # rollback landed, this clears the owner (and the holder
+        # record); if it did not, the owner stays and the next check
+        # retries the reap.
+        self._sync_txn_state(_WriteJob(
+            "rollback", "ROLLBACK", (), owner, owner_name, self._generation))
+        with self._state_lock:
+            cleared = self._txn_owner is None
+        if cleared:
+            self._db._invalidate_writer_generation("watchdog")
+        return cleared
+
     def _next_job(self) -> _WriteJob | None:
         """Next job to apply, preserving FIFO and transaction ownership.
 
         While a transaction is open only its owner's jobs apply; everyone
         else's waits in the pending deque and drains first when the
         transaction closes. Shutdown is checked before the owner check.
+
+        The queue wait is timed (``_WATCHDOG_POLL_S``), not blocking:
+        the stale-transaction check at the top of the loop must run even
+        when the actor is idle, so a wedge is reaped within
+        ``_STALE_TXN_REAP_S + _WATCHDOG_POLL_S``. The same check runs
+        before a non-owner job is deferred, so a new arrival clears a
+        wedge immediately.
         """
 
         while True:
+            self._maybe_reap_stale_txn()
             with self._state_lock:
                 if self._pending and self._txn_owner is None:
                     job = self._pending.popleft()
                     return job
-            job = self._queue.get()
+            try:
+                job = self._queue.get(timeout=_WATCHDOG_POLL_S)
+            except queue.Empty:
+                continue
             if job.kind == "shutdown":
                 self._fail_all(StorageError("database is closed"))
                 return None
             if job.cancelled:
                 continue
             with self._state_lock:
-                if self._txn_owner is not None and job.owner != self._txn_owner:
-                    self._pending.append(job)
+                owner = self._txn_owner
+            if owner is not None and job.owner != owner:
+                if self._maybe_reap_stale_txn():
+                    # The owner's transaction is gone; this job applies now.
+                    pass
+                else:
+                    with self._state_lock:
+                        self._pending.append(job)
                     continue
+            with self._state_lock:
                 if job.kind == "script" and self._txn_owner is not None:
                     self._pending.append(job)
                     continue
