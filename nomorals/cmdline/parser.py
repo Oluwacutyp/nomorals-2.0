@@ -134,6 +134,9 @@ CLI_ALIASES: dict[str, list[str]] = {
     "impossible": [],
     "repair": [],
 
+    # Telegram "/" picker sync from the command registry (R3-49).
+    "menu": [],
+
     # Shell completion scripts generated from the live parser.
     "completion": ["complete"],
 }
@@ -4356,6 +4359,21 @@ def _parser() -> argparse.ArgumentParser:
                           help="verb and arguments")
     failures.add_argument("--json", action="store_true",
                           help="Output as JSON")
+    menu = sub.add_parser("menu", aliases=CLI_ALIASES["menu"],
+        help="Telegram menu: sync the BotFather command list from the registry",
+        description=("nm menu sync [--bot gated|personal|both] [--dry-run] [--json]\n"
+                     "Push each bot's registry-derived \"/\" list via setMyCommands "
+                     "(gated: first 100 public commands; personal: its 100-command "
+                     "owner+public list). The same sync the adapter runs at startup."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    menu.add_argument("task", nargs="*", default=[], help="verb and arguments")
+    menu.add_argument("--json", action="store_true", help="Output as JSON")
+    menu.add_argument("--bot", default="both",
+                      choices=["gated", "personal", "both"],
+                      help="which bot to sync (default: both)")
+    menu.add_argument("--dry-run", action="store_true",
+                      help="build and validate the list without calling the API")
 
     search = sub.add_parser("search", aliases=CLI_ALIASES["search"],
         help="universal federated search across memory, books, wisdom, docs, code, timeline",

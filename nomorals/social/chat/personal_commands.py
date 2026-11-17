@@ -23,12 +23,18 @@ the leading slash, description at most 256 chars.
 
 from __future__ import annotations
 
+from typing import Any
+
 __all__ = [
     "PERSONAL_OWNER_COMMANDS",
     "personal_botfather_commands",
     "render_botfather_text",
     "validate_botfather_commands",
     "PERSONAL_HELP_CATEGORIES",
+    "gated_botfather_commands",
+    "render_gated_botfather_text",
+    "validate_gated_botfather_commands",
+    "sync_bot_commands",
 ]
 
 #: Public commands in BotFather priority order: the 19 named public
@@ -145,6 +151,29 @@ def personal_botfather_commands() -> list[tuple[str, str]]:
     return [(kind, _description(kind)) for kind in ordered]
 
 
+def gated_botfather_commands() -> list[tuple[str, str]]:
+    """``[(command, description)]`` for the gated (public) bot — ≤100 entries.
+
+    The gated bot has no owner-only commands to carry, so its "/" picker is
+    the first 100 public commands in :func:`_public_priority` order — the
+    same priority order the personal list fills from, so the two bots agree
+    on which public commands rank highest. The 163 public commands past
+    the cap stay fully available (typed, in the in-chat ``/menu``, in
+    ``/list``); the BotFather list is only the client's command picker.
+    Deterministic and can never exceed the cap, however large the public
+    catalog grows.
+    """
+    return [(kind, _description(kind))
+            for kind in _public_priority()[:BOTFATHER_MAX_COMMANDS]]
+
+
+def render_gated_botfather_text() -> str:
+    """Exact text to paste into BotFather ``/setcommands`` (gated bot)."""
+    return "\n".join(
+        f"{kind} - {desc}" for kind, desc in gated_botfather_commands()
+    )
+
+
 def render_botfather_text() -> str:
     """Exact text to paste into BotFather ``/setcommands``."""
     return "\n".join(
@@ -183,6 +212,122 @@ def validate_botfather_commands() -> list[str]:
     if missing_owner:
         problems.append(f"missing owner commands: {missing_owner}")
     return problems
+
+
+def validate_gated_botfather_commands() -> list[str]:
+    """Return a list of problems with the gated list (empty = valid).
+
+    Same structural checks as :func:`validate_botfather_commands`, plus the
+    coverage rule for the gated side: the list must be exactly the first
+    ``len(entries)`` public commands in priority order — a higher-priority
+    public command must never be missing while a lower-priority one is
+    listed. Public commands past the cap are excluded by design (they stay
+    in the public catalog, menus and /list), so only the priority head is
+    checked for completeness.
+    """
+    from .control import CONTROL_COMMANDS, PUBLIC_COMMANDS
+
+    problems: list[str] = []
+    entries = gated_botfather_commands()
+    if len(entries) > BOTFATHER_MAX_COMMANDS:
+        problems.append(
+            f"{len(entries)} commands, over BotFather max {BOTFATHER_MAX_COMMANDS}"
+        )
+    seen: set[str] = set()
+    for kind, desc in entries:
+        if kind in seen:
+            problems.append(f"duplicate command: {kind}")
+        seen.add(kind)
+        if kind not in PUBLIC_COMMANDS:
+            problems.append(f"non-public command on the gated list: {kind}")
+        if kind not in CONTROL_COMMANDS:
+            problems.append(f"unknown command (not in registry): {kind}")
+        if not desc or len(desc) > BOTFATHER_MAX_DESCRIPTION:
+            problems.append(
+                f"bad description for {kind}: {len(desc)} chars (max {BOTFATHER_MAX_DESCRIPTION})"
+            )
+        if " - " in kind or " " in kind:
+            problems.append(f"command contains spaces: {kind!r}")
+    head = _public_priority()[: len(entries)]
+    missing_head = [kind for kind in head if kind not in seen]
+    if missing_head:
+        problems.append(
+            f"missing higher-priority public commands: {missing_head}")
+    return problems
+
+
+def sync_bot_commands(adapter: Any, *, dry_run: bool = False) -> dict[str, Any]:
+    """Push this bot's registry-derived "/" list via setMyCommands.
+
+    The list is picked by ``adapter.owner_only`` — the personal bot gets
+    :func:`personal_botfather_commands`, the gated bot gets
+    :func:`gated_botfather_commands`. Before any push, the drift gate runs:
+    :func:`telegram_menu.validate_menu` must pass (owner menu covers every
+    registered command, public menu every public command), and the list's
+    own validator must pass. A failing gate refuses the push and names the
+    problems — a half-synced or drifted menu never reaches Telegram.
+
+    ``dry_run`` builds and validates the list without calling the API.
+    Never raises for a bad adapter shape — a missing
+    ``set_default_commands`` is a refusal, not a crash. Returns
+    ``{"ok", "bot", "pushed", "skipped", "problems", ...}`` where
+    ``skipped`` counts the public commands past the BotFather cap that
+    stay available everywhere except the "/" picker.
+    """
+    from .telegram_menu import validate_menu
+
+    bot = str(getattr(adapter, "name", "") or "telegram-bot")
+    owner_only = bool(getattr(adapter, "owner_only", False))
+    result: dict[str, Any] = {
+        "ok": False,
+        "bot": bot,
+        "pushed": 0,
+        "skipped": 0,
+        "problems": [],
+    }
+    ok, problems = validate_menu()
+    if not ok:
+        result["problems"] = list(problems)
+        return result
+    if owner_only:
+        entries = personal_botfather_commands()
+        list_problems = validate_botfather_commands()
+        skipped = max(0, len(_public_priority())
+                      - (BOTFATHER_MAX_COMMANDS
+                         - len(PERSONAL_OWNER_COMMANDS)))
+    else:
+        entries = gated_botfather_commands()
+        list_problems = validate_gated_botfather_commands()
+        skipped = max(0, len(_public_priority()) - len(entries))
+    if list_problems:
+        result["problems"] = list(list_problems)
+        return result
+    result["skipped"] = skipped
+    if dry_run:
+        result["ok"] = True
+        result["commands"] = [kind for kind, _ in entries]
+        return result
+    push = getattr(adapter, "set_default_commands", None)
+    if not callable(push):
+        result["problems"] = [
+            f"{bot} cannot push commands (no set_default_commands)"]
+        return result
+    try:
+        out = push(entries)
+    except Exception as exc:  # noqa: BLE001 - an API failure is a refusal
+        result["problems"] = [f"setMyCommands failed: {exc}"]
+        return result
+    if not isinstance(out, dict) or not out.get("ok"):
+        error = ""
+        if isinstance(out, dict):
+            error = str(out.get("error") or "")
+        result["problems"] = [
+            f"setMyCommands failed: {error or 'unknown error'}"]
+        return result
+    result["ok"] = True
+    result["pushed"] = len(entries)
+    result["commands"] = [kind for kind, _ in entries]
+    return result
 
 
 #: /help category buttons on the personal bot: (label, callback).

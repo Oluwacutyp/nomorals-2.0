@@ -125,6 +125,7 @@ from .commands.wisdom import _cmd_wisdom
 from .commands.mesh import _cmd_mesh
 from .commands.sync import _cmd_sync
 from .commands.failures import _cmd_failures
+from .commands.menu import _cmd_menu
 from .emit import _emit
 from .parser import CLI_ALIASES, _parser
 
@@ -398,6 +399,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "mesh": _CommandSpec(_cmd_mesh),
     "sync": _CommandSpec(_cmd_sync),
     "failures": _CommandSpec(_cmd_failures, needs_context=False),
+    "menu": _CommandSpec(_cmd_menu),
     "trigger": _CommandSpec(_cmd_trigger),
     "schedule": _CommandSpec(_cmd_schedule),
     "db": _CommandSpec(_cmd_db),

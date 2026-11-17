@@ -6089,6 +6089,10 @@ class TelegramBotAdapter(ChatAdapter):
             _log.debug("telegram-bot: stale-skip failed: %s", exc)
         if self._offset:
             self._persist_offset(self._offset - 1)
+        # Menu sync (R3-49): the "/" picker is pushed from the registry
+        # once per start, after preflight proved the token. Best-effort
+        # and idempotent — a failed sync logs and polling continues.
+        self._sync_bot_commands()
         poll_fail_delay = 5.0
         while not self._stopped.is_set():
             try:
@@ -8447,6 +8451,49 @@ class TelegramBotAdapter(ChatAdapter):
         return self._set_command_scope(
             {"type": "chat_administrators",
              "chat_id": int(chat.chat_id)}, None)
+
+    def set_default_commands(self, commands: list[tuple[str, str]]
+                             ) -> dict[str, Any]:
+        """The command list EVERYONE sees for this bot
+        (BotCommandScopeDefault) — the "/" picker. The list itself
+        comes from the registry via
+        :func:`nomorals.social.chat.personal_commands.sync_bot_commands`
+        (gated bot: first 100 public commands in priority order;
+        personal bot: its 100-command owner+public list); this method
+        only performs the setMyCommands push."""
+        return self._set_command_scope({"type": "default"}, commands)
+
+    def clear_default_commands(self) -> dict[str, Any]:
+        """Drop the default scope (deleteMyCommands) — the "/" picker
+        falls back to whatever BotFather holds, if anything."""
+        return self._set_command_scope({"type": "default"}, None)
+
+    def _sync_bot_commands(self) -> dict[str, Any] | None:
+        """Best-effort startup sync of this bot's "/" list.
+
+        Builds the registry-derived list for this adapter
+        (``owner_only`` picks personal vs gated) and pushes it via
+        setMyCommands. Never raises: a failed sync is logged and the
+        bot keeps polling — the next start (or ``nm menu sync``)
+        retries. Returns the sync result, or None when the sync
+        itself could not run.
+        """
+        try:
+            from .personal_commands import sync_bot_commands
+
+            out = sync_bot_commands(self)
+        except Exception as exc:  # noqa: BLE001 - sync must never kill startup
+            _log.warning("telegram-bot %s: menu sync failed: %s",
+                         self.name, exc)
+            return None
+        if out.get("ok"):
+            _log.info("telegram-bot %s: menu synced (%d commands, %d past "
+                      "the BotFather cap stay available in /list)",
+                      self.name, out.get("pushed", 0), out.get("skipped", 0))
+        else:
+            _log.warning("telegram-bot %s: menu sync refused: %s",
+                         self.name, "; ".join(out.get("problems") or ["?"]))
+        return out
 
     def send_ephemeral(self, chat: ChatRef, user_id: str,
                        text: str, *,
