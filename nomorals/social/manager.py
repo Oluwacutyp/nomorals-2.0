@@ -44,6 +44,10 @@ class PublishOutcome:
     content: str
     results: list[PostResult] = field(default_factory=list)
     seconds: float = 0.0
+    #: Task-scoped identity that posted this (audit R3-46). Empty
+    #: when Devon posted as herself.
+    identity_id: str = ""
+    identity_label: str = ""
 
     @property
     def ok(self) -> bool:
@@ -64,6 +68,8 @@ class PublishOutcome:
             "failed": [r.to_dict() for r in self.failed],
             "seconds": round(self.seconds, 3),
             "content": self.content[:200],
+            "identity_id": self.identity_id,
+            "identity_label": self.identity_label,
         }
 
 
@@ -207,11 +213,15 @@ class SocialManager:
         actor: str = "user",
         parallel: bool = True,
         confirmation: str = "",
+        identity: Any = None,
     ) -> PublishOutcome:
         """Publish to every targeted platform, fanned out in parallel.
 
         ``platforms`` names the targets; ``account_handles`` picks a specific
-        account per platform when more than one is connected.
+        account per platform when more than one is connected. ``identity``
+        is the task-scoped identity posting on the owner's behalf (an
+        ``AgentIdentity`` — its ``id`` and ``label()`` ride the outcome
+        and the ledger row); ``None`` means Devon posted as herself.
         """
         if not content or not content.strip():
             raise ValidationError("post content is empty", field="content")
@@ -228,6 +238,12 @@ class SocialManager:
             )
 
         outcome = PublishOutcome(content=content)
+        identity_id = str(getattr(identity, "id", "") or "")
+        identity_label = identity.label() if callable(
+            getattr(identity, "label", None)) else ""
+        if identity_id:
+            outcome.identity_id = identity_id
+            outcome.identity_label = identity_label
         started = time.perf_counter()
 
         if parallel and len(targets) > 1:
@@ -246,13 +262,17 @@ class SocialManager:
         try:
             from ..cognition.representation import log_representation_action
             posted = [getattr(r, "platform", "?") for r in outcome.posted]
+            metadata: dict[str, Any] = {"platforms": posted,
+                                         "failed": len(outcome.failed)}
+            if identity_id:
+                metadata["identity_id"] = identity_id
+                metadata["identity_label"] = identity_label
             log_representation_action(
                 "post", f"published to {', '.join(posted) or 'no platforms'}: "
                         f"{content[:80]}",
                 outcome=("success" if outcome.posted and not outcome.failed
                          else "partial" if outcome.posted else "failed"),
-                metadata={"platforms": posted,
-                          "failed": len(outcome.failed)})
+                metadata=metadata)
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
         return outcome

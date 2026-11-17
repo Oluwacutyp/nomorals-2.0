@@ -107,6 +107,10 @@ class Order:
     destination: str = ""
     created_at: str = ""
     raw: dict[str, Any] = field(default_factory=dict)
+    #: Task-scoped identity that booked this order (audit R3-46).
+    #: Empty when Devon booked as herself.
+    identity_id: str = ""
+    identity_label: str = ""
 
     @property
     def total(self) -> str:
@@ -401,8 +405,14 @@ class DuffelConnector(Connector):
         mandate_store: Any = None,
         principal: str = "owner",
         ledger: Any = None,
+        identity: Any = None,
     ) -> Order:
         """Create an order (PNR) and ticket it. Moves real money.
+
+        ``identity`` is the task-scoped identity booking on the
+        owner's behalf (an ``AgentIdentity`` — its ``id`` and
+        ``label()`` ride the returned order and the ledger row);
+        ``None`` means Devon booked as herself.
 
         ``passengers`` must carry the ``id`` from the selected offer's
         passengers plus ``given_name``, ``family_name``, ``born_on``
@@ -469,23 +479,33 @@ class DuffelConnector(Connector):
             }
         })
         order = _parse_order(body.get("data", {}))
+        identity_id = str(getattr(identity, "id", "") or "")
+        label = identity.label() if callable(
+            getattr(identity, "label", None)) else ""
+        if identity_id:
+            order.identity_id = identity_id
+            order.identity_label = label
         try:
             from ..cognition.representation import log_representation_action
+            metadata: dict[str, Any] = {
+                "action_class": "book",
+                "order_id": order.id,
+                "booking_reference": order.booking_reference,
+                "total": order.total_amount,
+                "currency": order.total_currency,
+                "origin": order.origin,
+                "destination": order.destination,
+            }
+            if identity_id:
+                metadata["identity_id"] = identity_id
+                metadata["identity_label"] = label
             log_representation_action(
                 "purchase",
                 f"flight booked {order.origin} → {order.destination}: "
                 f"{order.total_amount} {order.total_currency} "
                 f"({order.booking_reference})",
                 outcome="success",
-                metadata={
-                    "action_class": "book",
-                    "order_id": order.id,
-                    "booking_reference": order.booking_reference,
-                    "total": order.total_amount,
-                    "currency": order.total_currency,
-                    "origin": order.origin,
-                    "destination": order.destination,
-                },
+                metadata=metadata,
             )
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass

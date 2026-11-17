@@ -819,6 +819,7 @@ def execute_post(
     queue: DraftQueue | None = None,
     actor: str = "user",
     artifact_store: Any = None,
+    identity: Any = None,
 ) -> Any:
     """Post IMMEDIATELY on the owner's explicit instruction.
 
@@ -910,7 +911,7 @@ def execute_post(
     try:
         outcome = manager.publish(content, platforms=platforms or None,
                                   actor=actor, confirmation=confirmation,
-                                  **extra)
+                                  identity=identity, **extra)
     finally:
         if media_dir is not None:
             media_dir.cleanup()
@@ -1154,8 +1155,14 @@ def handle_draft_callback(
     manager: Any = None,
     scheduler: Any = None,
     ask_schedule_time: Callable[[str], float] | None = None,
+    identity: Any = None,
 ) -> str:
-    """Route a ``draft:<action>:<id>`` button tap. Returns a reply string."""
+    """Route a ``draft:<action>:<id>`` button tap. Returns a reply string.
+
+    ``identity`` is the task-scoped identity posting on the owner's
+    behalf; it rides through :func:`execute_post` to the publisher
+    (``None`` means Devon posted as herself).
+    """
     parts = (callback_data or "").split(":")
     if len(parts) != 3 or parts[0] != "draft":
         return ""
@@ -1169,7 +1176,8 @@ def handle_draft_callback(
         queue.approve(draft_id)
         outcome = execute_post(manager, draft.content,
                                platforms=draft.platforms or None,
-                               draft_id=draft_id, queue=queue)
+                               draft_id=draft_id, queue=queue,
+                               identity=identity)
         posted = len(getattr(outcome, "posted", []) or [])
         reply = f"posted to {posted} platform(s)."
         note = media_notes(outcome)

@@ -175,7 +175,9 @@ CREATE TABLE IF NOT EXISTS delegation_runs (
   created_at REAL NOT NULL DEFAULT 0,
   updated_at REAL NOT NULL DEFAULT 0,
   completed_at REAL NOT NULL DEFAULT 0,
-  delivered INTEGER NOT NULL DEFAULT 0
+  delivered INTEGER NOT NULL DEFAULT 0,
+  identity_id TEXT NOT NULL DEFAULT '',
+  identity_label TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_runs_contract
   ON delegation_runs(contract_id);
@@ -206,6 +208,11 @@ class DelegationRun:
     updated_at: float = 0.0
     completed_at: float = 0.0
     delivered: bool = False
+    #: Task-scoped identity minted at spawn (``ident_…``), retired
+    #: when the run ends. The label is snapshotted here so the record
+    #: still names who acted after the store row is retired.
+    identity_id: str = ""
+    identity_label: str = ""
 
     @property
     def terminal(self) -> bool:
@@ -236,6 +243,7 @@ def _row_run(row: Any) -> DelegationRun:
         notes = json.loads(row["notes_json"] or "[]")
     except (ValueError, TypeError):
         notes = []
+    keys = set(row.keys()) if hasattr(row, "keys") else set()
     return DelegationRun(
         id=row["id"], contract_id=row["contract_id"],
         mission_id=row["mission_id"], role=row["role"],
@@ -246,7 +254,10 @@ def _row_run(row: Any) -> DelegationRun:
         chat_key=row["chat_key"], created_at=float(row["created_at"]),
         updated_at=float(row["updated_at"]),
         completed_at=float(row["completed_at"]),
-        delivered=bool(row["delivered"]))
+        delivered=bool(row["delivered"]),
+        identity_id=row["identity_id"] if "identity_id" in keys else "",
+        identity_label=(row["identity_label"]
+                        if "identity_label" in keys else ""))
 
 
 class DelegationManager:
@@ -258,6 +269,7 @@ class DelegationManager:
                  run_agent: Callable[[str, dict[str, Any]],
                                      dict[str, Any]] | None = None,
                  notifier: Callable[..., dict[str, Any]] | None = None,
+                 identity_store: Any = None,
                  max_workers: int = 2) -> None:
         if store is None:
             raise DelegationError(
@@ -269,6 +281,24 @@ class DelegationManager:
                 "delegation manager needs a database — no db on "
                 "the store")
         self.db.executescript(_DDL)
+        # Databases created before the identity columns existed get
+        # them via a guarded ALTER (the agency_initiatives precedent)
+        # — the manager owns this table, so no migration is involved.
+        try:
+            cols = {r["name"]
+                    for r in self.db.table_info("delegation_runs")}
+            for name in ("identity_id", "identity_label"):
+                if name not in cols:
+                    self.db.execute(
+                        "ALTER TABLE delegation_runs ADD COLUMN "
+                        f"{name} TEXT NOT NULL DEFAULT ''")
+        except Exception as exc:  # noqa: BLE001 - identity is additive
+            record_failure("delegation_manager.identity_columns", exc)
+        #: Task-scoped identities, one per run (audit R3-46). An
+        #: explicit store is used as given; otherwise the first
+        #: spawn lazily builds the module's default store.
+        self._identity_store = identity_store
+        self._identity_store_failed = False
         self.context = context
         self._executor = executor or concurrent.futures.ThreadPoolExecutor(
             max_workers=max(1, int(max_workers)),
@@ -347,6 +377,73 @@ class DelegationManager:
         merged[field] = (str(merged.get(field) or "") + direction).strip()
         return merged, True
 
+    # -- task identities (audit R3-46) ---------------------------------
+
+    def _get_identity_store(self) -> Any | None:
+        """The IdentityStore for this manager, built lazily.
+
+        An explicit store wins; otherwise the module's default store
+        (``~/.nomorals/agents/identities.db``) is built on first use
+        and cached. A failed build is remembered so a broken store
+        never retries on every spawn — the run simply goes
+        identity-less, and the failure is already recorded.
+        """
+        if self._identity_store is not None:
+            return self._identity_store
+        if self._identity_store_failed:
+            return None
+        try:
+            from .identities import IdentityStore
+
+            self._identity_store = IdentityStore()
+        except Exception as exc:  # noqa: BLE001 - identity is additive
+            record_failure("delegation_manager.identity_store", exc)
+            self._identity_store_failed = True
+            return None
+        return self._identity_store
+
+    def _mint_identity(self, role: str, goal: str
+                       ) -> tuple[str, str]:
+        """Mint one task-scoped identity. Never raises.
+
+        Returns ``(identity_id, identity_label)`` — ``("", "")`` when
+        the store cannot mint (the run proceeds identity-less). The
+        identity is a display/attribution label for Devon's own work
+        ("Devon Tester", ``@devon_tester``): no email is ever invented,
+        no account is created, no credential exists.
+        """
+        try:
+            store = self._get_identity_store()
+            if store is None:
+                return "", ""
+            slug = "".join(c if c.isalnum() else "_"
+                           for c in (role or "task").strip().lower())
+            ident = store.create(
+                f"Devon {(role or 'task').strip().title()}",
+                handle=f"@devon_{slug or 'task'}",
+                purpose=" ".join(str(goal or "").split())[:200])
+            if ident is None:
+                return "", ""
+            return ident.id, ident.label()
+        except Exception as exc:  # noqa: BLE001 - mint never blocks
+            record_failure("delegation_manager.mint_identity", exc)
+            return "", ""
+
+    def _retire_identity(self, identity_id: str) -> None:
+        """Remove a task identity from the store. Never raises.
+
+        The run row keeps the snapshotted label, so the record still
+        names who acted after the live identity is gone.
+        """
+        if not identity_id:
+            return
+        try:
+            store = self._get_identity_store()
+            if store is not None:
+                store.remove(identity_id)
+        except Exception as exc:  # noqa: BLE001 - retire never blocks
+            record_failure("delegation_manager.retire_identity", exc)
+
     # -- durable rows -----------------------------------------------------
 
     def _insert_run(self, run: DelegationRun) -> None:
@@ -354,18 +451,20 @@ class DelegationManager:
             "INSERT INTO delegation_runs (id, contract_id, mission_id,"
             " role, input_json, status, generation, worker,"
             " result_json, error, notes_json, chat_key, created_at,"
-            " updated_at, completed_at, delivered)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            " updated_at, completed_at, delivered, identity_id,"
+            " identity_label)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (run.id, run.contract_id, run.mission_id, run.role,
              run.input_json, run.status, run.generation, run.worker,
              run.result_json, run.error, json.dumps(list(run.notes)),
              run.chat_key, run.created_at, run.updated_at,
-             run.completed_at, int(run.delivered)))
+             run.completed_at, int(run.delivered), run.identity_id,
+             run.identity_label))
 
     def _update_run(self, run_id: str, **fields: Any) -> None:
         allowed = {"status", "generation", "result_json", "error",
                    "notes_json", "delivered", "completed_at", "worker",
-                   "input_json"}
+                   "input_json", "identity_id", "identity_label"}
         sets = [f"{key} = ?" for key in fields if key in allowed]
         values = [fields[key] for key in fields if key in allowed]
         if not sets:
@@ -453,12 +552,14 @@ class DelegationManager:
         contract = open_step_contract(
             self.store, mission_id=mission_id, step=step)
         now = time.time()
+        identity_id, identity_label = self._mint_identity(role, goal)
         run = DelegationRun(
             id=f"dr-{uuid.uuid4().hex[:12]}",
             contract_id=contract.id, mission_id=mission_id, role=role,
             input_json=json.dumps(data), status="running",
             generation=contract.generation, worker=contract.worker,
-            chat_key=chat_key, created_at=now, updated_at=now)
+            chat_key=chat_key, created_at=now, updated_at=now,
+            identity_id=identity_id, identity_label=identity_label)
         self._insert_run(run)
         self._submit(run, data)
         return run
@@ -621,10 +722,12 @@ class DelegationManager:
                                  result_json=json.dumps(outcome),
                                  error=f"contract settle failed: {exc}",
                                  completed_at=now)
+                self._retire_identity(run.identity_id)
                 return True
             self._update_run(run_id, status="completed",
                              result_json=json.dumps(outcome),
                              completed_at=now)
+            self._retire_identity(run.identity_id)
             return True
         detail = str(outcome.get("error") or
                      "worker failed without a reason")
@@ -637,6 +740,7 @@ class DelegationManager:
         self._update_run(run_id, status="failed",
                          result_json=json.dumps(outcome), error=detail,
                          completed_at=now)
+        self._retire_identity(run.identity_id)
         return True
 
     # -- track / steer ------------------------------------------------------
@@ -742,9 +846,15 @@ class DelegationManager:
             run.role, run.input_dict(), notes)
         # The row keeps the PRISTINE input: steering merges at submit
         # time only, so a second resume never duplicates the
-        # direction lines.
+        # direction lines. A resumed attempt is a new scope: it mints
+        # a FRESH identity (the old one was retired when the run
+        # failed or was interrupted), never a resurrection.
+        identity_id, identity_label = self._mint_identity(
+            run.role, contract.goal)
         self._update_run(run_id, generation=fresh.generation,
-                         status="running", result_json="", error="")
+                         status="running", result_json="", error="",
+                         identity_id=identity_id,
+                         identity_label=identity_label)
         self._submit(self.get_run(run_id) or run, merged)
         return self.get_run(run_id) or run
 
@@ -806,6 +916,9 @@ class DelegationManager:
             self._update_run(run.id, status="interrupted",
                              error="interrupted by restart — resume "
                                    "to re-run")
+            # No live identity outlives its task — a restart orphan's
+            # identity retires with it; resume mints a fresh one.
+            self._retire_identity(run.identity_id)
             fresh = self.get_run(run.id)
             if fresh is not None:
                 recovered.append(fresh)
@@ -943,6 +1056,9 @@ class DelegationManager:
             f"worker: {run.worker}",
             f"result: {summary}",
         ]
+        if run.identity_label:
+            lines.append(f"acting as: {run.identity_label} "
+                         f"({run.identity_id})")
         if run.mission_id:
             lines.append(f"mission: {run.mission_id}")
         if run.notes:
@@ -1072,6 +1188,9 @@ class DelegationManager:
                 else self.store.completion_blockers(contract)
             if blockers:
                 lines.append("contract blocked by: " + "; ".join(blockers))
+        if run.identity_label:
+            lines.append(f"acting as: {run.identity_label} "
+                         f"({run.identity_id})")
         if run.notes:
             lines.append("steering: " + "; ".join(run.notes))
         if run.error:
