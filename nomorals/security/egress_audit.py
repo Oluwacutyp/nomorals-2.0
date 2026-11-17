@@ -39,6 +39,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..core.logging_setup import get_logger
+
+_log = get_logger(__name__)
+
 __all__ = [
     "EgressDecision",
     "EgressRecord",
@@ -238,6 +242,37 @@ class EgressAuditor:
             with open(self.log_path, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(record.to_dict()) + "\n")
         return decision
+
+    def record(self, host: str, port: int, *, allowed: bool, reason: str,
+               resolved_ips: tuple[str, ...] | list[str] = (),
+               caller: str = "") -> EgressRecord | None:
+        """Append a decision made ELSEWHERE — record-only, never decide.
+
+        The live egress verdict belongs to the token/proxy
+        (:mod:`nomorals.core.egress` + :mod:`nomorals.tools.sandbox_l2`);
+        this method only logs it. It never resolves DNS, never consults
+        the auditor's own allowlist/policy, and never raises — a failing
+        log must never break a proxied request. Returns the record, or
+        ``None`` when even the in-memory append could not be made.
+        """
+        try:
+            record = EgressRecord(
+                host=(host or "").strip(), port=int(port or 0),
+                allowed=bool(allowed), reason=reason or "",
+                resolved_ips=list(resolved_ips or []),
+                caller=caller or "", timestamp=time.time())
+            self._log.append(record)
+        except Exception as exc:  # noqa: BLE001 - the log never breaks egress
+            _log.debug("egress audit record failed: %s", exc, exc_info=True)
+            return None
+        if self.log_path is not None:
+            try:
+                with open(self.log_path, "a", encoding="utf-8") as fh:
+                    fh.write(json.dumps(record.to_dict()) + "\n")
+            except Exception as exc:  # noqa: BLE001 - mirror failure is not fatal
+                _log.debug("egress audit mirror failed: %s", exc,
+                           exc_info=True)
+        return record
 
     def entries(self) -> list[EgressRecord]:
         """The full log, oldest first. A copy — callers cannot rewrite

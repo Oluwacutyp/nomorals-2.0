@@ -36,6 +36,7 @@ import select
 import socket
 import socketserver
 import threading
+import urllib.parse
 from typing import Any
 
 from ..core.cassette import GenericCassetteStore
@@ -48,6 +49,7 @@ from ..core.egress import (
     default_controller,
 )
 from ..core.logging_setup import get_logger
+from ..security.egress_audit import EgressAuditor
 from .shell import SandboxLimits, run_sandboxed
 
 _log = get_logger(__name__)
@@ -60,8 +62,29 @@ _HOP_BY_HOP = frozenset({
 })
 
 
+def _record_egress(proxy: Any, host: str, port: int, *, allowed: bool,
+                   reason: str, resolved_ips: tuple[str, ...] | list[str] = (),
+                   caller: str = "") -> None:
+    """Record one proxy decision when the proxy carries a recorder.
+
+    Defensive by design: duck-typed proxies (failure-injection tests
+    build ``SimpleNamespace`` proxies with only ``fetch``) have no
+    ``record_egress`` — the record is best-effort and must never
+    change the proxy's behavior or crash a client.
+    """
+    record = getattr(proxy, "record_egress", None)
+    if record is None:
+        return
+    try:
+        record(host, port, allowed=allowed, reason=reason,
+               resolved_ips=resolved_ips, caller=caller)
+    except Exception as exc:  # noqa: BLE001 - the audit never breaks egress
+        _log.debug("egress audit record failed: %s", exc, exc_info=True)
+
+
 def _egress_summary(token: EgressToken | None, *, mode: str,
-                    network: bool, replayed: int = 0) -> dict[str, Any]:
+                    network: bool, replayed: int = 0,
+                    audit: dict[str, Any] | None = None) -> dict[str, Any]:
     summary: dict[str, Any] = {
         "mode": mode,
         "network": network,
@@ -72,6 +95,8 @@ def _egress_summary(token: EgressToken | None, *, mode: str,
         "denied": token.denied if token else 0,
         "replayed": replayed,
     }
+    if audit is not None:
+        summary["audit"] = audit
     return summary
 
 
@@ -89,6 +114,7 @@ def run_sandboxed_l2(
     cassette: GenericCassetteStore | None = None,
     cassette_mode: str = "record",
     controller: EgressController | None = None,
+    egress_auditor: EgressAuditor | None = None,
 ) -> dict[str, Any]:
     """Run ``command`` in the sandbox. Same result shape as L1, plus ``level``/``egress``.
 
@@ -98,6 +124,10 @@ def run_sandboxed_l2(
       recorded traffic is replayed through :class:`EgressClient`, not
       through the shell.
     * ``egress_token`` + live mode → L2: egress proxy sidecar + network on.
+    * ``egress_auditor`` → the :class:`EgressAuditor` the proxy records
+      each egress decision on (allowed/blocked + reason). When omitted,
+      a fresh in-memory auditor is created per live L2 run and its
+      report rides ``result["egress"]["audit"]``.
     """
     if egress_token is None:
         result = run_sandboxed(
@@ -121,8 +151,9 @@ def run_sandboxed_l2(
         return result
 
     child_env = dict(env or {})
+    auditor = egress_auditor if egress_auditor is not None else EgressAuditor()
     with EgressProxy(token=egress_token, controller=ctl, cassette=cassette,
-                     cassette_mode=cassette_mode) as proxy:
+                     cassette_mode=cassette_mode, auditor=auditor) as proxy:
         child_env.update({
             "http_proxy": proxy.proxy_url,
             "https_proxy": proxy.proxy_url,
@@ -139,7 +170,7 @@ def run_sandboxed_l2(
             limits=limits, backend=backend, max_output=max_output, stdin=stdin)
     result["level"] = "L2"
     result["egress"] = _egress_summary(
-        egress_token, mode="L2", network=True)
+        egress_token, mode="L2", network=True, audit=auditor.audit_report())
     return result
 
 
@@ -167,6 +198,7 @@ class EgressProxy:
         controller: EgressController | None = None,
         cassette: GenericCassetteStore | None = None,
         cassette_mode: str = "record",
+        auditor: EgressAuditor | None = None,
         host: str = "127.0.0.1",
         port: int = 0,
     ) -> None:
@@ -175,12 +207,34 @@ class EgressProxy:
         self.client = EgressClient(
             controller=self.controller, cassette=cassette,
             cassette_mode=cassette_mode)
+        # Record-only: the auditor logs the proxy's decisions (allowed /
+        # blocked + the live reason). It never decides — the token's
+        # verdict stays authoritative, and a failing auditor must never
+        # break a proxied request (see record_egress).
+        self.auditor = auditor
         self._server = _ProxyServer((host, port), _ProxyHandler)
         self._server.proxy = self  # type: ignore[attr-defined]
         self._thread = threading.Thread(
             target=self._server.serve_forever, kwargs={"poll_interval": 0.05},
             name="egress-proxy", daemon=True)
         self.proxy_url = f"http://127.0.0.1:{self._server.server_address[1]}"
+
+    def record_egress(self, host: str, port: int, *, allowed: bool,
+                      reason: str, resolved_ips: tuple[str, ...] | list[str] = (),
+                      caller: str = "") -> None:
+        """Log one proxy decision on the auditor, if one is attached.
+
+        Never raises and never changes a verdict: the proxy decides,
+        the auditor only records. A missing auditor is a silent no-op.
+        """
+        auditor = self.auditor
+        if auditor is None:
+            return
+        try:
+            auditor.record(host, port, allowed=allowed, reason=reason,
+                           resolved_ips=resolved_ips, caller=caller)
+        except Exception as exc:  # noqa: BLE001 - the audit never breaks egress
+            _log.debug("egress audit record failed: %s", exc, exc_info=True)
 
     def __enter__(self) -> "EgressProxy":
         self._thread.start()
@@ -215,6 +269,12 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
     # ── absolute-form requests ──
     def _handle_proxy_request(self, method: str) -> None:
         proxy = self._proxy
+        if self.path.startswith("/"):
+            host, port = "", 0
+        else:
+            parsed = urllib.parse.urlparse(self.path)
+            host = parsed.hostname or ""
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
         try:
             body = self._read_body()
             # The proxy form is an absolute URL. Origin-form ("/path")
@@ -231,8 +291,14 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             response = proxy.client.fetch(
                 proxy.token, method, self.path,
                 headers=forward, data=body or None)
+            _record_egress(
+                proxy, host, port, allowed=True,
+                reason="allowed by egress token",
+                caller="sandbox_l2:proxy")
             self._send_relay(response.status, response.headers, response.body)
         except EgressDenied as exc:
+            _record_egress(proxy, host, port, allowed=False, reason=str(exc),
+                           caller="sandbox_l2:proxy")
             self._send_text(403, f"egress denied: {exc}\n")
         except (BrokenPipeError, ConnectionResetError) as _exc:
             _log.debug("sandbox_l2._handle_proxy_request#2 failed", exc_info=True)
@@ -315,6 +381,7 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
         proxy = self._proxy
         self.close_connection = True  # tunnels are one-shot; no keep-alive
         target = self.path or ""
+        host, port = "", 0  # bound before the try: the denial record needs them
         try:
             if ":" in target:
                 host, port_s = target.rsplit(":", 1)
@@ -342,6 +409,10 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
             if upstream is None:
                 raise EgressDenied(
                     f"CONNECT to {host} failed: {last_error or 'no address'}")
+            _record_egress(
+                proxy, host, port, allowed=True,
+                reason="allowed by egress token",
+                resolved_ips=ips, caller="sandbox_l2:connect")
             client_sock = self.connection
             proxy.controller.track_socket(client_sock)
             proxy.controller.track_socket(upstream)
@@ -363,6 +434,8 @@ class _ProxyHandler(http.server.BaseHTTPRequestHandler):
                 except OSError as _exc:
                     _log.debug("sandbox_l2.do_CONNECT#4 failed", exc_info=True)
         except EgressDenied as exc:
+            _record_egress(proxy, host, port, allowed=False, reason=str(exc),
+                           caller="sandbox_l2:connect")
             try:
                 self._send_text(403, f"egress denied: {exc}\n")
             except (BrokenPipeError, ConnectionResetError) as _exc:
