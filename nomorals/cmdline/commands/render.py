@@ -38,6 +38,10 @@ def _status_text(status: dict[str, Any]) -> str:
            if status.get("pending_stages") else " (all done)"))
     for stage, output in (status.get("outputs") or {}).items():
         lines.append(f"  {stage}: {output}")
+    if status.get("degraded"):
+        lines.append(
+            f"  degraded: {status.get('full_height')}p on profile "
+            f"{status.get('profile')!r} — {status.get('degraded_reason')}")
     lines.append(
         f"  budget: spent {status.get('spent_wall', 0.0):.1f}s wall / "
         f"{status.get('spent_tokens', 0)} tokens of "
@@ -71,7 +75,8 @@ def _cmd_render(args, context):
         for status in payload:
             lines.append(
                 f"  {status['mission_id']} — {status['status']} "
-                f"({', '.join(status['completed_stages']) or 'no stages yet'})")
+                f"({', '.join(status['completed_stages']) or 'no stages yet'})"
+                f"{' (degraded 480p)' if status.get('degraded') else ''}")
         _emit(args, {"renders": payload}, "\n".join(lines))
         return 0
 
@@ -91,7 +96,8 @@ def _cmd_render(args, context):
         _emit(args, result,
               f"render {mission_id} — {result.get('status')} "
               f"(stage {result.get('stage') or '—'}"
-              f"{', done' if result.get('done') else ''})")
+              f"{', done' if result.get('done') else ''}"
+              f"{', degraded 480p' if result.get('degraded') else ''})")
         return 0 if result.get("status") != "failed" else 1
 
     if getattr(args, "source", None):

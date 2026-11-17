@@ -41,7 +41,9 @@ from typing import Any
 
 from ..core.failures import record_failure
 from ..core.logging_setup import get_logger
+from ..core.profile import detect_profile
 from ..media.edit_engine.pure_render import proxy_spec, render_pure
+from ..media.edit_engine.render_queue import resolve_render_profile
 from .mission import Mission, MissionStatus, MissionStore
 from .render_queue import RENDER_STAGES, advance_render
 
@@ -80,23 +82,57 @@ def _home_of(context: Any) -> Path | None:
     return Path(home) if home is not None else None
 
 
+def _runtime_profile(profile: str | None = None) -> str:
+    """The profile a render runs under: explicit wins, else the
+    detected runtime profile — the same single source
+    :class:`LocalHost.plan` ultimately reads (``probe_host`` →
+    :func:`core.profile.detect_profile`). Detection failing is a
+    fail-open to ``pc`` (full-res), never a crash in the tick."""
+    if profile:
+        return str(profile).strip().lower()
+    try:
+        return (detect_profile().kind or "pc").strip().lower()
+    except Exception:  # noqa: BLE001 - profile is a hint, not a gate
+        return "pc"
+
+
 def stage_render_fn(stage: str, state: dict[str, Any], *,
                     cache_dir: Path | str,
-                    renderer: Any = None) -> dict[str, Any]:
+                    renderer: Any = None,
+                    profile: str | None = None) -> dict[str, Any]:
     """Render one mission-queue stage through the real engine.
 
     ``proxy`` renders the 480p proxy spec, ``full`` the full spec —
     both through :func:`render_pure`, so a re-run with an unchanged
-    triple is a cache hit and zero ffmpeg. Returns ``{"output": ...}``,
-    the shape :func:`advance_render` requires.
+    triple is a cache hit and zero ffmpeg. The ``full`` stage runs
+    through the profile gate (:func:`resolve_render_profile`): on a
+    small profile (termux/mobile/embedded) it is clamped to 480p with
+    ``degraded=True`` and the explicit reason — never silently. The
+    gate is a pure function of (profile, height), so the clamped spec
+    is stable: a re-run is still a cache hit, and on a small profile
+    the clamped full spec is identical to the proxy spec, so the full
+    stage costs zero extra renders. Returns ``{"output", "degraded",
+    "reason", "profile", "height"}``, the shape
+    :func:`advance_render` records on the stage.
     """
     if stage not in RENDER_STAGES:
         raise ValueError(f"unknown render stage {stage!r}")
+    prof = _runtime_profile(profile)
     spec = state["spec"]
-    eff_spec = proxy_spec(spec) if stage == "proxy" else spec
+    if stage == "proxy":
+        eff_spec = proxy_spec(spec)
+        gate = {"height": int(eff_spec["height"]), "degraded": False,
+                "reason": "", "profile": prof}
+    else:
+        gate = resolve_render_profile(
+            profile=prof, height=int(dict(spec).get("height") or 1920))
+        eff_spec = (proxy_spec(spec, height=int(gate["height"]))
+                    if gate["degraded"] else spec)
     result = render_pure(state["sources"], eff_spec, state.get("pack") or {},
                          cache_dir=cache_dir, renderer=renderer)
-    return {"output": result["output"]}
+    return {"output": result["output"], "degraded": bool(gate["degraded"]),
+            "reason": str(gate.get("reason") or ""), "profile": prof,
+            "height": int(gate["height"])}
 
 
 def _record_stage_failure(store: MissionStore, mission: Mission,
@@ -141,14 +177,17 @@ def run_render_tick_once(context: Any, *,
                          store: MissionStore | None = None,
                          render_fn: Callable[..., dict[str, Any]] | None = None,
                          notifier: Any = None,
-                         cache_dir: Path | str | None = None
+                         cache_dir: Path | str | None = None,
+                         profile: str | None = None
                          ) -> dict[str, Any]:
     """Run one render tick. Never raises.
 
     Every non-terminal render-tagged mission advances exactly one
     stage. A stage failure is recorded on the mission and retried
     next tick; three in a row fails it. A finished render notifies
-    the owner once with the output path.
+    the owner once with the output path. ``profile`` pins the render
+    profile for this tick (tests / a host that knows better); without
+    it the detected runtime profile applies.
     """
     try:
         if store is None:
@@ -159,7 +198,8 @@ def run_render_tick_once(context: Any, *,
                 "error": f"render tick failed: {exc}"}
     try:
         return _run_once(context, store=store, render_fn=render_fn,
-                         notifier=notifier, cache_dir=cache_dir)
+                         notifier=notifier, cache_dir=cache_dir,
+                         profile=profile)
     except Exception as exc:  # noqa: BLE001 - the tick never dies
         record_failure("render.tick", exc)
         return {"ok": False, "status": "failed",
@@ -168,15 +208,20 @@ def run_render_tick_once(context: Any, *,
 
 def _run_once(context: Any, *, store: MissionStore,
               render_fn: Callable[..., dict[str, Any]] | None,
-              notifier: Any, cache_dir: Path | str | None
+              notifier: Any, cache_dir: Path | str | None,
+              profile: str | None = None
               ) -> dict[str, Any]:
     if cache_dir is None:
         cache_dir = default_render_cache_dir(_home_of(context))
     if render_fn is None:
+        prof = _runtime_profile(profile)
+
         def render_fn(*, stage: str, state: dict[str, Any],
-                      _cache_dir: Path | str = cache_dir
+                      _cache_dir: Path | str = cache_dir,
+                      _prof: str = prof
                       ) -> dict[str, Any]:
-            return stage_render_fn(stage, state, cache_dir=_cache_dir)
+            return stage_render_fn(stage, state, cache_dir=_cache_dir,
+                                   profile=_prof)
     try:
         due = store.list(tag="render", active_only=True, limit=50)
     except Exception as exc:  # noqa: BLE001 - a bad store is not a crash
@@ -232,11 +277,16 @@ def _run_once(context: Any, *, store: MissionStore,
                       f"{result.get('note') or 'budget exhausted'}"))
         elif result.get("done"):
             done.append(mission.id)
+            body = (f"render {mission.id} is ready\n"
+                    f"output: {result.get('output') or ''}")
+            render_state = (fresh.state or {}).get("render") or {}
+            full = (render_state.get("stages") or {}).get("full") or {}
+            if full.get("degraded"):
+                body += (f"\ndegraded: {full.get('height') or 480}p — "
+                         f"{full.get('reason') or ''}")
             _notify_once(
                 store, fresh, notifier=notifier,
-                title="🎬 render done",
-                body=(f"render {mission.id} is ready\n"
-                      f"output: {result.get('output') or ''}"))
+                title="🎬 render done", body=body)
         else:
             advanced.append(mission.id)
     return {"ok": True, "advanced": advanced, "done": done,

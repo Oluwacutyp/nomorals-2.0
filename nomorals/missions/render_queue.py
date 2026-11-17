@@ -130,8 +130,21 @@ def advance_render(store: Any, mission_id: str, *,
         raise ValidationError(
             f"render_fn for stage {stage!r} returned no output")
     mission.charge(wall=max(0.0, time.monotonic() - started))
-    stages[stage] = {"output": str(output),
-                     "completed_at": time.time()}
+    record: dict[str, Any] = {"output": str(output),
+                              "completed_at": time.time()}
+    if isinstance(result, dict):
+        # Gate fields, when the stage function reports them (the
+        # mission driver does; a plain {"output": ...} function
+        # simply leaves them off — nothing breaks either way).
+        if "degraded" in result:
+            record["degraded"] = bool(result.get("degraded"))
+        if "reason" in result:
+            record["reason"] = str(result.get("reason") or "")
+        if "profile" in result:
+            record["profile"] = str(result.get("profile") or "")
+        if "height" in result:
+            record["height"] = int(result["height"])
+    stages[stage] = record
     render = {**render, "stages": stages, "stage": stage}
     mission.state = {**(mission.state or {}), "render": render}
     store.save(mission)
@@ -143,21 +156,37 @@ def advance_render(store: Any, mission_id: str, *,
         status = MissionStatus.DONE
     else:
         status = MissionStatus.RUNNING
-    return {"mission_id": mission.id, "status": status, "done": done,
-            "stage": stage, "output": str(output)}
+    out: dict[str, Any] = {"mission_id": mission.id, "status": status,
+                           "done": done, "stage": stage,
+                           "output": str(output)}
+    out.update({k: v for k, v in record.items()
+                if k in ("degraded", "reason", "profile", "height")})
+    return out
 
 
 def render_mission_status(store: Any, mission_id: str) -> dict[str, Any]:
-    """Small status summary for a render mission."""
+    """Small status summary for a render mission.
+
+    ``degraded`` / ``degraded_reason`` / ``profile`` / ``full_height``
+    describe the ``full`` stage's profile gate: on a small profile
+    the full stage renders clamped to 480p and says so here, with the
+    reason — never silently. Missions recorded before the gate carry
+    no such fields and read as not degraded.
+    """
     mission = store.get(mission_id)
     render = _render_state(mission)
     stages = render.get("stages") or {}
+    full = stages.get("full") or {}
     return {"mission_id": mission.id, "status": mission.status,
             "cache_key": render.get("cache_key"),
             "stage": render.get("stage"),
             "completed_stages": sorted(stages),
             "pending_stages": [s for s in RENDER_STAGES if s not in stages],
             "outputs": {s: v.get("output") for s, v in stages.items()},
+            "degraded": bool(full.get("degraded")),
+            "degraded_reason": str(full.get("reason") or ""),
+            "profile": str(full.get("profile") or ""),
+            "full_height": full.get("height"),
             "budget_exhausted": bool(mission.budget_exhausted),
             "spent_wall": float(mission.spent_wall or 0.0),
             "spent_tokens": int(mission.spent_tokens or 0),
