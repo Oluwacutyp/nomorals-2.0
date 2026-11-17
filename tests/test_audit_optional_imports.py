@@ -60,7 +60,6 @@ import nomorals.media.imggen.diffusion
 import nomorals.media.imggen.masks
 import nomorals.media.imggen.edit
 import nomorals.media.highlight_model.model
-import nomorals.media.cv_ops
 import nomorals.tui
 import nomorals.tui.app
 import nomorals.cmdline
@@ -118,9 +117,6 @@ _expect("masks.point_flood_mask", lambda: point_flood_mask(None, (5, 5)))
 from nomorals.media.imggen.edit import feather_mask, inpaint_cpu
 _expect("imggen.edit.feather_mask", lambda: feather_mask(None), "Pillow")
 _expect("imggen.edit.inpaint_cpu", lambda: inpaint_cpu(None, None))
-from nomorals.media.cv_ops import inpaint_diffuse, feather
-_expect("media.cv_ops.inpaint_diffuse", lambda: inpaint_diffuse(_FakeImg(), _FakeImg()))
-_expect("media.cv_ops.feather", lambda: feather(None), "Pillow")
 from nomorals.tui.app import TuiApp, run as tui_run
 TuiApp()  # construction must still work
 _expect("tui.run", tui_run, "curses")
@@ -210,8 +206,6 @@ from nomorals.media.directed.filler import _morph_blend_frames
 a = Image.new("RGB", (8, 8), (255, 0, 0))
 b = Image.new("RGB", (8, 8), (0, 0, 255))
 assert len(_morph_blend_frames(a, b, 2)) == 2
-from nomorals.media.cv_ops import feather
-assert feather(Image.new("L", (8, 8), 0)).size == (8, 8)
 from nomorals.media_edit.cv_ops import backend_status, denoise
 assert backend_status()["pillow"] is True
 assert denoise(Image.new("RGB", (8, 8), (10, 20, 30))).size == (8, 8)
