@@ -23,6 +23,33 @@ def _cmd_train(args, context):
         _emit(args, {"configured": configured, "backends": rows}, "\n".join(lines))
         return 0
 
+    if getattr(args, "status", False):
+        # The DM promise: `CognitiveLoop._tick_train` tells the owner
+        # "`nm train status` any time". The status already exists —
+        # SelfImprovementStatus computes policy + last run and already
+        # feeds the brain-side `autonomy` tool — this is one branch over
+        # that function, same _emit/--json pattern as --backends.
+        from ...agents.cognition import SelfImprovementStatus
+
+        status = SelfImprovementStatus(context)
+        runs = status.get("runs", {}) or {}
+        total = int(runs.get("total") or 0)
+        lines = ["training due — retraining recommended"
+                 if status.get("should_retrain") else "training not due"]
+        reasons = status.get("reasons", []) or []
+        if reasons:
+            lines.append("  reasons: " + "; ".join(str(r) for r in reasons))
+        if not total:
+            lines.append("  no training run yet")
+        else:
+            lines.append(
+                f"  {total} run{'s' if total != 1 else ''} — "
+                f"{runs.get('promoted', 0)} promoted, "
+                f"{runs.get('rejected', 0)} rejected, "
+                f"{runs.get('gate_passed', 0)} passed the gate")
+        _emit(args, status, "\n".join(lines))
+        return 0
+
     if getattr(args, "export_telegram", False):
         # Owner-history export (audit R3-71): the harvester itself
         # (nomorals/exporter.py) is complete and already reachable through

@@ -4033,9 +4033,11 @@ def _parser() -> argparse.ArgumentParser:
     trial_inbox.add_argument("--limit", type=int, default=10,
                              help="max messages to show")
     train = sub.add_parser("train", aliases=CLI_ALIASES["train"],
-                           help="model training: backends, runs")
+                           help="model training: backends, status, runs")
     train.add_argument("--backends", action="store_true",
                        help="list training backends with honest machine availability")
+    train.add_argument("--status", action="store_true",
+                       help="show the training policy status and the last run")
     train.add_argument("--run", action="store_true",
                        help="kick off one pipeline run (collect->train->evaluate->promote)")
     train.add_argument("--continual", action="store_true",
