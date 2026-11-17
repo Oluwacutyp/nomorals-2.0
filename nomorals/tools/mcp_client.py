@@ -47,7 +47,7 @@ import subprocess
 import threading
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from ..core.logging_setup import get_logger
@@ -125,6 +125,15 @@ class MCPServerConfig:
     enabled: bool = False
     timeout_s: float = 0.0  # 0 = the manager default
     notes: str = ""
+    #: Literal environment values for the spawned server (ACP-declared
+    #: servers: the client hands over the values, not just the names).
+    #: Constructor-only — ``from_dict`` still rejects it, so no TOML
+    #: config can ever carry a literal secret (see the module docstring:
+    #: tokens live in the environment/vault, never in config or code).
+    env_values: dict[str, str] = field(default_factory=dict)
+    #: Literal HTTP headers for Streamable-HTTP servers (ACP-declared
+    #: servers with auth). Constructor-only, same reason as env_values.
+    headers: dict[str, str] = field(default_factory=dict)
 
     def validate(self) -> None:
         """The config is usable as a server (called on the EFFECTIVE
@@ -366,6 +375,10 @@ class _StdioTransport(_BaseTransport):
             if var not in env:
                 _log.warning("mcp[%s]: env %s is not set; the server "
                              "may refuse to start", config.name, var)
+        # Literal values from the declaration win over passthrough
+        # names (an ACP client hands over the values themselves).
+        for key, value in (config.env_values or {}).items():
+            env[str(key)] = str(value)
         try:
             self._proc = subprocess.Popen(
                 [config.command, *config.args],
@@ -587,6 +600,8 @@ class _StreamableHttpTransport(_BaseTransport):
             "Accept": "application/json, text/event-stream",
             "MCP-Protocol-Version": MCP_PROTOCOL_VERSION,
         }
+        for key, value in (self._config.headers or {}).items():
+            headers[str(key)] = str(value)
         if self._session_id:
             headers["Mcp-Session-Id"] = self._session_id
         return headers
@@ -905,10 +920,23 @@ class MCPClientManager:
     shuts them all down.
     """
 
-    def __init__(self, settings: Any = None) -> None:
+    def __init__(self, settings: Any = None, *,
+                 servers: dict[str, MCPServerConfig] | None = None,
+                 ) -> None:
         self._settings = settings
-        self._registry = effective_mcp_servers(settings)
-        self._enabled = _mcp_enabled(settings)
+        if servers is not None:
+            # An explicit server set — an ACP session's declared
+            # servers. The declaration itself is the enablement: no
+            # config master switch, no per-server config flag. The
+            # session principal's capability grant still gates every
+            # call made through this manager.
+            self._registry = {
+                name: replace(cfg, enabled=True)
+                for name, cfg in servers.items()}
+            self._enabled = True
+        else:
+            self._registry = effective_mcp_servers(settings)
+            self._enabled = _mcp_enabled(settings)
         self._default_timeout = (
             _mcp_default_timeout(settings) or DEFAULT_TIMEOUT_S)
         self._max_payload = (

@@ -27,6 +27,13 @@ COVERAGE — honest accounting of the spec surface:
     devon/tools (Devon extension, NOT part of the ACP spec: lists the
     tool registry filtered to the session principal's capability grant).
 
+  session/new mcpServers — declared servers are wired into each
+    turn's registry view (per-turn scope: the view wraps the shared
+    registry, the session's MCP connections live on the session and
+    close when it is pruned or expires). initialize reports
+    mcpCapabilities http True (Streamable HTTP is spoken), sse False
+    (the legacy SSE transport is not implemented).
+
   session/update notifications: agent_message_chunk (completed message in
     chunks — the loop does not token-stream), tool_call / tool_call_update
     (live, around each real tool invocation, with spec ToolKind, rawInput,
@@ -59,6 +66,7 @@ import argparse
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -202,10 +210,24 @@ class ACPSession:
     mcp_servers: list[dict[str, Any]] = field(default_factory=list)
     cancel_event: threading.Event = field(default_factory=threading.Event,
                                           repr=False, compare=False)
+    #: The session's live MCP connections (an MCPClientManager, built
+    #: lazily on the first turn that needs it; closed when the session
+    #: is pruned or expires). Not part of to_dict().
+    mcp_manager: Any = field(default=None, repr=False, compare=False)
 
     def touch(self) -> None:
         self.last_active = time.time()
         self.cancel_event.clear()
+
+    def close_mcp(self) -> None:
+        """Drop the session's MCP connections. Never raises."""
+        manager, self.mcp_manager = self.mcp_manager, None
+        if manager is None:
+            return
+        try:
+            manager.close()
+        except Exception:  # noqa: BLE001 - close must never raise
+            _log.debug("acp: mcp close failed", exc_info=True)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -217,6 +239,315 @@ class ACPSession:
             "lastActive": self.last_active,
             "historyTurns": len(self.history) // 2,
         }
+
+
+# ── session MCP wiring ────────────────────────────────────────────────
+#
+# The session-scoping decision, settled from the code rather than by
+# asking anyone: _default_turn already wraps registry.call per turn
+# with traced_call under _turn_lock, so the scoping IS a per-turn
+# registry view wrapping the shared one. The view exposes the session's
+# declared MCP servers' tools as real ToolSpecs — named
+# mcp_<server>_<tool> so they can never shadow a native tool — and the
+# session principal's capability grant still gates every call
+# (NET_OUT). The view never raises: a dead server contributes nothing
+# and the shared tools keep working. Its tool results are translated
+# exactly like the spine mcp_call tool's, so the loop sees identical
+# observations from both paths.
+
+_MCP_NAME_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _sanitize_mcp_name(raw: str, *, fallback: str) -> str:
+    """Lowercase snake_case for a tool name; never empty."""
+    text = _MCP_NAME_RE.sub("_", (raw or "").lower()).strip("_")
+    return text or fallback
+
+
+def _mcp_server_config(entry: dict[str, Any], *, index: int) -> Any | None:
+    """One ACP-declared mcpServers entry -> MCPServerConfig, or None.
+
+    Liberal about shapes: ACP clients send stdio {command, args, env}
+    or http {url, headers} entries, optionally named; Devon-shaped
+    entries (transport, timeout_s, env as a list of names) work too.
+    A malformed entry is skipped with a log line — it never breaks the
+    session, and a session whose declarations are ALL unusable simply
+    behaves as if it declared none.
+    """
+    from ..tools.mcp_client import MCPClientError, MCPServerConfig
+    if not isinstance(entry, dict):
+        _log.warning("acp: skipping non-object mcpServers entry %r",
+                     type(entry).__name__)
+        return None
+    transport = str(entry.get("transport") or "").strip().lower()
+    url = str(entry.get("url") or "")
+    if not transport:
+        transport = "http" if url else "stdio"
+    if transport not in ("stdio", "http"):
+        _log.warning("acp: skipping mcpServers entry %r: unknown "
+                     "transport %r", entry.get("name") or index, transport)
+        return None
+    name = str(entry.get("name") or "").strip()
+    if not name:
+        if transport == "stdio":
+            name = os.path.splitext(
+                os.path.basename(str(entry.get("command") or "")))[0]
+        else:
+            try:
+                from urllib.parse import urlparse
+                name = urlparse(url).hostname or ""
+            except Exception:  # noqa: BLE001 - any malformed URL
+                name = ""
+    name = _sanitize_mcp_name(name, fallback=f"server{index + 1}")
+    env_values: dict[str, str] = {}
+    env_names: list[str] = []
+    env = entry.get("env")
+    if isinstance(env, dict):
+        env_values = {str(k): str(v) for k, v in env.items()}
+    elif isinstance(env, list):
+        env_names = [str(e) for e in env]
+    headers = entry.get("headers")
+    headers = ({str(k): str(v) for k, v in headers.items()}
+               if isinstance(headers, dict) else {})
+    try:
+        timeout_s = float(entry.get("timeout_s") or 0.0)
+    except (TypeError, ValueError):
+        timeout_s = 0.0
+    args = entry.get("args")
+    args = [str(a) for a in args] if isinstance(args, (list, tuple)) else []
+    cfg = MCPServerConfig(
+        name=name,
+        command=str(entry.get("command") or ""),
+        args=args,
+        env=env_names,
+        transport=transport,
+        url=url,
+        enabled=True,
+        timeout_s=timeout_s,
+        env_values=env_values,
+        headers=headers,
+    )
+    try:
+        cfg.validate()
+    except MCPClientError as exc:
+        _log.warning("acp: skipping mcpServers entry %r: %s", name, exc)
+        return None
+    return cfg
+
+
+def _mcp_tool_result(manager: Any, server: str, tool: str,
+                     arguments: dict[str, Any]) -> dict[str, Any]:
+    """Call one MCP tool; the mcp_call-shaped dict, never a raise."""
+    from ..tools.mcp_client import MCPClientError
+    try:
+        result = manager.call_tool(server, tool, arguments)
+    except MCPClientError as exc:
+        return {"ok": False, "error": str(exc)}
+    parts = []
+    for item in result.get("content") or []:
+        if isinstance(item, dict) and item.get("type") == "text":
+            parts.append(str(item.get("text") or ""))
+    if result.get("isError"):
+        return {"ok": False,
+                "error": "\n".join(parts) or "tool reported an error",
+                "structured": result.get("structuredContent")}
+    return {"ok": True, "text": "\n".join(parts),
+            "structured": result.get("structuredContent")}
+
+
+class _SessionRegistryView:
+    """Per-turn registry view: the shared registry + this session's
+    MCP tools. Satisfies the ToolAdapter interface (schemas / get /
+    call / call_many) so the agentic loop needs no special-casing.
+
+    The MCP tool list is fetched lazily on first use and cached for
+    the turn; servers connect on demand through the session's manager
+    (connections cache across turns on the session). MCP calls are
+    synchronous and serial (call_many runs them one by one); the
+    idempotency_key the adapter may pass is accepted and ignored — an
+    MCP call executes live each time, so there is nothing to replay.
+    """
+
+    def __init__(self, shared: Any, session: ACPSession,
+                 manager: Any, grant: Any) -> None:
+        self._shared = shared
+        self._session = session
+        self._manager = manager
+        self._grant = grant
+        self._index: dict[str, tuple[str, str, dict[str, Any]]] | None = None
+
+    # -- MCP tool index (lazy, per turn) --
+    def _mcp_index(self) -> dict[str, tuple[str, str, dict[str, Any]]]:
+        if self._index is not None:
+            return self._index
+        index: dict[str, tuple[str, str, dict[str, Any]]] = {}
+        for cfg in self._manager.servers():
+            try:
+                tools = self._manager.list_tools(cfg.name)
+            except Exception as exc:  # noqa: BLE001 - dead server fails open
+                _log.warning("acp: mcp server %r tools/list failed: %s",
+                             cfg.name, exc)
+                continue
+            for tool in tools:
+                raw = str(tool.get("name") or "")
+                if not raw:
+                    continue
+                reg_name = ("mcp_"
+                            + _sanitize_mcp_name(cfg.name, fallback="server")
+                            + "_"
+                            + _sanitize_mcp_name(raw, fallback="tool"))
+                if self._shared is not None \
+                        and self._shared.get(reg_name) is not None:
+                    _log.warning("acp: mcp tool %r would shadow a native "
+                                 "tool; skipping", reg_name)
+                    continue
+                if reg_name in index:
+                    continue
+                index[reg_name] = (cfg.name, raw, tool)
+        self._index = index
+        return index
+
+    def _mcp_spec(self, reg_name: str, server: str,
+                  tool: dict[str, Any]) -> Any:
+        from ..core.policy import Capability
+        from ..tools.registry import ToolSpec
+        manager = self._manager
+        raw_name = str(tool.get("name") or "")
+        description = str(tool.get("description") or "").strip()
+        params = tool.get("inputSchema")
+        if not isinstance(params, dict):
+            params = {}
+
+        def _fn(**kwargs: Any) -> dict[str, Any]:
+            return _mcp_tool_result(manager, server, raw_name, kwargs)
+
+        return ToolSpec(
+            name=reg_name,
+            fn=_fn,
+            description=(f"[mcp:{server}] {description}" if description
+                         else f"MCP tool {server}/{raw_name}"),
+            capability=Capability.NET_OUT,
+            parameters=params,
+            kind="net",
+        )
+
+    def _net_out_allowed(self, capabilities: Any) -> bool:
+        from ..core.policy import Capability
+        grant = capabilities if capabilities is not None else self._grant
+        if grant is None:
+            return True
+        return grant.grants(Capability.NET_OUT)
+
+    def _audit_mcp(self, name: str, actor: str, kwargs: dict[str, Any],
+                   elapsed: float, *, decision: str, ok: bool,
+                   error: str = "") -> None:
+        from ..core.policy import Capability
+        if self._shared is None:
+            return
+        try:
+            self._shared._audit(name, actor, Capability.NET_OUT, decision,
+                                kwargs, elapsed, ok=ok, error=error)
+        except Exception:  # noqa: BLE001 - auditing never breaks a call
+            _log.debug("acp: mcp audit failed", exc_info=True)
+
+    # -- ToolAdapter interface --
+    def schemas(self, *, capabilities: Any = None) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        if self._shared is not None:
+            try:
+                out = list(self._shared.schemas(capabilities=capabilities))
+            except Exception:  # noqa: BLE001 - shared listing never breaks
+                _log.debug("acp: shared schemas failed", exc_info=True)
+                out = []
+        if not self._net_out_allowed(capabilities):
+            return out
+        try:
+            index = self._mcp_index()
+        except Exception:  # noqa: BLE001 - MCP listing never breaks shared
+            _log.debug("acp: mcp index failed", exc_info=True)
+            return out
+        for reg_name, (server, _raw, tool) in index.items():
+            try:
+                out.append(self._mcp_spec(reg_name, server, tool).schema())
+            except Exception:  # noqa: BLE001 - one bad tool never breaks
+                _log.debug("acp: mcp spec %r failed", reg_name,
+                           exc_info=True)
+        return out
+
+    def get(self, name: str) -> Any | None:
+        if self._shared is not None:
+            spec = self._shared.get(name)
+            if spec is not None:
+                return spec
+        if not self._net_out_allowed(None):
+            return None
+        try:
+            entry = self._mcp_index().get(name)
+        except Exception:  # noqa: BLE001 - MCP listing never breaks shared
+            _log.debug("acp: mcp index failed", exc_info=True)
+            return None
+        if entry is None:
+            return None
+        server, _raw, tool = entry
+        return self._mcp_spec(name, server, tool)
+
+    def call(self, name: str, /, *args: Any, actor: str = "system",
+             capabilities: Any = None, confirmation: str | None = None,
+             idempotency_key: str | None = None,
+             **kwargs: Any) -> Any:
+        from ..core.errors import CapabilityDenied, ToolError
+        from ..core.policy import Capability
+        from ..core.result import Err, Ok
+        if args:
+            return Err(ToolError(
+                f"call() takes 1 positional argument but {1 + len(args)} "
+                "were given"))
+        entry = None
+        try:
+            entry = self._mcp_index().get(name)
+        except Exception:  # noqa: BLE001 - MCP listing never breaks shared
+            _log.debug("acp: mcp index failed", exc_info=True)
+            entry = None
+        if entry is None:
+            if self._shared is None:
+                return Err(ToolError(f"unknown tool {name!r}"))
+            return self._shared.call(
+                name, actor=actor, capabilities=capabilities,
+                confirmation=confirmation,
+                idempotency_key=idempotency_key, **kwargs)
+        server, raw_tool, _tool = entry
+        if not self._net_out_allowed(capabilities):
+            self._audit_mcp(name, actor, kwargs, 0.0, decision="deny",
+                            ok=False,
+                            error=f"actor {actor!r} lacks 'net.out'")
+            return Err(CapabilityDenied(
+                f"actor {actor!r} lacks 'net.out'",
+                capability=Capability.NET_OUT, actor=actor))
+        started = time.perf_counter()
+        result = _mcp_tool_result(self._manager, server, raw_tool, kwargs)
+        elapsed = time.perf_counter() - started
+        if result.get("ok"):
+            self._audit_mcp(name, actor, kwargs, elapsed, decision="allow",
+                            ok=True)
+            return Ok(result)
+        err = str(result.get("error") or "tool reported an error")
+        self._audit_mcp(name, actor, kwargs, elapsed, decision="allow",
+                        ok=False, error=err)
+        return Err(ToolError(err))
+
+    def call_many(self, calls: list[tuple[str, dict[str, Any]]],
+                  *, max_workers: int = 1, **common: Any) -> list[Any]:
+        out: list[Any] = []
+        for name, args in calls:
+            args = dict(args) if isinstance(args, dict) else {}
+            key = args.pop("idempotency_key", None)
+            out.append(self.call(
+                str(name),
+                actor=common.get("actor", "system"),
+                capabilities=common.get("capabilities"),
+                idempotency_key=key, **args))
+        return out
+
 
 
 # ── server ────────────────────────────────────────────────────────────────
@@ -314,6 +645,7 @@ class ACPServer:
         if (time.time() - session.last_active) > self.session_ttl_s:
             with self._lock:
                 self._sessions.pop(session_id, None)
+            session.close_mcp()
             raise ACPError(f"session {session_id!r} expired", INVALID_PARAMS)
         return session
 
@@ -323,9 +655,48 @@ class ACPServer:
         with self._lock:
             dead = [sid for sid, s in self._sessions.items()
                     if now - s.last_active > self.session_ttl_s]
-            for sid in dead:
-                del self._sessions[sid]
+            sessions = [self._sessions.pop(sid) for sid in dead]
+        for session in sessions:
+            session.close_mcp()
         return len(dead)
+
+    def _session_mcp_manager(self, session: ACPSession) -> Any | None:
+        """The session's MCP manager, built lazily from its declared
+        servers. None when the session declared no usable servers.
+        Built once per session (connections cache across turns) under
+        the server lock; closed when the session is pruned or expires."""
+        from ..tools.mcp_client import MCPClientManager
+        with self._lock:
+            manager = session.mcp_manager
+            if manager is not None:
+                return manager
+            configs: dict[str, Any] = {}
+            for index, entry in enumerate(session.mcp_servers or []):
+                cfg = _mcp_server_config(entry, index=index)
+                if cfg is None:
+                    continue
+                if cfg.name in configs:
+                    _log.warning("acp: duplicate mcpServers name %r; "
+                                 "keeping the first", cfg.name)
+                    continue
+                configs[cfg.name] = cfg
+            if not configs:
+                return None
+            manager = MCPClientManager(servers=configs)
+            session.mcp_manager = manager
+            return manager
+
+    def _session_view(self, session: ACPSession, grant: Any) -> Any:
+        """Per-turn registry view for a session: the shared registry
+        plus the session's declared MCP servers' tools. A session with
+        no usable servers gets the shared registry itself (byte-
+        identical behavior to before this lane)."""
+        if self.registry is None or not session.mcp_servers:
+            return self.registry
+        manager = self._session_mcp_manager(session)
+        if manager is None:
+            return self.registry
+        return _SessionRegistryView(self.registry, session, manager, grant)
 
     def _new_session(self, params: dict[str, Any]) -> ACPSession:
         cwd = params.get("cwd") or ""
@@ -342,8 +713,9 @@ class ACPServer:
             mcp_servers=list(params.get("mcpServers") or []),
         )
         if session.mcp_servers:
-            _log.info("acp: session %s declared %d mcpServers (accepted, "
-                      "not wired to MCP)", session.id, len(session.mcp_servers))
+            _log.info("acp: session %s declared %d mcpServers (wired "
+                      "into the per-turn registry view)", session.id,
+                      len(session.mcp_servers))
         with self._lock:
             self.prune()
             self._sessions[session.id] = session
@@ -387,6 +759,12 @@ class ACPServer:
         registry = self.registry
         grant = self.principal.grant
         actor = f"acp:{session.id}"
+        if session.mcp_servers:
+            # Per-turn scope: the session's declared MCP servers are
+            # visible through this view only; the shared registry is
+            # untouched and a session that declared nothing gets it
+            # directly (behavior identical to before this lane).
+            registry = self._session_view(session, grant)
         orig_call = registry.call
 
         def traced_call(name: str, /, *args: Any, **kwargs: Any) -> Any:
@@ -553,8 +931,10 @@ class ACPServer:
                         "audio": False,
                         "embeddedContext": False,
                     },
-                    # Honest: declared mcpServers are accepted, not wired.
-                    "mcpCapabilities": {"http": False, "sse": False},
+                    # Declared session servers are wired into the
+                    # turn's registry view. Streamable HTTP is spoken;
+                    # the legacy SSE transport is not implemented.
+                    "mcpCapabilities": {"http": True, "sse": False},
                 },
                 "authMethods": [],
                 "agentInfo": {"name": "devon", "version": "2.0"},
