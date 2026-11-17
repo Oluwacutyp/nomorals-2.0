@@ -3468,6 +3468,18 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("av sweep job not registered: %s",
                                  exc)
+                # Travel: the monthly airport dataset refresh (1st
+                # 04:00 local — the 03:00 slot is the backup drill's;
+                # the IATA→country table, rebuilt from the canonical
+                # dump with validation, old table kept on failure).
+                # Idempotent by name; a stale spec is replaced.
+                try:
+                    from ...travel.refresh import ensure_airport_refresh_job
+
+                    ensure_airport_refresh_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("airport refresh job not registered: %s",
+                                 exc)
                 # Social measurement spine (WS3 P1): posted rows get
                 # their real metrics refreshed every 6h, so posting
                 # windows and brief outcomes learn from measured data

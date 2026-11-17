@@ -13,10 +13,16 @@ of accuracy or fitness for use", https://ourairports.com/data/).
   3d7eeb55961be0f1691e3420ec0e05d4a58be4597c61540511e3e838d7e486f9
 - Coverage at generation: 86,371 dump rows → 9,053 distinct IATA codes
   → 239 countries, 0 rows dropped, 0 conflicting codes.
+- Regeneration: ``travel/refresh.py`` — the monthly
+  ``airport dataset refresh`` job fetches the canonical dump, rebuilds
+  with the same rules, validates, atomically replaces the CSV, and
+  invalidates the module cache; a failed fetch or validation leaves
+  the old table in place. ``nm airports refresh`` runs it on demand.
 - Regeneration: ``generate_mapping.py`` in the lane verify dir
   (~/workspace/airportmap-verify/) — re-run it against a fresh dump
   and replace the CSV; every row stays traceable to a dataset row by
-  its IATA code.
+  its IATA code. (Kept as the original generator's record; the live
+  refresh is ``travel/refresh.py``.)
 
 Why this module exists: the itinerary builder's flights carry IATA
 codes (LOS→LHR) while the visa layer answers from ISO country codes
@@ -40,9 +46,11 @@ _log = get_logger(__name__)
 
 __all__ = [
     "AIRPORTS_DATA_PATH",
+    "airport_countries_count",
     "airport_country_count",
     "countries_for_route",
     "country_for_iata",
+    "invalidate_cache",
     "lookup_iata",
 ]
 
@@ -77,6 +85,17 @@ def _load() -> dict[str, str]:
         _log.debug("airport country mapping unavailable", exc_info=True)
     _cache = mapping
     return mapping
+
+
+def invalidate_cache() -> None:
+    """Drop the cached mapping so the next lookup re-reads the CSV.
+
+    Called by ``travel/refresh.py`` right after an atomic replace —
+    without it the running process would keep serving the old table
+    until restart.
+    """
+    global _cache
+    _cache = None
 
 
 def _normalise(iata: Any) -> str:
@@ -132,3 +151,8 @@ def countries_for_route(
 def airport_country_count() -> int:
     """How many IATA codes the loaded mapping knows."""
     return len(_load())
+
+
+def airport_countries_count() -> int:
+    """How many distinct countries the loaded mapping covers."""
+    return len(set(_load().values()))

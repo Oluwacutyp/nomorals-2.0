@@ -728,6 +728,30 @@ def register(registry: Any) -> None:
                     "error": f"av sweep tick failed: {exc}"}
 
     @registry.register(
+        "__airport_refresh_tick__",
+        description="Run one airport dataset refresh tick (R3-67 "
+        "remainder): fetch the canonical OurAirports dump, rebuild "
+        "the IATA→country mapping with the generator's rules, "
+        "validate it, atomically replace the table, and invalidate "
+        "the module cache — a failed fetch or validation leaves the "
+        "old table in place. Scheduler-internal; runs monthly on the "
+        "1st at 04:00 local. Routine and silent on success; a "
+        "failure is published to the owner.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _airport_refresh_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..travel.refresh import run_airport_refresh_tick_once
+
+        try:
+            return run_airport_refresh_tick_once(
+                context=_context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"airport refresh tick failed: {exc}"}
+
+    @registry.register(
         "__group_ritual_tick__",
         description="Run one group ritual tick (audit gap R2-29): "
         "every themed community group with a ritual due within a "

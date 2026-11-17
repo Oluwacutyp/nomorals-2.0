@@ -52,6 +52,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "arena-research": [],
     "autonomy": ["auto"],
     "av": [],
+    "airports": [],
     "bet": ["bt"],
     "apk": [],
     "re": [],
@@ -3392,6 +3393,25 @@ def _parser() -> argparse.ArgumentParser:
                       help="Output as JSON")
     av_p.add_argument("--no-quarantine", action="store_true",
                       help="scan without quarantining hits")
+
+    airports_p = sub.add_parser(
+        "airports", aliases=CLI_ALIASES["airports"],
+        help="airport table: rows, countries, last refresh, refresh now",
+        description=("nm airports [status]\n"
+                     "nm airports refresh\n"
+                     "The IATA→country table the visa layer answers "
+                     "from: status names the rows and countries it "
+                     "knows and when it was last refreshed, refresh "
+                     "runs the monthly refresh tick on demand."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    airports_p.add_argument("airports_action", nargs="?", default="status",
+                            choices=["status", "refresh"],
+                            help="Action to perform")
+    airports_p.add_argument("airports_rest", nargs="*", default=[],
+                            help="action arguments (unused)")
+    airports_p.add_argument("--json", action="store_true",
+                            help="Output as JSON")
 
     focus_p = sub.add_parser("focus", aliases=CLI_ALIASES["focus"],
         help="focus sessions: start, pause, resume, stop, status, today, week, month",
