@@ -5,7 +5,7 @@ PartnerRuntime must behave like the pre-split god class.
 * facade identity: every public name importable from
   ``nomorals.agents.partner_runtime`` is ``is``-identical to the object in
   ``nomorals.agents.partner``.
-* MRO: the 23 concern mixins compose in a defined order, no method is
+* MRO: the 25 concern mixins compose in a defined order, no method is
   defined twice (no shadowing), and representative methods resolve to the
   mixin that owns them.
 * smoke: construct PartnerRuntime through the facade exactly the way the
@@ -62,6 +62,8 @@ EXPECTED_MRO = [
     "RuntimeMockScreensMixin",
     "RuntimeFontsMixin",
     "RuntimeChatOpsMixin",
+    "RuntimeWorkflowMixin",
+    "RuntimePlanMixin",
     "object",
 ]
 
@@ -91,6 +93,8 @@ MIXIN_PROBES = {
     "nomorals.agents.partner.runtime_mock_screens": ("RuntimeMockScreensMixin", "_control_mock"),
     "nomorals.agents.partner.runtime_fonts": ("RuntimeFontsMixin", "_control_fonts"),
     "nomorals.agents.partner.runtime_chatops": ("RuntimeChatOpsMixin", "_control_chatops"),
+    "nomorals.agents.partner.runtime_workflow": ("RuntimeWorkflowMixin", "_control_workflow"),
+    "nomorals.agents.partner.runtime_plan": ("RuntimePlanMixin", "_control_plan"),
 }
 
 
