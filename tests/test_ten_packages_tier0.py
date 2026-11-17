@@ -19,10 +19,20 @@ from nomorals.cmdline.dispatch import _COMMANDS
 from nomorals.cmdline.parser import _parser
 from nomorals.learn.chat import control_learn
 from nomorals.legal.chat import control_legal_full
-from nomorals.matching import adapter_community as community
-from nomorals.matching import adapter_gig as gig
-from nomorals.matching import adapter_learning as learning
-from nomorals.matching.batches import Candidate, DailyBatchStore
+from nomorals.matching import (
+    DailyBatchStore,
+    Questionnaire,
+    curate_daily,
+    explain_pick,
+    optimal_assignment,
+    roommate_match,
+    stable_match,
+    stable_match_capacities,
+    verify_roommate_stable,
+    verify_stable,
+)
+from nomorals.matching.batches import Candidate
+from nomorals.matching.chat import control_match
 from nomorals.social.chat.control import (
     COMMAND_DETAILS,
     CONTROL_COMMANDS,
@@ -238,12 +248,30 @@ def test_legal_help_lists_subcommands():
 
 
 # ── matching: three documented surfaces ──────────────────────────────────
+# R3-66: the adapter shims (adapter_gig / adapter_community /
+# adapter_learning) were deleted — pure one-line delegations with zero
+# production importers. The same behavior is pinned here through the
+# live path: the core modules directly, and /match (control_match) for
+# the per-surface serving.
 
 
-def test_matching_surfaces_are_documented():
-    assert gig.SURFACE == "gig"
-    assert community.SURFACE == "community"
-    assert learning.SURFACE == "learning"
+def test_matching_surfaces_are_documented(tmp_path):
+    import nomorals.matching as matching
+
+    doc = matching.__doc__ or ""
+    assert "#1 gig marketplace" in doc
+    assert "#12 community" in doc
+    assert "#46 mentoring" in doc
+    # And /match actually serves each surface (daily picks, stable all day).
+    for surface in ("gig", "community", "learning"):
+        store = DailyBatchStore(db_path=str(tmp_path / f"{surface}.db"))
+        assert store.add_candidate(
+            Candidate(candidate_id=f"{surface}-1",
+                      title=f"{surface} pick", quality=0.8),
+            surface=surface)
+        batch = store.today(surface, "owner", n=5)
+        assert [c.candidate_id for c in batch] == [f"{surface}-1"]
+        assert store.today(surface, "owner", n=5) == batch
 
 
 def test_matching_gig_daily_and_stable():
@@ -253,22 +281,23 @@ def test_matching_gig_daily_and_stable():
         Candidate(candidate_id="b", title="Gig B", tags=("design",),
                   quality=0.2),
     ]
-    picks = gig.daily_picks(cands, {"python": 10.0}, n=1)
+    picks = curate_daily(cands, {"python": 10.0}, n=1)
     assert [c.candidate_id for c in picks] == ["a"]
-    assert "python" in gig.explain(cands[0], {"python": 10.0})
-    result = gig.stable_match_for(
+    assert "python" in explain_pick(cands[0], {"python": 10.0})
+    result = stable_match(
         ["f1"], ["c1"], {"f1": ["c1"]}, {"c1": ["f1"]})
     assert result["f1"] == "c1"
-    stable, _ = gig.verify(result, {"f1": ["c1"]}, {"c1": ["f1"]})
+    stable, _ = verify_stable(result, {"f1": ["c1"]}, {"c1": ["f1"]})
     assert stable
 
 
 def test_matching_gig_questionnaire_and_dealbreakers(tmp_path):
-    q = gig.new_questionnaire("owner", db_path=str(tmp_path / "g.db"))
+    q = Questionnaire(owner="owner", db_path=str(tmp_path / "g.db"))
+    q.ensure_starters("gig")
     assert q.unanswered()
     q.set_dealbreaker("budget", "rate", "le", 100)
-    kept = gig.filter_dealbreakers(
-        q, [{"attributes": {"rate": 50}}, {"attributes": {"rate": 500}}])
+    kept = q.filter_dealbreakers(
+        [{"attributes": {"rate": 50}}, {"attributes": {"rate": 500}}])
     assert kept == [{"attributes": {"rate": 50}}]
 
 
@@ -277,34 +306,51 @@ def test_matching_community_roommates():
         "a": ["b", "c", "d"], "b": ["a", "c", "d"],
         "c": ["d", "a", "b"], "d": ["c", "a", "b"],
     }
-    pairs = community.pair_members(["a", "b", "c", "d"], prefs)
+    pairs = roommate_match(["a", "b", "c", "d"], prefs)
     assert pairs["a"] == "b" and pairs["c"] == "d"
-    stable, _ = community.verify_pairing(dict(pairs), prefs)
+    stable, _ = verify_roommate_stable(dict(pairs), prefs)
     assert stable
 
 
 def test_matching_learning_capacity_and_assignment(tmp_path):
-    result = learning.capacity_match(
+    result = stable_match_capacities(
         ["m1", "m2"], ["mentor"],
         {"m1": ["mentor"], "m2": ["mentor"]},
         {"mentor": ["m1", "m2"]},
         {"mentor": 2})
     assert result["m1"] == "mentor" and result["m2"] == "mentor"
-    assign = learning.assign({"s1": {"slot1": 9.0, "slot2": 1.0},
-                              "s2": {"slot1": 1.0, "slot2": 9.0}})
+    assign = optimal_assignment({"s1": {"slot1": 9.0, "slot2": 1.0},
+                                 "s2": {"slot1": 1.0, "slot2": 9.0}})
     assert assign == {"s1": "slot1", "s2": "slot2"}
-    q = learning.new_questionnaire("owner", db_path=str(tmp_path / "l.db"))
+    q = Questionnaire(owner="owner", db_path=str(tmp_path / "l.db"))
+    q.ensure_starters("learning")
     assert q.unanswered()
 
 
 def test_matching_daily_batch_store_per_surface(tmp_path):
     store = DailyBatchStore(db_path=str(tmp_path / "b.db"))
-    for surface, adapter in (("gig", gig), ("community", community),
-                             ("learning", learning)):
+    for surface in ("gig", "community", "learning"):
         assert store.add_candidate(
             Candidate(candidate_id=f"{surface}-1", title=f"{surface} pick",
                       quality=0.8), surface=surface)
-        batch = adapter.todays_batch(store, owner="owner", n=5)
+        batch = store.today(surface, "owner", n=5)
         assert [c.candidate_id for c in batch] == [f"{surface}-1"]
         # Stable all day: second call returns the same batch.
-        assert adapter.todays_batch(store, owner="owner", n=5) == batch
+        assert store.today(surface, "owner", n=5) == batch
+
+
+def test_matching_daily_served_through_match_command(tmp_path):
+    """The per-surface daily picks reach the user through /match."""
+    import types
+
+    ctx = types.SimpleNamespace(
+        matching_batch_store=DailyBatchStore(
+            db_path=str(tmp_path / "b.db")),
+        matching_questionnaire=Questionnaire(
+            owner="owner", db_path=str(tmp_path / "q.db")),
+        matching_surface="community",
+    )
+    assert "registered for" in control_match(
+        "add c-1 | community pick | python | quality=0.9", context=ctx)
+    out = control_match("daily community", context=ctx)
+    assert "community pick" in out
