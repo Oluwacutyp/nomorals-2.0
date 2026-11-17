@@ -603,6 +603,19 @@ class _VAEUpsample(nn.Module):
                                        mode="nearest"))
 
 
+def _vae_dec_block(in_ch, out_ch, up_ch, n_resnets):
+    """One decoder level: channel-change resnet, then same-channel
+    resnets (``n_resnets`` total), then an upsample — or none for
+    the last level. The LDM VAE carries 3 resnets per level, the
+    diffusers VAE 2; the resnet indices are 0..n-1 and the upsample
+    sits at index n either way."""
+    blocks = [ResnetVAE(in_ch, out_ch)]
+    blocks += [ResnetVAE(out_ch, out_ch) for _ in range(n_resnets - 1)]
+    if up_ch is not None:
+        blocks.append(_VAEUpsample(up_ch))
+    return nn.Sequential(*blocks)
+
+
 class AutoencoderKL(nn.Module):
     """SD's VAE: 8× downsample, 4-channel latent, KL-regularized.
 
@@ -617,13 +630,28 @@ class AutoencoderKL(nn.Module):
     levels together and could never have held the real weights.
     """
 
-    def __init__(self, latent_ch: int = 4, scale: float = 0.18215
-                 ) -> None:
+    def __init__(self, latent_ch: int = 4, scale: float = 0.18215,
+                 shift: float = 0.0, decoder_resnets: int = 3,
+                 diffusers_layout: bool = False) -> None:
         super().__init__()
         self.latent_ch = latent_ch
-        #: Latent scale factor: 0.18215 for SD1.5, 0.13025 for SDXL
-        #: (the VAEs share the layout; only the scale differs).
+        #: Latent scale factor: 0.18215 for SD1.5, 0.13025 for SDXL,
+        #: 0.3611 for FLUX (the VAEs share the layout; only the
+        #: scale — and FLUX's shift — differ).
         self.scale = scale
+        #: Latent shift, added after scaling on encode and removed
+        #: before unscaling on decode: 0.0 for SD1.5/SDXL, 0.1159
+        #: for FLUX (black-forest-labs/FLUX.1-dev vae config).
+        self.shift = shift
+        #: Resnets per decoder level: 3 for the LDM VAE (SD1.5/SDXL),
+        #: 2 for the diffusers VAE (FLUX, layers_per_block=2).
+        self.decoder_resnets = decoder_resnets
+        #: The diffusers AutoencoderKL splits the I/O convs the LDM
+        #: VAE folds into one (encoder conv_out 3x3 + quant_conv
+        #: 1x1; post_quant_conv 1x1 + decoder conv_in 3x3) and adds
+        #: an encoder norm_out + SiLU. False keeps the LDM shape
+        #: byte-identical; True builds the diffusers shape (FLUX).
+        self.diffusers_layout = diffusers_layout
         # Encoder (LDM down.0..3): 3 → 128 → 256 → 512 → 512.
         self.enc_in = nn.Conv2d(3, 128, 3, padding=1)
         self.enc_b1 = nn.Sequential(ResnetVAE(128, 128),
@@ -643,45 +671,50 @@ class AutoencoderKL(nn.Module):
         self.enc_mid = nn.Sequential(ResnetVAE(512, 512),
                                      VAEAttention(512),
                                      ResnetVAE(512, 512))
-        self.quant_conv = nn.Conv2d(512, latent_ch * 2, 1)
+        self.enc_norm_out = (nn.GroupNorm(32, 512)
+                             if diffusers_layout else None)
+        self.enc_out = (nn.Conv2d(512, latent_ch * 2, 3, padding=1)
+                        if diffusers_layout else None)
+        self.quant_conv = (nn.Conv2d(latent_ch * 2, latent_ch * 2, 1)
+                           if diffusers_layout else
+                           nn.Conv2d(512, latent_ch * 2, 1))
         # Decoder (LDM up.3..0, in execution order): post-quant →
         # mid → 512 (up.3) → 512 (up.2) → 256 (up.1) → 128 (up.0,
         # no upsample) → out.
-        self.post_quant = nn.Conv2d(latent_ch, 512, 1)
+        self.post_quant = (nn.Conv2d(latent_ch, latent_ch, 1)
+                           if diffusers_layout else
+                           nn.Conv2d(latent_ch, 512, 1))
+        self.dec_in = (nn.Conv2d(latent_ch, 512, 3, padding=1)
+                       if diffusers_layout else None)
         self.dec_mid = nn.Sequential(ResnetVAE(512, 512),
                                      VAEAttention(512),
                                      ResnetVAE(512, 512))
-        self.dec_b1 = nn.Sequential(ResnetVAE(512, 512),
-                                    ResnetVAE(512, 512),
-                                    ResnetVAE(512, 512),
-                                    _VAEUpsample(512))
-        self.dec_b2 = nn.Sequential(ResnetVAE(512, 512),
-                                    ResnetVAE(512, 512),
-                                    ResnetVAE(512, 512),
-                                    _VAEUpsample(512))
-        self.dec_b3 = nn.Sequential(ResnetVAE(512, 256),
-                                    ResnetVAE(256, 256),
-                                    ResnetVAE(256, 256),
-                                    _VAEUpsample(256))
-        self.dec_b4 = nn.Sequential(ResnetVAE(256, 128),
-                                    ResnetVAE(128, 128),
-                                    ResnetVAE(128, 128))
+        self.dec_b1 = _vae_dec_block(512, 512, 512, decoder_resnets)
+        self.dec_b2 = _vae_dec_block(512, 512, 512, decoder_resnets)
+        self.dec_b3 = _vae_dec_block(512, 256, 256, decoder_resnets)
+        self.dec_b4 = _vae_dec_block(256, 128, None, decoder_resnets)
         self.dec_out = nn.Sequential(nn.GroupNorm(32, 128), nn.SiLU(),
                                      nn.Conv2d(128, 3, 3, padding=1))
 
     def encode(self, x: torch.Tensor) -> torch.Tensor:
-        """RGB [-1,1] → latent (scaled by SD's 0.18215 factor)."""
+        """RGB [-1,1] → latent (scaled, then shifted for FLUX)."""
         h = self.enc_in(x)
         h = self.enc_b1(h)
         h = self.enc_b2(h)
         h = self.enc_b3(h)
         h = self.enc_b4(h)
         h = self.enc_mid(h)
+        if self.enc_norm_out is not None:
+            h = F.silu(self.enc_norm_out(h))
+        if self.enc_out is not None:
+            h = self.enc_out(h)
         mean, logvar = self.quant_conv(h).chunk(2, dim=1)
-        return mean * self.scale
+        return mean * self.scale + self.shift
 
     def decode(self, z: torch.Tensor) -> torch.Tensor:
-        h = self.post_quant(z / self.scale)
+        h = self.post_quant((z - self.shift) / self.scale)
+        if self.dec_in is not None:
+            h = self.dec_in(h)
         h = self.dec_mid(h)
         h = self.dec_b1(h)
         h = self.dec_b2(h)

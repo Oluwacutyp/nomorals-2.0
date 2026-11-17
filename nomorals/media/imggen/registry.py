@@ -19,12 +19,10 @@ length-prefixed JSON block; reading it loads no tensors):
 - anything else → ``unknown``
 
 Classification is metadata; *loadability* is a separate, honest flag.
-Devon's native checkpoints and LDM-format SD1.5 AND SDXL safetensors
-can actually load — FLUX entries are listed with ``loadable=False``
-and a reason naming the class and the missing loader, never silently
-omitted and never pretended runnable. A diffusers-layout checkpoint
-of either SD class is likewise listed not-loadable with a reason
-naming the one-time convert.
+Devon's native checkpoints and LDM-format SD1.5, SDXL AND FLUX
+safetensors can actually load. A diffusers-layout checkpoint of any
+of the three classes is listed not-loadable with a reason naming the
+one-time convert, never silently omitted and never pretended runnable.
 """
 
 from __future__ import annotations
@@ -46,8 +44,6 @@ _CLASS_ORDER = {"native": 0, "sd15": 1, "sdxl": 2, "flux": 3,
                 "unknown": 4}
 
 _NOT_LOADABLE_REASONS = {
-    "flux": "FLUX checkpoints are registered but the FLUX loader "
-            "arrives in a later pass (B)",
     "unknown": "unrecognized safetensors layout — cannot classify "
                "this file as a known image model family",
 }
@@ -87,11 +83,14 @@ def _classify_keys(keys: set[str]) -> tuple[str, str]:
         return "sdxl", _FORMAT_LDM if any(
             k.startswith("model.diffusion_model.") for k in keys) \
             else _FORMAT_DIFFUSERS
-    if any("double_blocks" in k or "single_transformer_blocks" in k
+    if any("double_blocks" in k for k in keys):
+        # BFL single-file layout, with or without the
+        # model.diffusion_model. wrapper — the loader speaks both.
+        return "flux", _FORMAT_LDM
+    if any(k.startswith("transformer_blocks.")
+           or k.startswith("single_transformer_blocks.")
            for k in keys):
-        return "flux", _FORMAT_LDM if any(
-            k.startswith("model.diffusion_model.") for k in keys) \
-            else _FORMAT_DIFFUSERS
+        return "flux", _FORMAT_DIFFUSERS
     if any(k.startswith("model.diffusion_model.") for k in keys):
         return "sd15", _FORMAT_LDM
     if any(k.startswith("unet.") for k in keys) \
@@ -113,7 +112,8 @@ def _entry_for_safetensors(path: str) -> dict:
                                "from this file",
         }
     model_class, fmt = _classify_keys(keys)
-    loadable = model_class in ("sd15", "sdxl") and fmt == _FORMAT_LDM
+    loadable = model_class in ("sd15", "sdxl", "flux") \
+        and fmt == _FORMAT_LDM
     if loadable:
         reason = ""
     elif model_class == "sd15":
@@ -124,6 +124,11 @@ def _entry_for_safetensors(path: str) -> dict:
         reason = ("SDXL checkpoint in diffusers layout — the loader "
                   "speaks compvis LDM format; convert the checkpoint "
                   "to a single LDM .safetensors first")
+    elif model_class == "flux":
+        reason = ("FLUX checkpoint in diffusers transformer layout "
+                  "— the loader speaks the BFL single-file layout "
+                  "(double_blocks/single_blocks); convert the "
+                  "transformer to a single BFL .safetensors first")
     else:
         reason = _NOT_LOADABLE_REASONS[model_class]
     return {
@@ -175,10 +180,10 @@ def list_models() -> list[dict]:
     """All installed image models: native runs + safetensors entries.
 
     Sorted loadable-first (Devon's native class before SD1.5, then
-    SDXL, then the registered-but-not-yet-loadable classes), newest
-    first within a class. Every entry: ``{name, path, model_class,
-    format, bytes, loadable, loadable_reason}`` (native entries also
-    carry ``run``).
+    SDXL, then FLUX, then the registered-but-not-yet-loadable
+    classes), newest first within a class. Every entry: ``{name,
+    path, model_class, format, bytes, loadable, loadable_reason}``
+    (native entries also carry ``run``).
     """
     from .pipeline import list_native_checkpoints
 

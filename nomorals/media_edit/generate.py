@@ -1156,8 +1156,8 @@ class NativeBackend(GenerativeBackend):
         return False, ("no native checkpoint yet — train one: "
                        "`nm imggen train --data <photo-folder>` "
                        "(tiny 64px model trains on CPU in minutes), "
-                       "or drop an SD1.5 or SDXL .safetensors into the "
-                       "imggen checkpoint dir")
+                       "or drop an SD1.5, SDXL or FLUX .safetensors "
+                       "into the imggen checkpoint dir")
 
     def generate(self, prompt: str, *,
                  seed: int | None = None,

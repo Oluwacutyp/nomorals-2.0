@@ -155,9 +155,11 @@ def test_registry_classifies_flux_variants(model_roots):
     _write_safetensors(ckpt / "flux-diffusers.safetensors",
                        FLUX_DIFFUSERS_KEYS)
     by_name = {e["name"]: e for e in list_models()}
+    # Pass B: FLUX in the BFL single-file layout is loadable now; the
+    # diffusers transformer layout still needs a convert.
     assert by_name["flux-bfl"]["model_class"] == "flux"
-    assert by_name["flux-bfl"]["loadable"] is False
-    assert "FLUX" in by_name["flux-bfl"]["loadable_reason"]
+    assert by_name["flux-bfl"]["loadable"] is True
+    assert by_name["flux-bfl"]["loadable_reason"] == ""
     assert by_name["flux-diffusers"]["model_class"] == "flux"
     assert by_name["flux-diffusers"]["format"] == "diffusers-safetensors"
 

@@ -2829,7 +2829,8 @@ def _parser() -> argparse.ArgumentParser:
     ig_gen.add_argument("--size", type=int, default=64)
     ig_gen.add_argument("--ar", default="", help="aspect ratio, e.g. 16:9")
     ig_gen.add_argument("--negative", default="", help="negative prompt")
-    ig_gen.add_argument("--sampler", default="ddim", choices=["ddim", "ddpm"])
+    ig_gen.add_argument("--sampler", default="ddim",
+                        choices=["ddim", "ddpm", "flow"])
     ig_gen.add_argument("--checkpoint", default="")
     ig_gen.add_argument("--device", default="")
     ig_i2i = ig_sub.add_parser("img2img", help="prompt-guided edit of an image")

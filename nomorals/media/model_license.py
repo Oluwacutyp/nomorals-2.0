@@ -25,6 +25,11 @@ Registry (verified against upstream licenses):
   weights; outputs are otherwise the user's). Covers the whole SD1.5
   checkpoint family Devon loads locally through her own imggen
   implementation — the weights are data, this label is metadata.
+- FLUX.1-dev — FLUX.1-dev Non-Commercial License — commercial_use
+  False. Personal AI: fine. The local FLUX loader (imggen/flux.py)
+  loads the BFL single-file checkpoint; the same non-commercial
+  licence string is already used for the FLUX.1-Kontext-dev edit
+  route (media_edit/models.py).
 - Wan 2.2 — Apache-2.0 — commercial_use True. The video backend's
   TI2V-5B checkpoint (``Wan-AI/Wan2.2-TI2V-5B-Diffusers``); the
   cleanest licence of any strong open video model.
@@ -134,6 +139,13 @@ MODEL_LICENSES: dict[str, ModelLicense] = {
         "outputs are otherwise the user's to ship.",
         "image generation (SDXL family, local weights via imggen)",
         "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0"),
+    "flux": ModelLicense(
+        "flux", "FLUX.1-dev Non-Commercial License", False,
+        "commercial_use False: research / personal use only. "
+        "Personal AI: fine — the flag only matters if the image "
+        "goes public.",
+        "image generation (FLUX.1 family, local weights via imggen)",
+        "https://huggingface.co/black-forest-labs/FLUX.1-dev"),
     "wan": ModelLicense(
         "wan", "Apache-2.0", True,
         "Apache-2.0 — output is yours.",

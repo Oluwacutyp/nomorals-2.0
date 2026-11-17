@@ -357,7 +357,7 @@ class PipelineConfig:
     width: int = 64
     height: int = 64
     negative_prompt: str = ""
-    sampler: str = "ddim"  # ddim | ddpm
+    sampler: str = "ddim"  # ddim | ddpm | flow (flow = FLUX only)
     extra: dict = field(default_factory=dict)
 
 
