@@ -339,6 +339,7 @@ def _collect_ensure_bindings(ctx, sched):
     from nomorals.cognition.calibration_loop import (
         ensure_calibration_loop_job)
     from nomorals.cognition.failure_loop import ensure_failure_loop_job
+    from nomorals.commerce.dunning import ensure_dunning_job
     from nomorals.community.digest import ensure_group_ritual_job
     from nomorals.community.orchestration import ensure_orchestration_job
     from nomorals.finance.jobs import ensure_finance_jobs
@@ -403,6 +404,7 @@ def _collect_ensure_bindings(ctx, sched):
         ("calibration loop tick",
          lambda: ensure_calibration_loop_job(sched)),
         ("failure loop tick", lambda: ensure_failure_loop_job(sched)),
+        ("dunning tick", lambda: ensure_dunning_job(sched)),
         ("group ritual tick", lambda: ensure_group_ritual_job(sched)),
         ("season tick", lambda: ensure_season_tick_job(sched)),
         ("health drift tick", lambda: ensure_health_drift_job(sched)),
@@ -497,6 +499,7 @@ _VARIABLE_TOOL_FILES = {
     "backup/jobs.py",            # loop over specs {"tool": tool}
     "cognition/calibration_loop.py",  # {"tool": CALIBRATION_LOOP_TOOL}
     "cognition/failure_loop.py",  # {"tool": FAILURE_LOOP_TOOL}
+    "commerce/dunning.py",         # {"tool": DUNNING_TOOL}
     "community/digest.py",       # {"tool": RITUAL_TOOL}
     "games/tournaments_seasons.py",  # {"tool": SEASON_TOOL}
     "health/drift.py",           # {"tool": DRIFT_TOOL}

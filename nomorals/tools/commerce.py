@@ -214,6 +214,12 @@ def _commerce_tail(action: str, kwargs: dict[str, Any]) -> str:
 
 
 def register(registry: Any) -> None:
+    # Closure over ``registry.context``: ``registry.call`` passes no
+    # ``context`` arg, so a ``context``-taking fn would fail with
+    # TypeError. Same pattern as ``pulse``/``briefing`` and the other
+    # ``__*_`` scheduler bridges in tools/autonomy.py.
+    _context = registry.context
+
     @registry.register(
         "commerce",
         description=(
@@ -345,3 +351,24 @@ def register(registry: Any) -> None:
             _log.warning("commerce %s failed: %s", action, exc)
             return {"ok": False, "error": str(exc)[:300]}
         return {"ok": False, "error": f"unknown commerce action {action!r}"}
+
+    @registry.register(
+        "__dunning_tick__",
+        description="Run one commerce dunning tick: charge every due "
+        "subscription retry through the real payment gateway, advance "
+        "the 1/3/7-day schedule on a failed charge, park the "
+        "subscription past_due after the third failure, and journal "
+        "every attempt. A missing provider key is a named skip, never "
+        "a burned retry. Scheduler-internal; runs daily 09:00. Never "
+        "raises — a bad tick is recorded, never fatal to the job.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _dunning_tick_tool() -> dict[str, Any]:
+        from ..commerce.dunning import run_dunning_tick_once
+
+        try:
+            return run_dunning_tick_once(_context)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"dunning tick failed: {exc}"}

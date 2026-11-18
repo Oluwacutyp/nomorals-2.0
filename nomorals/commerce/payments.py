@@ -461,6 +461,19 @@ class PaymentGateway:
             sub.status = "past_due"
         return sub
 
+    def record_successful_charge(self, sub: Subscription) -> Subscription:
+        """Dunning: a retry landed — clear the retry state, stay active.
+
+        The mirror of :meth:`record_failed_charge`: a subscription whose
+        retry charge succeeded owes nothing, so its failed-attempt count
+        and next-retry time reset instead of lingering into the next
+        dunning tick.
+        """
+        sub.failed_attempts = 0
+        sub.next_retry_at = 0.0
+        sub.status = "active"
+        return sub
+
     def dunning_due(self) -> list[Subscription]:
         """Subscriptions whose retry time has arrived and are still active."""
         now = self._now()

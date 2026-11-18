@@ -64,7 +64,8 @@ _USAGE = (
     "| disputes | resolve <dispute_id> <won|lost|accepted> [resolution] · "
     "/store invoice create <customer> <amount_kobo> [| currency] | list | "
     "pay <invoice_id> <payment_reference> · /store subscribe create "
-    "<provider> <customer> <amount_kobo> [| interval] | list | cancel <id> · "
+    "<provider> <customer> <amount_kobo> [| interval] | list | cancel <id> "
+    "| dunning [n] · "
     "/store ship quote <carrier> <weight_kg> [| distance_km] | eta <carrier> "
     "[| distance_km | same-city] | send <carrier> <waybill> [| order_ref | "
     "recipient] | track <carrier> <waybill> | list · /store reconcile run | "
@@ -515,6 +516,26 @@ def _subscribe(store: CommerceStore, rest: str) -> str:
         gw.cancel_subscription(sub_obj)
         store.save_gateway(gw)
         return f"subscription {sub_id} cancelled."
+    if sub == "dunning":
+        try:
+            limit = int(arg.strip().split(None, 1)[0]) if arg.strip() else 15
+        except ValueError:
+            return "usage: /store subscribe dunning [n]"
+        attempts = store.list_dunning_attempts(limit=limit)
+        if not attempts:
+            return ("no dunning attempts yet — the daily dunning tick "
+                    "records every retry here.")
+        lines = ["🔁 dunning attempts (most recent first):"]
+        for a in attempts:
+            # timezone.utc, not datetime.UTC: EC2 runs Python <= 3.11.
+            when = datetime.fromtimestamp(
+                float(a.get("ts") or 0), tz=timezone.utc).strftime(  # noqa: UP017
+                    "%Y-%m-%d %H:%M")
+            lines.append(
+                f"• {when} {a.get('customer')} — {a.get('outcome')} "
+                f"(attempt {a.get('attempt')}) via {a.get('provider')}"
+                + (f" — {a.get('reason')}" if a.get("reason") else ""))
+        return "\n".join(lines)
     return _USAGE
 
 

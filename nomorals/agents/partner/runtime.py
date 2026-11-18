@@ -3706,6 +3706,17 @@ class PartnerRuntime(
                     ensure_finance_jobs(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("finance jobs not registered: %s", exc)
+                # Commerce dunning (register §8 L969): one durable
+                # "dunning tick" job (daily 09:00) driving retries for
+                # failed subscription charges — the 1/3/7-day schedule,
+                # then past_due. Idempotent by name; a no-op when no
+                # subscription is due. A missing provider key is a
+                # named skip in the dunning journal, never a charge.
+                try:
+                    from ...commerce.dunning import ensure_dunning_job
+                    ensure_dunning_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("dunning job not registered: %s", exc)
                 # Scheduled backups (gapfix 2): the encrypted offsite
                 # 3-2-1 pipeline — daily generation at 02:00 + monthly
                 # restore drill on the 1st at 03:00. Idempotent by name;

@@ -11,7 +11,8 @@ Devon's home; in-memory when no path is given)::
      "tickets": [<Ticket.to_dict()>, ...],
      "shipments": [{"id", "carrier", "waybill", "order_ref", ...}, ...],
      "journal": [<JournalEntry.to_dict()>, ...],
-     "unreconciled": [{"reference", "amount_minor", "reason", "ts"}, ...]}
+     "unreconciled": [{"reference", "amount_minor", "reason", "ts"}, ...],
+     "dunning": [<dunning-attempt row>, ...]}
 
 The persistence shape mirrors
 :class:`nomorals.shows.store.ShowStore`: tolerant load (a missing file
@@ -54,7 +55,7 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 _SECTIONS: tuple[str, ...] = (
     "products", "payments", "invoices", "subscriptions", "disputes",
-    "tickets", "shipments", "journal", "unreconciled",
+    "tickets", "shipments", "journal", "unreconciled", "dunning",
 )
 
 
@@ -152,11 +153,17 @@ class CommerceStore:
 
     # ── payments ───────────────────────────────────────────────────
 
-    def gateway(self, *, http: Any = None, keys: Any = None) -> Any:
-        """A :class:`PaymentGateway` rehydrated from the stored records."""
+    def gateway(self, *, http: Any = None, keys: Any = None,
+                now: Any = None) -> Any:
+        """A :class:`PaymentGateway` rehydrated from the stored records.
+
+        ``now`` (a ``() -> float`` clock) is forwarded to the gateway —
+        the dunning driver runs its ticks against an injected clock in
+        tests; production passes none and gets ``time.time``.
+        """
         from .payments import Dispute, Invoice, Payment, PaymentGateway, Subscription
 
-        gw = PaymentGateway(keys=keys, http=http)
+        gw = PaymentGateway(keys=keys, http=http, now=now)
         gw.payments = [Payment(**row) for row in self._rows("payments")]
         gw.invoices = [Invoice(**row) for row in self._rows("invoices")]
         gw.subscriptions = [Subscription(**row)
@@ -175,6 +182,36 @@ class CommerceStore:
             self._data["disputes"] = [d.to_dict()
                                       for d in gateway.disputes]
             self._save()
+
+    # ── dunning journal ──────────────────────────────────────────────
+
+    def record_dunning_attempt(self, row: dict[str, Any]) -> dict[str, Any]:
+        """Append one dunning-attempt row (outcome per subscription).
+
+        A row needs an ``id`` (the dunning section's only required key);
+        the driver writes ``subscription_id``, ``customer``, ``provider``,
+        ``amount_minor``, ``currency``, ``outcome`` (``charged`` |
+        ``failed_retry`` | ``past_due`` | ``skipped_no_key`` |
+        ``skipped_bad_record``), ``attempt``, ``reference``, ``reason``
+        and ``ts``. The journal is the money trail: a retry is never
+        silent, a skipped subscription is never dropped.
+        """
+        entry = dict(row)
+        if not str(entry.get("id") or "").strip():
+            raise ValueError("dunning attempt needs an id")
+        with self._lock:
+            rows = [r for r in self._data["dunning"]
+                    if str(r.get("id")) != str(entry["id"])]
+            rows.append(entry)
+            self._data["dunning"] = rows
+            self._save()
+            return dict(entry)
+
+    def list_dunning_attempts(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Most recent dunning attempts first (default 50)."""
+        rows = self._rows("dunning")
+        rows.sort(key=lambda r: float(r.get("ts") or 0.0), reverse=True)
+        return rows[:max(1, int(limit))]
 
     # ── support ────────────────────────────────────────────────────
 
