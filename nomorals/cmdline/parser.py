@@ -57,6 +57,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "evidence": [],
     "devask": [],
     "explain": [],
+    "regex": [],
     "consensus": [],
     "papergraph": [],
     "scholar": [],
@@ -3749,6 +3750,43 @@ def _parser() -> argparse.ArgumentParser:
                            help="allow tldr page fetches")
     explain_p.add_argument("--json", action="store_true",
                            help="Output as JSON")
+    regex_p = sub.add_parser(
+        "regex", aliases=CLI_ALIASES["regex"],
+        help="regex workbench — test, explain and debug patterns, generate code that is executed to prove it",
+        description=("nm regex '<pattern>' --text '<text>' [--flavour python]\\\\n"
+                     "nm regex gen '<description>'\\\\n"
+                     "nm regex debug '<pattern>' --text '<text>'\\\\n"
+                     "nm regex sub '<pattern>' --replacement '<replacement>' --text '<text>'\\\\n"
+                     "nm regex code <id> <lang>\\\\n"
+                     "nm regex list\\\\n"
+                     "nm regex show <id>\\\\n"
+                     "The regex-lab organ: the pattern is parsed by a "
+                     "real pattern parser (token tree + plain-English "
+                     "explanation), matched with groups, named groups "
+                     "and positions, traced with a step budget that "
+                     "catches catastrophic backtracking, and code is "
+                     "generated per language and EXECUTED to prove it "
+                     "reproduces the session's matches. A generated "
+                     "pattern is proved against positive and negative "
+                     "cases before it is printed. A pattern a flavour "
+                     "does not support is refused by name; a flavour "
+                     "with no engine here is labelled not verifiable, "
+                     "never simulated."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    regex_p.add_argument("regex_query", nargs="*", default=[],
+                         help="pattern, or gen|debug|sub|code|list|show …")
+    regex_p.add_argument("--text", action="append", default=[],
+                         help="sample text to test (repeatable)")
+    regex_p.add_argument("--flavour", default="python",
+                         help="regex flavour: python, javascript, go, "
+                              "rust, java, dotnet, pcre2")
+    regex_p.add_argument("--flags", default="",
+                         help="flags: i m s x a u")
+    regex_p.add_argument("--replacement", default="",
+                         help="replacement for the sub verb")
+    regex_p.add_argument("--json", action="store_true",
+                         help="Output as JSON")
 
     consensus_p = sub.add_parser(
         "consensus", aliases=CLI_ALIASES["consensus"],

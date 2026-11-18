@@ -418,7 +418,7 @@ class ChatRegistrationTests(unittest.TestCase):
         )
 
         self.assertIn("scholar", PUBLIC_COMMANDS)
-        self.assertEqual(276, len(PUBLIC_COMMANDS))
+        self.assertEqual(278, len(PUBLIC_COMMANDS))
         self.assertIn("scholar", CONTROL_COMMANDS)
         self.assertIn("scholar", COMMAND_DETAILS)
         self.assertTrue(COMMAND_DETAILS["scholar"].get("what"))

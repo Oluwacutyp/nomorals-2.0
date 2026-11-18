@@ -5911,6 +5911,158 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"explain failed: {exc}"
 
+    def _control_regex(self, tail: str) -> str:
+        """Regex workbench (Regex101 core).
+
+        Public. /regex <pattern> [:: <text>] tests the pattern and
+        explains every token in plain English from a real pattern
+        parser — never an LLM guess. /regex gen <description>
+        generates a pattern, then PROVES it against positive and
+        negative cases before answering (a pattern that fails its
+        proof is never presented as working). /regex debug <pattern>
+        :: <text> traces the match attempt with a step budget, so a
+        catastrophic-backtracking pattern is caught and reported,
+        never hung on. /regex sub <pattern> :: <replacement> ::
+        <text> tests substitution. /regex code <id> <lang> generates
+        code from a stored session and EXECUTES it to prove it
+        reproduces the session's matches. /regex list shows past
+        sessions; /regex show <id> re-renders one. A pattern a
+        flavour does not support is refused by name; a flavour with
+        no engine here is labelled not verifiable, never simulated.
+        Never raises: bad input returns usage.
+        """
+        from ...tools.regex_lab import (
+            format_regex_reply,
+            generate_code,
+            open_regex_store,
+            run_regex_session,
+            verify_code,
+        )
+
+        tail = (tail or "").strip()
+        usage = ("usage: /regex <pattern> [:: <text>] | gen "
+                 "<description> | debug <pattern> :: <text> | sub "
+                 "<pattern> :: <replacement> :: <text> | code <id> "
+                 "<lang> | list | show <id>")
+        if not tail:
+            return usage
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — default home then
+                home = None
+            store = open_regex_store(home)
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb in {"help", "--help"}:
+                return usage
+            if verb == "list":
+                sessions = store.list()
+                if not sessions:
+                    return "no regex sessions yet — test a pattern " \
+                           "with /regex <pattern> :: <text>"
+                lines = ["regex sessions:"]
+                for row in sessions[:10]:
+                    lines.append(
+                        f"  {row['session_id']} — "
+                        f"{row['pattern']} ({row['flavour']})")
+                return "\n".join(lines)
+            if verb == "show":
+                if not rest:
+                    return "usage: /regex show <id>"
+                row = store.get(rest)
+                if row is None:
+                    return f"no regex session “{rest}”"
+                return format_regex_reply({**row, "ok": True})
+            context = getattr(self, "context", None)
+            tools = getattr(context, "tools", None) if context else None
+            run_fn = None
+            if tools is not None:
+                def _run(code: str, lang: str):
+                    try:
+                        outcome = tools.call(
+                            "run_code", action="run", code=code,
+                            lang=lang, timeout=30.0)
+                    except Exception:  # noqa: BLE001 — unverified
+                        return None
+                    if not getattr(outcome, "ok", False):
+                        return None
+                    value = getattr(outcome, "value", None)
+                    return value if isinstance(value, dict) else None
+
+                run_fn = _run
+            llm_fn = None
+            if context is not None:
+                from ...tools.paper_reader import _llm_from_context
+
+                llm_fn = _llm_from_context(context)
+            if verb == "gen":
+                if not rest:
+                    return "usage: /regex gen <description>"
+                record = run_regex_session(
+                    home, description=rest, llm_fn=llm_fn,
+                    run_fn=run_fn, store=store)
+                return format_regex_reply(record)
+            if verb == "code":
+                fields = rest.split()
+                if len(fields) < 2:
+                    return "usage: /regex code <id> <lang>"
+                row = store.get(fields[0])
+                if row is None:
+                    return f"no regex session “{fields[0]}”"
+                snippet = generate_code(
+                    str(row.get("pattern", "")),
+                    str(row.get("flavour", "python")), fields[1],
+                    texts=[str(r.get("text", "")) for r in
+                           (row.get("matches") or {}).get(
+                               "results", [])])
+                if not snippet.get("ok"):
+                    return ("code generation failed: " +
+                            str(snippet.get("error") or ""))
+                record = dict(row)
+                record["code"] = snippet
+                expected = (row.get("matches") or {}).get(
+                    "results", [])
+                record["code_verification"] = verify_code(
+                    snippet["code"], fields[1], expected,
+                    run_fn=run_fn)
+                return format_regex_reply(record)
+            if verb in {"debug", "sub"}:
+                segments = [s.strip() for s in rest.split("::")]
+                if verb == "debug":
+                    if len(segments) < 2 or not segments[0]:
+                        return "usage: /regex debug <pattern> :: " \
+                               "<text>"
+                    record = run_regex_session(
+                        home, pattern=segments[0],
+                        trace_text=segments[1], run_fn=run_fn,
+                        store=store)
+                    return format_regex_reply(record)
+                if len(segments) < 3 or not segments[0]:
+                    return "usage: /regex sub <pattern> :: " \
+                           "<replacement> :: <text>"
+                record = run_regex_session(
+                    home, pattern=segments[0],
+                    substitution=segments[1],
+                    texts=[segments[2]], run_fn=run_fn,
+                    store=store)
+                return format_regex_reply(record)
+            segments = [s.strip() for s in tail.split("::")]
+            pattern = segments[0]
+            if not pattern:
+                return usage
+            texts = [ln for ln in segments[1].splitlines()
+                     if ln.strip()] if len(segments) > 1 else []
+            record = run_regex_session(
+                home, pattern=pattern, texts=texts, run_fn=run_fn,
+                store=store)
+            return format_regex_reply(record)
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"regex failed: {exc}"
+
+
     def _control_consensus(self, tail: str) -> str:
         """What the literature agrees on (Consensus meter).
 
