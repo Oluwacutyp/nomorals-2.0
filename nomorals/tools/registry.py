@@ -615,7 +615,7 @@ class ToolRegistry:
             "music", "studio",
             "network", "osint", "osint_people", "parsers",
             "prompt_compiler",
-            "proxy", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
+            "proxy", "proxy_rotation", "proxylab", "pytest_runner", "sandbox_code", "scriptgen",
             "trace_view",
             "sceneintel", "directed", "seer", "shell", "side_chats", "ssh_socks", "traindata", "translate", "vision", "visuals", "voice_live", "web", "weather",
             "security",

@@ -5686,7 +5686,7 @@ LIST_ONELINERS: dict[str, str] = {
     "notion": "Notion databases, rows, and page creation",
     "gcal": "Google Calendar agenda and event creation",
     "trello": "Trello boards, lists, cards — create cards",
-    "proxy": "proxy lab: status|test|set|scrape|refresh|health|pool|pick|affinity|rotate|schedule|ssh",
+    "proxy": "proxy lab: status|test|set|scrape|refresh|health|pool|pick|affinity|rotate|rotate-probe|rotate-pick|schedule|ssh",
     "record": "capture actions into a macro",
     "macro": "replay a recorded macro",
     "file": "send a file to any live chat",

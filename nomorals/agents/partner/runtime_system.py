@@ -643,6 +643,41 @@ class RuntimeSystemMixin:
                         f"(fastest: {v.get('fastest', '?')})")
             return (f"🧱 clean file ready ({v['count']} proxies): {v['path']} "
                     f"\n(plain chat — no file sending on this adapter)")
+        if verb == "rotate-probe":
+            # /proxy rotate-probe — score the owner's own proxy list
+            # (the rotation pool), not the lab's free pool.
+            outcome = self.context.tools.call("proxy_rotate_probe")
+            if not outcome.ok:
+                return (f"rotate-probe failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            if v.get("note"):
+                return v["note"]
+            lines = [f"🔄 owner pool: {v['healthy']} healthy, "
+                     f"{v['quarantined']} quarantined ({v['size']} known)"]
+            for r in v.get("rows", []):
+                flag = ("⏳" if r["quarantined_for"]
+                        else ("✅" if r["ok"] else "❌"))
+                lines.append(
+                    f"  {flag} {r['proxy']} {r['latency_ms']}ms "
+                    f"streak={r['fail_streak']} uses={r['uses']}"
+                    + (f" (cooling {r['quarantined_for']}s)"
+                       if r["quarantined_for"] else ""))
+            return "\n".join(lines)
+        if verb == "rotate-pick":
+            # /proxy rotate-pick — next owner proxy from the scored
+            # pool; apply it with /proxy set <url>. The pool answers
+            # "which next"; ProxyManager stays the "which is active"
+            # authority, so the pick never applies itself.
+            outcome = self.context.tools.call("proxy_rotate_pick")
+            if not outcome.ok:
+                return (f"rotate-pick failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            if v.get("proxy"):
+                return (f"🎯 {v['proxy']}\n"
+                        f"  use: /proxy set {v['proxy']}")
+            return "⚠ " + v.get("note", "no proxy available — direct")
         if verb == "rotate":
             sub = parts[1].lower() if len(parts) > 1 else "status"
             if sub in {"on", "start"}:
@@ -674,7 +709,7 @@ class RuntimeSystemMixin:
         return ("usage: /proxy status | list | test [url] | set <url> | clear |"
                 " scrape | refresh | health | pool [scheme] | pick [udp] "
                 "[country=XX] [anon=elite] [target=url] | file | affinity "
-                "bind|lookup|release|list | rotate on [strategy] | schedule "
+                "bind|lookup|release|list | rotate on [strategy] | rotate-probe | rotate-pick | schedule "
                 "on [min] | ssh start <name> <host> <user>")
 
     def _control_toolhub(self, tail: str, chat_key: str = "") -> Any:
