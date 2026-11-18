@@ -289,7 +289,14 @@ class TestStorageState:
 class TestMailTmProvider:
     def test_registered_first_in_cascade(self):
         assert PROVIDERS["mailtm"] is MailTmProvider
-        assert CASCADE_PROVIDERS[0] == "mailtm"
+        # Own-domain rung first when configured (10MinuteMail #50):
+        # the owner's own domain is not a known disposable, so signup
+        # systems don't blocklist it — and its probe() is False when
+        # unconfigured, so mail.tm stays first for everyone without
+        # a domain. mail.tm remains first among the public providers.
+        assert CASCADE_PROVIDERS[0] == "owndomain"
+        public = [p for p in CASCADE_PROVIDERS if p != "owndomain"]
+        assert public[0] == "mailtm"
 
     def test_grab_flow_mocked(self, monkeypatch):
         import urllib.request

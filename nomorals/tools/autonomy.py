@@ -928,6 +928,26 @@ def register(registry: Any) -> None:
                     "error": f"burn note tick failed: {exc}"}
 
     @registry.register(
+        "__own_domain_mail_tick__",
+        description="Run one own-domain mail sweep (10MinuteMail "
+        "build): delete expired own-domain mailboxes and their "
+        "messages from the durable store — deleted, not archived — "
+        "and report live counts. Scheduler-internal; runs every 5 "
+        "minutes. Routine and silent — a run with nothing expired "
+        "deletes nothing, and a live mailbox is never touched.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _own_domain_mail_tick_tool() -> dict[str, Any]:
+        from ..accounts.temp_mail import run_own_domain_mail_tick_once
+
+        try:
+            return run_own_domain_mail_tick_once(context=_context)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"own-domain mail tick failed: {exc}"}
+
+    @registry.register(
         "__share_tick__",
         description="Run one share sweep (File.io build): delete "
         "expired and exhausted file shares from the durable store — "

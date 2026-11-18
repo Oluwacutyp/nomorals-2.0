@@ -3705,6 +3705,23 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("burn note job not registered: %s",
                                  exc)
+                # Accounts: the own-domain mail sweep (every 5 min —
+                # expired own-domain mailboxes are deleted, not
+                # archived; a live mailbox is never touched) and the
+                # catch-all SMTP listener when a domain is configured
+                # (a no-op that logs when unconfigured). Idempotent
+                # by name; a stale spec is replaced.
+                try:
+                    from ...accounts.temp_mail import (
+                        ensure_own_domain_mail_job,
+                        start_own_domain_listener,
+                    )
+
+                    ensure_own_domain_mail_job(self._scheduler)
+                    start_own_domain_listener()
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("own-domain mail not registered: %s",
+                                 exc)
                 # Storage: the share sweep (hourly — expired and
                 # exhausted shares are deleted, record and blob ref
                 # both; a live share is never touched). Idempotent

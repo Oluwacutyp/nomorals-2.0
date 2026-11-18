@@ -31,6 +31,37 @@ _TEMP_SMS_TTL_S = 7200.0
 _MAX_BODY_CHARS = 2000
 
 
+def _tempmail_dies_in(expires_at: float) -> str:
+    """Human countdown to an expires_at: 'in 9m 12s' / '9m ago'."""
+    delta = expires_at - time.time()
+    past = delta < 0
+    total = max(0, int(abs(delta)))
+    mins, secs = divmod(total, 60)
+    if mins >= 60:
+        hours, mins = divmod(mins, 60)
+        text = f"{hours}h {mins}m"
+    elif mins:
+        text = f"{mins}m {secs}s"
+    else:
+        text = f"{secs}s"
+    return f"{text} ago" if past else f"in {text}"
+
+
+def _own_domain_live_expires(address: str) -> float | None:
+    """Live expires_at for an own-domain address from the store, or
+    None when the mailbox is gone or the rung is unconfigured. The
+    store is authoritative — the per-user record can outlive the
+    mailbox (its KV TTL is 24h), so a reaper-deleted inbox must read
+    as gone here, never as alive. Never raises."""
+    try:
+        from ...accounts import temp_mail as _tm
+
+        box = _tm.get_provider("owndomain")._store_for().mailbox(address)
+    except Exception:  # noqa: BLE001 - store failure reads as gone
+        return None
+    return float(box["expires_at"]) if box else None
+
+
 def _attach_approval_receipt(result: dict[str, Any],
                              approver: Any) -> None:
     """Attach a run's consequential verdicts to its result IN PLACE.
@@ -120,7 +151,7 @@ class RuntimeReachMixin:
     # ── temp mail: /tempmail /checkmail ─────────────────────────────────
     def _control_tempmail(self, tail: str, *, chat_key: str = "",
                           message: Any = None) -> str:
-        """Temp inbox: /tempmail new | status | forget (bare shows it)."""
+        """Temp inbox: /tempmail new | status | extend | forget (bare shows it)."""
         from ...accounts import temp_mail as _tm
 
         verb = (tail or "").strip().split(None, 1)[0].lower() \
@@ -133,14 +164,49 @@ class RuntimeReachMixin:
             if not self._temp_save("mail", message, chat_key, {
                     "address": addr.address, "login": addr.login,
                     "domain": addr.domain, "provider": addr.provider,
-                    "token": addr.token}, _TEMP_MAIL_TTL_S):
+                    "token": addr.token,
+                    "expires_at": addr.expires_at}, _TEMP_MAIL_TTL_S):
                 return "temp-mail storage is off in this session."
+            if addr.provider == "owndomain" and addr.expires_at:
+                return (f"temp inbox: {addr.address} (via owndomain — "
+                        "your own domain)\nsend mail to it, then "
+                        "/checkmail to read it. "
+                        f"It dies {_tempmail_dies_in(addr.expires_at)}; "
+                        "/tempmail extend adds 10 more · /tempmail "
+                        "forget drops it now.")
             return (f"temp inbox: {addr.address} (via {addr.provider})\n"
                     "send mail to it, then /checkmail to read it. "
                     "It expires in 24h; /tempmail forget drops it now.")
         if verb == "forget":
             self._temp_forget("mail", message, chat_key)
             return "temp inbox forgotten."
+        if verb == "extend":
+            rec = self._temp_load("mail", message, chat_key)
+            if rec is None:
+                return "no temp inbox here — /tempmail new makes one."
+            if str(rec.get("provider", "")) != "owndomain":
+                return ("only own-domain inboxes extend — this one is "
+                        f"via {rec.get('provider')}.")
+            addr = _tm.TempAddress(
+                address=str(rec.get("address", "")),
+                login=str(rec.get("login", "")),
+                domain=str(rec.get("domain", "")),
+                provider="owndomain",
+                token=str(rec.get("token", "")),
+                expires_at=float(rec.get("expires_at") or 0))
+            try:
+                new_expires = _tm.get_provider("owndomain") \
+                    .extend_address(addr)
+            except Exception as exc:  # noqa: BLE001
+                return f"couldn't extend that inbox ({exc})"
+            if not new_expires:
+                return ("that inbox is already gone — /tempmail new "
+                        "makes a fresh one.")
+            rec["expires_at"] = new_expires
+            self._temp_save("mail", message, chat_key, rec,
+                            _TEMP_MAIL_TTL_S)
+            return (f"extended — {addr.address} now dies "
+                    f"{_tempmail_dies_in(new_expires)}.")
         if verb in ("status", ""):
             rec = self._temp_load("mail", message, chat_key)
             if rec is None:
@@ -148,13 +214,35 @@ class RuntimeReachMixin:
                     return "no temp inbox here — /tempmail new makes one."
                 return ("usage: /tempmail new — get a temp inbox\n"
                         "       /checkmail — read it\n"
-                        "       /tempmail status | forget")
+                        "       /tempmail status | extend | forget")
+            expires_at = float(rec.get("expires_at") or 0)
+            if str(rec.get("provider", "")) == "owndomain":
+                live = _own_domain_live_expires(
+                    str(rec.get("address", "")))
+                if live is None:
+                    if expires_at:
+                        return ("that inbox is gone — it died "
+                                f"{_tempmail_dies_in(expires_at)} · "
+                                "/tempmail new makes a fresh one.")
+                    return ("that inbox is gone — /tempmail new makes "
+                            "a fresh one.")
+                expires_at = live
+            if expires_at:
+                if expires_at <= time.time():
+                    return ("that inbox is gone — it died "
+                            f"{_tempmail_dies_in(expires_at)} · "
+                            "/tempmail new makes a fresh one.")
+                return (f"temp inbox: {rec.get('address')} "
+                        f"(via {rec.get('provider')})\n"
+                        f"dies {_tempmail_dies_in(expires_at)} · "
+                        "/checkmail to read it · /tempmail extend adds "
+                        "10 minutes · /tempmail new for a fresh one.")
             return (f"temp inbox: {rec.get('address')} "
                     f"(via {rec.get('provider')})\n"
                     "/checkmail to read it · /tempmail new for a fresh one.")
         return ("usage: /tempmail new — get a temp inbox\n"
                 "       /checkmail — read it\n"
-                "       /tempmail status | forget")
+                "       /tempmail status | extend | forget")
 
     def _control_checkmail(self, tail: str, *, chat_key: str = "",
                            message: Any = None) -> str:
@@ -164,6 +252,21 @@ class RuntimeReachMixin:
         rec = self._temp_load("mail", message, chat_key)
         if rec is None:
             return "no temp inbox here (it may have expired) — /tempmail new makes one."
+        expires_at = float(rec.get("expires_at") or 0)
+        if str(rec.get("provider", "")) == "owndomain":
+            live = _own_domain_live_expires(str(rec.get("address", "")))
+            if live is None:
+                if expires_at:
+                    return ("that inbox died "
+                            f"{_tempmail_dies_in(expires_at)} — "
+                            "/tempmail new makes a fresh one.")
+                return ("that inbox is gone — /tempmail new makes a "
+                        "fresh one.")
+            expires_at = live
+        if expires_at and expires_at <= time.time():
+            return ("that inbox died "
+                    f"{_tempmail_dies_in(expires_at)} — /tempmail new "
+                    "makes a fresh one.")
         addr = _tm.TempAddress(
             address=str(rec.get("address", "")),
             login=str(rec.get("login", "")),

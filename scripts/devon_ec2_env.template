@@ -682,6 +682,16 @@
 # Config key read by Devon code.
 # NM_TELEGRAM_BOT_TOKEN=
 # Config key read by Devon code.
+# NM_TEMPMAIL_BIND=0.0.0.0
+# Config key read by Devon code.
+# NM_TEMPMAIL_DB=
+# Config key read by Devon code.
+# NM_TEMPMAIL_DOMAIN=
+# Config key read by Devon code.
+# NM_TEMPMAIL_SMTP_PORT=25
+# Config key read by Devon code.
+# NM_TEMPMAIL_TTL_S=600
+# Config key read by Devon code.
 # NM_TERMUX_NOTIFY=
 # Config key read by Devon code.
 # NM_TRAINING_BASE_MODEL=

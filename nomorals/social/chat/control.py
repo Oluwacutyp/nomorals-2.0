@@ -1137,7 +1137,7 @@ _HELP_TEXT = "\n".join(
         "  /trial send <platform>                  send it via WhatsApp/Telegram",
         "  /trial list | /trial rm <platform>",
         "  — temp mail & sms (per-user inboxes: yours alone, never another user's) —",
-        "  /tempmail new | status | forget         get a temp inbox (mail.tm → 1secmail → guerrilla)",
+        "  /tempmail new | status | extend | forget  get a temp inbox (own domain → mail.tm → 1secmail → guerrilla)",
         "  /checkmail [read <n> | code | forget]    read your temp inbox",
         "  /vnumber new [country] | status | forget get a temp number for SMS codes",
         "  /checksms [code | forget]               read SMS on your temp number",
@@ -5759,7 +5759,7 @@ LIST_ONELINERS: dict[str, str] = {
     # reachability wave — one-liners for the nine new commands (these
     # feed COMMAND_DETAILS via the auto-fill loop) plus the previously
     # weak/missing ones (alert/balances/goal/insights had 'run /x.' text).
-    "tempmail": "temp inbox: /tempmail new gets an address (mail.tm → 1secmail → guerrilla), per-user",
+    "tempmail": "temp inbox: /tempmail new gets an address (own domain → mail.tm → 1secmail → guerrilla), per-user",
     "checkmail": "read your temp inbox: /checkmail [read <n> | code | forget]",
     "vnumber": "temp number: /vnumber new [country] gets a virtual number for SMS codes, per-user",
     "checksms": "read SMS on your temp number: /checksms [code | forget]",
