@@ -133,6 +133,22 @@ BASELINE: dict[str, int] = {
     "tests/test_games_quit_hygiene.py": 3,
     "tests/test_games_seasons.py": 2,
     "tests/test_games_sweep.py": 1,
+    # Grandfathered (batch H40): 8 reads stay on the real clock — the
+    # run seeds in PickTopicsTests (3 tests) and TickTests stamp a run
+    # "10 seconds ago" that pick_topics judges on its own real clock
+    # (research_loop.py:303 takes now = time.time() with no now seam,
+    # and topic_ages compares started_at against it). A frozen MIDDAY
+    # seed reads ~35 days old on the real clock, so "just covered"
+    # (eligibility at the floor, ranked last) becomes "fully eligible"
+    # and the curve ordering the tests pin breaks. Threading a now
+    # seam through pick_topics/tick would be a production API change
+    # in a hygiene lane for a non-regression (H21 precedent). The
+    # file's other 16 reads are frozen to MIDDAY_TS: gap/watch seeds
+    # (harvest ignores ts except ORDER BY), kg-stale/proposal seeds
+    # (the harvesters take an explicit now, passed as MIDDAY_TS),
+    # the ages-test now (topic_ages takes now=), and the ledger seed
+    # (first_seen_at is tiebreak data only).
+    "tests/test_gapfix_topic_engine.py": 8,
     "tests/test_gateway_inbound.py": 1,
     "tests/test_gifting.py": 1,
     "tests/test_goals_sweep.py": 18,

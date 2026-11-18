@@ -28,6 +28,7 @@ except ImportError:  # failing-first: module not built yet
 
 from nomorals.agents import research_loop as rl
 from nomorals.storage.db import Database
+from tests.frozen_clock import MIDDAY_TS
 
 
 def _db():
@@ -140,7 +141,7 @@ class CurveTests(EngineRequired):
 class AgesTests(EngineRequired):
     def test_ages_from_run_history(self):
         ctx = _ctx()
-        now = time.time()
+        now = MIDDAY_TS
         rl.record_run(ctx, {"started_at": now - 2 * 86400,
                             "finished_at": now, "topics": ["alpha", "beta"]})
         rl.record_run(ctx, {"started_at": now - 10 * 86400,
@@ -161,7 +162,7 @@ class HarvestGapTests(EngineRequired):
         ctx.db.execute(
             "INSERT INTO knowledge_gaps (question, context, ts, status,"
             " priority) VALUES (?, ?, ?, 'open', ?)",
-            ("why do agents forget long conversations", "memory", time.time(),
+            ("why do agents forget long conversations", "memory", MIDDAY_TS,
              0.8))
         got = te.harvest_gaps(ctx)
         self.assertEqual(len(got), 1)
@@ -177,7 +178,7 @@ class HarvestGapTests(EngineRequired):
         ctx.db.execute(
             "INSERT INTO knowledge_gaps (question, ts, status, priority)"
             " VALUES (?, ?, 'resolved', ?)",
-            ("done question", time.time(), 0.9))
+            ("done question", MIDDAY_TS, 0.9))
         self.assertEqual(te.harvest_gaps(ctx), [])
 
     def test_missing_table_is_empty_not_a_crash(self):
@@ -191,13 +192,13 @@ class HarvestKgStaleTests(EngineRequired):
             " VALUES (?, ?, 'claim', ?, ?)",
             (cid, "c", json.dumps({"claim": "some claim text",
                                    "query": query, "status": status}),
-             time.time() - age_days * 86400.0))
+             MIDDAY_TS - age_days * 86400.0))
 
     def test_old_active_claim_becomes_recheck(self):
         ctx = _ctx()
         self._claim(ctx, "claim:old", "stale distributed caching wisdom",
                     "active", 40)
-        got = te.harvest_kg_stale(ctx)
+        got = te.harvest_kg_stale(ctx, now=MIDDAY_TS)
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["text"], "stale distributed caching wisdom")
         self.assertEqual(got[0]["source"], "kg_stale")
@@ -205,13 +206,13 @@ class HarvestKgStaleTests(EngineRequired):
     def test_fresh_claim_not_stale(self):
         ctx = _ctx()
         self._claim(ctx, "claim:new", "fresh caching wisdom", "active", 1)
-        self.assertEqual(te.harvest_kg_stale(ctx), [])
+        self.assertEqual(te.harvest_kg_stale(ctx, now=MIDDAY_TS), [])
 
     def test_contradicted_claim_left_to_the_loop(self):
         ctx = _ctx()
         self._claim(ctx, "claim:bad", "contradicted wisdom", "contradicted",
                     40)
-        self.assertEqual(te.harvest_kg_stale(ctx), [])
+        self.assertEqual(te.harvest_kg_stale(ctx, now=MIDDAY_TS), [])
 
 
 class HarvestWatchTests(EngineRequired):
@@ -223,7 +224,7 @@ class HarvestWatchTests(EngineRequired):
             " created_at) VALUES (?, ?, ?, 1, ?)",
             ("w_1", "money", json.dumps(["bitcoin etf flows",
                                          "nigeria fintech funding"]),
-             time.time()))
+             MIDDAY_TS))
         got = te.harvest_watches(ctx)
         self.assertEqual([g["text"] for g in got],
                          ["bitcoin etf flows", "nigeria fintech funding"])
@@ -235,7 +236,7 @@ class HarvestWatchTests(EngineRequired):
         ctx.db.execute(
             "INSERT INTO research_watches (id, topic, queries, enabled,"
             " created_at) VALUES (?, ?, ?, 0, ?)",
-            ("w_1", "money", json.dumps(["bitcoin etf flows"]), time.time()))
+            ("w_1", "money", json.dumps(["bitcoin etf flows"]), MIDDAY_TS))
         self.assertEqual(te.harvest_watches(ctx), [])
 
 
@@ -280,13 +281,13 @@ class HarvestProposalTests(EngineRequired):
         ctx.db.execute(
             "INSERT INTO upgrade_proposals (id, title, status, created_at)"
             " VALUES (?, ?, ?, ?)",
-            (pid, title, status, time.time() - age_days * 86400.0))
+            (pid, title, status, MIDDAY_TS - age_days * 86400.0))
 
     def test_old_denied_proposal_becomes_followup(self):
         ctx = _ctx()
         self._proposal(ctx, "upg_1", "cache the briefing ranker", "denied",
                        10)
-        got = te.harvest_proposals(ctx)
+        got = te.harvest_proposals(ctx, now=MIDDAY_TS)
         self.assertEqual(len(got), 1)
         self.assertEqual(got[0]["text"], "cache the briefing ranker")
         self.assertEqual(got[0]["source"], "proposal")
@@ -295,13 +296,13 @@ class HarvestProposalTests(EngineRequired):
         ctx = _ctx()
         self._proposal(ctx, "upg_1", "cache the briefing ranker", "proposed",
                        1)
-        self.assertEqual(te.harvest_proposals(ctx), [])
+        self.assertEqual(te.harvest_proposals(ctx, now=MIDDAY_TS), [])
 
     def test_approved_proposal_never_a_followup(self):
         ctx = _ctx()
         self._proposal(ctx, "upg_1", "cache the briefing ranker", "approved",
                        30)
-        self.assertEqual(te.harvest_proposals(ctx), [])
+        self.assertEqual(te.harvest_proposals(ctx, now=MIDDAY_TS), [])
 
 
 class SuggestTests(EngineRequired):
@@ -312,7 +313,7 @@ class SuggestTests(EngineRequired):
                   "why do agents forget long conversations?"):
             ctx.db.execute(
                 "INSERT INTO knowledge_gaps (question, ts, status, priority)"
-                " VALUES (?, ?, 'open', ?)", (q, time.time(), 0.8))
+                " VALUES (?, ?, 'open', ?)", (q, MIDDAY_TS, 0.8))
         engine = te.TopicEngine(ctx)
         got = engine.suggest(limit=10)
         self.assertEqual(len(got), 1)
@@ -324,11 +325,11 @@ class SuggestTests(EngineRequired):
         ctx.db.execute(
             "INSERT INTO knowledge_gaps (question, ts, status, priority)"
             " VALUES (?, ?, 'open', ?)",
-            ("low priority question here", time.time(), 0.2))
+            ("low priority question here", MIDDAY_TS, 0.2))
         ctx.db.execute(
             "INSERT INTO knowledge_gaps (question, ts, status, priority)"
             " VALUES (?, ?, 'open', ?)",
-            ("high priority question here", time.time(), 0.9))
+            ("high priority question here", MIDDAY_TS, 0.9))
         engine = te.TopicEngine(ctx)
         got = engine.suggest(limit=10)
         self.assertEqual(got, ["high priority question here",
@@ -344,7 +345,7 @@ class SuggestTests(EngineRequired):
         for q in ("first question here", "second question here"):
             ctx.db.execute(
                 "INSERT INTO knowledge_gaps (question, ts, status, priority)"
-                " VALUES (?, ?, 'open', ?)", (q, time.time(), 0.8))
+                " VALUES (?, ?, 'open', ?)", (q, MIDDAY_TS, 0.8))
         engine = te.TopicEngine(ctx)
         engine.suggest(limit=10)
         engine.note_picked(["first question here"])
@@ -355,7 +356,7 @@ class SuggestTests(EngineRequired):
     def test_ledger_is_bounded(self):
         ctx = _ctx()
         engine = te.TopicEngine(ctx)
-        now = time.time()
+        now = MIDDAY_TS
         seed = [{"text": f"topic number {i} here", "source": "gap",
                  "provenance": f"knowledge_gap#{i}", "priority": 0.5,
                  "first_seen_at": now, "last_suggested_at": 0.0,
@@ -370,7 +371,7 @@ class SuggestTests(EngineRequired):
         ctx.db.execute(
             "INSERT INTO knowledge_gaps (question, ts, status, priority)"
             " VALUES (?, ?, 'open', ?)",
-            ("a gap question here", time.time(), 0.8))
+            ("a gap question here", MIDDAY_TS, 0.8))
         engine = te.TopicEngine(ctx)
         engine.suggest(limit=10)
         stats = engine.stats()
@@ -378,6 +379,15 @@ class SuggestTests(EngineRequired):
         self.assertEqual(stats["by_source"], {"gap": 1})
 
 
+# Grandfathered (batch H40): the run seeds below stay on the real
+# clock — pick_topics (research_loop.py:303) takes now =
+# time.time() internally with no now seam, and topic_ages judges
+# coverage against it. A frozen MIDDAY seed reads ~35 days old on
+# the real clock, so "just covered 10s ago" (eligibility at the
+# floor, ranked last) becomes "fully eligible" and the curve
+# ordering these tests pin breaks. Threading a now seam through
+# pick_topics would be a production API change in a hygiene lane
+# for a non-regression (H21 precedent). See the baseline entry.
 class PickTopicsTests(unittest.TestCase):
     def test_fresh_beats_just_covered_stale_goes_last(self):
         ctx = _ctx()
@@ -409,7 +419,7 @@ class PickTopicsTests(unittest.TestCase):
         ctx.db.execute(
             "INSERT INTO knowledge_gaps (question, ts, status, priority)"
             " VALUES (?, ?, 'open', ?)",
-            ("why do agents forget long conversations", time.time(), 0.8))
+            ("why do agents forget long conversations", MIDDAY_TS, 0.8))
         picked = rl.pick_topics(ctx, limit=2)
         self.assertEqual(picked[0], "why do agents forget long conversations")
         self.assertEqual(picked[1], "alpha")
@@ -421,6 +431,10 @@ class PickTopicsTests(unittest.TestCase):
 
 
 class TickTests(unittest.TestCase):
+    # Grandfathered (batch H40): same shape as PickTopicsTests —
+    # tick() drives pick_topics on the real clock, so the run
+    # must be "10 seconds ago" on that clock for the owner pool
+    # to read stale. See the baseline entry.
     def test_tick_draws_engine_topic_when_owner_pool_is_stale(self):
         self.assertIsNotNone(te, "topic_engine not built yet")
         ctx = _ctx()
@@ -433,7 +447,7 @@ class TickTests(unittest.TestCase):
         ctx.db.execute(
             "INSERT INTO knowledge_gaps (question, ts, status, priority)"
             " VALUES (?, ?, 'open', ?)",
-            ("why do agents forget long conversations", time.time(), 0.8))
+            ("why do agents forget long conversations", MIDDAY_TS, 0.8))
         fake_result = {
             "report": {"findings": [{"claim": "a"}]},
             "claims": [{"id": "c1"}],
@@ -463,7 +477,7 @@ class StatusTests(EngineRequired):
         ctx.db.execute(
             "INSERT INTO knowledge_gaps (question, ts, status, priority)"
             " VALUES (?, ?, 'open', ?)",
-            ("a gap question here", time.time(), 0.8))
+            ("a gap question here", MIDDAY_TS, 0.8))
         # Status reports the ledger, not the raw harvest pool — the
         # gap lands in the ledger when the engine suggests it.
         te.TopicEngine(ctx).suggest(limit=10)
