@@ -41,6 +41,7 @@ from typing import Any, Callable
 from ..core.logging_setup import get_logger
 from ..tools.media import probe
 from .cookies import BOT_COOKIE_HELP, YTDLP_INSTALL_HELP
+from .download_failures import is_url_dead, last_search_failure, normalize_url
 from .failures import record_failure
 
 _log = get_logger(__name__)
@@ -500,9 +501,10 @@ class SourceResolver:
 
         Runs EVERY downloadable text strategy (all of
         MUSIC_SEARCH_SOURCES that can return candidates) and returns
-        every usable candidate, deduped by (title, artist), best first.
-        One source failing never kills the others.  Never raises; empty
-        list on total failure.
+        every usable candidate, deduped by URL (per-source copies of
+        the same song survive — the fall-through needs them), best
+        first. One source failing never kills the others.  Never
+        raises; empty list on total failure.
         """
         out, _attempts = self.search_candidates_detailed(query, limit=limit)
         return out
@@ -607,6 +609,28 @@ class SourceResolver:
                         except Exception:  # noqa: BLE001
                             pass
             else:
+                # A source that answered [] may have failed instead of
+                # finding nothing: the scrape/API sources never raise,
+                # so a search fetch that timed out or 403'd leaves its
+                # failure in the download-failure memory (see
+                # sources.AudioSource._get). A fresh failure for this
+                # source is evidence — "failed: <kind>" + a registry
+                # failure — not a no-result. A clean [] stays a
+                # no-result, exactly as before.
+                search_kind = None
+                if name.endswith("-search"):
+                    try:
+                        search_kind = last_search_failure(
+                            name[:-len("-search")])
+                    except Exception:  # noqa: BLE001 — evidence is best-effort
+                        search_kind = None
+                if search_kind is not None:
+                    attempts.append(f"{name} — failed: {search_kind}")
+                    if reg is not None and desc is not None:
+                        self._record_failure(
+                            reg, desc, search_kind,
+                            time.perf_counter() - t0)
+                    continue
                 attempts.append(f"{name} — no results")
                 if reg is not None and desc is not None \
                         and not (name == "soundcloud-search"
@@ -614,7 +638,7 @@ class SourceResolver:
                     # An unwired SoundCloud adapter returning [] is a
                     # configuration fact, not source evidence.
                     self._record_no_result(reg, desc)
-        seen: set[tuple[str, str]] = set()
+        seen: set[str] = set()
         deduped: list[ResolvedAudio] = []
         for r in out:
             title = (r.title or "").strip()
@@ -627,12 +651,33 @@ class SourceResolver:
             # records that the source was tried.
             if r.downloadable is False:
                 continue
-            key = (title.lower(), (r.artist or "").strip().lower())
+            url = (r.path_or_url or "").strip()
+            if not url:
+                continue
+            # Dedupe by URL, not by (title, artist): when several
+            # sources hold the SAME song, only the first copy used
+            # to survive and the others were thrown away before the
+            # fall-through ever saw them (owner correction
+            # 2026-11-17). Per-source copies — different URLs for
+            # the same (title, artist) — now all survive, in chain
+            # order, so the fall-through walks SoundCloud → mdundo
+            # → bandcamp for the same track. The same URL from two
+            # sources is one file and still collapses to the first.
+            key = normalize_url(url)
             if key in seen:
                 continue
             seen.add(key)
             deduped.append(r)
-        return deduped[:limit], attempts
+        # Failure memory: a URL that failed to download recently is
+        # demoted behind every live candidate (stable — live order
+        # untouched). It stays in the list (the owner can still pick
+        # it; the fall-through skips it while it is dead), it just
+        # never leads the auto path again until its TTL expires.
+        live = [r for r in deduped
+                if not is_url_dead(r.path_or_url)]
+        dead = [r for r in deduped
+                if is_url_dead(r.path_or_url)]
+        return (live + dead)[:limit], attempts
 
     def _soundcloud_search_many(self, query: str,
                                 limit: int) -> list[ResolvedAudio]:

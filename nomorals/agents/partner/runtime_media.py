@@ -3626,6 +3626,12 @@ class RuntimeMediaMixin:
         track — never passed off as the original.
         """
         from ...media.cookies import BOT_COOKIE_SHORT_HELP, is_bot_detection_error
+        from ...media.download_failures import (
+            SOURCE_DEAD_KINDS,
+            classify_failure,
+            dead_kind_for_url,
+            record_url_failure,
+        )
 
         title = str(first_item.get("title") or "audio")
         items: list[dict[str, Any]] = []
@@ -3703,6 +3709,17 @@ class RuntimeMediaMixin:
                 -pair[0]))
             attempt_items = [it for _score, it in confident]
         outcomes: dict[str, str] = {}
+        # Failure memory (lane 26): source kinds that already failed
+        # on THIS song — a 403 / timeout / 5xx / site error on one
+        # copy means the source is hostile right now, so its other
+        # copies for the same song are skipped instead of burning the
+        # chain. dead_kind_reasons carries the kind that condemned
+        # each. skipped_dead flags that at least one candidate was
+        # skipped for a recorded failure (the preview-only line must
+        # not fire when full tracks were found but dead).
+        dead_kinds: set[str] = set()
+        dead_kind_reasons: dict[str, str] = {}
+        skipped_dead = False
         # Matches a source PRE-JUDGED undownloadable (never attempted:
         # its block was known before any byte moved).  When a
         # different source's copy is what lands, the delivery must
@@ -3721,6 +3738,7 @@ class RuntimeMediaMixin:
             kind = str(item.get("kind", ""))
             name = self._KIND_TO_ATTEMPT_NAME.get(
                 kind, f"{kind}-search" if kind else "unknown")
+            cand_path = str(item.get("path", "") or "")
             if kind == "youtube" and youtube_already_attempted:
                 # A previous download already ran the YouTube fallback
                 # (e.g. SoundCloud DRM -> YouTube) — don't attempt
@@ -3749,6 +3767,31 @@ class RuntimeMediaMixin:
             # The same milestone edits the ack in place (one message,
             # edited as the job progresses — presentation law).
             from ...core.jobs import report_progress
+            # ── failure memory ──────────────────────────────
+            # A link that failed recently is not re-attempted: the
+            # next source's copy goes first, and the skip is named
+            # in the journal trail instead of burning minutes on
+            # the same dead end (owner report 2026-11-17).
+            recorded_kind = dead_kind_for_url(cand_path)
+            if recorded_kind is not None:
+                outcomes[name] = (
+                    f"skipped — this link failed recently "
+                    f"({recorded_kind})")
+                skipped_dead = True
+                if gated:
+                    blocked_matches.append(
+                        (item,
+                         f"link failed recently ({recorded_kind})"))
+                continue
+            if kind in dead_kinds:
+                outcomes[name] = (
+                    f"skipped — {kind} already failed on this song "
+                    f"({dead_kind_reasons.get(kind, '')})")
+                skipped_dead = True
+                if gated:
+                    blocked_matches.append(
+                        (item, f"{kind} failed on this song"))
+                continue
             report_progress(
                 f"trying {name} ({cand_no} of {len(attempt_items)})")
             self._job_ack_progress(
@@ -3788,6 +3831,11 @@ class RuntimeMediaMixin:
                             f"downloaded the wrong file "
                             f"({acc.reason})")
                     verify_notes.append(acc.reason)
+                    # The URL served the wrong file — remember it, so
+                    # the next attempt does not download the same
+                    # clip / error page again.
+                    record_url_failure(cand_path, "wrong_file",
+                                       source=kind)
                     if gated:
                         blocked_matches.append((item, acc.reason))
                     continue
@@ -3867,6 +3915,17 @@ class RuntimeMediaMixin:
                     return (f"had the file but couldn't send it: {exc} "
                             f"(it's saved on the server at {path})"), False
             reason = str(dl.get("reason", "unknown error"))
+            # Record the failure so the next /play never re-picks
+            # this link — and so the sweep demotes it. A 403 /
+            # timeout / 5xx / site error also condemns the source
+            # for the rest of THIS song (its other copies are
+            # skipped above); a generic error condemns only its own
+            # URL.
+            fail_kind = classify_failure(reason)
+            record_url_failure(cand_path, fail_kind, source=kind)
+            if fail_kind in SOURCE_DEAD_KINDS:
+                dead_kinds.add(kind)
+                dead_kind_reasons[kind] = fail_kind
             if gated:
                 blocked_matches.append((item, reason))
             if dl.get("youtube_fallback_attempted"):
@@ -3908,7 +3967,7 @@ class RuntimeMediaMixin:
             and v.startswith(("download blocked", "downloaded"))
             for v in outcomes.values())
         if preview_finds and not blocked_matches \
-                and not attempted_download:
+                and not attempted_download and not skipped_dead:
             # Previews were the ONLY thing any source had: the plain
             # honest-absence line instead of the generic failure
             # line.  Nothing was sent, nothing queued for download.

@@ -28,6 +28,22 @@ def _clean_cache():
     PickCache.clear()
 
 
+@pytest.fixture(autouse=True)
+def _isolated_download_failure_home(tmp_path, monkeypatch):
+    # Lane 26: the sweep demotes URLs the durable download-failure
+    # memory holds as dead, so tests that run live sweeps must not
+    # share one home — a URL recorded dead by an earlier run would
+    # otherwise be demoted (and cut by the limit) in the next. The
+    # app's own NM_HOME override points the memory at a fresh
+    # per-test home.
+    from nomorals.media import download_failures as _df
+
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    _df.clear_failures()
+    yield
+    _df.clear_failures()
+
+
 def _cand(title, artist="", duration=180.0, kind="youtube"):
     return ResolvedAudio(ok=True, path_or_url=f"https://x/{title}",
                          title=title, artist=artist, duration=duration,

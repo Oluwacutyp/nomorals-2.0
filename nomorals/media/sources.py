@@ -41,6 +41,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..core.logging_setup import get_logger
+from .download_failures import classify_failure, record_search_failure
 
 _log = get_logger(__name__)
 
@@ -146,8 +147,18 @@ class AudioSource(abc.ABC):
         return candidate.direct_url or candidate.url
 
     # ── shared HTTP helper ──────────────────────────────────────────
+    #: The last fetch failure on THIS instance, as (kind, url) — set
+    #: by :meth:`_get` when a fetch raises, cleared on the next fetch.
+    #: The search frameworks read it so a failed search fetch is
+    #: recorded in the failure memory instead of vanishing into an
+    #: empty result. Instances are short-lived (one per search call),
+    #: so a hop/download fetch on another instance can never pollute
+    #: a search's evidence.
+    _last_get_error: tuple[str, str] | None = None
+
     def _get(self, url: str, timeout: float = _HTTP_TIMEOUT) -> str:
         """GET *url*, return text.  Empty string on any failure."""
+        self._last_get_error = None
         try:
             req = urllib.request.Request(
                 url, headers={"User-Agent": BROWSER_UA,
@@ -163,6 +174,12 @@ class AudioSource(abc.ABC):
                 pass
             return raw.decode(charset, errors="replace")
         except Exception as exc:  # noqa: BLE001 — network is hostile
+            # A failed fetch is evidence, not silence: a timeout or a
+            # 403 here is why a search returns [] — record the kind
+            # on the instance so the search framework can file it
+            # (the fetch itself still returns "" — the contract that
+            # every caller relies on is unchanged).
+            self._last_get_error = (classify_failure(exc), url)
             _log.info("%s: GET failed for %s: %s", self.name,
                       url[:80], exc)
             return ""
@@ -205,6 +222,15 @@ class BaseScrapeSource(AudioSource):
         try:
             html = self._get(self.search_url(q))
             if not html:
+                # Empty page: a failed fetch or a genuinely empty
+                # result. Only the first is a failure — the fetch
+                # error on the instance says which, so a timeout /
+                # 403 is recorded in the failure memory (the sweep
+                # reports "failed: <kind>" from it) instead of
+                # masquerading as "no results".
+                if self._last_get_error is not None:
+                    kind, url = self._last_get_error
+                    record_search_failure(self.name, kind, url)
                 return []
             out: list[SourceCandidate] = []
             for title, post_url in self.parse_search(html)[:limit]:
@@ -217,6 +243,7 @@ class BaseScrapeSource(AudioSource):
             _log.info("%s: %d candidates for %r", self.name, len(out), q)
             return out
         except Exception as exc:  # noqa: BLE001 — never raises
+            record_search_failure(self.name, classify_failure(exc))
             _log.info("%s: search failed for %r: %s", self.name, q, exc)
             return []
 
@@ -873,14 +900,19 @@ class _JsonApiSource(AudioSource):
             import json as _json
             raw = self._get(self.search_url(q))
             if not raw:
+                if self._last_get_error is not None:
+                    kind, url = self._last_get_error
+                    record_search_failure(self.name, kind, url)
                 return []
             payload = _json.loads(raw)
         except Exception as exc:  # noqa: BLE001 — never raises
+            record_search_failure(self.name, classify_failure(exc))
             _log.info("%s: search failed for %r: %s", self.name, q, exc)
             return []
         try:
             out = self.parse(payload, q)
         except Exception as exc:  # noqa: BLE001
+            record_search_failure(self.name, classify_failure(exc))
             _log.info("%s: parse failed for %r: %s", self.name, q, exc)
             return []
         _log.info("%s: %d candidates for %r", self.name, len(out), q)

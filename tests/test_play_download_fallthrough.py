@@ -38,6 +38,21 @@ BOTCHECK_MSG = (
 _RT_LOGGER = "nomorals.agents.partner.runtime_media"
 
 
+@pytest.fixture(autouse=True)
+def _isolated_download_failure_home(tmp_path, monkeypatch):
+    # Lane 26: the fall-through consults the durable download-failure
+    # memory, so tests that reuse fixture URLs across tests must not
+    # share one home — a URL recorded dead by an earlier test would
+    # otherwise be skipped by the next. The app's own NM_HOME
+    # override points the memory at a fresh per-test home.
+    from nomorals.media import download_failures as _df
+
+    monkeypatch.setenv("NM_HOME", str(tmp_path / "home"))
+    _df.clear_failures()
+    yield
+    _df.clear_failures()
+
+
 class _FakeGateway:
     """Records sends/files/edits; plays the adapter for edit verbs."""
 
