@@ -811,7 +811,8 @@ class MediaDownloader:
                  site_connectors: dict[str, Any] | None = None,
                  site_auth: Any | None = None,
                  rendered_tab_factory: Any | None = None,
-                 swarm_downloader: Any | None = None) -> None:
+                 swarm_downloader: Any | None = None,
+                 file_url_resolver: Any | None = None) -> None:
         self.context = context
         self.profile = profile or detect_profile()
         self._connector_factory = connector_factory
@@ -884,6 +885,11 @@ class MediaDownloader:
         # swarm downloader wins; otherwise it is built lazily,
         # exactly like the kit downloader above.
         self._swarm_downloader = swarm_downloader
+        # Extractor-URL swarm: an injected file-URL resolver wins;
+        # otherwise tools.media.resolve_file_url is imported lazily
+        # at the call site (tests hand in a fake, like the swarm
+        # downloader above).
+        self._file_url_resolver = file_url_resolver
 
     # ── download-kit accessors (Pass #76) ─────────────────────────────
 
@@ -1360,7 +1366,8 @@ class MediaDownloader:
         """Dispatch one chain stage by name (the chain's real stage
         vocabulary).  Used for the canonical order and for the
         learned-path-first attempt (Pass #87).  ``swarm`` /
-        ``swarm_min_bytes`` ride through to the kit stage only."""
+        ``swarm_min_bytes`` ride through to the direct and kit
+        stages."""
         tracker = self._tracker()
         if tracker is not None:
             from ..core.progress_events import CONNECTING
@@ -1377,6 +1384,17 @@ class MediaDownloader:
             self._chain_stage_count = count + 1
             tracker.set_stage(CONNECTING, note=f"via {stage}")
         if stage == "direct":
+            # The swarm kwargs ride ONLY when the caller opted in:
+            # the default call keeps the old shape, so a
+            # monkeypatched / overridden _stage_direct with the
+            # pre-swarm signature (fixed args, no **kwargs) still
+            # works — the swarm must never break a download that
+            # never asked for it.
+            if swarm or swarm_min_bytes is not None:
+                return self._stage_direct(
+                    report, url, target_dir, audio_only, format_spec,
+                    timeout, budget, swarm=swarm,
+                    swarm_min_bytes=swarm_min_bytes)
             return self._stage_direct(report, url, target_dir,
                                       audio_only, format_spec, timeout,
                                       budget)
@@ -1629,8 +1647,11 @@ class MediaDownloader:
         file URLs (the kit stage tries the swarm first, large files
         first — see ``swarm_min_bytes`` — and falls back to the
         single-stream kit when the server will not serve ranges).
-        For extractor URLs the flag is inert: the swarm can only
-        fetch a direct file URL.
+        For extractor URLs the direct stage resolves the page to its
+        single file URL first and tries the swarm for THAT file —
+        same chunking, same journaling — falling through to yt-dlp's
+        own download when there is nothing to swarm (a playlist,
+        merged streams, a segmented playlist) or the swarm refuses.
         """
         started = time.perf_counter()
         report = DownloadReport(url=url or "")
@@ -1916,9 +1937,24 @@ class MediaDownloader:
     def _stage_direct(self, report: DownloadReport, url: str,
                       target_dir: Path, audio_only: bool,
                       format_spec: str, timeout: float,
-                      budget: dict[str, float]) -> bool:
-        """Current behavior, with retry + backoff on network failures."""
+                      budget: dict[str, float], *,
+                      swarm: bool = False,
+                      swarm_min_bytes: int | None = None) -> bool:
+        """Current behavior, with retry + backoff on network failures.
+
+        When ``swarm`` is opted in, an extractor URL tries the
+        swarm FIRST: the page resolves to its single file URL and
+        that file downloads through the same segmented fetch the
+        kit stage uses — a resolution that finds nothing, or a
+        swarm refusal/failure, falls through to yt-dlp's own
+        download below, exactly like the kit stage falls through
+        to the single-stream kit."""
         from ..tools.media import download as direct_download
+
+        if swarm and self._attempt_swarm_extracted(
+                report, url, target_dir, audio_only, format_spec,
+                budget, swarm_min_bytes):
+            return True
 
         tracker = self._tracker()
         attempt = 0
@@ -2088,9 +2124,65 @@ class MediaDownloader:
             "extractor": "download-kit"}, size)
         return True
 
+    def _attempt_swarm_extracted(self, report: DownloadReport,
+                                 url: str, target_dir: Path,
+                                 audio_only: bool, format_spec: str,
+                                 budget: dict[str, float],
+                                 swarm_min_bytes: int | None) -> bool:
+        """Try the swarm for an extractor URL.
+
+        The page URL resolves to its single direct file URL through
+        the existing yt-dlp extract-only seam, and that file URL
+        runs through the SAME ``_attempt_swarm`` the kit stage uses
+        — same chunking, same stage log, same journaling.  True
+        only when the swarm landed the file.  A resolution that
+        finds nothing, a refusal, or a failure is a stage log and
+        False — the direct stage falls through to yt-dlp's own
+        download, exactly like the kit stage falls through to the
+        single-stream kit.
+        """
+        if time.perf_counter() > budget["deadline"]:
+            return False
+        t0 = time.perf_counter()
+        try:
+            resolver = self._file_url_resolver
+            if resolver is None:
+                from ..tools.media import resolve_file_url as resolver
+            resolved = resolver(
+                url, format_spec=format_spec, audio_only=audio_only,
+                cookies_file=self._cookies_file(url))
+        except Exception as exc:  # noqa: BLE001 — a stage reports
+            lat = time.perf_counter() - t0
+            kind = classify_failure(exc)
+            report.stages.append(StageLog(
+                stage="swarm", url=url, latency_s=lat,
+                error_class=kind.value,
+                error=f"could not resolve a file URL for the swarm: "
+                      f"{_err_text(exc)}"))
+            self._log_stage("swarm", url, "", lat, 0, kind,
+                            _err_text(exc, 200))
+            return False
+        file_url = str((resolved or {}).get("url") or "")
+        if not file_url:
+            lat = time.perf_counter() - t0
+            report.stages.append(StageLog(
+                stage="swarm", url=url, latency_s=lat,
+                error_class=FailureKind.NO_MEDIA_FOUND.value,
+                error="the extractor returned no file URL — nothing "
+                      "for the swarm to fetch"))
+            self._log_stage("swarm", url, "", lat, 0,
+                            FailureKind.NO_MEDIA_FOUND,
+                            "no file URL resolved")
+            return False
+        dest = target_dir / _safe_name(file_url, audio_only)
+        return self._attempt_swarm(
+            report, file_url, dest, budget, swarm_min_bytes,
+            title=str((resolved or {}).get("title") or ""))
+
     def _attempt_swarm(self, report: DownloadReport, url: str,
                        dest: Path, budget: dict[str, float],
-                       swarm_min_bytes: int | None) -> bool:
+                       swarm_min_bytes: int | None, *,
+                       title: str = "") -> bool:
         """Try the parallel segmented fetch for a direct file URL.
 
         True only when the swarm landed the file.  A refusal (the
@@ -2168,7 +2260,7 @@ class MediaDownloader:
                  f"restarted={result.restarted})"))
         self._log_stage("swarm", url, "", lat, size, FailureKind.OK, "")
         self._fill_success(report, {
-            "path": _path, "bytes": size, "title": "",
+            "path": _path, "bytes": size, "title": title,
             "extractor": "download-swarm"}, size)
         return True
 

@@ -235,6 +235,129 @@ def _summarize(info: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _pick_file_url(info: dict[str, Any]) -> dict[str, Any]:
+    """Pick the single direct file URL out of yt-dlp info.
+
+    Returns ``{"url", "title", "ext", "extractor"}``.  Raises
+    :class:`MediaError` naming the reason when there is no single
+    file to fetch: a playlist, separate video+audio streams that
+    need a merge, a segmented (HLS/DASH) playlist, or an info dict
+    with no URL at all.  The swarm fetches ONE file — anything else
+    belongs to yt-dlp's own downloader, which speaks those shapes.
+    """
+    if isinstance(info.get("entries"), list):
+        raise MediaError(
+            "that link is a playlist, not a single file — the swarm "
+            "fetches one file at a time")
+    title = str(info.get("title") or "")
+    extractor = str(info.get("extractor_key")
+                    or info.get("extractor") or "")
+    ext = str(info.get("ext") or "")
+    candidates: list[dict[str, Any]] = []
+    requested = info.get("requested_formats")
+    if isinstance(requested, list) and requested:
+        candidates = [f for f in requested
+                      if isinstance(f, dict) and f.get("url")]
+    elif isinstance(info.get("url"), str) and info.get("url"):
+        candidates = [info]
+    if not candidates:
+        raise MediaError("the extractor returned no file URL")
+    if len(candidates) > 1:
+        raise MediaError(
+            "separate video and audio streams need merging — yt-dlp "
+            "downloads those itself, the swarm cannot merge them")
+    chosen = candidates[0]
+    file_url = str(chosen.get("url") or "")
+    protocol = str(chosen.get("protocol")
+                   or info.get("protocol") or "")
+    if protocol.startswith("m3u8") \
+            or file_url.lower().endswith((".m3u8", ".mpd")):
+        raise MediaError(
+            "a segmented playlist (HLS/DASH), not a single file — "
+            "yt-dlp speaks those natively")
+    return {"url": file_url, "title": title,
+            "ext": str(chosen.get("ext") or ext),
+            "extractor": extractor}
+
+
+def resolve_file_url(
+    url: str,
+    *,
+    format_spec: str = "bestvideo*+bestaudio/best",
+    audio_only: bool = False,
+    cookies_file: str = "",
+    proxy: str = "",
+) -> dict[str, Any]:
+    """Resolve *url* to its single direct file URL, without downloading.
+
+    The yt-dlp extract-only seam (the same ``extract_info`` call
+    :func:`probe` makes): python API first, CLI fallback.  The
+    chosen format is the one :func:`download` would fetch, so the
+    swarm and the direct stage agree on quality.  Returns
+    ``{"url", "title", "ext", "extractor"}``; raises
+    :class:`MediaError` naming the reason when there is no single
+    file URL to fetch (playlist, merged streams, segmented
+    playlist, no URL, yt-dlp missing).  Never returns a fabricated
+    URL.
+    """
+    from ..media.cookies import (
+        ytdlp_cookie_args_for,
+        ytdlp_cookie_opts_for,
+        ytdlp_hardened_opts,
+    )
+
+    if audio_only:
+        format_spec = "bestaudio/best"
+    last_error: Exception | None = None
+    module = load_optional("yt_dlp")
+    if module is not None:
+        try:
+            opts = ytdlp_hardened_opts()
+            opts.update({"format": format_spec})
+            opts.update({"cookiefile": cookies_file} if cookies_file
+                        else ytdlp_cookie_opts_for(url))
+            if proxy:
+                opts["proxy"] = proxy
+            with module.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+            return _pick_file_url(
+                info if isinstance(info, dict) else {})
+        except MediaError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - fall through to CLI
+            _log.debug("yt_dlp python API resolve failed: %s", exc)
+            last_error = exc
+    if which("yt-dlp"):
+        try:
+            argv = (["yt-dlp", "--dump-single-json", "--no-download",
+                     "--format", format_spec]
+                    + (["--cookies", cookies_file] if cookies_file
+                       else ytdlp_cookie_args_for(url))
+                    + (["--proxy", proxy] if proxy else [])
+                    + [url])
+            completed = subprocess.run(
+                argv,
+                capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=120.0, check=False,
+            )
+            if completed.returncode == 0:
+                return _pick_file_url(json.loads(completed.stdout))
+            last_error = RuntimeError(
+                f"yt-dlp exited {completed.returncode}: "
+                f"{(completed.stderr or '').strip()[:200]}")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError,
+                OSError) as exc:
+            _log.debug("yt-dlp CLI resolve failed: %s", exc)
+            last_error = exc
+    if last_error is not None:
+        raise MediaError(
+            f"could not resolve a file URL for {url}: "
+            f"{str(last_error)[:200]}")
+    raise MediaError(
+        f"could not resolve a file URL for {url}: install yt-dlp "
+        "for site extraction")
+
+
 def download(
     url: str,
     destination: str | Path,

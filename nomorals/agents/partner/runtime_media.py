@@ -1348,7 +1348,9 @@ class RuntimeMediaMixin:
                                          480p | 360p)
         /download <url> audio 720p    → audio (quality is video-only)
         /download <url> --swarm       → parallel segmented fetch for a
-                                    large direct file (byte-range
+                                    large file — a direct link, or a
+                                    page/video link whose file URL the
+                                    extractor resolves first (byte-range
                                     workers, resume, hash check);
                                     falls back to the single stream
                                     when the server will not serve
