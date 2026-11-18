@@ -1424,7 +1424,16 @@ class RenderedBrowserSession:
         if self._tab is not None:
             return self._tab
         svc = self._service()
-        self._tab = svc.open_tab()
+        # ``open_tab`` lives on SessionHandle, never on BrowserService
+        # (calling it here raised AttributeError on every rendered
+        # call — the chronic ToolError).  The service's real API is
+        # open_rendered_tab; the session-handle route is the fallback
+        # for a service without it (the open_shopping_tab pattern).
+        open_rendered = getattr(svc, "open_rendered_tab", None)
+        if callable(open_rendered):
+            self._tab = open_rendered(self.name)
+        else:
+            self._tab = svc.open_session(self.name).open_tab()
         self._tab_id = getattr(self._tab, "tab_id", "")
         return self._tab
 
@@ -1993,6 +2002,33 @@ def seed_session_from_persisted(session: Any, session_dir: str) -> int:
 # ── tool registration ────────────────────────────────────────────────────────
 
 
+#: Actions the plain-HTTP engine can serve as a fallback when the
+#: rendered engine is dead.  Read-only only: a fallback re-run
+#: cannot double-act.  Click/fill/submit/task write or navigate
+#: state, and observe/screenshot/select/check/scroll/hover/press/
+#: wait need a live rendered page — none of those ever fall back.
+_HTTP_FALLBACK_ACTIONS = frozenset({
+    "open", "text", "markdown", "links", "extract", "state", "close",
+})
+
+#: Fragments of the rendered engine's own fail-fast messages — the
+#: engine itself is dead (Chromium cannot launch, the driver cannot
+#: start, Playwright is missing), not the page.  An action failure
+#: on a live page ("no such element") carries none of these and
+#: never triggers a fallback.
+_ENGINE_DEAD_MARKERS = (
+    "could not launch chromium",
+    "could not start the playwright driver",
+    "rendered browser unavailable",
+)
+
+
+def _is_engine_dead(exc: BaseException) -> bool:
+    """True when *exc* says the rendered engine itself cannot run."""
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _ENGINE_DEAD_MARKERS)
+
+
 def register(registry: Any) -> None:
     # Side effect with a purpose: importing the local slider solver
     # registers its `local_slider` backend + slider/geetest kind
@@ -2101,22 +2137,72 @@ def register(registry: Any) -> None:
         engine: str = "auto",
         **_: Any,
     ) -> dict[str, Any]:
+        auto = (engine or "auto").strip().lower() == "auto"
         eng = (engine or "auto").strip().lower()
         if eng == "auto":
             ok, _ = _playwright_available()
             eng = "rendered" if ok else "http"
+        rendered_sess: Any = None
         if eng == "rendered":
             sess = get_rendered_session(session, proxy_url=proxy_url,
                                         session_dir=session_dir, timeout=timeout)
-        else:
+            if auto and getattr(sess, "_rendered_dead", False):
+                # The rendered engine already proved dead this
+                # process — go straight to http, never burn another
+                # launch timeout finding out again.
+                eng = "http"
+            else:
+                rendered_sess = sess
+        if eng != "rendered":
             sess = get_session(session, user_agent=user_agent, timeout=timeout,
                                respect_robots=respect_robots, proxy_url=proxy_url,
                                session_dir=session_dir, max_task_steps=max_task_steps)
+
+        def _http_fallback(exc: BaseException) -> dict[str, Any]:
+            """Serve a read-only action from the http engine after
+            the rendered engine proved dead.  Marks the rendered
+            session dead so the next call skips it.  If the http
+            engine fails too, the ORIGINAL rendered failure is the
+            story — it propagates, not the fallback's."""
+            rendered_sess._rendered_dead = True  # noqa: SLF001
+            http_sess = get_session(session, user_agent=user_agent,
+                                    timeout=timeout,
+                                    respect_robots=respect_robots,
+                                    proxy_url=proxy_url,
+                                    session_dir=session_dir,
+                                    max_task_steps=max_task_steps)
+            try:
+                result = http_sess.do(action, url=url, target=target,
+                                      name=name, value=value, kind=kind,
+                                      steps=steps, uploads=uploads,
+                                      max_chars=max_chars, solve=solve)
+            except Exception:  # noqa: BLE001 - original failure stands
+                # from None: the fallback's own failure is not the
+                # story — the original rendered failure propagates
+                # without the fallback's context chained onto it.
+                raise exc from None
+            note = (f"rendered engine unavailable ({exc}); served "
+                    "by the http engine")
+            if isinstance(result, dict):
+                out = dict(result)
+                out.setdefault("engine", "http")
+                out["fallback"] = note
+                return out
+            return {"engine": "http", "result": result, "fallback": note}
+
         try:
             return sess.do(action, url=url, target=target, name=name,
                            value=value, kind=kind, steps=steps, uploads=uploads,
                            max_chars=max_chars, solve=solve)
-        except ToolError:
+        except ToolError as exc:
+            if (rendered_sess is not None and auto
+                    and action in _HTTP_FALLBACK_ACTIONS
+                    and _is_engine_dead(exc)):
+                return _http_fallback(exc)
             raise
         except Exception as exc:  # noqa: BLE001 - a browser error is a result
+            if (rendered_sess is not None and auto
+                    and action in _HTTP_FALLBACK_ACTIONS
+                    and _is_engine_dead(exc)):
+                return _http_fallback(exc)
             raise ToolError(f"browser {action} failed: {classify(exc).message}") from exc

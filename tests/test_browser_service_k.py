@@ -485,11 +485,17 @@ class TestRenderedTabs(unittest.TestCase):
             tab = self.svc.open_rendered_tab("sess1", "https://example.com/")
             self.assertIsInstance(tab, RenderedTab)
             # headless chromium launched lazily, exactly once, with the
-            # stealth flag (AutomationControlled blink feature disabled)
+            # stealth flag (AutomationControlled blink feature disabled),
+            # a fail-fast launch timeout, and the low-resource args the
+            # 2 GB live box needs (no sandbox, no /dev/shm, no GPU).
             self.assertEqual(
                 chromium.launch_kwargs,
                 {"headless": True,
-                 "args": ["--disable-blink-features=AutomationControlled"]})
+                 "timeout": 60_000,
+                 "args": ["--no-sandbox",
+                          "--disable-dev-shm-usage",
+                          "--disable-gpu",
+                          "--disable-blink-features=AutomationControlled"]})
             self.assertTrue(instances[0].started)
             url, kwargs = page.goto_calls[0]
             self.assertEqual(url, "https://example.com/")

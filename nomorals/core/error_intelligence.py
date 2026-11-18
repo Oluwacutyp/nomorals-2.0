@@ -278,6 +278,32 @@ class ErrorKnowledgeBase:
             "root_cause": "DNS lookup failed - domain doesn't exist or DNS server unreachable",
             "fix": "Check your internet connection and verify the domain name is correct.",
         },
+        # Local browser-launch failures — NOT a slow remote service.
+        # A Chromium launch that times out on the box is the box
+        # (no free memory/CPU, a dead driver), and "increase the
+        # timeout" is the wrong medicine for a launch that never
+        # completes.  Placed BEFORE "timeout": the generic pattern
+        # matches any message containing "timeout".
+        "browser_launch_timeout": {
+            "patterns": [r"could not launch chromium",
+                         r"launch.*timeout",
+                         r"could not start the playwright driver"],
+            "category": ErrorCategory.TIMEOUT,
+            "severity": ErrorSeverity.HIGH,
+            "root_cause": "Chromium could not start on this machine (the local browser launch timed out)",
+            "fix": "Check free memory/CPU on the box and clear any stale browser lock; the launch never completed, so raising the timeout will not help — fix the launch, not the clock.",
+            "retryable": False,
+        },
+        # Wiring bugs — the code called a method that does not exist
+        # on the object.  Retrying a code bug never fixes it.
+        "wiring_attribute_error": {
+            "patterns": [r"has no attribute"],
+            "category": ErrorCategory.VALIDATION,
+            "severity": ErrorSeverity.HIGH,
+            "root_cause": "The code called a method that does not exist on that object — a wiring bug in Devon's own code",
+            "fix": "This is a code bug, not a service failure: retrying will not fix it. The call site must be fixed to use a method the object actually has.",
+            "retryable": False,
+        },
         "timeout": {
             "patterns": [r"timeout", r"timed out", r"deadline exceeded"],
             "category": ErrorCategory.TIMEOUT,
@@ -1284,7 +1310,16 @@ class ErrorIntelligence:
         """Generate explanation for unknown error."""
         operation = context.get("operation", "operation")
         exc_type = type(exception).__name__
-
+        # The type alone hides the cause: the ToolError that carried
+        # "'BrowserService' object has no attribute 'open_tab'" read
+        # only as "An unexpected error occurred during browser:
+        # ToolError."  Carry the message (truncated) so the real
+        # cause survives into the log and the selfheal journal.
+        message = str(exception).strip()
+        if message:
+            message = message[:200]
+            return (f"An unexpected error occurred during {operation}: "
+                    f"{exc_type}: {message}")
         return f"An unexpected error occurred during {operation}: {exc_type}."
 
     def _suggest_fix_for_unknown(

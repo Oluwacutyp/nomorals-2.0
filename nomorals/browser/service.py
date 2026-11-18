@@ -522,6 +522,21 @@ _PERMISSIONS_SPOOF_JS = """(() => {
 #: chromium flags for rendered tabs (stealth).
 _STEALTH_CHROME_ARGS = ["--disable-blink-features=AutomationControlled"]
 
+#: chromium flags every rendered-tab launch carries.  The live box
+#: is 2 vCPU / 2 GB: ``--disable-dev-shm-usage`` keeps the renderer
+#: out of the tiny /dev/shm, ``--no-sandbox`` drops the sandbox
+#: (the tab runs as the owner's own process), ``--disable-gpu``
+#: skips GPU process bring-up on a box with no GPU.  A launch that
+#: cannot complete in 60 s on this box is not going to complete in
+#: 180 s either — the launch timeout fails fast instead of burning
+#: the whole download attempt on a dead launch.
+_LAUNCH_TIMEOUT_MS = 60_000
+_LOW_RESOURCE_CHROME_ARGS = [
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+]
+
 #: Fallback accessibility-tree walker for snapshot() when the driver has
 #: no aria_snapshot (older playwright). Produces the same ref-handle
 #: shape as playwright's tree — ``- role "name" [ref=fN]`` — so agents
@@ -959,9 +974,13 @@ class RenderedTab:
         if self._page is not None:
             return self._page
         try:
-            launch_kwargs: dict[str, Any] = {"headless": True}
+            launch_kwargs: dict[str, Any] = {
+                "headless": True,
+                "timeout": _LAUNCH_TIMEOUT_MS,
+                "args": list(_LOW_RESOURCE_CHROME_ARGS),
+            }
             if self._stealth.get("enabled"):
-                launch_kwargs["args"] = list(_STEALTH_CHROME_ARGS)
+                launch_kwargs["args"].extend(_STEALTH_CHROME_ARGS)
             proxy_cfg = _playwright_proxy_config(self._proxy)
             if proxy_cfg:
                 launch_kwargs["proxy"] = proxy_cfg
@@ -1033,7 +1052,12 @@ class RenderedTab:
                 except Exception as exc:  # noqa: BLE001 - best effort
                     _log.debug("rendered tab %s: download listener failed: %r",
                                self.tab_id, exc)
-            self._page = self._context.new_page()
+            # NOTE: the page created above (with the telemetry
+            # listeners attached) IS the tab's page.  A second
+            # new_page() here would orphan it — a leaked renderer
+            # process per launch, and a returned page with no
+            # listeners, so _network_log stays empty and the
+            # downloader's rendered capture can never find media.
         except Exception as exc:  # noqa: BLE001 - launch errors are opaque
             self._teardown_quiet()
             raise BrowserError(

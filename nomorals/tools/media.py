@@ -336,18 +336,49 @@ def _download_python_api(
     if _cancel_requested():
         raise MediaError(CANCELLED_MESSAGE)
     before = _snapshot_dir(target_dir)
+
+    def _extract(opts: dict[str, Any]) -> tuple[Any, str]:
+        try:
+            with module.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info) if info else ""
+            return info, filename
+        except MediaError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # yt-dlp error text can carry terminal escapes — this
+            # message is what chat surfaces show, so it leaves here
+            # clean.
+            from ..core.text import strip_ansi
+            raise MediaError(
+                f"download failed: {strip_ansi(str(exc))}") from exc
+
     try:
-        with module.YoutubeDL(options) as ydl:
-            info = ydl.extract_info(url, download=True)
-            filename = ydl.prepare_filename(info) if info else ""
-    except MediaError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        # yt-dlp error text can carry terminal escapes — this message
-        # is what chat surfaces show, so it leaves here clean.
-        from ..core.text import strip_ansi
-        raise MediaError(
-            f"download failed: {strip_ansi(str(exc))}") from exc
+        info, filename = _extract(options)
+    except MediaError as exc:
+        # A 403 WITH cookies riding along is usually the cookies
+        # themselves: a stale CloudFront ``__cf_bm`` bot-management
+        # cookie is a known 403 trigger (current yt-dlp even clears
+        # it on a Cloudflare 403), and the estate cookies the box
+        # exports are exactly what rides.  The same signed URL
+        # fetched bare returns 200 (live probe, 2026-11-17), so one
+        # bare retry is the honest next step — once, and only when
+        # cookies were actually used.  A bare failure stands: the
+        # original error is re-raised, never the retry's.
+        if _cookie_opts and "403" in str(exc):
+            _log.info("yt-dlp 403 with cookies for %s — retrying "
+                      "bare", url)
+            bare_options = {k: v for k, v in options.items()
+                            if k != "cookiefile"}
+            try:
+                info, filename = _extract(bare_options)
+            except MediaError:
+                # from None: the original error is re-raised, never
+                # the retry's — the retry's failure must not chain
+                # onto the story.
+                raise exc from None
+        else:
+            raise
 
     # Attribute the result to THIS download.  Preference order: the
     # filepath yt-dlp reports for the finished item, the prepared

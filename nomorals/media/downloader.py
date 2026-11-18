@@ -1347,7 +1347,8 @@ class MediaDownloader:
                                    swarm_min_bytes=swarm_min_bytes)
         if stage == "connector":
             if self._stage_connector(report, url, target_dir,
-                                     audio_only, budget):
+                                     audio_only, budget,
+                                     page_url=page_url):
                 return True
             # A classified login block from the connector is the
             # site itself saying this content needs a signed-in
@@ -2161,7 +2162,8 @@ class MediaDownloader:
 
     def _stage_connector(self, report: DownloadReport, url: str,
                          target_dir: Path, audio_only: bool,
-                         budget: dict[str, float]) -> bool:
+                         budget: dict[str, float],
+                         page_url: str = "") -> bool:
         """The connector's own resolved stream as a download rung.
 
         Engages only when the matched site descriptor declares a
@@ -2177,33 +2179,42 @@ class MediaDownloader:
         journaled WITH its class and the chain moves on — later
         rungs (proxy, rendered capture) still get their turn, and
         true DRM is named, never chased.
+
+        ``page_url`` is the source page the download came from
+        (the playback path passes it).  The work url is often a
+        raw file link the descriptor cannot claim — a SoundCloud
+        CDN playlist, for instance — while the page IS the track
+        the connector resolves.  The descriptor match and the
+        ``stream_url`` call both run against ``page_url`` when one
+        is given; the stage logs name the url actually acted on.
         """
-        desc = self._site_descriptor_for(url)
+        act_url = page_url or url
+        desc = self._site_descriptor_for(act_url)
         if desc is None or not desc.connector:
             return False
         connector = self._site_connector(desc.connector)
         if connector is None:
             report.stages.append(StageLog(
-                stage="connector", url=url,
+                stage="connector", url=act_url,
                 note=f"{desc.site} connector unavailable (no connector "
                      "factory wired)"))
             _log.info("download stage=connector url=%s skipped: no "
-                      "connector factory", url)
+                      "connector factory", act_url)
             return False
         if time.perf_counter() > budget["deadline"]:
             return False
         t0 = time.perf_counter()
         try:
-            stream = connector.stream_url(url)
+            stream = connector.stream_url(act_url)
         except Exception as exc:  # noqa: BLE001 — a stage reports
             lat = time.perf_counter() - t0
             kind = classify_failure(exc)
             block = str(getattr(exc, "reason", "") or "")
             report.stages.append(StageLog(
-                stage="connector", url=url, latency_s=lat,
+                stage="connector", url=act_url, latency_s=lat,
                 error_class=kind.value, error=_err_text(exc),
                 note=f"{desc.site} block: {block}" if block else ""))
-            self._log_stage("connector", url, "", lat, 0, kind,
+            self._log_stage("connector", act_url, "", lat, 0, kind,
                             _err_text(exc, 200))
             return False
         final = str((stream or {}).get("url", "") or "")
@@ -2213,11 +2224,11 @@ class MediaDownloader:
         if not final:
             lat = time.perf_counter() - t0
             report.stages.append(StageLog(
-                stage="connector", url=url, latency_s=lat,
+                stage="connector", url=act_url, latency_s=lat,
                 error_class=FailureKind.NO_MEDIA_FOUND.value,
                 error="connector resolved the track but returned no "
                       "stream URL"))
-            self._log_stage("connector", url, "", lat, 0,
+            self._log_stage("connector", act_url, "", lat, 0,
                             FailureKind.NO_MEDIA_FOUND,
                             "no stream URL")
             return False
@@ -2225,7 +2236,7 @@ class MediaDownloader:
             return self._connector_hls(report, final, target_dir,
                                        title, t0, budget, desc)
         dest = target_dir / _safe_name(
-            str(track.get("permalink_url") or url), audio_only=True)
+            str(track.get("permalink_url") or act_url), audio_only=True)
         try:
             kit = self._kit()
             tracker = self._tracker()
@@ -2246,32 +2257,32 @@ class MediaDownloader:
         if result is None or not result.ok:
             kind = classify_failure(error)
             report.stages.append(StageLog(
-                stage="connector", url=url, latency_s=lat,
+                stage="connector", url=act_url, latency_s=lat,
                 error_class=kind.value, error=error,
                 note="connector stream fetch failed"))
-            self._log_stage("connector", url, "", lat, 0, kind,
+            self._log_stage("connector", act_url, "", lat, 0, kind,
                             _err_text(error, 200))
             return False
         landed = self._verify_landed(
             {"path": result.path, "bytes": result.size_bytes})
         if landed is None:
             report.stages.append(StageLog(
-                stage="connector", url=url, latency_s=lat,
+                stage="connector", url=act_url, latency_s=lat,
                 error_class=FailureKind.NO_MEDIA_FOUND.value,
                 error="connector stream fetch reported success but "
                       "the file is missing or empty on disk "
                       f"({result.path or 'no path'})"))
-            self._log_stage("connector", url, "", lat, 0,
+            self._log_stage("connector", act_url, "", lat, 0,
                             FailureKind.NO_MEDIA_FOUND,
                             "reported success, nothing on disk")
             return False
         _path, size = landed
         report.stages.append(StageLog(
-            stage="connector", url=url, latency_s=lat,
+            stage="connector", url=act_url, latency_s=lat,
             size_bytes=size, ok=True,
             note=f"{desc.site} connector stream (progressive) via "
                  "download kit"))
-        self._log_stage("connector", url, "", lat, size,
+        self._log_stage("connector", act_url, "", lat, size,
                         FailureKind.OK, "")
         self._fill_success(report, {
             "path": _path, "bytes": size, "title": title,
