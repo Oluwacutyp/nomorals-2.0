@@ -17,7 +17,7 @@ def test_collect_covers_every_source_family():
     for s in specs:
         by_cat.setdefault(s.category, []).append(s)
     for cat in ("news", "search", "music", "film", "weather", "wisdom",
-                "software", "price"):
+                "software", "learning", "price"):
         assert cat in by_cat, f"missing category {cat} (errors={errors})"
         assert len(by_cat[cat]) >= 1
     assert errors == [], f"registry imports failed: {errors}"
@@ -55,7 +55,7 @@ def test_music_specs_match_the_real_chain():
 def test_no_duplicate_urls_inside_a_category():
     specs, _ = collect()
     for cat in ("news", "search", "music", "film", "weather", "wisdom",
-                "software", "price"):
+                "software", "learning", "price"):
         urls = [s.url for s in specs if s.category == cat]
         assert len(urls) == len(set(urls)), f"dup URLs in {cat}"
 
