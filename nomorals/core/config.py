@@ -986,6 +986,19 @@ class RuntimeSettings:
     threads: int = 0
 
 @dataclass
+class DelegationSettings:
+    """Async delegation manager (see agents/delegation_manager.py).
+
+    ``worker_timeout_s`` bounds one worker attempt: a roster worker
+    still running past it is reaped (run failed, contract failed,
+    timeout reported to the origin chat) — a stuck worker can never
+    hang a delegation forever. 0 or negative disables the timeout.
+    Env: NM_DELEGATION_WORKER_TIMEOUT_S.
+    """
+    worker_timeout_s: float = 1800.0
+
+
+@dataclass
 class TakeoverSettings:
     """Human-in-the-loop browser takeover (see browser/takeover.py).
 
@@ -1160,6 +1173,8 @@ class Settings:
     hub: "HubSettings" = field(default_factory=lambda: HubSettings())
     takeover: "TakeoverSettings" = field(
         default_factory=lambda: TakeoverSettings())
+    delegation: DelegationSettings = field(
+        default_factory=DelegationSettings)
     location: "LocationSettings" = field(
         default_factory=lambda: LocationSettings())
     translate: "TranslateSettings" = field(
@@ -1430,6 +1445,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_TAKEOVER_LINK_TTL_S": "takeover.link_ttl_s",
     "NM_TAKEOVER_WAIT_TIMEOUT_S": "takeover.wait_timeout_s",
     "NM_TAKEOVER_POLL_S": "takeover.poll_s",
+    "NM_DELEGATION_WORKER_TIMEOUT_S": "delegation.worker_timeout_s",
     "NM_CHAT_MEDIA_IN_GROUPS": "chat.media_in_groups",
     "NM_CHAT_MEDIA_MAX_MB": "chat.media_max_mb",
     "NM_CHAT_TELEGRAM_ENABLED": "chat.telegram_enabled",

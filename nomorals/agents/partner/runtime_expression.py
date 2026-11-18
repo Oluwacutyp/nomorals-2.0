@@ -2100,6 +2100,9 @@ class RuntimeExpressionMixin:
                     f"{outcome['contract_id']} done")
             if outcome.get("replayed"):
                 line += " (already collected — no second delivery)"
+            elif outcome.get("delivery") == "direct":
+                line += (" — delivered back to the chat it started "
+                         "from")
             elif not outcome.get("delivered"):
                 line += ("; delivery did not reach a channel — the "
                          "result stays on the run record")

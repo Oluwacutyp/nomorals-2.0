@@ -580,6 +580,8 @@
 # Per-engine scan timeout, seconds. Default: 300 each (a positive number; anything else falls back to 300).
 # NM_AV_TIMEOUT_DEFENDER_S=
 # NM_AV_TIMEOUT_CLAMAV_S=
+# Per-worker timeout for one delegation attempt, seconds. Default: 1800 (30 minutes); 0 or negative disables it.
+# NM_DELEGATION_WORKER_TIMEOUT_S=
 # Placeholder-example key used in config.py docs; no setting reads it.
 # NM_FLOAT=
 # Config key read by Devon code.

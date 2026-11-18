@@ -52,16 +52,29 @@ ledger-only — the note is never silently pretended into an input
 it cannot enter. Steering a live run cannot rewrite an input
 already handed to the worker; it applies at the next boundary.
 
-Collection: ``collect()`` delivers a completed run's result into
-the chat via the notifier (durable-first; persist-only when no
-channel is live) and marks the run collected. The contract itself
-is completed by the settle gate at finalize time, not by collect —
-so completing the contract unblocks the mission loop
-(``missions.mission_effect_outcome`` reads open contracts) whether
-or not a chat channel is live. Collecting twice replays without a
-second delivery. A run whose gate refused completion (defect in
-the recorded result) cannot collect: the blockers are named, and
-the owner steers and resumes instead.
+Collection: ``collect()`` delivers a completed run's result back
+to the chat it started from — the run's stored ``chat_key``, sent
+straight through the live chat gateway — falling back to the
+notifier (durable-first; persist-only when no channel is live)
+when no origin chat was recorded or the direct send fails, and
+marks the run collected. The contract itself is completed by the
+settle gate at finalize time, not by collect — so completing the
+contract unblocks the mission loop (``missions.mission_effect_outcome``
+reads open contracts) whether or not a chat channel is live.
+Collecting twice replays without a second delivery. A run whose
+gate refused completion (defect in the recorded result) cannot
+collect: the blockers are named, and the owner steers and resumes
+instead.
+
+Per-worker timeout: one worker attempt gets ``worker_timeout_s``
+(default 30 minutes, ``NM_DELEGATION_WORKER_TIMEOUT_S``). The
+tick reaps a worker past it — run failed, contract failed, timeout
+reported through the same delivery path (direct to the origin chat,
+notifier fallback) with the timeout named. The worker thread
+itself cannot be killed in-process; it keeps running detached, and
+its late output is fenced by the failed status claim and the
+generation check, never recorded. A resumed attempt gets a fresh
+deadline; 0 or negative disables the timeout.
 
 The scheduler tick (``__delegation_manager_tick__``, every 5m)
 calls ``poll()``: recover orphans, resume what the restart
@@ -77,6 +90,7 @@ import concurrent.futures
 import contextlib
 import dataclasses
 import json
+import os
 import threading
 import time
 import uuid
@@ -90,10 +104,22 @@ from .failures import record_failure
 
 _log = get_logger(__name__)
 
+#: Default per-worker wall-clock budget: one roster-worker attempt
+#: gets 30 minutes. Past it the run is reaped (run failed, contract
+#: failed, timeout reported through the delivery path) — a stuck
+#: worker can never hang a delegation forever. Configurable via
+#: ``NM_DELEGATION_WORKER_TIMEOUT_S`` / ``settings.delegation`` /
+#: the ``worker_timeout_s`` constructor kwarg; 0 or negative
+#: disables the timeout.
+DEFAULT_WORKER_TIMEOUT_S = 1800.0
+#: Env override for the per-worker timeout (seconds).
+WORKER_TIMEOUT_ENV = "NM_DELEGATION_WORKER_TIMEOUT_S"
+
 __all__ = [
     "DelegationError",
     "DelegationManager",
     "DelegationRun",
+    "DEFAULT_WORKER_TIMEOUT_S",
     "RUN_STATUSES",
     "PLAN_ROLE_TO_ROSTER",
     "DELEGATION_JOB",
@@ -270,7 +296,9 @@ class DelegationManager:
                                      dict[str, Any]] | None = None,
                  notifier: Callable[..., dict[str, Any]] | None = None,
                  identity_store: Any = None,
-                 max_workers: int = 2) -> None:
+                 max_workers: int = 2,
+                 worker_timeout_s: float | None = None,
+                 gateway: Any = None) -> None:
         if store is None:
             raise DelegationError(
                 "delegation manager needs a DelegationStore")
@@ -306,12 +334,80 @@ class DelegationManager:
         self._owns_executor = executor is None
         self._run_agent = run_agent or self._run_roster_agent
         self._notifier = notifier
-        #: run id -> (future, generation the worker started with).
-        #: The generation is the fence: a late finalize from a
-        #: superseded worker carries the old generation and is
-        #: dropped, never recorded on the contract.
-        self._futures: dict[str, tuple[Any, int]] = {}
+        #: Explicit gateway wins; otherwise direct delivery resolves
+        #: the live gateway from the context on each send (the
+        #: notifier's ``resolve_gateway`` seam — ``context.gateway``
+        #: or ``context.extras["gateway"]``).
+        self._gateway_override = gateway
+        #: Per-worker wall-clock budget for one attempt (seconds;
+        #: 0 or negative disables the timeout). Resolution order:
+        #: constructor kwarg, context settings
+        #: (``settings.delegation.worker_timeout_s``), the
+        #: ``NM_DELEGATION_WORKER_TIMEOUT_S`` env var, then the
+        #: module default.
+        self.worker_timeout_s = self._resolve_worker_timeout(
+            worker_timeout_s)
+        #: run id -> (future, generation the worker started with,
+        #: monotonic deadline for this attempt, or None when the
+        #: timeout is disabled). The generation is the fence: a late
+        #: finalize from a superseded worker carries the old
+        #: generation and is dropped, never recorded on the contract.
+        self._futures: dict[str, tuple[Any, int, float | None]] = {}
         self._futures_lock = threading.Lock()
+
+    def _resolve_worker_timeout(
+            self, explicit: float | None) -> float:
+        """Resolve the per-worker timeout. Never raises."""
+        if explicit is not None:
+            try:
+                return float(explicit)
+            except (TypeError, ValueError):
+                record_failure(
+                    "delegation_manager.worker_timeout",
+                    ValueError(
+                        f"bad worker_timeout_s {explicit!r} — using "
+                        f"default {DEFAULT_WORKER_TIMEOUT_S:g}s"))
+                return DEFAULT_WORKER_TIMEOUT_S
+        try:
+            settings = getattr(self.context, "settings", None)
+            delegation = getattr(settings, "delegation", None)
+            value = getattr(delegation, "worker_timeout_s", None)
+            if value is not None:
+                return float(value)
+        except (TypeError, ValueError):
+            record_failure(
+                "delegation_manager.worker_timeout",
+                ValueError("bad settings.delegation.worker_timeout_s "
+                           "— using the env/default"))
+        except Exception as exc:  # noqa: BLE001 - timeout never blocks
+            record_failure("delegation_manager.worker_timeout", exc)
+        try:
+            raw = os.environ.get(WORKER_TIMEOUT_ENV, "")
+            if str(raw or "").strip():
+                return float(str(raw).strip())
+        except (TypeError, ValueError):
+            record_failure(
+                "delegation_manager.worker_timeout",
+                ValueError(
+                    f"bad {WORKER_TIMEOUT_ENV} {raw!r} — using "
+                    f"default {DEFAULT_WORKER_TIMEOUT_S:g}s"))
+        except Exception as exc:  # noqa: BLE001 - timeout never blocks
+            record_failure("delegation_manager.worker_timeout", exc)
+        return DEFAULT_WORKER_TIMEOUT_S
+
+    def _resolve_gateway(self) -> Any | None:
+        """The live chat gateway for direct delivery, or None."""
+        if self._gateway_override is not None:
+            return self._gateway_override
+        if self.context is None:
+            return None
+        try:
+            from .notifier import resolve_gateway
+
+            return resolve_gateway(self.context)
+        except Exception as exc:  # noqa: BLE001 - delivery degrades
+            record_failure("delegation_manager.resolve_gateway", exc)
+            return None
 
     @classmethod
     def from_context(cls, context: Any, **kw: Any) -> DelegationManager:
@@ -570,8 +666,12 @@ class DelegationManager:
                 else run.input_dict())
         future = self._executor.submit(self._execute, run.id,
                                        run.role, data)
+        deadline = None
+        if self.worker_timeout_s and self.worker_timeout_s > 0:
+            deadline = time.monotonic() + float(self.worker_timeout_s)
         with self._futures_lock:
-            self._futures[run.id] = (future, int(run.generation))
+            self._futures[run.id] = (future, int(run.generation),
+                                     deadline)
         future.add_done_callback(
             lambda fut, run_id=run.id: self._on_done(run_id, fut))
 
@@ -892,7 +992,7 @@ class DelegationManager:
             with self._futures_lock:
                 entry = self._futures.get(run.id)
             if entry is not None:
-                future, _generation = entry
+                future, _generation, _deadline = entry
                 if not future.done():
                     continue
                 try:
@@ -924,17 +1024,130 @@ class DelegationManager:
                 recovered.append(fresh)
         return recovered
 
+    def _claim_timeout(self, run_id: str, error: str) -> bool:
+        """Atomically claim a timed-out run as failed.
+
+        The conditional UPDATE is the claim, mirroring
+        :meth:`_claim_finalize`: the first caller flips the row to
+        ``failed``; a racing finalizer (the worker finished in the
+        same instant) sees zero rows and the reap stands down.
+        """
+        now = time.time()
+        cursor = self.db.execute(
+            "UPDATE delegation_runs SET status = 'failed',"
+            " error = ?, completed_at = ?, updated_at = ?"
+            " WHERE id = ? AND status IN ('running', 'steering')",
+            (error, now, now, run_id))
+        return bool(getattr(cursor, "rowcount", 0))
+
+    def _reap_timed_out(self) -> list[dict[str, Any]]:
+        """Reap workers past their per-worker timeout. Never raises.
+
+        Returns one entry per reaped run: ``run_id``, ``role``,
+        ``timeout_s``, and the notice delivery
+        (``delivered``/``delivery``/``target``). A reaped run is
+        claimed failed, its contract fails, its identity retires,
+        and the timeout is reported through the same delivery path
+        as a collect (direct to the origin chat, notifier fallback)
+        with the timeout named. The worker thread itself cannot be
+        killed in-process — it keeps running detached, and its late
+        output is fenced by the failed status claim and the
+        generation check in :meth:`_finalize`, never recorded.
+        A future that already finished is never reaped: the finalize
+        path owns it.
+        """
+        if not self.worker_timeout_s or self.worker_timeout_s <= 0:
+            return []
+        now = time.monotonic()
+        with self._futures_lock:
+            overdue = [
+                (run_id, entry)
+                for run_id, entry in self._futures.items()
+                if len(entry) > 2 and entry[2] is not None
+                and entry[2] <= now
+                and not self._future_done(entry[0])]
+        reaped: list[dict[str, Any]] = []
+        for run_id, (future, _generation, _deadline) in overdue:
+            try:
+                run = self.get_run(run_id)
+                if run is None:
+                    with self._futures_lock:
+                        self._futures.pop(run_id, None)
+                    continue
+                error = (
+                    f"worker timed out after "
+                    f"{self.worker_timeout_s:g}s — the run was "
+                    "reaped; the worker thread keeps running "
+                    "detached in-process (Python threads cannot be "
+                    "killed) and its late output is fenced, never "
+                    "recorded; resume to re-run")
+                if not self._claim_timeout(run_id, error):
+                    continue
+                with self._futures_lock:
+                    self._futures.pop(run_id, None)
+                with contextlib.suppress(Exception):
+                    future.cancel()
+                contract = self.store.get_contract(run.contract_id)
+                if contract is not None and not contract.terminal:
+                    try:
+                        from .plan_contracts import fail_step_contract
+
+                        fail_step_contract(self.store, contract,
+                                           detail=error)
+                    except Exception as exc:  # noqa: BLE001 - recorded
+                        record_failure(
+                            "delegation_manager.timeout.fail_contract",
+                            exc)
+                self._retire_identity(run.identity_id)
+                subject = (contract.title if contract is not None
+                           else run.id)
+                title = f"delegation worker timed out: {subject}"
+                lines = [
+                    f"run {run.id} · contract {run.contract_id} · "
+                    f"role {run.role} · generation {run.generation}",
+                    f"worker: {run.worker}",
+                    f"timed out after {self.worker_timeout_s:g}s — "
+                    "the run was reaped and its contract failed.",
+                    "the worker thread keeps running detached "
+                    "(Python threads cannot be killed); its late "
+                    "output is fenced, never recorded.",
+                    f"resume to re-run: /delegate resume {run.id}",
+                ]
+                if run.mission_id:
+                    lines.append(f"mission: {run.mission_id}")
+                delivery = self._deliver(run, title,
+                                         "\n".join(lines))
+                reaped.append({
+                    "run_id": run_id, "role": run.role,
+                    "timeout_s": float(self.worker_timeout_s),
+                    "delivered": bool(delivery.get("delivered")),
+                    "delivery": delivery.get("delivery", "none"),
+                    "target": delivery.get("target", "")})
+            except Exception as exc:  # noqa: BLE001 - reap never dies
+                record_failure("delegation_manager.reap_timed_out", exc)
+        return reaped
+
+    @staticmethod
+    def _future_done(future: Any) -> bool:
+        try:
+            done = getattr(future, "done", None)
+            return bool(done()) if callable(done) else False
+        except Exception:  # noqa: BLE001 - a broken future is live
+            return False
+
     def poll(self) -> dict[str, Any]:
-        """One tick: heal, finalize, collect. Never raises.
+        """One tick: heal, reap, finalize, collect. Never raises.
 
         The scheduler tick's whole job: recover orphans, resume what
-        the restart interrupted, finalize finished futures, collect
-        completed runs into the chat. A run whose gate refused
-        completion is left for the owner (collect would refuse it
-        with its blockers named).
+        the restart interrupted, reap workers past their per-worker
+        timeout, finalize finished futures, collect completed runs
+        into the chat. A run whose gate refused completion is left
+        for the owner (collect would refuse it with its blockers
+        named).
         """
         out: dict[str, Any] = {"recovered": [], "resumed": [],
-                               "finalized": [], "collected": []}
+                               "finalized": [], "collected": [],
+                               "timed_out": []}
         try:
             recovered = self.recover()
         except Exception as exc:  # noqa: BLE001 - the tick never dies
@@ -947,6 +1160,11 @@ class DelegationManager:
                 out["resumed"].append(resumed.id)
             except Exception as exc:  # noqa: BLE001
                 record_failure("delegation_manager.poll.resume", exc)
+        try:
+            out["timed_out"] = self._reap_timed_out()
+        except Exception as exc:  # noqa: BLE001 - the tick never dies
+            record_failure("delegation_manager.poll.reap", exc)
+            out["timed_out"] = []
         try:
             rows = self.list_runs(limit=500)
         except Exception as exc:  # noqa: BLE001
@@ -1006,31 +1224,144 @@ class DelegationManager:
         return outcome if isinstance(outcome, dict) \
             else {"delivered": bool(outcome)}
 
+    @staticmethod
+    def _send_ok(result: Any) -> bool:
+        """Whether a gateway send result counts as delivered."""
+        if result is None:
+            return False
+        if isinstance(result, dict):
+            return bool(result.get("ok") or result.get("delivered"))
+        return bool(getattr(result, "ok", False))
+
+    @staticmethod
+    def _send_error(result: Any) -> str:
+        """The refusal reason carried by a gateway send result."""
+        if result is None:
+            return "no result"
+        if isinstance(result, dict):
+            return str(result.get("error") or result.get("reason")
+                       or "refused")
+        return str(getattr(result, "error", "") or "refused")
+
+    def _deliver_direct(self, chat_key: str, title: str,
+                        body: str) -> dict[str, Any]:
+        """Send one message straight to the origin chat.
+
+        Returns ``{"delivered": bool, "reason": str}`` — ``reason``
+        is set exactly when delivery failed, and always names the
+        fallback (the notifier), so a failed direct send is never
+        silent. The gateway's own ``send`` parses the chat-key
+        string, so no ChatRef import is needed here.
+        """
+        if ":" not in str(chat_key or ""):
+            return {"delivered": False,
+                    "reason": f"origin chat_key {chat_key!r} names "
+                              "no platform — fell back to the "
+                              "notifier"}
+        platform = str(chat_key).partition(":")[0].strip()
+        if not platform:
+            return {"delivered": False,
+                    "reason": f"origin chat_key {chat_key!r} names "
+                              "no platform — fell back to the "
+                              "notifier"}
+        gateway = self._resolve_gateway()
+        if gateway is None:
+            return {"delivered": False,
+                    "reason": "no live chat gateway — fell back to "
+                              "the notifier"}
+        send = getattr(gateway, "send", None)
+        if send is None:
+            return {"delivered": False,
+                    "reason": "chat gateway has no send — fell back "
+                              "to the notifier"}
+        try:
+            result = send(platform, str(chat_key),
+                          f"{title}\n{body}")
+        except Exception as exc:  # noqa: BLE001 - delivery degrades
+            record_failure("delegation_manager.deliver_direct", exc)
+            return {"delivered": False,
+                    "reason": f"direct send to {chat_key} failed "
+                              f"({exc}) — fell back to the notifier"}
+        if self._send_ok(result):
+            return {"delivered": True, "reason": ""}
+        return {"delivered": False,
+                "reason": f"direct send to {chat_key} was refused "
+                          f"({self._send_error(result)}) — fell back "
+                          "to the notifier"}
+
+    def _deliver(self, run: DelegationRun, title: str,
+                 body: str) -> dict[str, Any]:
+        """The one delivery path for delegation messages.
+
+        A run that recorded its origin chat gets the message sent
+        straight back there first; a failed direct send, a missing
+        gateway, or no recorded origin chat falls back to the
+        notifier (the historical path) — the message is never
+        silently dropped. Returns ``{"delivered", "delivery",
+        "target", "reasons"}`` where ``delivery`` is ``"direct"``,
+        ``"notifier"``, or ``"none"``.
+        """
+        reasons: list[str] = []
+        chat_key = str(getattr(run, "chat_key", "") or "")
+        if chat_key:
+            direct = self._deliver_direct(chat_key, title, body)
+            if direct.get("delivered"):
+                return {"delivered": True, "delivery": "direct",
+                        "target": chat_key, "reasons": []}
+            reasons.append(str(direct.get("reason") or
+                               "direct delivery failed"))
+        try:
+            outcome = self._notify("delegation", title, body)
+            delivered = bool(outcome.get("delivered"))
+            if not delivered:
+                detail = (outcome.get("reason")
+                          or outcome.get("delivery_state")
+                          or "no channel")
+                reasons.append(
+                    f"delivery did not reach a channel ({detail}) "
+                    "— the result stays on the run record")
+            return {"delivered": delivered,
+                    "delivery": "notifier" if delivered else "none",
+                    "target": chat_key, "reasons": reasons}
+        except Exception as exc:  # noqa: BLE001 - delivery never blocks
+            record_failure("delegation_manager.collect.notify", exc)
+            reasons.append(
+                f"delivery failed: {exc} — the result stays on the "
+                "run record")
+            return {"delivered": False, "delivery": "none",
+                    "target": chat_key, "reasons": reasons}
+
     def collect(self, run_id: str, *, by: str = "") -> dict[str, Any]:
         """Deliver a completed run's result into the chat.
 
         Requires the run completed AND its contract settled by the
         gate (finalize settles; a gate refusal leaves the contract
         open and collect refuses with the blockers named). Delivery
-        goes through the notifier; a dead channel does not block the
-        mission loop — the run still collects, with the delivery
-        failure named. Idempotent: a second collect replays without
-        a second delivery.
+        goes back to the chat the run started from when one was
+        recorded (``chat_key``), and falls back to the notifier
+        otherwise — a dead channel does not block the mission loop:
+        the run still collects, with the delivery failure named.
+        Idempotent: a second collect replays without a second
+        delivery.
         """
         run = self.get_run(run_id)
         if run is None:
             return {"ok": False, "run_id": run_id, "contract_id": "",
-                    "delivered": False,
+                    "delivered": False, "delivery": "none",
+                    "delivery_target": "",
                     "reasons": [f"no delegation run {run_id!r}"],
                     "replayed": False}
         if run.status == "collected":
             return {"ok": True, "run_id": run.id,
                     "contract_id": run.contract_id,
-                    "delivered": bool(run.delivered), "reasons": [],
-                    "replayed": True}
+                    "delivered": bool(run.delivered),
+                    "delivery": "replayed",
+                    "delivery_target": run.chat_key,
+                    "reasons": [], "replayed": True}
         if run.status != "completed":
             return {"ok": False, "run_id": run.id,
                     "contract_id": run.contract_id, "delivered": False,
+                    "delivery": "none", "delivery_target": run.chat_key,
                     "reasons": [f"run is {run.status} — only a "
                                 "completed run collects"],
                     "replayed": False}
@@ -1038,12 +1369,14 @@ class DelegationManager:
         if contract is None:
             return {"ok": False, "run_id": run.id,
                     "contract_id": run.contract_id, "delivered": False,
+                    "delivery": "none", "delivery_target": run.chat_key,
                     "reasons": [f"contract {run.contract_id} is gone"],
                     "replayed": False}
         if not contract.terminal:
             blockers = self.store.completion_blockers(contract)
             return {"ok": False, "run_id": run.id,
                     "contract_id": contract.id, "delivered": False,
+                    "delivery": "none", "delivery_target": run.chat_key,
                     "reasons": blockers or
                     [f"contract is {contract.status}"],
                     "replayed": False}
@@ -1065,28 +1398,16 @@ class DelegationManager:
             lines.append("steering applied: "
                          + "; ".join(run.notes))
         body = "\n".join(lines)
-        reasons: list[str] = []
-        delivered = False
-        try:
-            outcome = self._notify("delegation", title, body)
-            delivered = bool(outcome.get("delivered"))
-            if not delivered:
-                detail = (outcome.get("reason")
-                          or outcome.get("delivery_state")
-                          or "no channel")
-                reasons.append(
-                    f"delivery did not reach a channel ({detail}) "
-                    "— the result stays on the run record")
-        except Exception as exc:  # noqa: BLE001 - delivery never blocks
-            record_failure("delegation_manager.collect.notify", exc)
-            reasons.append(
-                f"delivery failed: {exc} — the result stays on the "
-                "run record")
+        delivery = self._deliver(run, title, body)
+        delivered = bool(delivery.get("delivered"))
         self._update_run(run.id, status="collected",
                          delivered=1 if delivered else 0)
         return {"ok": True, "run_id": run.id,
                 "contract_id": contract.id, "delivered": delivered,
-                "reasons": reasons, "replayed": False}
+                "delivery": delivery.get("delivery", "none"),
+                "delivery_target": delivery.get("target", ""),
+                "reasons": delivery.get("reasons", []),
+                "replayed": False}
 
     # -- plan -------------------------------------------------------------------
 
@@ -1188,6 +1509,8 @@ class DelegationManager:
                 else self.store.completion_blockers(contract)
             if blockers:
                 lines.append("contract blocked by: " + "; ".join(blockers))
+        if run.chat_key:
+            lines.append(f"origin chat: {run.chat_key}")
         if run.identity_label:
             lines.append(f"acting as: {run.identity_label} "
                          f"({run.identity_id})")
