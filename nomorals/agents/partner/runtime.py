@@ -8987,6 +8987,33 @@ class PartnerRuntime(
             _, _gh_name = _gh_parsed
             return self._control_ghealth(_gh_name, message)
 
+        # Natural phrasing for the photo editor: "open this photo
+        # <path.psd>" / "edit this photo <name>" — matched only
+        # against a .psd path in the text or a document already
+        # open in the Studio store, so the question never steals
+        # an unrelated one. Owner-only, like /photo.
+        from ...tools.photo_editor import parse_photo_request
+
+        _photo_parsed = None
+        try:
+            from ...media.photo_editor.store import PhotoStore
+
+            _home = getattr(
+                getattr(self.context, "settings", None), "home", None)
+            _store = PhotoStore(
+                home=str(_home) if _home else None)
+            _known = [(row.get("id", ""),
+                       row.get("title") or "")
+                      for row in _store.list_docs()]
+            _photo_parsed = parse_photo_request(text, _known)
+        except Exception:  # noqa: BLE001 — no store, no hook
+            _photo_parsed = None
+        if _photo_parsed is not None:
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            _verb, _ref = _photo_parsed
+            return self._control_photo(f"{_verb} {_ref}", message)
+
         # Living-card taps (Living Chat P2): a card button's
         # payload is a fencing stamp, not a command —
         # "cardtap <card_id> <revision> <index>". Checked before
@@ -10468,6 +10495,13 @@ class PartnerRuntime(
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
             return self._control_board(command.tail or arg, message)
+        if kind == "photo":
+            # Studio photo editor (PhotoCraft port, lane 76) — PSD
+            # documents the owner opens and edits as data.
+            # Owner-only, like /board.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_photo(command.tail or arg, message)
         if kind == "immune":
             # Defensive immune system — owner-only, like /learn.
             if message is not None and not self._is_operator(message):

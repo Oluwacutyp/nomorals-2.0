@@ -656,6 +656,7 @@ class ToolRegistry:
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "representation",  # "what did you tell X for me?" over the representation ledger
             "group_health",  # churn / growth / topic clusters for WhatsApp group health
+            "photo_editor",  # Studio photo editor — PSD documents, ladder edits, Studio page (PhotoCraft port)
             "workspace",
             "trading",
             "characters",

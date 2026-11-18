@@ -1454,6 +1454,185 @@ class RuntimeMetaMixin:
             return f"live board page written. {note}"
         return usage
 
+    def _control_photo(self, tail: str, message: Any = None) -> str:
+        """The /photo reply: the Studio photo editor, in chat.
+
+        A thin dispatch to the same ``photo_editor`` tool the brain
+        uses — no organ logic duplicated here, so the command's
+        output is the tool's output.
+
+        ``/photo open <path.psd>`` opens a PSD into the Studio
+        store. ``/photo edit <id> crop <l> <t> <r> <b>`` crops the
+        canvas; ``/photo edit <id> enhance [brightness <n>]``
+        brightens the active layer; ``/photo edit <id> develop
+        [brightness <n>] [contrast <n>]`` runs the develop stage.
+        ``/photo undo|redo <id>`` steps the op history.
+        ``/photo show <id>`` and ``/photo list`` read documents.
+        ``/photo save <id> [path]`` writes the PSD back.
+        ``/photo render <id> <png path>`` writes the composite PNG;
+        ``/photo page <id> <html path>`` writes the Studio page.
+        Owner-only. A failure reports in words — never silence,
+        never a fake image.
+        """
+        import shlex
+
+        usage = ("usage: /photo open <path.psd> | edit <id> crop "
+                 "<l> <t> <r> <b> | edit <id> enhance [brightness "
+                 "<n>] [contrast <n>] | edit <id> develop "
+                 "[brightness <n>] [contrast <n>] | undo|redo <id> "
+                 "| show <id> | list | save <id> [path] | render "
+                 "<id> <png path> | page <id> <html path>")
+        try:
+            words = shlex.split(tail or "")
+        except ValueError:
+            return usage
+        verb = words[0].lower() if words else "list"
+        if verb not in ("open", "edit", "undo", "redo", "show",
+                        "list", "save", "render", "page"):
+            return usage
+
+        def _call(action: str, **kwargs: Any) -> tuple[bool, dict]:
+            outcome = self.context.tools.call(
+                "photo_editor", action=action, **kwargs)
+            if not outcome.ok:
+                error = getattr(outcome, "error", None)
+                text = getattr(error, "message", None) or str(error)
+                return False, {"error": text}
+            value = getattr(outcome, "value", None) or {}
+            if not isinstance(value, dict):
+                value = {"value": value}
+            return True, value
+
+        def _describe(value: dict) -> str:
+            size = value.get("size") or []
+            head = f"photo {value.get('id', '')[:8]}"
+            if len(size) == 2:
+                head += (f" — {value.get('title') or 'untitled'} "
+                         f"{size[0]}x{size[1]}")
+            lines = [head,
+                     f"  {value.get('layers', 0)} layer(s)"]
+            for layer in value.get("layer_list") or []:
+                lines.append(
+                    f"  {layer.get('name')} — {layer.get('kind')} "
+                    f"{layer.get('width')}x{layer.get('height')}")
+            for op in value.get("history") or []:
+                params = ", ".join(
+                    f"{k}={v}" for k, v in
+                    (op.get("params") or {}).items())
+                lines.append(f"  edit: {op.get('op')}({params})")
+            for note in value.get("notes") or []:
+                lines.append(f"  note: {note}")
+            return "\n".join(lines)
+
+        def _send(path: str, caption: str) -> str:
+            if message is None:
+                return (f"written to {path} — run /photo from a "
+                        "chat to have the file sent there.")
+            failed = self._scene_send_file(path, message, caption)
+            if failed is not None:
+                return failed
+            return "sent."
+
+        if verb == "list":
+            ok, value = _call("list")
+            if not ok:
+                return f"photo list failed: {value['error']}"
+            docs = value.get("documents") or []
+            if not docs:
+                return ("no photos open yet — /photo open "
+                        "<path.psd> opens one.")
+            lines = ["photos:"]
+            for row in docs:
+                lines.append(
+                    f"  {row.get('id', '')[:8]} — "
+                    f"{row.get('title') or 'untitled'} "
+                    f"{row.get('width')}x{row.get('height')}, "
+                    f"{len(row.get('layers') or [])} layer(s)")
+            return "\n".join(lines)
+        if verb == "open":
+            if len(words) < 2:
+                return usage
+            path = str(Path(words[1]).expanduser())
+            ok, value = _call("open", path=path)
+            if not ok:
+                return f"photo open failed: {value['error']}"
+            return _describe(value)
+        ref = words[1] if len(words) > 1 else ""
+        if verb in ("show", "undo", "redo"):
+            if not ref:
+                return usage
+            ok, value = _call(verb, doc_id=ref)
+            if not ok:
+                return f"photo {verb} failed: {value['error']}"
+            if verb == "show":
+                return _describe(value)
+            done = value.get("undone") or value.get("redone")
+            if done is None:
+                return value.get("note") or "nothing to step."
+            return (f"{verb} — {done.get('op')} stepped. "
+                    f"{len(value.get('history') or [])} edit(s) now.")
+        if verb == "edit":
+            if len(words) < 4:
+                return usage
+            name = words[2].lower()
+            if name not in ("crop", "enhance", "develop"):
+                return usage
+            rest = words[3:]
+            params: dict[str, Any] = {}
+            if name == "crop":
+                if len(rest) != 4:
+                    return usage
+                try:
+                    box = tuple(int(v) for v in rest)
+                except ValueError:
+                    return "/photo edit crop needs four integers."
+                params["box"] = list(box)
+            else:
+                i = 0
+                while i < len(rest):
+                    key = rest[i].lower()
+                    if key == "layer" and i + 1 < len(rest):
+                        try:
+                            params["layer"] = int(rest[i + 1])
+                        except ValueError:
+                            return ("/photo edit layer needs an "
+                                    "integer.")
+                        i += 2
+                        continue
+                    if i + 1 >= len(rest):
+                        return usage
+                    try:
+                        params[key] = float(rest[i + 1])
+                    except ValueError:
+                        return (f"/photo edit {key} needs a "
+                                f"number, got {rest[i + 1]!r}")
+                    i += 2
+            ok, value = _call("edit", doc_id=ref, op=name,
+                              params=params)
+            if not ok:
+                return f"photo edit failed: {value['error']}"
+            return _describe(value)
+        if verb == "save":
+            target = str(Path(words[2]).expanduser()) \
+                if len(words) > 2 else ""
+            ok, value = _call("save", doc_id=ref, path=target)
+            if not ok:
+                return f"photo save failed: {value['error']}"
+            return (f"saved as PSD: {value.get('saved')}\n"
+                    + _describe(value))
+        if verb in ("render", "page"):
+            if len(words) < 3:
+                return usage
+            target = str(Path(words[2]).expanduser())
+            ok, value = _call(verb, doc_id=ref, out=target)
+            if not ok:
+                return f"photo {verb} failed: {value['error']}"
+            key = "rendered" if verb == "render" else "page"
+            note = _send(value.get(key, target),
+                         f"photo — {value.get('title') or ref[:8]}")
+            return (f"photo {verb} written. {note}")
+        return usage
+
     def _control_arena_research(self, tail: str,
                                  message: Any = None) -> str:
         """The /arena-research reply: Devon researching herself, on

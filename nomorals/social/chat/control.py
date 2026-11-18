@@ -700,6 +700,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "impossible": (0, None),  # /impossible solve <problem> | status | attempt | dossier | queue | charter | lattice | examples — always-on conceive-and-solve (owner-only)
     "scene": (0, None),  # /scene point <x> <y> [label] | tag <text> | clear | status | page | idle — Clicky interaction mechanisms on the scene organ (owner-only)
     "board": (0, None),  # /board new <title> | add <board> <type> <label> [x y w h] | move | remove | bind | undo | redo | show | list | render | page — whiteboard organ (owner-only)
+    "photo": (0, None),  # /photo open <path.psd> | edit <id> <op> ... | undo | redo | show | list | save | render | page — Studio photo editor, the PhotoCraft port (owner-only)
     "tour": (0, 1),         # /tour — smoke-test every command; /tour <cmd> deep-probes one
     "heal": (0, 1),         # /heal [--dry] | /heal <cmd> — self-healing loop: diagnose + auto-fix broken commands
     "ekiti": (0, None),       # /ekiti converse <text> | debate <topic> | say <text> | check "<expected>" | tones
@@ -2574,6 +2575,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/board new <title> [--theme sketch|clean] | add <board> <type> <label> [x y w h] | move <board> <shape> <x> <y> | remove <board> <shape> | bind <board> <from> <to> [label] | undo|redo <board> | show <board> | list | render <board> [--theme sketch] | page <board>",
                 "example": "/board new launch plan",
                 "related": "/scene /impossible"},
+    "photo": {"what": "Devon Studio's native photo editor (the PhotoCraft port): open a PSD file as a layered document, edit it through the image ladder, and save it back as PSD. Layers, masks and adjustment layers are parsed; the flatten renders normal blends; adjustment layers are reported, not rendered yet. Owner only.",
+                "usage": "/photo open <path.psd> | edit <id> crop <l> <t> <r> <b> | edit <id> enhance [brightness <n>] [contrast <n>] | edit <id> develop [brightness <n>] [contrast <n>] | undo|redo <id> | show <id> | list | save <id> [path] | render <id> <png path> | page <id> <html path>",
+                "example": "/photo open ~/shots/cover.psd",
+                "related": "/board /image"},
     "learn": {"what": "one front door over learn/ — Socratic/direct tutoring, quiz formats, FSRS flashcards from the mistake notebook, BKT mastery, and WAEC/JAMB syllabus. Owner only.",
                 "usage": "/learn tutor [guide me] <topic> | answer <text> | hint | status | stop | /learn quiz formats | /learn flashcards due | stats | list | review <id> <1-4> | export <path> | /learn mastery [weakest] | /learn waec <subject> | waec grade <pct> | /learn jamb <subject> | jamb formats",
                 "example": "/learn tutor guide me fractions",
@@ -4975,8 +4980,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "identity", "book", "books", "features",
                            "checkpoint", "checkpoints", "rewind", "novel"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board",
-                           "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
+                           "benchmark", "redteam", "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board", "photo", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
                           "balances", "goal", "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
     ("games — 41, DM + group, start them directly",
@@ -5313,7 +5317,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
-      "immune", "impossible", "scene", "board", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
+      "immune", "impossible", "scene", "board", "photo", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -5896,6 +5900,7 @@ LIST_ONELINERS: dict[str, str] = {
     "impossible": "Impossible Made Possible: /impossible solve <problem> | status | attempt | dossier | queue | charter | lattice | examples",
     "scene": "Clicky interaction mechanisms: /scene point <x> <y> [label] | tag <text> | clear | status | page | idle",
     "board": "Whiteboard: /board new <title> [--theme sketch] | add <board> <type> <label> [x y w h] | move | remove | bind | undo | redo | show | list | render | page",
+    "photo": "Photo editor: /photo open <path.psd> | edit <id> crop <l> <t> <r> <b> | edit <id> enhance [brightness <n>] | edit <id> develop [...] | undo | redo | show | list | save | render | page",
     "like": "last production was good: /like [notes…]",
     "novel": "webnovel tracker: /novel follow <url|title> | list | read <slug> [ch] | continue <slug> [n]",
     "produce": "compose original music, taste-aware: /produce [spotify-url|vibe words…]",

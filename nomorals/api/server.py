@@ -97,7 +97,7 @@ __all__ = [
 
 _log = get_logger(__name__)
 
-_ROUTE = re.compile(r"^/[a-z0-9_/-]+$")
+_ROUTE = re.compile(r"^/[A-Za-z0-9_/-]+$")
 #: Client-supplied request ids are echoed verbatim on the response, so
 #: they must be header-safe: anything outside this token charset is
 #: ignored and a fresh id is minted (blocks response-splitting).
@@ -1347,6 +1347,11 @@ class APIServer:
             "Owner-approved public-face pages (/p/<slug>), served as "
             "plain HTML — drafts never serve"
         )
+        self._route_docs[("GET", "/studio/photo/<id>")] = (
+            "Studio photo editor page for one open photo document "
+            "(/studio/photo/<id>), served as plain HTML — bearer-gated, "
+            "Capability.MEDIA; unknown ids answer 404"
+        )
 
 
 def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
@@ -1758,6 +1763,54 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                     self._send_error(503, "pairing page unavailable")
                     return
                 raw = page.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Security-Policy", CSP)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Frame-Options", "DENY")
+                request_id = getattr(self, "_request_id", "")
+                if request_id:
+                    self.send_header("X-Request-ID", request_id)
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            if method == "GET" and parsed.path.startswith("/studio/photo/"):
+                # Studio photo editor (PhotoCraft port, lane 76): the
+                # page for one open photo document, served as plain
+                # HTML like /pair — bearer-gated AFTER principal
+                # resolution (no bearer is a 401 above), and the page
+                # rides Capability.MEDIA, which the bounded default
+                # grant does not carry. Unknown ids answer 404,
+                # identically — no oracle for guessing ids.
+                try:
+                    _require_capability(principal, Capability.MEDIA)
+                except CapabilityDenied as exc:
+                    self._send_error(403, str(exc) or "capability denied",
+                                     extra={"kind": "CapabilityDenied"})
+                    return
+                from ..media.photo_editor.page import photo_page_html
+                from ..media.photo_editor.store import PhotoStore
+
+                home = getattr(
+                    getattr(server.context, "settings", None),
+                    "home", "") or ""
+                try:
+                    store = PhotoStore(home=home or None)
+                    doc_id = parsed.path[len("/studio/photo/"):]
+                    doc = store.load(doc_id)
+                    if doc is None:
+                        self._send_error(404, "no such photo")
+                        return
+                    raw = photo_page_html(doc, doc_id=doc_id).encode(
+                        "utf-8")
+                except Exception:  # noqa: BLE001 - a broken store is a 503, not a 500
+                    _log.exception("studio photo page failed")
+                    self._send_error(503, "photo page unavailable")
+                    return
                 self.send_response(200)
                 self.send_header("Content-Type",
                                  "text/html; charset=utf-8")
