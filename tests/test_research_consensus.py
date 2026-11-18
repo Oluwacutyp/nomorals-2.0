@@ -476,7 +476,7 @@ class TestChatRegistration:
         assert "consensus" in CONTROL_COMMANDS
         assert CONTROL_COMMANDS["consensus"] == (1, None)
         assert "consensus" in PUBLIC_COMMANDS
-        assert len(PUBLIC_COMMANDS) == 276
+        assert len(PUBLIC_COMMANDS) == 277
         assert "consensus" in COMMAND_DETAILS
         assert "/consensus" in COMMAND_DETAILS["consensus"]["usage"]
         assert "consensus" in LIST_ONELINERS

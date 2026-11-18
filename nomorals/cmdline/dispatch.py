@@ -20,6 +20,7 @@ from .commands.airports import _cmd_airports
 from .commands.compute import _cmd_compute
 from .commands.evidence import _cmd_evidence
 from .commands.devask import _cmd_devask
+from .commands.explain import _cmd_explain
 from .commands.consensus import _cmd_consensus
 from .commands.scholar import _cmd_scholar
 from .commands.paper_graph import _cmd_paper_graph
@@ -577,6 +578,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "compute": _CommandSpec(_cmd_compute),
     "evidence": _CommandSpec(_cmd_evidence),
     "devask": _CommandSpec(_cmd_devask),
+    "explain": _CommandSpec(_cmd_explain),
     "consensus": _CommandSpec(_cmd_consensus),
     "scholar": _CommandSpec(_cmd_scholar),
     "papergraph": _CommandSpec(_cmd_paper_graph),

@@ -5798,6 +5798,119 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"devask failed: {exc}"
 
+    def _control_explain(self, tail: str) -> str:
+        """Explain a shell command fragment by fragment.
+
+        Public. /explain <shell command> annotates each fragment —
+        the command, every option, arguments, pipes and redirects —
+        with the exact help text for that fragment, grounded in the
+        man pages of the binaries actually installed on this box,
+        in --help output harvested in the sandbox, or in tldr
+        pages. A fragment with no grounded doc is marked unknown,
+        never filled in silently. /explain list shows past
+        explanations; /explain show <id> re-renders one;
+        /explain ingest rebuilds the man corpus; /explain status
+        reports it. The explainer never executes the command.
+        Never raises: bad input returns usage.
+        """
+        from ...codews.explain import (
+            explain_command,
+            format_explanation_reply,
+            open_explanation_store,
+        )
+        from ...codews.man_corpus import fetch_tldr_page, open_man_corpus
+
+        tail = (tail or "").strip()
+        usage = "usage: /explain <shell command> | list | show <id> | " \
+                "ingest | status"
+        if not tail:
+            return usage
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — default home then
+                home = None
+            store = open_explanation_store(home)
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb in {"help", "--help"}:
+                return usage
+            if verb == "list":
+                rows = store.list()
+                if not rows:
+                    return "no explanations yet — explain a command " \
+                           "with /explain <shell command>"
+                lines = ["explanations:"]
+                for row in rows[:10]:
+                    lines.append(
+                        f"  {row['explanation_id']} — {row['command']}")
+                return "\n".join(lines)
+            if verb == "show":
+                if not rest:
+                    return "usage: /explain show <id>"
+                row = store.get(rest)
+                if row is None:
+                    return f"no explanation “{rest}”"
+                return format_explanation_reply({**row, "ok": True})
+            if verb == "status":
+                corpus = open_man_corpus(home)
+                try:
+                    status = corpus.status()
+                finally:
+                    corpus.close()
+                lines = [f"man corpus: {status['pages']} pages, "
+                         f"{status['options']} options",
+                         f"stored at {status['path']}",
+                         f"explanations stored: {len(store.list())}"]
+                if status["last_ingest"]:
+                    lines.append(
+                        f"last ingest: {status['last_ingest']}")
+                return "\n".join(lines)
+            if verb == "ingest":
+                corpus = open_man_corpus(home)
+                try:
+                    stats = corpus.ingest()
+                finally:
+                    corpus.close()
+                return (f"man corpus ingested: {stats['pages']} pages, "
+                        f"{stats['options']} options "
+                        f"({stats['skipped']} unchanged)")
+            context = getattr(self, "context", None)
+            tools = getattr(context, "tools", None) if context else None
+            help_fetcher = None
+            if tools is not None:
+                def _help(cmd: str):
+                    try:
+                        outcome = tools.call(
+                            "shell_run", command=f"{cmd} --help",
+                            timeout=15.0)
+                    except Exception:  # noqa: BLE001 — harvest is a miss
+                        return None
+                    if not getattr(outcome, "ok", False):
+                        return None
+                    value = getattr(outcome, "value", None)
+                    if not isinstance(value, dict):
+                        return None
+                    if value.get("exit_code") != 0:
+                        return None
+                    text = (value.get("stdout") or "").strip()
+                    return text or None
+
+                help_fetcher = _help
+            llm_fn = None
+            if context is not None:
+                from ...tools.paper_reader import _llm_from_context
+
+                llm_fn = _llm_from_context(context)
+            return format_explanation_reply(explain_command(
+                home, tail, store=store, llm_fn=llm_fn,
+                help_fetcher=help_fetcher,
+                tldr_fetcher=fetch_tldr_page))
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"explain failed: {exc}"
+
     def _control_consensus(self, tail: str) -> str:
         """What the literature agrees on (Consensus meter).
 

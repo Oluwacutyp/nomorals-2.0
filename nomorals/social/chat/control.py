@@ -206,7 +206,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: pins the two together — a wave that adds a kind here must add its
 #: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "explain", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "map-route", "headline", "teardown",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
@@ -434,6 +434,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "scholar": (1, None),  # /scholar <title or DOI> | list | show <id> | watch <topic> | feeds | unwatch <topic> — the full Semantic Scholar record of a paper
     "readpaper": (1, None),  # /readpaper <DOI or title> | text <pasted paper> | list | show <id> | ask <id> <question> | explain <id> <equation 1|table 1> | cite <id> [style] | paraphrase <text> — read a paper and explain it in plain language
     "devask": (1, None),  # /devask <question or pasted stack trace> | list | show <id> — developer answers with cited sources and executed code (Phind core)
+    "explain": (1, None),  # /explain <shell command> | list | show <id> | ingest | status — explain a shell command fragment by fragment from local man pages (ExplainShell core)
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
     "searchleads": (0, 0),   # legit paid-task platform report
     "money": (0, None),      # money opportunities hunter: scan|list|new|profile
@@ -2482,6 +2483,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/devask <question or pasted stack trace> | list | show <id>",
                 "example": "/devask why does my Go bridge get 'index out of range'?",
                 "related": "/search · /evidence"},
+    "explain": {"what": "Shell-command explainer: paste a shell command and get each fragment annotated with the exact help text for that fragment — the command, every option, arguments, pipes and redirects — grounded in the man pages of the binaries actually installed on this box, in --help output, or in tldr pages. A fragment with no grounded doc is marked unknown, never filled in silently. explain_and_run explains first and only then runs the command in the sandbox.",
+                "usage": "/explain <shell command> | list | show <id> | ingest | status",
+                "example": "/explain tar -czf archive.tgz dir",
+                "related": "/devask · /compute"},
     "searchdeep": {"what": "deep multi-query research with synthesis (power mode).",
                    "usage": "/searchdeep <query>", "example": "/searchdeep eBPF rootkit detection",
                    "related": "/search /searchhist"},
@@ -4883,7 +4888,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "audit", "whois", "ports",
-                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask"]),
+                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "explain"]),
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
@@ -5168,7 +5173,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
-      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask"]),
+      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "explain"]),
     ("wisdom keeper — corpus · history · practice",
      ["wisdom", "wis"]),
     ("building for real — code & missions",
@@ -5369,6 +5374,7 @@ LIST_ONELINERS: dict[str, str] = {
     "papergraph": "the paper graph around a paper — what it cites, what cites it, the clusters, what to read next",
     "scholar": "the full record of a paper — authors, venue, TLDR, influential citations, open-access PDF",
     "devask": "developer answers with cited sources — explanation plus code, every code block executed before it is presented",
+    "explain": "shell-command explainer — each fragment annotated with the exact help text for it, grounded in local man pages",
     "readpaper": "read a paper and explain it in plain language — findings quoted verbatim, equations and tables unpacked, questions answered from the paper itself",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",

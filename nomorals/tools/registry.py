@@ -633,6 +633,7 @@ class ToolRegistry:
             "paper_reader",  # paper reader — explain a paper in plain language (SciSpace core)
             "video_brief",  # video brief — long video as a sectioned brief (Summarize.tech core)
             "dev_answer",  # developer answer engine — cited answers + executed code (Phind core)
+            "explain_command",  # shell-command explainer — grounded fragments from local man pages (ExplainShell core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",

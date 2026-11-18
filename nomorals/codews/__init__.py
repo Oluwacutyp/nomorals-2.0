@@ -1,6 +1,24 @@
 """L5 code workspace object: repos, patches, tests, builds for agents."""
 
 from .compute import Computation, compute_answer, format_compute_reply
+from .explain import (
+    Fragment,
+    explain_command,
+    format_explanation_reply,
+    open_explanation_store,
+    parse_bash,
+)
+from .man_corpus import (
+    BUILTIN_DOCS,
+    ManCorpus,
+    ManPage,
+    fetch_tldr_page,
+    open_man_corpus,
+    parse_help_text,
+    parse_man_page_file,
+    parse_man_page_text,
+    parse_tldr_markdown,
+)
 from .patch import (
     apply_edit_blocks,
     apply_patch,
@@ -21,6 +39,20 @@ __all__ = [
     "WolframClient",
     "compute_answer",
     "format_compute_reply",
+    "Fragment",
+    "explain_command",
+    "format_explanation_reply",
+    "open_explanation_store",
+    "parse_bash",
+    "BUILTIN_DOCS",
+    "ManCorpus",
+    "ManPage",
+    "fetch_tldr_page",
+    "open_man_corpus",
+    "parse_help_text",
+    "parse_man_page_file",
+    "parse_man_page_text",
+    "parse_tldr_markdown",
     "review_patch",
     "apply_patch",
     "preview_patch",

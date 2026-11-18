@@ -56,6 +56,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "compute": [],
     "evidence": [],
     "devask": [],
+    "explain": [],
     "consensus": [],
     "papergraph": [],
     "scholar": [],
@@ -3717,6 +3718,37 @@ def _parser() -> argparse.ArgumentParser:
                           help="max cited sources")
     devask_p.add_argument("--json", action="store_true",
                           help="Output as JSON")
+
+    explain_p = sub.add_parser(
+        "explain", aliases=CLI_ALIASES["explain"],
+        help="explain a shell command fragment by fragment",
+        description=("nm explain <shell command> [--json]\\\\n"
+                     "nm explain run <shell command> [--json]\\\\n"
+                     "nm explain list\\\\n"
+                     "nm explain show <id>\\\\n"
+                     "nm explain ingest [--man-root <dir>]\\\\n"
+                     "nm explain status\\\\n"
+                     "The shell-command explainer: each fragment of the "
+                     "command is annotated with the exact help text for "
+                     "that fragment, grounded in the man pages of the "
+                     "binaries actually installed on this host, in "
+                     "--help output harvested in the sandbox, or in "
+                     "tldr pages (with --online). A fragment with no "
+                     "grounded doc is marked unknown, never filled in "
+                     "silently. The explainer itself never executes "
+                     "anything; 'run' explains first and only then "
+                     "runs the command in the sandbox."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    explain_p.add_argument("explain_query", nargs="*", default=[],
+                           help="shell command, or list|show|ingest|"
+                                "status|run …")
+    explain_p.add_argument("--man-root", default=None,
+                           help="man root to ingest from (ingest only)")
+    explain_p.add_argument("--online", action="store_true",
+                           help="allow tldr page fetches")
+    explain_p.add_argument("--json", action="store_true",
+                           help="Output as JSON")
 
     consensus_p = sub.add_parser(
         "consensus", aliases=CLI_ALIASES["consensus"],
