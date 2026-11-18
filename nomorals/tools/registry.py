@@ -611,6 +611,7 @@ class ToolRegistry:
             "ruff_ratchet", "secret_scan", "landability",  # Wave 8 gates
             "map", "macros", "mcp_client", "media", "media_edit", "media_gen", "media_director", "media_pipeline", "metadata",
             "board",  # whiteboard organ (Excalidraw/Tldraw)
+            "bgremove",  # one-shot background removal (Remove.bg core)
             "music", "studio",
             "network", "osint", "osint_people", "parsers",
             "prompt_compiler",

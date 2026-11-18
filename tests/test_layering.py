@@ -381,6 +381,11 @@ MODULE_PINS: dict[str, int] = {
     # foundation tool. The registry loads it dynamically by dotted
     # name, never by static import.
     "nomorals.tools.pagewise": 5,
+    # tools/bgremove is the same shape: a tool *surface* over the
+    # L4 media/imggen organ (the composed background-removal
+    # ladder), not an L4 foundation tool. The registry loads it
+    # dynamically by dotted name, never by static import.
+    "nomorals.tools.bgremove": 5,
     # tools/flight_track is the same shape: a tool *surface* over the
     # L5 travel organ (the live flight-tracking organ), not an L4
     # foundation tool. The registry loads it dynamically by dotted

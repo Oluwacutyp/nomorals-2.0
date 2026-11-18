@@ -3308,6 +3308,7 @@ class CoreMind:
             out_dir = Path(self.context.settings.resolve(
                 "data/generations"))
             out_dir.mkdir(parents=True, exist_ok=True)
+            caption_extra = ""
             if action == "captions":
                 # #25: video captions — transcribe → burn → deliver video +
                 # .srt sidecar. Video path, not the image pipeline below.
@@ -3381,9 +3382,20 @@ class CoreMind:
                             f"{result.error}")
                 return f"🎬 done — {labels[action].split(' ', 1)[1]}"
             if action == "bgremove":
-                from ..media_edit.segment import remove_background
-                out = remove_background(load_image(src_paths[0]))
+                # Through the Studio document flow, not the bare
+                # organ call: the cutout lands as an
+                # ImageDocument (saved beside the PNG) so Studio
+                # work can continue from it.
+                from ..media.imggen.studio import Studio
+                studio = Studio()
+                doc = studio.remove_background_document(src_paths[0])
+                rendered = doc.render()
+                out = rendered.image
                 name = "bgcut"
+                rung = (rendered.provenance[0]["rung"]
+                        if rendered.provenance else "")
+                caption_extra = f" via {rung}" if rung else ""
+                doc.save(out_dir / f"bgcut-{stamp}.json")
             elif action == "upscale_sr":
                 from ..media_edit.upscale import upscale
                 out = upscale(load_image(src_paths[0]), scale=4.0)
@@ -3415,8 +3427,7 @@ class CoreMind:
                 ref, MediaRef(path=str(out_path), kind="image",
                               mime="image/png", name=out_path.name),
                 caption=(f"🖼️ {labels[action]} — done"
-                         + (caption_extra if action == "edittext"
-                            else "")))
+                         + caption_extra))
             if not result.ok:
                 return (f"❌ {labels[action]} done but couldn't send: "
                         f"{result.error}")

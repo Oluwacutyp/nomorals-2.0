@@ -501,6 +501,25 @@ class Studio:
         return self.render_document(
             doc, save_to=save_to, prompt=f"upscale x{scale}")
 
+    def remove_background(self, image_path: str, *,
+                          tier: str = "auto", model: str = "",
+                          margin: float = 0.06, feather: int = 2,
+                          save_to: str | None = None) -> list[str]:
+        """One-shot background removal → transparent PNG cutout.
+
+        The Studio document flow: builds the ImageDocument
+        holding one remove_background op and renders it. No
+        neural pipeline is needed — every rung is local (the
+        rembg model rung where provisioned, then the classical
+        mask ladder). The sidecar records the rung that served
+        the cutout.
+        """
+        doc = self.remove_background_document(
+            image_path, tier=tier, model=model, margin=margin,
+            feather=feather)
+        return self.render_document(
+            doc, save_to=save_to, prompt="remove background")
+
     # -- documents (Echelon Wave 2 · plan §2.1a) ----------------------
     # The classic methods above are document renders underneath:
     # each builds an ImageDocument (source ref + op list) and
@@ -589,6 +608,18 @@ class Studio:
         return ImageDocument(image_path).upscale(
             scale=scale, diffusion=diffusion, prompt=prompt,
             creativity=creativity)
+
+    def remove_background_document(self, image_path: str, *,
+                                   tier: str = "auto", model: str = "",
+                                   margin: float = 0.06,
+                                   feather: int = 2):
+        """An unrendered document holding one remove_background
+        op — chain more ops, undo, branch, save the project,
+        render later."""
+        from .document import ImageDocument
+
+        return ImageDocument(image_path).remove_background(
+            tier=tier, model=model, margin=margin, feather=feather)
 
     def render_document(self, doc, save_to: str | None = None,
                         prompt: str = "") -> list[str]:

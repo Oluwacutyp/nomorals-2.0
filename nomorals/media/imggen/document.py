@@ -74,7 +74,8 @@ CLASSIC_OPS = (
 )
 
 #: imggen-native ops (neural + develop + upscale).
-IMGGEN_OPS = ("develop", "img2img", "inpaint", "outpaint", "upscale")
+IMGGEN_OPS = ("develop", "img2img", "inpaint", "outpaint", "upscale",
+              "remove_background")
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +310,25 @@ def _run_outpaint(img, params: dict, ctx: _RenderContext):
     return out[0], "neural outpaint (blended diffusion)", ""
 
 
+def _run_remove_background(img, params: dict, ctx: _RenderContext):
+    from .bgremove import remove_background
+
+    p = dict(params)
+    tier = str(p.pop("tier", "auto"))
+    model = str(p.pop("model", ""))
+    margin = float(p.pop("margin", 0.06))
+    feather = int(p.pop("feather", 2))
+    if p:
+        raise ImgGenError(
+            f"remove_background op got unknown params {sorted(p)}")
+    res = remove_background(img, tier=tier, model=model,
+                            margin=margin, feather=feather)
+    note = res.detail
+    if res.notes:
+        note += "; " + "; ".join(res.notes)
+    return res.image, f"bgremove ({res.rung})", note
+
+
 def _run_upscale(img, params: dict, ctx: _RenderContext):
     from .upscale import upscale_classical, upscale_diffusion
 
@@ -371,6 +391,12 @@ IMAGE_OPS: dict = {
     "upscale": _OpSpec(
         "classical Lanczos upscale or diffusion detail synthesis",
         _run_upscale),
+    "remove_background": _OpSpec(
+        "one-shot background removal: the rembg model rung "
+        "where provisioned, then the classical mask ladder; "
+        "the cutout is a transparent PNG and the rung is "
+        "recorded in the provenance",
+        _run_remove_background),
 }
 
 
@@ -525,6 +551,17 @@ class ImageDocument:
                 creativity: float | None = None) -> "ImageDocument":
         return self.push("upscale", scale=scale, diffusion=diffusion,
                          prompt=prompt, creativity=creativity)
+
+    def remove_background(self, *, tier: str = "auto", model: str = "",
+                          margin: float = 0.06,
+                          feather: int = 2) -> ImageDocument:
+        """One-shot background removal as an op: the rembg model
+        rung where provisioned, then the classical mask ladder.
+        ``tier``: auto|rembg|sam|grabcut|flood|box. The cutout is
+        a transparent PNG; the rung that served it is recorded
+        in the render provenance."""
+        return self.push("remove_background", tier=tier, model=model,
+                         margin=margin, feather=feather)
 
     # -- serialization --------------------------------------------------
     def to_dict(self) -> dict:
