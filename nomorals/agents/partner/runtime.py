@@ -2655,6 +2655,20 @@ class PartnerRuntime(
                     _log.warning("snapshot reply send failed: %s", exc)
                 return
             try:
+                radio_reply = self._radio_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("radio hook failed")
+                radio_reply = None
+            if radio_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, radio_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      radio_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("radio reply send failed: %s", exc)
+                return
+            try:
                 track_reply = self._track_hook(message)
             except Exception:  # noqa: BLE001 - the hook must never eat chat
                 _log.exception("track hook failed")
@@ -6854,6 +6868,82 @@ class PartnerRuntime(
             record_failure("runtime.PartnerRuntime._snapshot_hook", exc)
             return "the snapshot failed — try the link again?"
 
+    def _radio_hook(self, message: ChatMessage) -> str | None:
+        """52-websites #29 Radio.Garden: "play a radio station from
+        Tokyo", "jazz stations in New Orleans", "what's on in
+        Accra?" → the radio organ.
+
+        Returns a reply string when a radio intent fired, else None.
+        Runs after the snapshot hook, before the flight track hook.
+        Never raises. A play intent captures a bounded live sample
+        and SENDS the audio file itself; the returned string is then
+        the caption the caller sends — None when the audio plus its
+        caption already went out as one media message.
+        """
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        from ...music_sources.radio import (
+            StationStore,
+            capture_sample,
+            default_store_path,
+            format_radio_reply,
+            parse_radio_request,
+            search_stations,
+        )
+        try:
+            settings = getattr(self.context, "settings", None)
+            home = getattr(settings, "home", None) if settings else None
+            store = getattr(self, "_radio_stations", None)
+            if store is None:
+                store = (StationStore(default_store_path(str(home)))
+                         if home else StationStore())
+                self._radio_stations = store
+            parsed = parse_radio_request(text, store.all())
+            if parsed is None:
+                return None
+            if parsed["intent"] == "stations":
+                found = search_stations(
+                    store, place=parsed["place"] or None,
+                    genre=parsed["genre"] or None, limit=20)
+                return format_radio_reply(found, place=parsed["place"],
+                                          genre=parsed["genre"])
+            if parsed["station_id"]:
+                station = store.get(parsed["station_id"])
+                candidates = [station] if station is not None else []
+            else:
+                candidates = search_stations(
+                    store, place=parsed["place"] or None,
+                    genre=parsed["genre"] or None, limit=3)
+            if not candidates:
+                return format_radio_reply([], place=parsed["place"],
+                                          genre=parsed["genre"])
+            errors: list[str] = []
+            from pathlib import Path as _RadioPath
+
+            for station in candidates:
+                sample = capture_sample(station, dest_dir=(
+                    str(_RadioPath(home) / "radio_samples")
+                    if home else None))
+                if not sample.ok:
+                    errors.append(f"{station.name}: {sample.error}")
+                    continue
+                caption = (
+                    f"🔴 LIVE {station.name} — {station.city}, "
+                    f"{station.country}\n"
+                    f"{sample.seconds}s live sample — the full live "
+                    f"stream is at {station.stream_url}")
+                if self._send_audio_media(message, sample.path, caption):
+                    return None
+                return (f"{caption}\n(the sample is saved at "
+                        f"{sample.path} — this chat could not take "
+                        f"the audio file)")
+            return ("📻 every station tried was down — "
+                    + "; ".join(errors))
+        except Exception as exc:  # noqa: BLE001 - the hook must never eat chat
+            record_failure("runtime.PartnerRuntime._radio_hook", exc)
+            return "the radio lookup failed — try the place again?"
+
     def _price_watch_hook(self, message: ChatMessage) -> str | None:
         """CamelCamelCamel (#22): "watch this on Amazon, tell me
         under $50" → retail price watch; "price history of X" →
@@ -6974,6 +7064,34 @@ class PartnerRuntime(
         except Exception:  # noqa: BLE001 - a failed chart never kills the reply
             _log.debug("price history chart failed", exc_info=True)
             return format_history(watch, points)
+
+    def _send_audio_media(self, message: ChatMessage, path: str,
+                          caption: str) -> bool:
+        """Send a live-radio sample (or any audio file) to the chat
+        that asked. False → text only."""
+        try:
+            from pathlib import Path as _AudioPath
+
+            from ...social.chat.base import MediaRef
+            platform = str(message.chat.platform or "")
+            adapter = (getattr(self.gateway, "adapters", {})
+                       or {}).get(platform)
+            fn = getattr(adapter, "send_media", None) \
+                if adapter is not None else None
+            if fn is None:
+                return False
+            mime = {".mp3": "audio/mpeg", ".aac": "audio/aac",
+                    ".ogg": "audio/ogg", ".wav": "audio/wav",
+                    ".flac": "audio/flac"}.get(
+                        _AudioPath(path).suffix.lower(), "audio/mpeg")
+            ref = MediaRef(path=str(path), kind="audio", mime=mime)
+            result = fn(message.chat, ref, caption=caption)
+            if isinstance(result, dict):
+                return bool(result.get("ok"))
+            return bool(getattr(result, "ok", False))
+        except Exception:  # noqa: BLE001 - media failure is text-only
+            _log.debug("radio audio send failed", exc_info=True)
+            return False
 
     def _send_chart_media(self, message: ChatMessage, path: str,
                           caption: str) -> bool:

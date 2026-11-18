@@ -27,16 +27,24 @@ __all__ = ["control_music_sources", "MUSIC_SOURCES_USAGE"]
 
 
 def MUSIC_SOURCES_USAGE() -> str:
+    from .registry import MUSIC_REGISTRY
+
+    rows = len(MUSIC_REGISTRY)
     return (
         "🎵 /music sources — legal music registry (licence always shown)\n"
-        "  /music sources — all 94 rows, grouped by class\n"
+        f"  /music sources — all {rows} rows, grouped by class\n"
         "  /music sources class <purchase|pool|open|artist_enabled|metadata|preview|dataset>\n"
         "  /music sources pack <axis> <value> — e.g. pack nation JP\n"
         "  /music sources licence <text>\n"
         "  /music sources <id> — one source, full row\n"
         "  /music enrich <file-or-query> — fingerprint → AcoustID → MusicBrainz → one hop\n"
         "  /music health [id] — probe one / all due sources\n"
-        "  /music registry-play <query> [--source <id>] — search → download → enrich"
+        "  /music registry-play <query> [--source <id>] — search → download → enrich\n"
+        "  /music radio <place> [genre] — live stations for a place\n"
+        "  /music radio play <station> | /music radio play <place> [genre]\n"
+        "  /music radio globe — one dot per city, sized by broadcasters\n"
+        "  /music radio grow — pull the most-voted stations in\n"
+        "  /music radio health [station] | /music radio status"
     )
 
 
@@ -74,6 +82,8 @@ def _control_music_sources(tail: str, context: Any = None,
         return _enrich(rest)
     if verb == "health":
         return _health(rest, context)
+    if verb == "radio":
+        return _radio(rest, context, deliver_fn)
     if verb in ("registry-play", "play"):
         return _registry_play(play_mod, rest, context, deliver_fn)
     return MUSIC_SOURCES_USAGE()
@@ -92,7 +102,8 @@ def _sources(reg: Any, rest: str) -> str:
     from .registry import all_sources, by_class, by_id, by_licence, by_pack
 
     if not rest:
-        lines = ["🎵 music sources — legal registry (94 rows):"]
+        lines = [f"🎵 music sources — legal registry "
+                 f"({len(reg.MUSIC_REGISTRY)} rows):"]
         for cls in ("purchase", "pool", "open", "artist_enabled",
                     "metadata", "preview", "dataset"):
             rows = by_class(cls)
@@ -189,6 +200,155 @@ def _health(rest: str, context: Any = None) -> str:
         f"{ups} up, {downs} down, {unknowns} unknown (no pinger wired).\n"
         "  Wire a pinger for live up/down; without one nothing is fabricated."
     )
+
+
+def _radio_home(context: Any) -> str | None:
+    settings = (getattr(context, "settings", None)
+                if context is not None else None)
+    home = (getattr(settings, "home", None)
+            if settings is not None else None)
+    return str(home) if home else None
+
+
+def _radio(rest: str, context: Any = None,
+           deliver_fn: Any = None) -> str:
+    """ /music radio — the Radio.Garden surface: stations by place,
+    live samples through the play spine's delivery. Never raises."""
+    from .radio import (
+        StationStore,
+        capture_sample,
+        check_all,
+        check_station,
+        default_store_path,
+        format_radio_reply,
+        globe_dots,
+        grow_from_directory,
+        search_stations,
+        station_by_id,
+        station_by_name,
+    )
+
+    home = _radio_home(context)
+    store = (StationStore(default_store_path(home)) if home
+             else StationStore())
+    raw = (rest or "").strip()
+    words = raw.split()
+    verb = words[0].lower() if words else ""
+    if verb == "status":
+        summary = store.health_summary()
+        return (f"📻 radio index: {store.count()} stations — "
+                f"{summary.get('up', 0)} up, {summary.get('down', 0)} down, "
+                f"{summary.get('unchecked', 0)} unchecked, "
+                f"{summary.get('unknown', 0)} unknown.\n"
+                f"  store: {store.path}")
+    if verb == "globe":
+        dots = globe_dots(store)
+        lines = [f"📻 radio globe — {len(dots)} cities, "
+                 f"{store.count()} stations:"]
+        for dot in dots:
+            lines.append(f"  • {dot['city']}, {dot['country']} "
+                         f"({dot['lat']:.2f}, {dot['lon']:.2f}) — "
+                         f"{dot['count']} station(s)")
+        return "\n".join(lines)
+    if verb == "grow":
+        result = grow_from_directory(store)
+        if result.get("error"):
+            return (f"📻 the radio directory did not answer "
+                    f"({result['error']}) — the index is unchanged.")
+        return (f"📻 grew the radio index: {result['added']} new "
+                f"station(s) from {result['seen']} seen — "
+                f"{store.count()} stations now.")
+    if verb == "health":
+        ref = " ".join(words[1:]).strip()
+        if ref:
+            station = (station_by_id(store, ref)
+                       or station_by_name(store, ref))
+            if station is None:
+                return f"📻 no station matches {ref!r}."
+            result = check_station(store, station.id)
+            if result is None:
+                return f"📻 no station matches {ref!r}."
+            status, detail = result
+            return (f"📻 health {station.name}: {status}\n"
+                    f"  detail: {detail}")
+        result = check_all(store)
+        lines = [f"📻 radio health: {result['up']} up, "
+                 f"{result['down']} down."]
+        lines += [f"  • {failure}" for failure in result["failures"]]
+        return "\n".join(lines)
+    if verb == "play":
+        query = " ".join(words[1:]).strip()
+        if not query:
+            return "usage: /music radio play <station> | <place> [genre]"
+        station = (station_by_id(store, query)
+                   or station_by_name(store, query))
+        candidates = [station] if station is not None else None
+        if candidates is None:
+            parts = query.split()
+            place = query
+            genre = None
+            if len(parts) > 1:
+                tried = search_stations(
+                    store, place=parts[0],
+                    genre=" ".join(parts[1:]), limit=3)
+                if not tried:
+                    tried = search_stations(
+                        store, place=" ".join(parts[1:]),
+                        genre=parts[0], limit=3)
+                if tried:
+                    candidates = tried
+            if candidates is None:
+                candidates = search_stations(store, place=place,
+                                             genre=genre, limit=3)
+        if not candidates:
+            return format_radio_reply([], place=query)
+        errors: list[str] = []
+        for candidate in candidates:
+            from pathlib import Path as _Path
+
+            sample = capture_sample(
+                candidate, dest_dir=(
+                    str(_Path(home) / "radio_samples")
+                    if home else None))
+            if not sample.ok:
+                errors.append(f"{candidate.name}: {sample.error}")
+                continue
+            caption = (f"🔴 LIVE {candidate.name} — {candidate.city}, "
+                       f"{candidate.country}\n"
+                       f"{sample.seconds}s live sample — the full live "
+                       f"stream is at {candidate.stream_url}")
+            if deliver_fn is None:
+                return (f"{caption}\n"
+                        f"saved on the server at {sample.path} — this "
+                        f"surface returns text; /play {sample.path} "
+                        f"sends it here.")
+            try:
+                ok, err = deliver_fn(sample.path, caption)
+            except Exception as exc:  # noqa: BLE001 - delivery failure is data
+                return f"📻 the sample was captured but sending it failed ({exc})."
+            if ok:
+                return caption
+            return (f"📻 the sample was captured but sending it failed "
+                    f"({err}).\n{caption}")
+        return ("📻 every station tried was down — "
+                + "; ".join(errors))
+    if verb == "list":
+        rows = store.all()
+        lines = [f"📻 radio index — {len(rows)} station(s):"]
+        lines += [f"  • {s.name} — {s.city}, {s.country}"
+                  for s in rows]
+        return "\n".join(lines)
+    # Anything else is "<place> [genre]".
+    place = raw
+    genre = None
+    found = search_stations(store, place=place, limit=20)
+    if not found and len(words) > 1:
+        found = search_stations(store, place=" ".join(words[1:]),
+                                genre=words[0], limit=20)
+        if found:
+            place = " ".join(words[1:])
+            genre = words[0]
+    return format_radio_reply(found, place=place, genre=genre or "")
 
 
 def _registry_play(play_mod: Any, rest: str, context: Any = None,

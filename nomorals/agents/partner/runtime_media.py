@@ -522,7 +522,7 @@ class RuntimeMediaMixin:
             return ("usage: /music <topic> [style]  |  /music styles  |  "
                     "/music song [slug]\nstyles: " + ", ".join(STYLES))
         words = tail.split()
-        if words and words[0].lower() in ("sources", "enrich", "health", "registry-play"):
+        if words and words[0].lower() in ("sources", "enrich", "health", "radio", "registry-play"):
             # Legal music registry surface — licence always shown.
             # The runtime context rides along (registry health +
             # the wired play pipeline consult it) and, in chat, a

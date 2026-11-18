@@ -501,6 +501,21 @@ MUSIC_REGISTRY: List[MusicSource] = [
        bulk=False, api=False, bot_wall=False, etiquette=OPEN_POLITE,
        notes="Public-domain scores; check the per-score copyright status for your region.",
        pack={"tradition": "classical"}),
+    _M(id="radio-browser", name="Radio Browser", source_class="open",
+       auth="none", formats=["MP3", "AAC"],
+       quality_ceiling="as streamed",
+       licence="Open community directory — streams belong to their broadcasters",
+       volatility="platform_api", bulk=False, api=True, bot_wall=False,
+       etiquette="Set a descriptive User-Agent; cache results; honour rate limits.",
+       notes="Community radio directory (radio-browser.info, keyless): "
+             "tens of thousands of live stations indexed by place. "
+             "Verified live from this box 2026-11-18: search + top-voted "
+             "endpoints return JSON and the seeded streams answer with "
+             "audio bytes. Devon indexes and plays; she does not "
+             "rebroadcast. Home of the radio organ "
+             "(music_sources/radio.py): Station{name, city, country, "
+             "lat, lon, stream_url, genres[], health} + place index.",
+       pack={"platform": "Radio Browser"}),
     _M(id="soundcloud", name="SoundCloud", source_class="artist_enabled",
        auth="none", formats=["MP3", "AAC"], quality_ceiling="varies by track",
        licence="Per-track licence as set by uploader",
