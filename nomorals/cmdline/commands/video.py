@@ -12,6 +12,8 @@
     nm video motion export --file clip.mp4 --format 9:16
     nm video chain scenes.json [--backend auto] [--style cinematic]
     nm video qc <path|prompt> [--seconds N] [--json]
+    nm video brief <url|path> [--window N] [--abstractive] [--json]
+    nm video brief --list | nm video brief --show <id>
     nm video formats [list|show <name>|scaffold <name>]
     nm video capability
     nm video list [--json]
@@ -127,6 +129,66 @@ def _cmd_qc(args: argparse.Namespace, context) -> int:
         return _err(str(exc))
     except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
         return _err(str(exc))
+
+
+def _cmd_brief(args: argparse.Namespace, context) -> int:
+    """``nm video brief <url|path>`` — long video as a sectioned brief."""
+    from ...media.video_brief import (
+        VideoBrief,
+        VideoBriefStore,
+        brief_video,
+        format_brief_reply,
+    )
+
+    settings = getattr(context, "settings", None) if context else None
+    home = None
+    if settings is not None:
+        home = getattr(settings, "home_path", None) or getattr(
+            settings, "home", None)
+    store = VideoBriefStore(home=home)
+    as_json = bool(getattr(args, "json", False))
+    if getattr(args, "list", False):
+        rows = store.list()
+        if as_json:
+            print(json.dumps(rows, indent=2))
+            return 0
+        if not rows:
+            return _ok("no video briefs yet")
+        lines = ["video briefs:"]
+        for row in rows:
+            lines.append(f"  {row['id']} — {row['title']} "
+                         f"({row['sections']} sections, "
+                         f"{row['transcript_source'] or '?'})")
+        return _ok("\n".join(lines))
+    if getattr(args, "show", ""):
+        record = store.get(str(args.show))
+        if record is None:
+            print(f"video: no stored brief '{args.show}'", file=sys.stderr)
+            return 1
+        brief = VideoBrief.from_dict(record)
+        if as_json:
+            print(json.dumps(brief.to_dict(), indent=2))
+            return 0
+        return _ok(format_brief_reply(brief))
+    ref = (getattr(args, "ref", "") or "").strip()
+    if not ref:
+        return _err("usage: nm video brief <url|path> [--window N] "
+                    "[--abstractive] [--json] | nm video brief --list | "
+                    "nm video brief --show <id>")
+    try:
+        brief = brief_video(
+            ref, home=home, context=context,
+            window_s=float(getattr(args, "window", 300.0) or 300.0),
+            abstractive=bool(getattr(args, "abstractive", False)),
+            store=store)
+    except Exception as exc:  # noqa: BLE001 - CLI surfaces as text
+        return _err(str(exc))
+    if as_json:
+        print(json.dumps(brief.to_dict(), indent=2))
+        return 0 if brief.ok else 1
+    if not brief.ok:
+        return _err(brief.reason)
+    return _ok(format_brief_reply(brief))
 
 
 def _cmd_capability(args: argparse.Namespace, context) -> int:
@@ -394,6 +456,8 @@ def cmd_video(args: argparse.Namespace, context) -> int:
         return _cmd_chain(args, context)
     if action == "qc":
         return _cmd_qc(args, context)
+    if action == "brief":
+        return _cmd_brief(args, context)
     if action == "formats":
         return _cmd_formats(args, context)
     if action == "capability":

@@ -3130,6 +3130,8 @@ def _parser() -> argparse.ArgumentParser:
                      "nm video motion export --file clip.mp4 --format 9:16\n"
                      "nm video chain scenes.json [--style cinematic]\n"
                      "nm video qc <path|prompt> [--seconds N] [--json]\n"
+                     "nm video brief <url|path> [--window N] [--abstractive] [--json]\n"
+                     "nm video brief --list | nm video brief --show <id>\n"
                      "nm video capability | nm video list"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -3246,6 +3248,20 @@ def _parser() -> argparse.ArgumentParser:
     v_qc.add_argument("--seconds", type=float, default=5.0)
     v_qc.add_argument("--json", action="store_true")
     v_qc.add_argument("--out", default="")
+    v_br = v_sub.add_parser(
+        "brief", help="long video as a sectioned brief (captions, else ASR)")
+    v_br.add_argument("ref", nargs="?",
+                      help="YouTube URL (or bare id) or local video path")
+    v_br.add_argument("--window", type=float, default=300.0,
+                      help="section window in seconds (default: 300)")
+    v_br.add_argument("--abstractive", action="store_true",
+                      help="rewrite section summaries with the LLM brain "
+                      "(falls back to extractive when unavailable)")
+    v_br.add_argument("--list", action="store_true",
+                      help="list stored briefs")
+    v_br.add_argument("--show", default="",
+                      help="show one stored brief by id")
+    v_br.add_argument("--json", action="store_true")
     v_cap = v_sub.add_parser("capability", help="what video can run here")
     v_cap.add_argument("--backend", default="auto")
     v_ls = v_sub.add_parser("list", help="recent studio renders")

@@ -4684,8 +4684,11 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                       "yt-dlp metadata (duration). Downloads real files. "
                       "The watch subverb truly watches one: sampled frames "
                       "described by the vision model + the audio track "
-                      "transcribed, answered from both (owner-only).",
-              "usage": "/video <query> [platform] | /video download <url> [audio] | /video platforms | /video watch <url|path> [question]",
+                      "transcribed, answered from both (owner-only). "
+                      "The brief subverb turns a long video into a "
+                      "sectioned brief — timestamped sections, TLDR, deep "
+                      "links, transcript source named (owner-only).",
+              "usage": "/video <query> [platform] | /video download <url> [audio] | /video platforms | /video watch <url|path> [question] | /video brief <url|path> [--abstractive] | /video brief list | /video brief show <id>",
               "example": "/video lofi beats for studying youtube",
               "related": "/searchdeep · nm video on the console"},
     "map-route": {"what": "Code-video route scene: a route draws itself — "

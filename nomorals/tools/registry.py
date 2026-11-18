@@ -631,6 +631,7 @@ class ToolRegistry:
             "paper_graph",  # paper graph — citation neighbourhood (Connected Papers core)
             "paper_record",  # full Semantic Scholar paper record (S2 core)
             "paper_reader",  # paper reader — explain a paper in plain language (SciSpace core)
+            "video_brief",  # video brief — long video as a sectioned brief (Summarize.tech core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",

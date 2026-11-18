@@ -4969,6 +4969,9 @@ class RuntimeMediaMixin:
         /video capability | /video list
         Watching lives here too: /video watch <url|path> [question]
         (owner-only — it spends vision-model calls per frame).
+        Briefing lives here too: /video brief <url|path> (owner-only —
+        it downloads the video and transcribes it when no captions
+        exist), /video brief list, /video brief show <id>.
         """
         from ...media.video import _PLATFORM_SITES, VideoFinder
 
@@ -4978,11 +4981,17 @@ class RuntimeMediaMixin:
                     "/video download <url> [audio]  |  /video platforms\n"
                     "studio: /video gen \"<prompt>\" | /video motion … | "
                     "/video capability | /video list\n"
-                    "watch: /video watch <url|path> [question]")
+                    "watch: /video watch <url|path> [question]\n"
+                    "brief: /video brief <url|path> | /video brief list | "
+                    "/video brief show <id>")
         words = tail.split()
         first = words[0].lower()
         if first == "watch":
             return self._control_video_watch(
+                tail[len(words[0]):].strip(),
+                chat_key=chat_key, message=message)
+        if first == "brief":
+            return self._control_video_brief(
                 tail[len(words[0]):].strip(),
                 chat_key=chat_key, message=message)
         # studio subcommands — "motion" only triggers on a known product
@@ -5032,6 +5041,86 @@ class RuntimeMediaMixin:
             lines.append(f"  {i}. {title}{dur}{extra}\n     {r['url']}")
         lines.append("download: /video download <url>")
         return "\n".join(lines)
+
+    def _control_video_brief(self, tail: str, chat_key: str = "",
+                             message: Any = None) -> str:
+        """`/video brief <url|path> | list | show <id>` — a long video as
+        a sectioned brief.
+
+        Captions first, ASR fallback, honest refusal when neither
+        exists — the brief names which transcript it was built from.
+        Owner-only: every brief downloads the video (when no captions
+        exist) and transcribes it, the same cost profile as /video
+        watch, so the same gate. The public /video grant admits
+        everyone, so this subverb gates itself. Never raises.
+        """
+        from ...media.video_brief import (
+            VideoBrief,
+            VideoBriefStore,
+            brief_video,
+            format_brief_reply,
+        )
+        from ...partner.gating import is_owner_chat
+
+        def _send(text: str) -> str:
+            chat = self._ref_from_key(chat_key) if chat_key else None
+            if chat is not None:
+                return self._send_long_checked(chat.platform, chat,
+                                               text[:6000])
+            return text[:6000]
+
+        if message is not None:
+            if not self._is_operator(message):
+                return "that one's just for the owner."
+        elif chat_key:
+            chat = self._ref_from_key(chat_key)
+            if not is_owner_chat(chat, owner_chats=getattr(
+                    self, "_owner_chats", ())):
+                return "that one's just for the owner."
+        else:
+            return "that one's just for the owner."
+
+        settings = getattr(self.context, "settings", None)
+        home = None
+        if settings is not None:
+            home = getattr(settings, "home_path", None) or getattr(
+                settings, "home", None)
+        store = VideoBriefStore(home=home)
+        tail = (tail or "").strip()
+        tokens = tail.split()
+        if tokens and tokens[0].lower() == "list":
+            rows = store.list()
+            if not rows:
+                return _send("no video briefs yet — /video brief <url> "
+                             "to make the first one")
+            lines = ["🎬 video briefs:"]
+            for row in rows:
+                lines.append(
+                    f"  {row['id']} — {row['title']} "
+                    f"({row['sections']} sections, "
+                    f"{row['transcript_source'] or '?'})")
+            return _send("\n".join(lines))
+        if tokens and tokens[0].lower() == "show":
+            wanted = tokens[1] if len(tokens) > 1 else ""
+            record = store.get(wanted) if wanted else None
+            if record is None:
+                return _send("no stored brief "
+                             + (f"'{wanted}'" if wanted else "(give an id)"))
+            return _send(format_brief_reply(
+                VideoBrief.from_dict(record)))
+        abstractive = "--abstractive" in tokens
+        targets = [t for t in tokens if t != "--abstractive"]
+        if not targets:
+            return _send("usage: /video brief <url|path> [--abstractive] | "
+                         "/video brief list | /video brief show <id>")
+        target = targets[0]
+        try:
+            brief = brief_video(
+                target, home=home, context=self.context,
+                abstractive=abstractive, store=store)
+            return _send(format_brief_reply(brief))
+        except Exception as exc:  # noqa: BLE001 - chat surfaces as text
+            return _send(f"video brief error: {exc}")
 
     def _control_video_watch(self, tail: str, chat_key: str = "",
                              message: Any = None) -> str:
