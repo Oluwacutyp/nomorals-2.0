@@ -87,7 +87,7 @@ class MuseumSendRegistrationTest(unittest.TestCase):
         self.assertNotIn("museum", PUBLIC_COMMANDS)
         self.assertFalse(caller_may_run("museum", False))
         self.assertTrue(caller_may_run("museum", True))
-        self.assertEqual(len(PUBLIC_COMMANDS), 275)
+        self.assertEqual(len(PUBLIC_COMMANDS), 276)
 
 
 class MuseumSendCommandTest(unittest.TestCase):

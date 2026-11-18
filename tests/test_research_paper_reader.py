@@ -457,7 +457,7 @@ class WiringTests(unittest.TestCase):
         )
 
         self.assertIn("readpaper", PUBLIC_COMMANDS)
-        self.assertEqual(275, len(PUBLIC_COMMANDS))
+        self.assertEqual(276, len(PUBLIC_COMMANDS))
         self.assertIn("readpaper", CONTROL_COMMANDS)
         self.assertIn("readpaper", COMMAND_DETAILS)
         self.assertTrue(COMMAND_DETAILS["readpaper"].get("what"))

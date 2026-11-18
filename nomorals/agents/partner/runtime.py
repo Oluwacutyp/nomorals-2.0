@@ -9828,6 +9828,8 @@ class PartnerRuntime(
             return self._control_scholar(command.tail or arg)
         if kind == "readpaper":
             return self._control_readpaper(command.tail or arg)
+        if kind == "devask":
+            return self._control_devask(command.tail or arg)
         if kind == "director":
             return self._control_director(command.tail or arg)
         if kind == "caption":

@@ -206,7 +206,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: pins the two together — a wave that adds a kind here must add its
 #: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "map-route", "headline", "teardown",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
@@ -433,6 +433,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "papergraph": (1, None),  # /papergraph <title or DOI> [deep] | list | show <id> | graph <id> — the paper graph around a paper (Connected Papers core)
     "scholar": (1, None),  # /scholar <title or DOI> | list | show <id> | watch <topic> | feeds | unwatch <topic> — the full Semantic Scholar record of a paper
     "readpaper": (1, None),  # /readpaper <DOI or title> | text <pasted paper> | list | show <id> | ask <id> <question> | explain <id> <equation 1|table 1> | cite <id> [style] | paraphrase <text> — read a paper and explain it in plain language
+    "devask": (1, None),  # /devask <question or pasted stack trace> | list | show <id> — developer answers with cited sources and executed code (Phind core)
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
     "searchleads": (0, 0),   # legit paid-task platform report
     "money": (0, None),      # money opportunities hunter: scan|list|new|profile
@@ -2477,6 +2478,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/readpaper <DOI or title> | text <pasted paper> | list | show <id> | ask <id> <question> | explain <id> <equation 1|table 1> | cite <id> [apa|mla|chicago|bibtex] | paraphrase <text>",
                 "example": "/readpaper 10.1038/nature12373",
                 "related": "/scholar · /evidence · /consensus · /papergraph"},
+    "devask": {"what": "Developer answers with cited sources and executed code: ask a technical question or paste a full stack trace and get a direct answer — explanation plus code — from official docs, Stack Overflow, GitHub issues and discussions, changelogs, and Devon's own code index first. Every self-contained code block is EXECUTED before it is presented; a block that did not run green is labelled not verified, never presented as working. A follow-up keeps the previous answer's context. A question no source answers is refused honestly — nothing here is invented.",
+                "usage": "/devask <question or pasted stack trace> | list | show <id>",
+                "example": "/devask why does my Go bridge get 'index out of range'?",
+                "related": "/search · /evidence"},
     "searchdeep": {"what": "deep multi-query research with synthesis (power mode).",
                    "usage": "/searchdeep <query>", "example": "/searchdeep eBPF rootkit detection",
                    "related": "/search /searchhist"},
@@ -4878,7 +4883,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "audit", "whois", "ports",
-                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper"]),
+                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask"]),
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
@@ -5163,7 +5168,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
-      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper"]),
+      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask"]),
     ("wisdom keeper — corpus · history · practice",
      ["wisdom", "wis"]),
     ("building for real — code & missions",
@@ -5363,6 +5368,7 @@ LIST_ONELINERS: dict[str, str] = {
     "consensus": "what the literature agrees on — a quality-weighted stance meter over real papers, dissent named by name",
     "papergraph": "the paper graph around a paper — what it cites, what cites it, the clusters, what to read next",
     "scholar": "the full record of a paper — authors, venue, TLDR, influential citations, open-access PDF",
+    "devask": "developer answers with cited sources — explanation plus code, every code block executed before it is presented",
     "readpaper": "read a paper and explain it in plain language — findings quoted verbatim, equations and tables unpacked, questions answered from the paper itself",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",

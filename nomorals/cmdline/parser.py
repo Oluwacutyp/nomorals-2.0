@@ -55,6 +55,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "airports": [],
     "compute": [],
     "evidence": [],
+    "devask": [],
     "consensus": [],
     "papergraph": [],
     "scholar": [],
@@ -3692,6 +3693,30 @@ def _parser() -> argparse.ArgumentParser:
                             help="max papers in the set")
     evidence_p.add_argument("--json", action="store_true",
                             help="Output as JSON")
+
+    devask_p = sub.add_parser(
+        "devask", aliases=CLI_ALIASES["devask"],
+        help="developer answers with cited sources and executed code",
+        description=("nm devask <question or pasted stack trace> [--limit N]\\\\n"
+                     "nm devask list\\\\n"
+                     "nm devask show <id>\\\\n"
+                     "The dev-answer organ: the question is asked of the "
+                     "dev source pack (Devon's own code index first, then "
+                     "the live web backends), the answer is synthesised "
+                     "with real citations, and every self-contained code "
+                     "block is EXECUTED before it is presented — a block "
+                     "that did not run green is labelled not verified, "
+                     "never presented as working. A question no source "
+                     "answers is refused honestly, never invented."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    devask_p.add_argument("devask_query", nargs="*", default=[],
+                          help="developer question, pasted stack trace, "
+                               "or list|show …")
+    devask_p.add_argument("--limit", type=int, default=5,
+                          help="max cited sources")
+    devask_p.add_argument("--json", action="store_true",
+                          help="Output as JSON")
 
     consensus_p = sub.add_parser(
         "consensus", aliases=CLI_ALIASES["consensus"],

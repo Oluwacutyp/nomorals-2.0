@@ -667,6 +667,41 @@ def valid_source_names() -> list[str]:
     return [name for name, _, _, _ in SOURCE_SPECS]
 
 
+#: The dev source pack (Phind core, 52-websites #40): the source set
+#: the developer answer engine searches, in order. Devon's own code
+#: index first — for "why is MY bridge doing X" her codebase is the
+#: most authoritative source there is — then the live web backends.
+#: RRF weights scale each source's ``1/(k+rank)`` contributions:
+#: code 2.0 (her own code is the answer's ground truth when it
+#: matches), keyless web backends 1.5/1.25 (free, always available),
+#: keyed backends 1.0 (paid keys, present only when configured).
+#: The weights are a stated prior, not fitted to any test.
+DEV_PACK_SOURCES: list[str] = [
+    "code",
+    "web_searxng",
+    "web_ddgs",
+    "web_tavily",
+    "web_serper",
+    "web_exa",
+    "web_brave",
+]
+
+DEV_PACK_WEIGHTS: dict[str, float] = {
+    "code": 2.0,
+    "web_searxng": 1.5,
+    "web_ddgs": 1.5,
+    "web_tavily": 1.25,
+    "web_serper": 1.0,
+    "web_exa": 1.0,
+    "web_brave": 1.0,
+}
+
+
+def dev_pack() -> tuple[list[str], dict[str, float]]:
+    """The dev source pack: (sources in order, RRF weights)."""
+    return list(DEV_PACK_SOURCES), dict(DEV_PACK_WEIGHTS)
+
+
 def valid_types() -> list[str]:
     seen: set[str] = set()
     out: list[str] = []

@@ -5657,6 +5657,88 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"evidence failed: {exc}"
 
+    def _control_devask(self, tail: str) -> str:
+        """Developer answers with cited sources and executed code.
+
+        Public. /devask <question or pasted stack trace> asks the dev
+        source pack (Devon's own code index first, then the live web
+        backends) and synthesises a direct answer — explanation plus
+        code — with every claim cited to a real source. Every
+        self-contained code block is EXECUTED (through the run_code
+        tool when the runtime's tool registry is reachable) before
+        it is presented; a block that did not run green is labelled
+        not verified, never presented as working. /devask list shows
+        past answers; /devask show <id> re-renders one. A question
+        no source answers is refused honestly — nothing is ever
+        invented. Never raises: bad input returns usage.
+        """
+        from ...research.dev_answer import (
+            answer_dev_question,
+            format_dev_answer_reply,
+            open_dev_answer_store,
+        )
+
+        tail = (tail or "").strip()
+        usage = "usage: /devask <question or pasted stack trace> | " \
+                "list | show <id>"
+        if not tail:
+            return usage
+        try:
+            home = None
+            try:
+                home = str(self.settings.home_path)
+            except Exception:  # noqa: BLE001 — default home then
+                home = None
+            store = open_dev_answer_store(home)
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb in {"help", "--help"}:
+                return usage
+            if verb == "list":
+                answers = store.list()
+                if not answers:
+                    return "no dev answers yet — ask me a developer " \
+                           "question with /devask <question>"
+                lines = ["dev answers:"]
+                for row in answers[:10]:
+                    lines.append(
+                        f"  {row['answer_id']} — {row['question']}")
+                return "\n".join(lines)
+            if verb == "show":
+                if not rest:
+                    return "usage: /devask show <id>"
+                row = store.get(rest)
+                if row is None:
+                    return f"no dev answer “{rest}”"
+                return format_dev_answer_reply({**row, "ok": True})
+            context = getattr(self, "context", None)
+            tools = getattr(context, "tools", None) if context else None
+            run_fn = None
+            if tools is not None:
+                def _run(code: str, lang: str):
+                    try:
+                        outcome = tools.call(
+                            "run_code", action="run", code=code,
+                            lang=lang, timeout=30.0)
+                    except Exception:  # noqa: BLE001 — unverified then
+                        return None
+                    if not getattr(outcome, "ok", False):
+                        return None
+                    value = getattr(outcome, "value", None)
+                    return value if isinstance(value, dict) else None
+
+                run_fn = _run
+            llm_fn = None
+            if context is not None:
+                from ...tools.paper_reader import _llm_from_context
+
+                llm_fn = _llm_from_context(context)
+            return format_dev_answer_reply(answer_dev_question(
+                home, tail, store=store, run_fn=run_fn, llm_fn=llm_fn))
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"devask failed: {exc}"
+
     def _control_consensus(self, tail: str) -> str:
         """What the literature agrees on (Consensus meter).
 
