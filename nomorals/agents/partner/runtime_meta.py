@@ -788,6 +788,130 @@ class RuntimeMetaMixin:
                 "[--password WORD] | /burn read <code> [--password WORD] "
                 "| /burn list | /burn purge <note-id>")
 
+    def _control_share(self, tail: str, message: Any = None) -> str:
+        """The /share reply: expiring file shares.
+
+        ``/share <file> [downloads N] [--expire 1h|1d|7d|30d|never|
+        --expire friday|--expire 2026-12-25]`` mints a share over a
+        file Devon already holds and hands back the link — after the
+        download budget is spent or the expiry passes, the link 404s
+        and the bytes are gone from storage. ``/share list`` lists
+        live shares as metadata with links, never contents;
+        ``/share revoke <id>`` kills a share early; ``/share
+        status`` reports the live count, the journal length and the
+        sweep job. Owner-only. Anyone holding the link can download
+        until the budget dies or the expiry passes, and the link is
+        host-network-only unless the API is fronted with a tunnel —
+        both are stated in the mint reply.
+        """
+        from ...storage.share import (
+            SHARE_JOB,
+            SHARE_SPEC,
+            ShareStore,
+            list_shares,
+            mint_share,
+            parse_share_expiry,
+            revoke_share,
+        )
+
+        context = getattr(self, "context", None)
+        settings = getattr(context, "settings", None) if context else None
+        home = getattr(settings, "home", None) if settings else None
+        home = str(home or "~/.nomorals")
+        api = getattr(settings, "api", None) if settings else None
+        host = str(getattr(api, "host", "") or "").strip()
+        port = getattr(api, "port", None)
+        base_url = ""
+        if host and port:
+            if host in ("0.0.0.0", "::"):
+                host = "127.0.0.1"
+            base_url = f"http://{host}:{int(port)}"
+
+        def _flag(rest: str, flag: str) -> tuple[str, str | None]:
+            match = re.search(rf"(?:^|\s){re.escape(flag)}\s+(\S+)\s*$", rest)
+            if not match:
+                return rest, None
+            return rest[:match.start()].strip(), match.group(1)
+
+        parts = (tail or "").split(None, 1)
+        first = parts[0] if parts else ""
+        verb = first.lower()
+        rest = parts[1].strip() if len(parts) > 1 else ""
+        try:
+            store = ShareStore(home)
+        except Exception as exc:  # noqa: BLE001 - share never crashes chat
+            return f"shares unavailable: {exc}"
+        if verb == "list":
+            shares = list_shares(store, base_url=base_url)
+            if not shares:
+                return "no live shares."
+            lines = ["live shares:"]
+            for meta in shares:
+                expires_at = meta["expires_at"]
+                when = ("never" if expires_at is None else
+                        time.strftime("%Y-%m-%d %H:%M",
+                                      time.localtime(expires_at)))
+                lines.append(f"• {meta['share_id']} · {meta['filename']} · "
+                             f"{meta['downloads_left']} left · expires {when}\n"
+                             f"  {meta['link']}")
+            return "\n".join(lines)
+        if verb == "revoke":
+            if not rest:
+                return "usage: /share revoke <share-id>"
+            if revoke_share(store, rest.split()[0]):
+                return f"revoked {rest.split()[0]} — the link is dead now."
+            return f"no live share {rest.split()[0]}."
+        if verb == "status":
+            shares = list_shares(store)
+            return (f"live shares: {len(shares)} · "
+                    f"journal: {len(store.journal_entries())} · "
+                    f"sweep job: {SHARE_JOB} ({SHARE_SPEC})")
+        if not first:
+            return ("usage: /share <file> [downloads N] "
+                    "[--expire 1h|1d|7d|30d|never|friday|2026-12-25] "
+                    "| /share list | /share revoke <share-id> "
+                    "| /share status")
+        # Anything else is a mint: the first token is the file.
+        file_arg = first
+        downloads = 1
+        match = re.search(r"\bdownloads\s+(\d+)\b", rest)
+        if match:
+            downloads = int(match.group(1))
+            rest = (rest[:match.start()] + rest[match.end():]).strip()
+        rest, expire = _flag(rest, "--expire")
+        if rest:
+            return ("usage: /share <file> [downloads N] "
+                    "[--expire 1h|1d|7d|30d|never|friday|2026-12-25]")
+        try:
+            parsed = parse_share_expiry(expire if expire else None)
+        except ValueError as exc:
+            return str(exc)
+        try:
+            if parsed is None:
+                out = mint_share(store, file_arg, downloads=downloads,
+                                 never=True)
+            else:
+                out = mint_share(store, file_arg, downloads=downloads,
+                                 expires_in_s=max(0.0, parsed - time.time()))
+        except Exception as exc:  # noqa: BLE001 - a failed mint never crashes chat
+            return f"could not share: {exc}"
+        if not out.get("ok"):
+            return f"could not share: {out.get('error')}"
+        link = str(out["link"])
+        if base_url:
+            link = base_url + link
+        expires_at = out["expires_at"]
+        when = ("never" if expires_at is None else
+                time.strftime("%Y-%m-%d %H:%M",
+                              time.localtime(expires_at)))
+        lines = [f"shared — {out['filename']} ({out['size']} bytes)",
+                 link,
+                 f"{out['downloads_left']} download(s) left · expires {when}",
+                 "anyone holding this link can download until the "
+                 "budget dies or the expiry passes; the link is "
+                 "host-network-only unless the API is fronted with "
+                 "a tunnel."]
+        return "\n".join(lines)
 
     def _impossible_diagram(self, claim_id: str,
                             message: Any = None) -> str:

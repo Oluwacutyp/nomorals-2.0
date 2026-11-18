@@ -74,7 +74,7 @@ import time
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from ..llm.brain import brain_for
 from ..core.errors import (
@@ -1559,6 +1559,52 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                 self.send_response(200)
                 self.send_header("Content-Type",
                                  "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Security-Policy", CSP)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Frame-Options", "DENY")
+                request_id = getattr(self, "_request_id", "")
+                if request_id:
+                    self.send_header("X-Request-ID", request_id)
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            if method == "GET" and parsed.path.startswith("/share/"):
+                # Expiring file shares (File.io build): raw bytes
+                # cannot ride the JSON dispatch — the /pair precedent
+                # says bytes get their own special path. The token
+                # is the capability, so the path is public like the
+                # site pages above: no bearer, no principal. Unknown,
+                # expired and exhausted tokens all answer 404,
+                # identically — no oracle for guessing tokens.
+                from ..storage.share import ShareStore, serve_share
+
+                home = getattr(
+                    getattr(server.context, "settings", None),
+                    "home", "") or ""
+                try:
+                    status, payload = serve_share(
+                        ShareStore(home),
+                        parsed.path[len("/share/"):])
+                except Exception:  # noqa: BLE001 - a broken store is a 503, not a 500
+                    _log.exception("share serve failed")
+                    self._send_error(503, "share unavailable")
+                    return
+                if status != "ok":
+                    self._send_error(404, "no such share")
+                    return
+                raw = payload["bytes"]
+                filename = str(payload.get("filename") or "download")
+                safe = re.sub(r"[^A-Za-z0-9_.-]+", "_", filename)
+                disposition = (f'attachment; filename="{safe}"; '
+                               f"filename*=UTF-8''{quote(filename)}")
+                self.send_response(200)
+                self.send_header(
+                    "Content-Type",
+                    str(payload.get("mime") or "application/octet-stream"))
+                self.send_header("Content-Disposition", disposition)
                 self.send_header("Content-Length", str(len(raw)))
                 self.send_header("Cache-Control", "no-store")
                 self.send_header("Content-Security-Policy", CSP)

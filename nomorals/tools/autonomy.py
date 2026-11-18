@@ -905,6 +905,26 @@ def register(registry: Any) -> None:
                     "error": f"burn note tick failed: {exc}"}
 
     @registry.register(
+        "__share_tick__",
+        description="Run one share sweep (File.io build): delete "
+        "expired and exhausted file shares from the durable store — "
+        "record and blob ref both — and journal each death with its "
+        "reason. Scheduler-internal; runs hourly. Routine and silent "
+        "— a run with nothing expired deletes nothing, and a live "
+        "share is never touched.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _share_tick_tool() -> dict[str, Any]:
+        from ..storage.share import run_share_tick_once
+
+        try:
+            return run_share_tick_once(context=_context)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"share sweep failed: {exc}"}
+
+    @registry.register(
         "__paper_feed_tick__",
         description="Run one paper-feed tick (Semantic Scholar "
         "paper records): check every watched topic against Semantic "

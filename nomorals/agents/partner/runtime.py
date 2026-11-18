@@ -3618,6 +3618,17 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("burn note job not registered: %s",
                                  exc)
+                # Storage: the share sweep (hourly — expired and
+                # exhausted shares are deleted, record and blob ref
+                # both; a live share is never touched). Idempotent
+                # by name; a stale spec is replaced.
+                try:
+                    from ...storage.share import ensure_share_job
+
+                    ensure_share_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("share sweep job not registered: %s",
+                                 exc)
                 # Research: the paper-feed tick (daily 08:00 —
                 # watched topics checked against Semantic Scholar
                 # search; new papers page the owner once each).
@@ -8547,6 +8558,8 @@ class PartnerRuntime(
             return self._control_readpaper(command.tail)
         if kind == "burn":
             return self._control_burn(command.tail, message)
+        if kind == "share":
+            return self._control_share(command.tail, message)
         if kind == "arena-research":
             return self._control_arena_research(command.tail, message)
         if kind == "community":

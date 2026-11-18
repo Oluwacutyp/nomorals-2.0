@@ -627,6 +627,7 @@ class ToolRegistry:
             "soundtrack",  # soundtrack index (TuneFind core)
             "soundscape",  # soundscape machine (MyNoise core)
             "burn_note",  # burn-after-reading notes (Privnote build-new)
+            "share",  # expiring file shares (File.io build)
             "evidence",  # research answers from real papers (Elicit core)
             "consensus",  # research consensus — stance meter over the evidence organ
             "paper_graph",  # paper graph — citation neighbourhood (Connected Papers core)
