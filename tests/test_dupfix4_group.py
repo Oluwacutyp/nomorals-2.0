@@ -546,25 +546,29 @@ def test_group_registry_resync_on_group_traffic(monkeypatch):
 
 def test_dm_command_ack_observed_without_registry(
         split_homes_broken_store):
-    """D1, Route 1 (dupfix5): the userbot never executes — and
-    never defers — a DM command echo, so the ack-observation
-    machinery has nothing to resolve. The echo is ledger
-    bookkeeping only; the bot's ack arrives as an ordinary
-    incoming DM message and still produces no second copy, and
-    the sweep still has nothing to fail over into. The D1
+    """D1, Route 1 (dupfix5): the userbot never EXECUTES a DM
+    command echo. The echo defers as the dupfix2 failover
+    (cmdsilence, lane 62 — the old "never defers" pin was the
+    silence hole: the failover was dead for exactly this shape),
+    so the ack-observation machinery has a deferral to resolve.
+    The bot's ack arrives as an ordinary incoming DM message and
+    still produces no second copy, and the sweep has nothing to
+    fail over into once the ack resolves the deferral. The D1
     deferral-certification path still exists for INCOMING command
-    copies (which can still defer); the echo simply never reaches
-    it."""
+    copies (which can still defer); the echo reaches it read-only
+    — it never claims the key, never executes at once."""
     (_rt_a, _ad_a, _ctx_a), (rt_b, ad_b, _ctx_b), _info = \
         split_homes_broken_store
     assert rt_b._claims_are_shared() is False
     text = "/chatmode games-only +2348164302080"
     # Stamped echo: before Route 1 the peer stamp identified the
     # DM at intake and the deferral registered even with an empty
-    # registry. Now the echo is observe-only — no deferral.
+    # registry. Route 1 made the echo observe-only — no deferral —
+    # and cmdsilence restores the deferral (read-only, no claim)
+    # so the failover exists again.
     rt_b._process_inner(_echo_copy(text, "870", stamped=True))
     assert _texts(ad_b["telegram"]) == []
-    assert rt_b._peer_deferral().pending_count() == 0
+    assert rt_b._peer_deferral().pending_count() == 1
     # The bot's ack, as an ordinary incoming DM message from the
     # bot's id — no peer_post service, no stamp.
     ack = _msg("telegram", chat_id=str(PERSONAL_BOT_ID),

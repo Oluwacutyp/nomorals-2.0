@@ -231,12 +231,20 @@ def split_homes(monkeypatch):
 def test_dm_echo_slash_command_never_executes(split_homes):
     """The regression, pinned: the own-echo of a DM slash command
     arriving FIRST on the userbot runtime (the race the owner
-    lived) must produce ZERO executions — no reply, no deferral.
+    lived) must produce ZERO executions — no reply at once.
     Before the fix the echo claims the key and answers (the
     userbot's "pong"); the bot's copy then stands down, so the
     owner still sees one reply — from the wrong surface, and the
     double appears whenever the bot copy lands first instead.
     After the fix only the bot answers, ever.
+
+    The echo DEFERS (cmdsilence, lane 62): it never executes, but
+    it registers the dupfix2 failover — the echo is the only copy
+    that can answer when the bot never does, and the old
+    "never defers" pin was the silence hole (the failover was
+    dead for exactly this shape). The deferral never claims the
+    key and never executes at once; the bot's copy still answers
+    once, and the observation / answer claim guards the double.
 
     Failing-first: before the fix rt_b sends "pong" and registers
     no deferral (it handles); the first two asserts fail.
@@ -244,7 +252,7 @@ def test_dm_echo_slash_command_never_executes(split_homes):
     (rt_a, ad_a, _ctx_a), (rt_b, ad_b, _ctx_b) = split_homes
     rt_b._process_inner(_echo_copy("/ping", "1000"))
     assert _texts(ad_b["telegram"]) == []
-    assert rt_b._peer_deferral().pending_count() == 0
+    assert rt_b._peer_deferral().pending_count() == 1
     rt_a._process_inner(_bot_copy("/ping", "1000"))
     assert len(_texts(ad_a["telegram-personal"])) == 1
     assert "pong" in _texts(ad_a["telegram-personal"])[0]
@@ -254,7 +262,9 @@ def test_dm_echo_slash_command_never_executes(split_homes):
 def test_group_echo_slash_command_never_executes(split_homes):
     """Same shape in a group: the owner's group command as the
     userbot stream echoes it back must never execute there. The
-    bot's incoming copy answers once.
+    bot's incoming copy answers once. The echo defers as the
+    dupfix2 failover (cmdsilence, lane 62) — never executes at
+    once, never claims the key.
 
     Failing-first: before the fix the echo claims and answers
     ("pong" from the userbot); the first assert fails.
@@ -262,7 +272,7 @@ def test_group_echo_slash_command_never_executes(split_homes):
     (rt_a, ad_a, _ctx_a), (rt_b, ad_b, _ctx_b) = split_homes
     rt_b._process_inner(_group_echo("/ping", "1010"))
     assert _texts(ad_b["telegram"]) == []
-    assert rt_b._peer_deferral().pending_count() == 0
+    assert rt_b._peer_deferral().pending_count() == 1
     rt_a._process_inner(_group_msg("telegram-personal", "/ping",
                                    "1010"))
     assert len(_texts(ad_a["telegram-personal"])) == 1

@@ -1459,6 +1459,11 @@ class PartnerRuntime(
         # /help detonating as a 13-chunk catalog at boot (owner's
         # WhatsApp self-chat, 2026-11-04) is the incident this ends;
         # silence over stale performance is the owner's standing law.
+        # The one exception (cmdsilence): a stale OWNER slash
+        # command gets ONE honest line — "send it again" — never
+        # an execution, never a performance. Stale non-commands
+        # stay silent, and a notice another surface already sent
+        # (proven by its answer claim) is never repeated.
         if message.meta.get("stale_replay"):
             self._bump("stale_held")
             _log.info(
@@ -1466,6 +1471,28 @@ class PartnerRuntime(
                 "(message ts %.0f, arrived %.0f)",
                 (message.text or "")[:40], message.chat.key,
                 float(message.ts or 0), time.time())
+            if (isinstance(message.text, str)
+                    and message.text.strip().startswith("/")
+                    and self._is_operator(message)):
+                try:
+                    from .command_claims import command_claim_key
+
+                    _platform = str(
+                        getattr(message.chat, "platform", "") or "")
+                    _key = command_claim_key(
+                        message, self._surface_account_id(_platform))
+                    if not _key or not self._command_claims().has_answer(
+                            _key):
+                        self.gateway.send(
+                            message.chat.platform, message.chat,
+                            "that command arrived while I was away, "
+                            "so I didn't run it — send it again and "
+                            "I'll pick it up.")
+                        self._record_command_answer(message)
+                except Exception as exc:  # noqa: BLE001 - a notice never eats a turn
+                    record_failure(
+                        "runtime.PartnerRuntime._process_inner:stale_notice",
+                        exc)
             return
         # Page-watch beat (§20b): due webshot watches re-shoot
         # on the message cycle (throttled inside; no daemon).
@@ -1792,6 +1819,45 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 - bookkeeping never eats a turn
                 record_failure(
                     "runtime.PartnerRuntime.owner_reply_ledger", exc)
+        # Own-echo commands (cmdsilence): the adapter delivers the
+        # owner's own sends as own-echoes (incoming=False), and the
+        # Route-1 fix (2026-11-14) made the game/operator branches
+        # require incoming — so an echo never arbitrated and never
+        # deferred, and the dupfix2 failover was dead for exactly
+        # the shape that needs it (the userbot's echo is the only
+        # copy that can fail over when the bot never answers).
+        # An echo slash command from the operator arbitrates and
+        # DEFERS — never executes at once (Route-1 holds: the
+        # primary's own live copy is the one that answers now).
+        # "down" stands down (provably answered); anything else
+        # registers the deferral. Unkeyable stands down silently
+        # (the primary holds its own live copy). Non-command and
+        # unknown-slash echoes flow on as today.
+        if ((message.meta or {}).get("own_message")
+                and not message.incoming
+                and isinstance(message.text, str)
+                and message.text.strip().startswith("/")):
+            try:
+                from ...social.chat.control import parse_control
+
+                _echo_cmd = parse_control(message.text)
+                if _echo_cmd is not None and (
+                        self._is_operator(message)
+                        or bool((message.meta or {}).get("from_owner"))):
+                    # Read-only verdict: the echo must never TAKE
+                    # the command key — the primary's incoming
+                    # copy claims and handles it, and an echo
+                    # that claimed would mute the primary.
+                    if self._command_arbitration(
+                            message, _echo_cmd,
+                            claim=False) == "down":
+                        return
+                    self._defer_peer_command(message, _echo_cmd)
+                    return
+            except Exception as exc:  # noqa: BLE001 - an echo never eats a turn
+                record_failure(
+                    "runtime.PartnerRuntime._process_inner:echo_command",
+                    exc)
         # Peer-post observations + the bot-turn law (dupfix2): a
         # bot's own post in a DM is an OBSERVATION for the
         # deferral registry, never a turn — and a post from one of
@@ -1878,6 +1944,21 @@ class PartnerRuntime(
             if _pending and self._is_peer_surface_group_post(message):
                 self._peer_post_observed(message)
                 return
+        # Failover clock, second hand (cmdsilence): the sweeper
+        # thread is the primary clock, but a deferred command
+        # must not depend on one thread alone — if the thread is
+        # dead or never started, the failover would never fire.
+        # Every inbound message drives a sweep here, AFTER the
+        # peer-observation block above (so a primary answer
+        # arriving as THIS message resolves the deferral before
+        # the sweep can fail over it) and BEFORE the plain-text
+        # deferral below. Failure-isolated: a sweep fault never
+        # eats the turn.
+        try:
+            self._sweep_peer_deferrals()
+        except Exception as exc:  # noqa: BLE001 - the turn must go on
+            record_failure(
+                "runtime.PartnerRuntime._process_inner:cycle_sweep", exc)
         # Plain-text defer-and-observe for groups (dupfix4 fix 2):
         # when the shared conversational claim is unavailable, a
         # plain-text group turn DEFERS briefly instead of answering
@@ -2054,6 +2135,7 @@ class PartnerRuntime(
             _bare_url = is_bare_media_url(message.text or "")
             if _bare_url:
                 self._bump("controls")
+                _bare_error = ""
                 try:
                     _bare_reply = self._control_download(
                         _bare_url, chat_key=message.chat.key)
@@ -2062,12 +2144,29 @@ class PartnerRuntime(
                         "runtime.PartnerRuntime._process_inner.bare_url",
                         e)
                     _bare_reply = ""
+                    _bare_error = str(e)[:120]
                 if _bare_reply:
                     try:
                         self.gateway.send(message.chat.platform,
                                           message.chat, _bare_reply)
                     except Exception:  # noqa: BLE001
                         _log.warning("bare-URL reply send failed")
+                elif _bare_error:
+                    # A fetch that RAISED is an answer, not a
+                    # silence: the owner pasted a link and got
+                    # nothing. (A "" return means the handler
+                    # already sent its own ack — no reply here,
+                    # or the ack doubles.) Name the link and the
+                    # failure, capped so a long traceback never
+                    # floods the chat.
+                    try:
+                        self.gateway.send(
+                            message.chat.platform, message.chat,
+                            f"couldn't fetch {_bare_url}: "
+                            f"{_bare_error}")
+                    except Exception:  # noqa: BLE001
+                        _log.warning(
+                            "bare-URL failure reply send failed")
                 return
         if message.incoming and message.text.strip().startswith("/"):
             from ...social.chat.control import (
@@ -2143,6 +2242,7 @@ class PartnerRuntime(
                         self.gateway.send(
                             message.chat.platform, message.chat,
                             _chat_modes_disabled_reply("games"))
+                        self._record_command_answer(message)
                     except Exception as e:
                         record_failure("runtime.PartnerRuntime._process_inner:1110", e)
                     return
@@ -2159,6 +2259,7 @@ class PartnerRuntime(
                             message.chat.platform, message.chat,
                             "stacks can't include games — send one game "
                             "command per message. Nothing ran.")
+                        self._record_command_answer(message)
                     except Exception as e:
                         record_failure("runtime.PartnerRuntime._process_inner:1126", e)
                     return
@@ -2175,12 +2276,14 @@ class PartnerRuntime(
                     try:
                         self.gateway.send(message.chat.platform, message.chat,
                                           "that one's just for the owner.")
+                        self._record_command_answer(message)
                     except Exception as e:
                         record_failure("runtime.PartnerRuntime._process_inner:1142", e)
                     return
                 self._bump("controls")
                 _log.info("game command %r from %s in %s (any-chat dispatch)",
                           message.text[:40], message.sender or "?", message.chat.key)
+                _game_delivered_before = _control_deliveries.get()
                 try:
                     if message.chat.kind == ChatKind.CHANNEL:
                         # Telegram doesn't identify individual senders in
@@ -2252,7 +2355,41 @@ class PartnerRuntime(
                     except Exception as exc:  # noqa: BLE001
                         _log.warning("game reply send failed: %s", exc)
                 else:
-                    _log.warning("game command produced empty reply in %s", message.chat.key)
+                    # The #32 no-empty law, for the game branch:
+                    # a handler returning "" (real case:
+                    # engine.quit returning no lines) is silence,
+                    # not an answer. One honest fallback — unless
+                    # the handler already delivered during the
+                    # dispatch (a chunked / file_send delivery
+                    # marks _control_deliveries), in which case
+                    # the "" is a delivered answer and the
+                    # fallback would be a false "bug on my end"
+                    # after a successful send.
+                    if _control_deliveries.get() \
+                            == _game_delivered_before:
+                        _log.warning(
+                            "game command produced empty reply in %s",
+                            message.chat.key)
+                        try:
+                            _okind, _ometa = self._control_output_kind(
+                                command)
+                            self._send_control_reply(
+                                message,
+                                f"/{command.kind} ran but produced "
+                                f"no reply — that's a bug on my end, "
+                                f"not something you did. "
+                                f"/help {command.kind} shows what it "
+                                f"should do.",
+                                output_kind=_okind, output_meta=_ometa)
+                        except Exception as exc:  # noqa: BLE001
+                            _log.warning(
+                                "game empty-reply fallback send failed: "
+                                "%s", exc)
+                    else:
+                        _log.info(
+                            "game command /%s delivered during "
+                            "dispatch in %s",
+                            command.kind, message.chat.key)
                 return
             # telegram-bot is the public endpoint: conversation + games
             # + the PUBLIC command list only. A public command here goes
@@ -2347,6 +2484,7 @@ class PartnerRuntime(
                     self._typing_for(message.chat, refusal)
                     self.gateway.send(message.chat.platform, message.chat,
                                       refusal)
+                    self._record_command_answer(message)
                 except Exception:  # noqa: BLE001
                     _log.warning("public-bot gate reply failed")
                 return
@@ -2404,6 +2542,7 @@ class PartnerRuntime(
                         "that one's owner-only — I run it in the owner's "
                         "own chats. Games and the public list work here: "
                         "/game list shows what's on.")
+                    self._record_command_answer(message)
                 except Exception:  # noqa: BLE001
                     _log.warning("group gate reply failed")
                 return
@@ -6353,18 +6492,26 @@ class PartnerRuntime(
         cache[key] = (now, roster)
         return roster
 
-    def _command_arbitration(self, message, command) -> str:  # type: ignore[no-untyped-def]
+    def _command_arbitration(self, message, command, *,  # type: ignore[no-untyped-def]
+                           claim: bool = True) -> str:
         """One of ``"handle"`` | ``"down"`` | ``"defer"`` for
         ``command`` on this surface.
 
-        ``"down"``: another surface owns it — stand down
-        silently. ``"defer"`` (dupfix2): the command sits in a
-        bot's DM on a non-bot surface and this surface cannot
-        PROVE the primary claimed it — no sibling adapter, no
-        live claim in a ledger the primary also writes. The
-        caller registers a deferral and watches the room for the
-        primary's answer instead of guessing; the sweeper fails
-        over if no answer ever comes."""
+        ``"down"``: the command is not ours at all (addressed to
+        a foreign account) — stand down silently. It never fires
+        on a claim or a standing: a claim is not proof of an
+        answer, so no rule stands down on one. ``"defer"``
+        (dupfix2): this surface cannot prove the primary answered
+        — register a deferral and watch the room for the primary's
+        answer instead of guessing; the sweeper fails over if no
+        answer ever comes (re-arming at claim expiry so a dead
+        claimant cannot mute the command forever), and the sweep
+        stands the failover down on a PROVEN answer (the answer
+        claim) or on the observed answer. ``claim=False`` is the
+        read-only verdict for an echo branch: the echo must never
+        TAKE the key — the primary's incoming copy must still be
+        able to claim and handle it — so rule (4) reads the
+        holder instead of claiming."""
         chat = message.chat
         platform = str(chat.platform or "")
         bot_surface = platform in ("telegram-bot", "telegram-personal")
@@ -6372,15 +6519,24 @@ class PartnerRuntime(
         # surface, everywhere: /cmd@Nomorals_bot is the bot's, on
         # the userbot's copy too — and a command addressed to an
         # account that is not one of ours is not ours at all.
+        # A DM has two participants: the addressed bot can never
+        # see a DM it is not part of, so standing a DM command
+        # down on its addressee silences it forever — the
+        # surface in front of the owner handles it. In a group
+        # the addressed bot may still answer, so defer and watch
+        # for its answer (the sweep fails over if none comes).
         addressee = str(getattr(command, "addressee", "")
                         or "").strip().lower()
         if addressee:
             owners = self._surface_usernames()
             if owners:
                 owner_surface = owners.get(addressee)
-                if owner_surface is None \
-                        or owner_surface != platform:
+                if owner_surface is None:
                     return "down"
+                if owner_surface != platform:
+                    if chat.kind == ChatKind.DM:
+                        return "handle"
+                    return "defer"
         # (1.5) A group game command belongs to the runtime that
         # OWNS the live room in that chat — it answers at once,
         # because only it can end the game (the /game quit trap:
@@ -6415,9 +6571,11 @@ class PartnerRuntime(
         # never handles commands in a DM whose peer is one of
         # Devon's bots at once (the userbot sees the owner's bot
         # chats in his dialogs). The verdict is "down" ONLY when
-        # this surface can PROVE the primary claimed it — a
-        # sibling bot adapter in this gateway plus a live claim
-        # by a bot surface in the ledger. Otherwise it is
+        # the primary provably ANSWERED (the answer claim) — a
+        # claim proves the bot saw the command, never that it
+        # answered it, and a bot that claimed then died or hung
+        # would silence the command for the claim's whole window
+        # if this stood down on the claim. Otherwise it is
         # "defer": watch the room for the primary's answer
         # (dupfix2 — the old unconditional stand-down was ALSO
         # the silence hole: a bot that never answers left the
@@ -6430,16 +6588,8 @@ class PartnerRuntime(
 
             key = command_claim_key(
                 message, self._surface_account_id(platform))
-            if key and self._sibling_bot_owns(peer_bot_id):
-                holder = self._command_claims().claimed_by(key)
-                # The holder names its surface as
-                # ``platform:own-account-id`` (groupdup2) or the
-                # bare platform (legacy rows, id-less runtimes):
-                # the family is the part before the first colon.
-                holder_family = str(holder or "").split(":", 1)[0]
-                if holder_family in ("telegram-bot",
-                                     "telegram-personal"):
-                    return "down"
+            if key and self._command_claims().has_answer(key):
+                return "down"
             return "defer"
         # (3) In a group where the bot's standing is VERIFIED
         # (the merged §33 claim says bot_admin), group systems
@@ -6464,7 +6614,18 @@ class PartnerRuntime(
             except Exception:  # noqa: BLE001 - unproven, no down
                 state = None
             if state and state.get("bot_admin") is True:
-                return "down"
+                # Verified standing is not a proven answer: the
+                # bot may be down even though it was admin when
+                # probed. Defer and watch for its answer; the
+                # sweep fails over if none comes. Only a proven
+                # answer stands this surface down at once.
+                from .command_claims import command_claim_key
+
+                key = command_claim_key(
+                    message, self._surface_account_id(platform))
+                if key and self._command_claims().has_answer(key):
+                    return "down"
+                return "defer"
             if not self._claims_are_shared():
                 return "defer"
         # (4) One handling: claim this message identity. The same
@@ -6490,8 +6651,25 @@ class PartnerRuntime(
             message, self._surface_account_id(platform))
         if not key:
             return "handle"
-        return "down" if not self._command_claims().claim(
-            key, self._claim_surface(platform)) else "handle"
+        if not claim:
+            # Read-only verdict (echo branch): never TAKE the
+            # key — the primary's incoming copy must still be
+            # able to claim and handle it. A live claim by
+            # another surface means defer (watch for its
+            # answer); a free key, or this surface's own claim,
+            # means handle.
+            holder = self._command_claims().claimed_by(key)
+            if holder and holder != self._claim_surface(platform):
+                return "defer"
+            return "handle"
+        if not self._command_claims().claim(
+                key, self._claim_surface(platform)):
+            # Another surface holds a live claim — but a claim
+            # is not proof of an answer. Defer and watch for it;
+            # the sweep re-arms at claim expiry and fails over
+            # if the claimant never answers.
+            return "defer"
+        return "handle"
 
     # ── peer-answer deferral (dupfix2) ──────────────────────────
     # A command in a bot's DM on a non-bot surface is deferred,
@@ -6727,10 +6905,29 @@ class PartnerRuntime(
         """Failover clock: deferred commands whose window expired
         with no primary answer are claimed (when a claim exists
         to take — a late primary claim stands this one down) and
-        handled here. Returns the records that were due."""
+        handled here. A record whose command was PROVABLY
+        answered is dropped, never failed over (the answer claim
+        is the proof the claim alone never was). A record stood
+        down on another surface's still-live claim is RE-ARMED
+        to that claim's expiry, not dropped — the old code
+        dropped it, so a claimant that never answered silenced
+        the command forever. Returns the records that were due."""
+        sweep_now = time.time() if now is None else float(now)
         due = self._peer_deferral().expire(now=now)
         for record in due:
             try:
+                # A proven answer stands the failover down for
+                # good — answered is answered, whatever the
+                # claim says (a slow primary whose claim lapsed
+                # before it answered still counts).
+                answer_key = str(record.get("claim_key") or "")
+                if answer_key and self._command_claims().has_answer(
+                        answer_key):
+                    _log.info(
+                        "deferred /%s in %s already answered — "
+                        "standing down", record.get("kind"),
+                        record.get("chat_key"))
+                    continue
                 if record.get("turn_kind") == "text":
                     # Plain-text failover (dupfix4 fix 2): the
                     # sibling never answered, so this surface
@@ -6763,11 +6960,24 @@ class PartnerRuntime(
                 platform = str(record.get("platform") or "")
                 if key and not self._command_claims().claim(
                         key, self._claim_surface(platform)):
+                    # Another surface still holds a live claim —
+                    # but a claim is not an answer. Re-arm the
+                    # deferral to the claim's expiry (plus one
+                    # second) and retry then; dropping it here
+                    # is the silence hole. A re-arm refused
+                    # (superseded by a newer command) drops it.
+                    expires = self._command_claims().claim_expires_at(
+                        key)
+                    deadline = ((expires + 1.0) if expires > 0
+                                else sweep_now + 600.0)
+                    rearmed = self._peer_deferral().rearm(
+                        record, deadline=deadline, now=sweep_now)
                     _log.info(
                         "deferred /%s in %s expired but another "
-                        "surface claimed it meanwhile — standing "
-                        "down", record.get("kind"),
-                        record.get("chat_key"))
+                        "surface claimed it meanwhile — %s",
+                        record.get("kind"), record.get("chat_key"),
+                        "re-armed to claim expiry" if rearmed
+                        else "superseded, dropping")
                     continue
                 message = record.get("message")
                 if message is None:
@@ -6790,13 +7000,21 @@ class PartnerRuntime(
     def _start_peer_deferral_sweeper(self) -> None:  # type: ignore[no-untyped-def]
         """One daemon thread per runtime, started lazily on the
         first deferral: the failover clock. Exits with the
-        runtime's stop event."""
+        runtime's stop event — or, when the runtime has none
+        (a partially-built rig), with a dedicated event, so the
+        thread still starts: a missing stop event must never
+        leave a deferred command with no failover clock (the
+        message-cycle sweep below is the second clock)."""
         thread = getattr(self, "_peer_deferral_thread", None)
         if thread is not None and thread.is_alive():
             return
         stop = getattr(self, "_stopped", None)
         if stop is None:
-            return
+            stop = getattr(self, "_peer_deferral_stop", None)
+            if stop is None:
+                import threading as _threading
+
+                stop = self._peer_deferral_stop = _threading.Event()
 
         def _loop() -> None:
             while not stop.wait(1.0):
@@ -8124,6 +8342,47 @@ class PartnerRuntime(
             record_failure(
                 "runtime.PartnerRuntime._clear_menu_grid_once", exc)
 
+    def _record_command_answer(self, message) -> None:  # type: ignore[no-untyped-def]
+        """Record the proof this surface ANSWERED the command in
+        ``message`` (cmdsilence): the failover sweep stands down
+        on a proven answer, never on a bare claim. Unconditional
+        — the caller already sent the reply. Never raises:
+        answer bookkeeping must not eat a reply."""
+        try:
+            from .command_claims import command_claim_key
+
+            platform = str(getattr(message.chat, "platform", "") or "")
+            key = command_claim_key(
+                message, self._surface_account_id(platform))
+            if not key:
+                return
+            self._command_claims().record_answer(
+                key, self._claim_surface(platform))
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never eats a reply
+            record_failure(
+                "runtime.PartnerRuntime._record_command_answer", exc)
+
+    def _note_control_answer(self, message, result) -> None:  # type: ignore[no-untyped-def]
+        """Record the proof this surface answered, when a control
+        reply's send actually succeeded (cmdsilence). Success is
+        a non-None result whose ``ok`` is not False (dicts check
+        ``.get("ok")``; objects default True when they carry no
+        ``.ok`` — session-edit and media results). A failed send
+        records nothing: the failover must still be able to
+        answer. Never raises."""
+        try:
+            if result is None:
+                return
+            if isinstance(result, dict):
+                if result.get("ok") is False:
+                    return
+            elif getattr(result, "ok", True) is False:
+                return
+            self._record_command_answer(message)
+        except Exception as exc:  # noqa: BLE001 - bookkeeping never eats a reply
+            record_failure(
+                "runtime.PartnerRuntime._note_control_answer", exc)
+
     def _send_control_reply(self, message, reply, *,  # type: ignore[no-untyped-def]
                             reply_keyboard=None,
                             output_kind=None, output_meta=None):
@@ -8244,6 +8503,7 @@ class PartnerRuntime(
                 except Exception:  # noqa: BLE001 - fall to DM
                     _out = None
                 if isinstance(_out, dict) and _out.get("ok"):
+                    self._note_control_answer(message, _out)
                     return _out
             if _uid:
                 from ...social.chat.base import (
@@ -8257,11 +8517,14 @@ class PartnerRuntime(
                 except Exception:  # noqa: BLE001 - fall to pointer
                     _sent = None
                 if _sent is not None and getattr(_sent, "ok", False):
+                    self._note_control_answer(message, _sent)
                     return _sent
-            return self.gateway.send(
+            _pointer = self.gateway.send(
                 message.chat.platform, message.chat,
                 "that's yours alone — check your DMs with me.",
                 fresh=True)
+            self._note_control_answer(message, _pointer)
+            return _pointer
         self._typing_for(message.chat, text)
         parse_mode = "HTML" if ("<b>" in text or "<code>" in text
                                 or "<i>" in text) else ""
@@ -8273,6 +8536,7 @@ class PartnerRuntime(
                 text=text, buttons=btn_rows or [],
                 parse_mode=parse_mode, media=_was_media)
             if edited is not None:
+                self._note_control_answer(message, edited)
                 return edited
         if media is not None:
             sent_media = self._send_reply_media_head(
@@ -8286,6 +8550,7 @@ class PartnerRuntime(
                         self._live_session_registry().record(
                             str(message.chat.key or ""), session,
                             _mid, media=True)
+                self._note_control_answer(message, sent_media)
                 return sent_media
         # Doc-16 route for long composed control replies
         # (presentation Phase 2): a PLAIN reply — no live session,
@@ -8324,12 +8589,14 @@ class PartnerRuntime(
                         ok=True, platform=message.chat.platform)
                     self._register_confirm_live(
                         message, result, text, buttons)
+                    self._note_control_answer(message, result)
                     return result
                 result = self.gateway.send(
                     message.chat.platform, message.chat, _note,
                     fresh=True)
                 self._register_confirm_live(
                     message, result, text, buttons)
+                self._note_control_answer(message, result)
                 return result
             # Markup-bearing: the gateway path below owns it
             # (its splitter is markup-balanced; the router's
@@ -8362,6 +8629,7 @@ class PartnerRuntime(
         # message so the ticker can burn its countdown down and
         # settle it at resolution/expiry (confirm_live).
         self._register_confirm_live(message, result, text, buttons)
+        self._note_control_answer(message, result)
         return result
 
     def _live_session_registry(self):  # type: ignore[no-untyped-def]

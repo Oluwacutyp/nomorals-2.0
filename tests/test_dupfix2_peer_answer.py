@@ -233,16 +233,20 @@ def _texts(adapter):
 
 
 def test_split_homes_observation_resolves_deferral(split_homes):
-    """The incident, replayed in the live shape: the bot answers,
-    the echo defers, the bot's post observed in the room resolves
-    the deferral — the userbot sends nothing, ever."""
+    """The incident, replayed in the live shape: the echo arrives
+    while the primary has not answered yet, so it DEFERS; the bot
+    answers; the bot's post observed in the room resolves the
+    deferral — the userbot sends nothing, ever. When the bot has
+    ALREADY answered before the echo arrives, the echo stands
+    down at once on the proven answer claim (no deferral to
+    resolve) — that is the answer-claim law, not a hole."""
     (rt_a, ad_a, _ctx_a), (rt_b, ad_b, _ctx_b) = split_homes
     text = "/chatmode games-only +2348164302080"
-    rt_a._process_inner(_bot_copy(text, "100"))
-    assert len(_texts(ad_a["telegram-personal"])) == 1
     rt_b._process_inner(_echo_copy(text, "100"))
     assert _texts(ad_b["telegram"]) == []
     assert rt_b._peer_deferral().pending_count() == 1
+    rt_a._process_inner(_bot_copy(text, "100"))
+    assert len(_texts(ad_a["telegram-personal"])) == 1
     # The primary's answer, arriving on the userbot's own stream:
     rt_b._process_inner(_peer_post(
         "whatsapp:2348164302080@s.whatsapp.net is now games-only",

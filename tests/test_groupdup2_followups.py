@@ -380,13 +380,15 @@ def test_non_game_group_command_shared_store_exactly_one_reply(
         split_whatsapp):
     """The item-1 acceptance: a non-game group command on both
     runtimes, separate homes, one shared file — the first
-    handles, the second stands down (rule 4, shared claim).
-    Exactly ONE reply across both surfaces."""
+    handles, the second defers (rule 4, shared claim: a claim is
+    not proof of an answer, so the loser watches for the
+    winner's answer and fails over only if none comes —
+    cmdsilence, lane 62). Exactly ONE reply across both surfaces."""
     (rt_a, ad_a, _ctx_a), (rt_b, ad_b, _ctx_b) = split_whatsapp
     assert rt_a._claims_are_shared() is True
     assert rt_b._claims_are_shared() is True
     assert _arbitrate(rt_b, "/ping", "p1") == "handle"
-    assert _arbitrate(rt_a, "/ping", "p1") == "down"
+    assert _arbitrate(rt_a, "/ping", "p1") == "defer"
     rt_b._process_inner(_group_msg("/ping", "p1", own=True))
     rt_a._process_inner(_group_msg("/ping", "p1"))
     assert len(_texts(ad_b["whatsapp"])) == 1, _texts(ad_b["whatsapp"])
@@ -398,7 +400,9 @@ def test_shared_store_group_standing_merges_across_homes(
         split_whatsapp):
     """The bot runtime's probe stamp lands in the shared file;
     the userbot runtime reads it as the room's standing and
-    stands its non-game group commands down (rule 3)."""
+    defers its non-game group commands (rule 3: standing is not
+    proof of an answer — it watches for the bot's answer and
+    fails over only if none comes; cmdsilence, lane 62)."""
     (rt_a, ad_a, _ctx_a), (rt_b, ad_b, _ctx_b) = split_whatsapp
     assert rt_b._group_surface().claim_state(
         GROUP_KEY)["bot_admin"] is None
@@ -406,7 +410,7 @@ def test_shared_store_group_standing_merges_across_homes(
         GROUP_KEY, True, bot_jid=BOT_JID)
     assert rt_b._group_surface().claim_state(
         GROUP_KEY)["bot_admin"] is True
-    assert _arbitrate(rt_b, "/ping", "p1") == "down"
+    assert _arbitrate(rt_b, "/ping", "p1") == "defer"
 
 
 def test_shared_store_unavailable_defers_on_unproven(

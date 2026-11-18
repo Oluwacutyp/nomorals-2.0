@@ -190,6 +190,39 @@ class PeerAnswerDeferral:
 
     # -- expiry (failover) --------------------------------------------
 
+    def rearm(self, record: dict[str, Any], *, deadline: float,
+              now: float | None = None) -> bool:
+        """Put an expired record back to wait for a later
+        deadline — the failover's retry at claim expiry.
+
+        The record keeps its original ``created_at`` (the age
+        of the owner's command, not the re-arm) and only its
+        deadline moves; the chat's newest-command pointer is
+        restored with it, so the record stays resolvable by
+        observation and due at the new deadline. Refuses when
+        the record is no longer the chat's newest owner command
+        (a newer command superseded it — re-arming it would
+        fail over a replaced command) or when it is already
+        pending. Returns True when re-armed."""
+        now = time.time() if now is None else float(now)
+        chat_key = str(record.get("chat_key") or "")
+        message_id = str(record.get("message_id") or "")
+        if not chat_key or not message_id:
+            return False
+        key = (chat_key, message_id)
+        with self._lock:
+            if key in self._pending:
+                return False
+            latest = self._latest.get(chat_key)
+            if latest is not None and latest[0] != message_id:
+                return False
+            record = dict(record)
+            record["deadline"] = float(deadline)
+            self._pending[key] = record
+            self._latest[chat_key] = (
+                message_id, float(record.get("created_at") or now))
+            return True
+
     def expire(self, *, now: float | None = None) -> list[dict[str, Any]]:
         """Records past their deadline that are still the chat's
         newest owner command — the primary never answered, so this

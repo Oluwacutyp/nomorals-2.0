@@ -111,6 +111,7 @@ __all__ = [
     "DurableConversationClaimLedger",
     "DurableGroupClaimStore",
     "WINDOW_S",
+    "ANSWER_WINDOW_S",
     "MAX_KEYS",
     "command_claim_key",
     "load_bot_ids",
@@ -128,6 +129,16 @@ _log = logging.getLogger(__name__)
 WINDOW_S = 600.0
 MAX_KEYS = 1024
 
+#: How long a PROVEN answer outlives the claim that guarded it.
+#: A claim says "I saw this command"; an answer says "I replied
+#: to it". The failover sweep re-arms a deferral to the claim's
+#: expiry and only then fails over — so an answer recorded by a
+#: slow primary (whose claim lapsed before it answered) must
+#: still be provable at claim expiry + margin, or the sweep
+#: would double-answer. One hour covers any re-arm the sweep
+#: can build (at most one claim window past the claim).
+ANSWER_WINDOW_S = 3600.0
+
 
 class CommandClaimLedger:
     """Bounded, thread-safe record of which surface claimed
@@ -139,6 +150,61 @@ class CommandClaimLedger:
         # claim key -> (surface, ts)
         self._claims: OrderedDict[str, tuple[str, float]] = \
             OrderedDict()
+        # answer key -> (surface, ts): the proof a surface
+        # ANSWERED the command, distinct from merely claiming it.
+        self._answers: OrderedDict[str, tuple[str, float]] = \
+            OrderedDict()
+
+    def record_answer(self, key: str, surface: str = "", *,
+                      now: float | None = None) -> None:
+        """Record that ``surface`` answered the command ``key``.
+
+        The answer is the proof the failover sweep needs: a
+        "down" may stand down only when the owning surface
+        provably answered, and a deferred command must never
+        fail over onto a command that was already answered.
+        Never raises."""
+        key = str(key or "")
+        if not key:
+            return
+        ts = time.time() if now is None else float(now)
+        with self._lock:
+            self._answers[key] = (str(surface or ""), ts)
+            self._answers.move_to_end(key)
+            while len(self._answers) > MAX_KEYS:
+                self._answers.popitem(last=False)
+
+    def has_answer(self, key: str, *,
+                   now: float | None = None) -> bool:
+        """True when a surface provably answered ``key`` inside
+        the answer window. Never raises."""
+        key = str(key or "")
+        if not key:
+            return False
+        ts = time.time() if now is None else float(now)
+        with self._lock:
+            held = self._answers.get(key)
+            if held is None:
+                return False
+            _surface, answered_ts = held
+            return ts - answered_ts <= ANSWER_WINDOW_S
+
+    def claim_expires_at(self, key: str, *,
+                         now: float | None = None) -> float:
+        """The epoch second the live claim on ``key`` expires,
+        or 0.0 when no live claim is held. Never raises."""
+        key = str(key or "")
+        if not key:
+            return 0.0
+        ts = time.time() if now is None else float(now)
+        with self._lock:
+            held = self._claims.get(key)
+            if held is None:
+                return 0.0
+            _holder, held_ts = held
+            if ts - held_ts > self._window_s:
+                return 0.0
+            return held_ts + self._window_s
 
     def claim(self, key: str, surface: str, *,
               now: float | None = None) -> bool:
@@ -232,6 +298,14 @@ CREATE TABLE IF NOT EXISTS command_claims (
 );
 """
 
+_ANSWERS_DDL = """
+CREATE TABLE IF NOT EXISTS command_answers (
+  answer_key TEXT PRIMARY KEY,
+  surface TEXT NOT NULL DEFAULT '',
+  answered_at REAL NOT NULL DEFAULT 0
+);
+"""
+
 
 class DurableCommandClaimLedger:
     """The command-claim law over the shared home store.
@@ -262,6 +336,7 @@ class DurableCommandClaimLedger:
         self._window_s = float(window_s)
         self._lock = threading.Lock()
         self._broken = False
+        self._answers_broken = False
         self._last_sweep = 0.0
         try:
             self._db.executescript(_CLAIMS_DDL)
@@ -269,6 +344,13 @@ class DurableCommandClaimLedger:
             _log.warning("command claims: DDL failed; claims "
                          "degrade to unclaimed", exc_info=True)
             self._broken = True
+        try:
+            self._db.executescript(_ANSWERS_DDL)
+        except Exception:  # noqa: BLE001 - answers degrade only
+            _log.warning("command claims: answers DDL failed; "
+                         "answer proofs degrade to unproven",
+                         exc_info=True)
+            self._answers_broken = True
 
     # -- internals ----------------------------------------------------
     def _row(self, key: str) -> tuple[str, float] | None:
@@ -368,6 +450,77 @@ class DurableCommandClaimLedger:
         if ts - held_ts > self._window_s:
             return ""
         return holder
+
+    # -- the answer proof ---------------------------------------------
+    def record_answer(self, key: str, surface: str = "", *,
+                      now: float | None = None) -> None:
+        """Record that ``surface`` answered the command ``key``.
+
+        The answer is the proof the failover sweep needs: a
+        "down" may stand down only when the owning surface
+        provably answered, and a deferred command must never
+        fail over onto a command that was already answered.
+        Never raises; a store fault degrades to unproven."""
+        key = str(key or "")
+        if not key or self._answers_broken:
+            return
+        ts = time.time() if now is None else float(now)
+        with self._lock:
+            try:
+                self._db.execute(
+                    "INSERT INTO command_answers"
+                    " (answer_key, surface, answered_at)"
+                    " VALUES (?, ?, ?)"
+                    " ON CONFLICT(answer_key) DO UPDATE SET"
+                    " surface = excluded.surface,"
+                    " answered_at = excluded.answered_at",
+                    (key, str(surface or ""), ts))
+            except Exception:  # noqa: BLE001 - never eats a turn
+                _log.debug("command claims: record_answer failed",
+                           exc_info=True)
+
+    def has_answer(self, key: str, *,
+                   now: float | None = None) -> bool:
+        """True when a surface provably answered ``key`` inside
+        the answer window. Never raises; a store fault reads as
+        unproven (the sweep then falls back to the claim)."""
+        key = str(key or "")
+        if not key or self._answers_broken:
+            return False
+        ts = time.time() if now is None else float(now)
+        try:
+            row = self._db.query_one(
+                "SELECT answered_at FROM command_answers"
+                " WHERE answer_key = ?", (key,))
+        except Exception:  # noqa: BLE001 - a probe, never fatal
+            _log.debug("command claims: has_answer failed",
+                       exc_info=True)
+            return False
+        if row is None:
+            return False
+        answered_ts = float(row["answered_at"] or 0)
+        return ts - answered_ts <= ANSWER_WINDOW_S
+
+    def claim_expires_at(self, key: str, *,
+                         now: float | None = None) -> float:
+        """The epoch second the live claim on ``key`` expires,
+        or 0.0 when no live claim is held. Never raises."""
+        key = str(key or "")
+        if not key or self._broken:
+            return 0.0
+        ts = time.time() if now is None else float(now)
+        try:
+            row = self._row(key)
+        except Exception:  # noqa: BLE001 - a probe, never fatal
+            _log.debug("command claims: claim_expires_at failed",
+                       exc_info=True)
+            return 0.0
+        if row is None:
+            return 0.0
+        _holder, held_ts = row
+        if ts - held_ts > self._window_s:
+            return 0.0
+        return held_ts + self._window_s
 
 
 _GROUP_CLAIMS_DDL = """
