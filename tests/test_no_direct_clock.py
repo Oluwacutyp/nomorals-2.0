@@ -133,6 +133,26 @@ BASELINE: dict[str, int] = {
     "tests/test_games_quit_hygiene.py": 3,
     "tests/test_games_seasons.py": 2,
     "tests/test_games_sweep.py": 1,
+    # Grandfathered (batch H41): 3 reads stay on the real clock.
+    # The drift briefing provider ignores its `since` arg and calls
+    # monitor.check() with no now (drift.py:933), and the
+    # __health_drift_tick__ tool calls run_health_drift_tick_once
+    # with no now (tools/autonomy.py:1071-1072) — both window the
+    # last 3 days against time.time() (drift.py:367-368), so a frozen
+    # MIDDAY seed sits ~35 days stale and falls outside the window:
+    # check() returns None for "not enough data" (drift.py:389).
+    # The drift-provider test would fail outright; the
+    # stable-provider and tool tests would pass vacuously (proven:
+    # frozen seeds + real-now check() -> None, while
+    # check(now=MIDDAY_TS) -> ('act', ['sleep_debt'])). Threading
+    # now seams through the provider and the tool would be a
+    # production API change in a hygiene lane for a non-regression
+    # (H21 precedent). The file's other 7 reads are frozen to
+    # MIDDAY_TS: the tick tests pass `now` explicitly through
+    # run_health_drift_tick_once into monitor.check(now=...), and
+    # the never-raises test's instant is never read (construction
+    # booms first).
+    "tests/test_gapfix_health_drift.py": 3,
     # Grandfathered (batch H40): 8 reads stay on the real clock — the
     # run seeds in PickTopicsTests (3 tests) and TickTests stamp a run
     # "10 seconds ago" that pick_topics judges on its own real clock

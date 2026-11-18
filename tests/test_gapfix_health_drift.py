@@ -13,6 +13,16 @@ from types import SimpleNamespace
 import pytest
 
 from nomorals.health import DriftMonitor, HealthTimeline
+from tests.frozen_clock import MIDDAY_TS
+
+# Clock reads in this file are frozen to MIDDAY_TS (tests.frozen_clock),
+# except the three grandfathered reads (see the comments at the reads):
+# every frozen seed is only ever compared as a window relative to the
+# same frozen `now` — run_health_drift_tick_once takes `now` explicitly
+# and passes it into monitor.check(now=...), which windows the last 3
+# days against it (drift.py:367-368), so a frozen seed behaves exactly
+# as a real-clock seed does. The never-raises test's instant is never
+# read (HealthTimeline construction booms first).
 
 DAY = 86400
 
@@ -135,7 +145,7 @@ def test_ensure_broken_scheduler_returns_none():
 def test_tick_stable_timeline_stays_silent(tl, mon):
     from nomorals.health.drift import run_health_drift_tick_once
 
-    now = time.time()
+    now = MIDDAY_TS
     _log_3days(tl, now, [7.5, 8.0, 7.0], [4, 4, 5])
     notifier = _Notifier()
     out = run_health_drift_tick_once(
@@ -148,7 +158,7 @@ def test_tick_stable_timeline_stays_silent(tl, mon):
 def test_tick_act_report_pings_once_then_caps(tl, mon):
     from nomorals.health.drift import run_health_drift_tick_once
 
-    now = time.time()
+    now = MIDDAY_TS
     _log_3days(tl, now, [4.5, 4.5, 4.5], [4, 4, 4])
     notifier = _Notifier()
     out = run_health_drift_tick_once(
@@ -170,7 +180,7 @@ def test_tick_act_report_pings_once_then_caps(tl, mon):
 def test_tick_watch_report_never_pings(tl, mon):
     from nomorals.health.drift import run_health_drift_tick_once
 
-    now = time.time()
+    now = MIDDAY_TS
     _log_3days(tl, now, [6.0, 5.8, 5.6], [4, 4, 4])
     notifier = _Notifier()
     out = run_health_drift_tick_once(
@@ -188,7 +198,7 @@ def test_tick_watch_report_never_pings(tl, mon):
 def test_tick_without_notifier_returns_payload(tl, mon):
     from nomorals.health.drift import run_health_drift_tick_once
 
-    now = time.time()
+    now = MIDDAY_TS
     _log_3days(tl, now, [4.5, 4.5, 4.5], [4, 4, 4])
     out = run_health_drift_tick_once(timeline=tl, monitor=mon, now=now)
     assert out["ok"] is True
@@ -201,7 +211,7 @@ def test_tick_without_notifier_returns_payload(tl, mon):
 def test_tick_records_report_row(tl, mon, tmp_path):
     from nomorals.health.drift import run_health_drift_tick_once
 
-    now = time.time()
+    now = MIDDAY_TS
     _log_3days(tl, now, [4.5, 4.5, 4.5], [4, 4, 4])
     out = run_health_drift_tick_once(
         timeline=tl, monitor=mon, notifier=_Notifier(), now=now)
@@ -215,7 +225,7 @@ def test_tick_records_report_row(tl, mon, tmp_path):
 def test_tick_illness_watch_rides_in_payload(tl, mon):
     from nomorals.health.drift import run_health_drift_tick_once
 
-    now = time.time()
+    now = MIDDAY_TS
     _log_3days(tl, now, [7.5, 8.0, 7.0], [4, 4, 5])
     out = run_health_drift_tick_once(
         timeline=tl, monitor=mon, notifier=_Notifier(), now=now)
@@ -230,6 +240,17 @@ def test_tick_illness_watch_rides_in_payload(tl, mon):
 def test_provider_stable_timeline_returns_none(tl, mon):
     from nomorals.health.drift import DriftBriefingProvider
 
+    # Grandfathered (H41): stays on the real clock —
+    # DriftBriefingProvider ignores its `since` arg and calls
+    # monitor.check() with no now (drift.py:933), so check()
+    # windows the last 3 days against time.time()
+    # (drift.py:367-368). A frozen MIDDAY seed sits ~35 days
+    # stale and falls outside the window, so check() returns
+    # None for "not enough data" and this test would pass
+    # vacuously instead of proving a stable timeline produces
+    # no section. Threading a now seam through the provider
+    # would be a production API change in a hygiene lane for a
+    # non-regression (H21 precedent).
     now = time.time()
     _log_3days(tl, now, [7.5, 8.0, 7.0], [4, 4, 5])
     provider = DriftBriefingProvider(timeline=tl, monitor=mon)
@@ -239,6 +260,15 @@ def test_provider_stable_timeline_returns_none(tl, mon):
 def test_provider_drift_returns_section_with_suggestions(tl, mon):
     from nomorals.health.drift import DriftBriefingProvider
 
+    # Grandfathered (H41): stays on the real clock — same
+    # shape as the stable-provider test above: the provider
+    # calls monitor.check() with no now (drift.py:933), so a
+    # frozen MIDDAY seed falls outside the 3-day window and
+    # check() returns None for "not enough data" — collect()
+    # would return None and the section assertion would fail
+    # outright (proven: frozen seeds + real-now check() ->
+    # None, while check(now=MIDDAY_TS) -> ('act',
+    # ['sleep_debt'])).
     now = time.time()
     _log_3days(tl, now, [4.5, 4.5, 4.5], [4, 4, 4])
     provider = DriftBriefingProvider(timeline=tl, monitor=mon)
@@ -259,7 +289,7 @@ def test_provider_never_raises(monkeypatch):
 
     monkeypatch.setattr(timeline_module, "HealthTimeline", _boom)
     provider = DriftBriefingProvider()
-    assert provider.collect(SimpleNamespace(), time.time()) is None
+    assert provider.collect(SimpleNamespace(), MIDDAY_TS) is None
 
 
 # ── scheduler tool ─────────────────────────────────────────────────
@@ -295,6 +325,15 @@ def test_tool_registered_and_runs_one_tick(monkeypatch, tl, mon):
     reg, captured = _registry(SimpleNamespace(workspace=None))
     autonomy_tools.register(reg)
     assert "__health_drift_tick__" in captured
+    # Grandfathered (H41): stays on the real clock — the
+    # __health_drift_tick__ tool calls
+    # run_health_drift_tick_once with no now
+    # (tools/autonomy.py:1071-1072), so the tick windows the
+    # last 3 days against time.time(). A frozen MIDDAY seed
+    # sits ~35 days stale and falls outside the window, so
+    # check() returns None and the tick reports drift False
+    # for "no data" instead of for the stable timeline it is
+    # meant to prove.
     now = time.time()
     _log_3days(tl, now, [7.5, 8.0, 7.0], [4, 4, 5])
     out = captured["__health_drift_tick__"]()
