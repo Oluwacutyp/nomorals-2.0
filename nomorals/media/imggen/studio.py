@@ -746,6 +746,101 @@ class Studio:
         return _build(image_path, target=target, max_bytes=max_bytes,
                       timeout_s=timeout_s)
 
+    def _code_card_document(self, rendered, save_to):
+        """An ImageDocument over one already-rendered card."""
+        from .document import ImageDocument
+
+        paths = self._finalize(
+            [rendered.image],
+            f"code card ({rendered.language}, {rendered.theme})",
+            save_to)
+        notes = [f"theme: {rendered.theme} "
+                 f"(pygments {rendered.style})",
+                 f"language: {rendered.language} "
+                 f"(lexer {rendered.lexer})",
+                 f"font: {rendered.font}",
+                 f"render_hash: {rendered.render_hash}"]
+        notes += list(rendered.notes)
+        return ImageDocument(
+            paths[0],
+            title=f"code card ({rendered.language})",
+            source_prompt="",
+            source_rung=f"codecard (pygments {rendered.style}, "
+                        f"{rendered.font})",
+            notes=notes)
+
+    def code_card_document(self, code: str, *, language: str = "",
+                           theme: str | None = None,
+                           preset: str = "carbon",
+                           chrome: bool | None = None,
+                           watermark: bool | None = None, title: str = "",
+                           font_size: int | None = None,
+                           line_numbers: bool | None = None,
+                           save_to: str | None = None):
+        """A code card as an unrendered document (Carbon core,
+        52-websites #19): the organ renders the code to a PNG
+        (real Pygments tokenisation, deterministic — same card,
+        same render hash), the document's source is that PNG and
+        its provenance names the code, language, theme, lexer and
+        font. Chain more ops, undo, branch, save the project,
+        render later — :meth:`render_document` replays it.
+        ``preset`` is the Ray.so fold (#20): "carbon" honours
+        every knob as passed; a "ray*" preset fixes the look
+        (theme, gradient backdrop, chrome, watermark, line
+        numbers, font size) and names any knob it overrode.
+        """
+        from .codecard import render_code_image
+
+        rendered = render_code_image(
+            code, language=language, theme=theme, preset=preset,
+            chrome=chrome, watermark=watermark, title=title,
+            font_size=font_size, line_numbers=line_numbers)
+        doc = self._code_card_document(rendered, save_to)
+        doc.source_prompt = code
+        if title:
+            doc.title = title
+        return doc
+
+    def code_card(self, code: str, *, language: str = "",
+                  theme: str | None = None,
+                  preset: str = "carbon",
+                  chrome: bool | None = None,
+                  watermark: bool | None = None, title: str = "",
+                  font_size: int | None = None,
+                  line_numbers: bool | None = None,
+                  save_to: str | None = None) -> dict:
+        """Render a code card and hand back the result — the
+        Carbon loop as one call. Builds the code-card document
+        and renders it through the document's own executor, so
+        the delivered PNG is a replay of the document (the same
+        path Studio effects continue from). The document is
+        saved beside the delivered PNG (<same stem>.json).
+        Returns {"paths", "document", "theme", "language",
+        "lexer", "font", "render_hash", "preset", "notes"}.
+        """
+        from .codecard import render_code_image
+
+        rendered = render_code_image(
+            code, language=language, theme=theme, preset=preset,
+            chrome=chrome, watermark=watermark, title=title,
+            font_size=font_size, line_numbers=line_numbers)
+        doc = self._code_card_document(rendered, save_to)
+        doc.source_prompt = code
+        if title:
+            doc.title = title
+        paths = self.render_document(
+            doc, save_to=save_to,
+            prompt=f"code card ({doc.source_rung})")
+        doc_path = paths[0].rsplit(".", 1)[0] + ".json"
+        doc.save(doc_path)
+        return {"paths": paths, "document": doc_path,
+                "theme": rendered.theme,
+                "language": rendered.language,
+                "lexer": rendered.lexer, "font": rendered.font,
+                "render_hash": rendered.render_hash,
+                "preset": rendered.preset,
+                "notes": list(rendered.notes)}
+
     def render_document(self, doc, save_to: str | None = None,
                         prompt: str = "", box_predictor=None
                         ) -> list[str]:

@@ -762,4 +762,13 @@ def format_dev_answer_reply(answer: dict[str, Any]) -> str:
         for n, cite in enumerate(citations, 1):
             title = cite.get("title") or cite.get("url") or ""
             lines.append(f"[{n}] {title} — {cite.get('url', '')}")
+    # The offer after a code fix lands: a verified block is code
+    # the owner can post — the card is one "screenshot this code"
+    # away (the code_card tool). Unverified blocks get no offer:
+    # an image of unproven code would present it as working.
+    if any(block.get("verified_by_execution")
+           for block in answer.get("code_blocks") or []):
+        lines.append("")
+        lines.append(
+            "Want it as a picture? Say \"screenshot this code\".")
     return "\n".join(lines).strip()
