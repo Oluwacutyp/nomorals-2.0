@@ -32,6 +32,12 @@ from .pipeline import generate, request_hero_clip, capability_report, VideoResul
 from .codegen import render_code_scene
 from .formats import build_format, list_formats, render_format
 from .narration import scene_narration, synthesize_narration
+from .captions import (
+    caption_narration,
+    check_caption_timing,
+    draw_captions,
+    captions_srt,
+)
 from .qc import matrix_message, plan_variants, qc_existing, render_matrix
 from .chaining import chain_scenes, ChainReport
 from .autotune import autotune_request, AUTOTUNE
@@ -56,6 +62,10 @@ __all__ = [
     "render_format",
     "scene_narration",
     "synthesize_narration",
+    "caption_narration",
+    "check_caption_timing",
+    "draw_captions",
+    "captions_srt",
     "plan_variants",
     "render_matrix",
     "qc_existing",

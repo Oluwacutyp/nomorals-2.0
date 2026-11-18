@@ -35,6 +35,15 @@ never ships it. The matrix therefore carries its own verdict over
 the axes a videogen render CAN be judged on — exposure, black
 frames, aesthetic, duration — and keeps the full gate dict beside
 it in every report, verbatim, so nothing is papered over.
+
+A render handed to :func:`qc_existing` WITH its caption record is
+different: the record is the document the gate was waiting for, so
+the caption axis is measured for real — the render's audio is
+transcribed and the caption words are matched against the measured
+transcript (:func:`nomorals.media.edit_engine.qc._measure_caption_drift`).
+A caption set that drifts from the voice fails the verdict with the
+drift named. Without a transcriber on the host the axis stays
+``unknown`` and the report says so — never a guessed pass.
 """
 
 from __future__ import annotations
@@ -176,21 +185,51 @@ def _rank_key(variant: dict[str, Any],
 
 
 def _qc_one(path: Path, *, out_dir: Path, stem: str,
-            expected_duration: float | None) -> dict[str, Any]:
-    """Measure + gate + sheet one finished render (the real measurer)."""
+            expected_duration: float | None,
+            document: Any = None, transcriber: Any = None
+            ) -> dict[str, Any]:
+    """Measure + gate + sheet one finished render (the real measurer).
+
+    ``document``/``transcriber`` are the edit-engine gate's inputs —
+    a document carrying caption word timings plus a word-timing
+    transcriber make the caption axis measurable; both None keeps
+    today's document-less behaviour.
+    """
     from ..edit_engine.qc import qc_render
 
     workdir = out_dir / "work"
     workdir.mkdir(parents=True, exist_ok=True)
     sheet_out = out_dir / f"{stem}.qc-sheet.png"
-    return qc_render(None, path, sheet_out=sheet_out,
+    return qc_render(document, path, sheet_out=sheet_out,
                      expected_duration=expected_duration,
-                     workdir=workdir)
+                     transcriber=transcriber, workdir=workdir)
+
+
+def _caption_transcriber() -> Any | None:
+    """A base-model word-timing transcriber for the QC drift check.
+
+    The caption alignment's own rung (faster-whisper ``base``) —
+    None when faster-whisper is not installed, so the caption axis
+    stays honestly unmeasured instead of failing on a missing rung.
+    """
+    import os
+
+    try:
+        from ...voice.stt import FasterWhisperBackend
+        from ..edit_engine.text import STTTranscriber
+    except Exception:  # noqa: BLE001 - no transcriber on this host
+        return None
+    try:
+        model = os.environ.get("VIDEOGEN_CAPTION_MODEL", "") or "base"
+        return STTTranscriber(stt=FasterWhisperBackend(model=model))
+    except Exception:  # noqa: BLE001 - model load is the wall
+        return None
 
 
 def qc_existing(path: str | Path, *,
                 out_dir: str | Path | None = None,
-                expected_duration: float | None = None
+                expected_duration: float | None = None,
+                captions: dict[str, Any] | None = None
                 ) -> dict[str, Any]:
     """QC a render that already exists: measure + gate + contact sheet.
 
@@ -199,16 +238,60 @@ def qc_existing(path: str | Path, *,
     gate's own verdict (False for a document-less render, honestly),
     ``verdict`` is the visual-axes verdict (see the module
     docstring). A JSON report is written beside the sheet.
+
+    ``captions`` is a caption record (see :mod:`.captions`) — the
+    document the gate's caption axis needs. With it, the record is
+    checked structurally (:func:`.captions.check_caption_timing`)
+    and the gate measures caption drift against the render's own
+    audio: a caption set that drifts from the voice fails the
+    verdict with the drift named. Without a transcriber on the host
+    the axis stays ``unknown`` and the reasons say so — never a
+    guessed pass. Without ``captions`` the render QCs exactly as
+    before (visual axes only).
     """
+    from types import SimpleNamespace
+
+    from .captions import check_caption_timing
+
     p = Path(path)
     if not p.is_file():
         raise VideogenError(f"no such render to QC: {path}")
     out = Path(out_dir) if out_dir else p.parent
     out.mkdir(parents=True, exist_ok=True)
+    cap_words = list((captions or {}).get("words") or [])
+    document = None
+    transcriber = None
+    if cap_words:
+        document = SimpleNamespace(
+            transcript=[{"start": float(w["start"]),
+                         "end": float(w["end"]),
+                         "text": str(w["text"])} for w in cap_words],
+            text_layers=[], identity_locks=[], loudness=None)
+        transcriber = _caption_transcriber()
     res = _qc_one(p, out_dir=out, stem=p.stem,
-                  expected_duration=expected_duration)
+                  expected_duration=expected_duration,
+                  document=document, transcriber=transcriber)
     verdict, reasons = _visual_verdict(
         res["measure"], res["gate"], expected_duration)
+    if cap_words:
+        dur = expected_duration
+        if dur is None:
+            dur = float((res["measure"].get("duration") or {})
+                        .get("measured_s") or 0.0)
+        ok, problems = check_caption_timing(captions or {}, duration=dur)
+        if not ok:
+            verdict = "fail"
+            reasons.extend(problems)
+        cap_axis = (res["gate"].get("axes") or {}).get(
+            "caption_sync_drift") or {}
+        if cap_axis.get("status") == "fail":
+            verdict = "fail"
+            reasons.append(
+                "caption sync drift — captions drift from the voice "
+                f"({cap_axis.get('detail', 'unmeasured drift')})")
+        elif cap_axis.get("status") != "pass":
+            reasons.append("caption sync unmeasured — no word-timing "
+                           "transcriber on this host")
     sheet = res["contact_sheet"]
     sheet_path = (sheet.get("path") if isinstance(sheet, dict) else None)
     report = {"kind": "render_qc", "path": str(p),
@@ -216,6 +299,8 @@ def qc_existing(path: str | Path, *,
               "ship": bool(res["gate"].get("ship")),
               "gate": res["gate"], "measure": res["measure"],
               "contact_sheet": sheet_path}
+    if captions is not None:
+        report["captions"] = captions
     report_path = out / f"{p.stem}.qc.json"
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
     report["report_path"] = str(report_path)

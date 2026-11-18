@@ -6848,9 +6848,13 @@ class RuntimeMediaMixin:
         tail = (tail or "").strip()
         seconds = 5.0
         narrate = True
+        captions = True
         if "--silent" in tail:
             narrate = False
             tail = tail.replace("--silent", " ").strip()
+        if "--no-captions" in tail:
+            captions = False
+            tail = tail.replace("--no-captions", " ").strip()
         sm = re.search(r"--seconds\s+([\d.]+)", tail)
         if sm:
             try:
@@ -6863,9 +6867,10 @@ class RuntimeMediaMixin:
                 if not tail:
                     return ("usage: /map-route <A> to <B> [via <C>…] | "
                             "/map-route <A>, <B>, <C> [--seconds N] "
-                            "[--silent]")
+                            "[--silent] [--no-captions]")
                 res = render_format("map-route", route=tail,
-                                    duration_s=seconds, narrate=narrate)
+                                    duration_s=seconds, narrate=narrate,
+                                    captions=captions)
             elif kind == "headline":
                 lines = None
                 lm = re.search(r'--lines\s+"([^"]*)"', tail)
@@ -6874,23 +6879,23 @@ class RuntimeMediaMixin:
                     tail = (tail[:lm.start()] + tail[lm.end():]).strip()
                 if not tail:
                     return ('usage: /headline <text> [--lines "a|b"] '
-                            "[--seconds N] [--silent]")
+                            "[--seconds N] [--silent] [--no-captions]")
                 res = render_format("headline", headline=tail,
                                     lines=lines, duration_s=seconds,
-                                    narrate=narrate)
+                                    narrate=narrate, captions=captions)
             else:  # teardown
                 if not tail:
                     return ("usage: /teardown <thing> : <part>, <part>… "
-                            "[--seconds N] [--silent]")
+                            "[--seconds N] [--silent] [--no-captions]")
                 thing, sep, parts = tail.partition(":")
                 if not sep:
                     thing, sep, parts = tail.partition("—")
                 if not sep or not parts.strip():
                     return ("usage: /teardown <thing> : <part>, <part>… "
-                            "[--seconds N] [--silent]")
+                            "[--seconds N] [--silent] [--no-captions]")
                 res = render_format("teardown", thing=thing.strip(),
                                     parts=parts, duration_s=seconds,
-                                    narrate=narrate)
+                                    narrate=narrate, captions=captions)
         except VideogenError as exc:
             return f"{kind}: {exc}"
         except Exception as exc:  # noqa: BLE001 - chat surfaces as text

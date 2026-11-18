@@ -250,6 +250,7 @@ def generate(prompt: str, *, backend: str = "auto",
              lora: Any = None,
              scene: dict[str, Any] | None = None,
              narrate: bool = True,
+             captions: bool = True,
              **kw) -> VideoResult:
     """Generate a video clip — neural when possible, motion otherwise.
 
@@ -316,7 +317,8 @@ def generate(prompt: str, *, backend: str = "auto",
         from .codegen import render_code_scene
 
         rec = render_code_scene(scene, out, duration=duration_s,
-                                size=size, fps=fps, narrate=narrate)
+                                size=size, fps=fps, narrate=narrate,
+                                captions=captions)
         narr = rec.get("narration", {})
         if narr.get("status") == "spoken":
             narr_note = (f"narrated by {narr.get('backend') or 'TTS'} "
@@ -326,13 +328,28 @@ def generate(prompt: str, *, backend: str = "auto",
                          f"{narr.get('reason') or 'no TTS voice'}")
         else:
             narr_note = "silent (--silent)"
+        caps = rec.get("captions", {})
+        if caps.get("status") in ("measured", "mixed"):
+            cap_note = (f"captions: {caps['status']} "
+                        f"({caps.get('words_measured', 0)} measured, "
+                        f"{caps.get('words_estimated', 0)} estimated, "
+                        f"{caps.get('words_total', 0)} words)")
+        elif caps.get("status") == "estimated":
+            cap_note = ("captions: estimated — "
+                        f"{caps.get('reason') or 'no word aligner'}")
+        elif caps.get("status") == "missing":
+            cap_note = ("captions: missing — "
+                        f"{caps.get('reason') or 'no narration'}")
+        else:
+            cap_note = "captions: off"
         result = VideoResult(
             path=rec["path"], engine="code", routed="code",
             note=(f"code-rendered {rec['kind']} scene: deterministic "
                   f"seek(t) frames ({rec['frames']} frames, render hash "
                   f"{rec['render_hash'][:12]}…) — no model, CPU-only; "
                   f"contact sheet: {rec['contact_sheet']}\n"
-                  f"   narration: {narr_note}"),
+                  f"   narration: {narr_note}\n"
+                  f"   {cap_note}"),
             prompt=prompt,
             meta={"scene_kind": rec["kind"], "source": rec["source"],
                   "frames": rec["frames"], "fps": rec["fps"],
@@ -340,7 +357,8 @@ def generate(prompt: str, *, backend: str = "auto",
                   "render_hash": rec["render_hash"],
                   "contact_sheet": rec["contact_sheet"],
                   "deterministic": True,
-                  "narration": narr})
+                  "narration": narr,
+                  "captions": caps})
         record_ledger({"kind": "videogen.generate", "path": rec["path"],
                        "engine": "code", "routed": "code",
                        "scene_kind": rec["kind"],
