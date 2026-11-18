@@ -772,6 +772,247 @@ class RuntimeSystemMixin:
         return ("usage: /onion validate <v3-onion-address> | "
                 "fetch <http(s)://url|.onion-url> [--rotate]")
 
+    def _control_combo(self, tail: str, chat_key: str = "") -> str:
+        # /combo <email:password> [service,...] — check one combo against
+        # the service adapters (owner's combo checker). Verdicts come
+        # from cookies/redirects/status, never body text; anything the
+        # adapter cannot prove is UNKNOWN, never VALID.
+        from pathlib import Path
+
+        parts = (tail or "").split()
+        if not parts or "@" not in parts[0]:
+            return ("usage: /combo <email:password> [service,...] "
+                    "(ebay, netflix, google, amazon, oracle, elevenlabs)")
+        services = parts[1] if len(parts) > 1 else ""
+        out_file = ""
+        try:
+            home = str(self.settings.home_path)
+            if home:
+                out_file = str(Path(home) / "data" / "combos_checked.jsonl")
+        except Exception:  # noqa: BLE001 — fall back to the tool default
+            pass
+        outcome = self.context.tools.call(
+            "combo_check", combos=parts[0], services=services,
+            out_file=out_file)
+        if not outcome.ok:
+            return (f"combo check failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        v = outcome.value
+        counts = v.get("counts") or {}
+        lines = [f"combo: {v.get('attempts', 0)} check(s), "
+                 f"{v.get('good', 0)} valid — "
+                 + ", ".join(f"{k} {n}"
+                             for k, n in sorted(counts.items()))]
+        for r in v.get("results") or []:
+            if str(r.get("verdict", "")).startswith("valid"):
+                lines.append(f"  + {r['email']} @ {r['service']} "
+                             f"[{r['verdict']}] {r.get('evidence', '')[:60]}")
+        return "\n".join(lines)
+
+    def _control_enum(self, tail: str, chat_key: str = "") -> str:
+        # /enum <username|email> — social surface enumeration (owner's
+        # social_enum). 404 / redirect to signup = free, 200 with a
+        # profile marker = taken; a site that answers 200 for
+        # everything is INCONCLUSIVE, never counted free.
+        parts = (tail or "").split()
+        if not parts:
+            return "usage: /enum <username|email>"
+        target = parts[0]
+        kind = "email" if "@" in target else "username"
+        outcome = self.context.tools.call(
+            "social_enum", target=target, kind=kind)
+        if not outcome.ok:
+            return (f"enum failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        v = outcome.value
+        lines = [f"{target}:"]
+        if v.get("free_on"):
+            lines.append("  free on: " + ", ".join(v["free_on"]))
+        if v.get("taken_on"):
+            lines.append("  taken on: " + ", ".join(v["taken_on"]))
+        if v.get("inconclusive"):
+            lines.append("  inconclusive: " + ", ".join(v["inconclusive"]))
+        if len(lines) == 1:
+            lines.append("  no answer anywhere — every site errored.")
+        return "\n".join(lines)
+
+    def _control_recon(self, tail: str, chat_key: str = "") -> str:
+        # /recon <domain> [--no-ct] [--no-axfr] — passive surface
+        # discovery (owner's recon): CT logs, DNS over HTTPS, AXFR
+        # attempt, wildcard suppression, takeover leads. Nothing is
+        # brute-forced here; that is /subbrute.
+        parts = (tail or "").split()
+        if not parts:
+            return "usage: /recon <domain> [--no-ct] [--no-axfr]"
+        domain = parts[0]
+        outcome = self.context.tools.call(
+            "recon_domain", domain=domain,
+            no_ct="true" if "--no-ct" in parts else "",
+            no_axfr="true" if "--no-axfr" in parts else "")
+        if not outcome.ok:
+            return (f"recon failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        v = outcome.value
+        lines = [f"{v.get('domain', domain)}: {v.get('host_count', 0)} host(s), "
+                 f"wildcard: {v.get('wildcard') or 'none'}"]
+        cands = v.get("takeover_candidates") or []
+        if cands:
+            lines.append("takeover leads:")
+            for c in cands[:10]:
+                lines.append(f"  ? {c['host']} → {c.get('provider')} "
+                             f"[{c.get('state')}]")
+        for a in (v.get("assets") or [])[:20]:
+            recs = a.get("records") or {}
+            addr = ",".join(recs.get("A") or []) or \
+                ",".join(a.get("cname_chain") or [])
+            lines.append(f"  {a['host']} — {addr or '—'} "
+                         f"({', '.join(a.get('sources') or [])})")
+        return "\n".join(lines)
+
+    def _control_subbrute(self, tail: str, chat_key: str = "") -> str:
+        # /subbrute <domain> [rounds] — DNS subdomain brute with
+        # wildcard suppression and permutation rounds (owner's
+        # subbrute). Wildcard matches are tagged, never counted.
+        parts = (tail or "").split()
+        if not parts:
+            return "usage: /subbrute <domain> [rounds]"
+        domain = parts[0]
+        rounds = parts[1] if len(parts) > 1 and parts[1].isdigit() else ""
+        outcome = self.context.tools.call(
+            "subbrute", domain=domain, rounds=rounds)
+        if not outcome.ok:
+            return (f"subbrute failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        v = outcome.value
+        lines = [f"{v.get('domain', domain)}: {v.get('found', 0)} found "
+                 f"({v.get('wildcard_matches', 0)} wildcard-tagged), "
+                 f"{v.get('queries', 0)} queries in {v.get('seconds', 0)}s, "
+                 f"wildcard: {v.get('wildcard') or 'none'}"]
+        for h in (v.get("hits") or [])[:25]:
+            if h.get("wildcard"):
+                continue
+            addr = ",".join(h.get("addresses") or []) or \
+                ",".join(h.get("cname") or [])
+            lines.append(f"  + {h['host']} {addr} [{h.get('via', '')}]")
+        return "\n".join(lines)
+
+    def _control_chain(self, tail: str, chat_key: str = "") -> str:
+        # /chain <case> verify | export | report <domain> — the
+        # hash-chained evidence packs (owner's evidence) and the
+        # engagement report built from one (owner's report). A broken
+        # chain is refused, never rendered as fact.
+        parts = (tail or "").split()
+        if len(parts) < 2:
+            return ("usage: /chain <case> verify | export | "
+                    "report <domain>")
+        case, verb = parts[0], parts[1].lower()
+        if verb == "verify":
+            outcome = self.context.tools.call("evidence_verify", case=case)
+            if not outcome.ok:
+                return (f"verify failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            line = (f"{case}: chain {v.get('state')} — "
+                    f"{v.get('records', 0)} record(s)")
+            if v.get("head"):
+                line += f", head {str(v['head'])[:16]}…"
+            if v.get("broken_at"):
+                line += (f" — broken at {v['broken_at']}: "
+                         f"{v.get('why', '')}")
+            return line
+        if verb == "export":
+            outcome = self.context.tools.call("evidence_export", case=case)
+            if not outcome.ok:
+                return (f"export failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            return (f"{case}: exported {v.get('records', 0)} record(s) to "
+                    f"{v.get('dir')} — integrity {v.get('verify', '?')}")
+        if verb == "report":
+            if len(parts) < 3:
+                return "usage: /chain report <case> <domain>"
+            outcome = self.context.tools.call(
+                "report_build", case=case, domain=parts[2])
+            if not outcome.ok:
+                return (f"report failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            counts = v.get("counts") or {}
+            return (f"{case}: report at {v.get('file')} — "
+                    + ", ".join(f"{k} {n}"
+                                for k, n in sorted(counts.items())
+                                if n)
+                    + f" — integrity {v.get('integrity', '?')}")
+        return ("usage: /chain <case> verify | export | report <domain>")
+
+    def _control_disclose(self, tail: str, chat_key: str = "") -> str:
+        # /disclose score <kind> [sensitivity] [reach] [scale] |
+        # contacts <domain> | draft <case> <domain> [contact] — the
+        # disclosure desk (owner's disclose): a deterministic severity
+        # rubric, RFC 9116 contact discovery, and a draft built from a
+        # verified evidence chain. Drafts only; sending is your act.
+        parts = (tail or "").split()
+        if not parts:
+            return ("usage: /disclose score <kind> [sensitivity] [reach] "
+                    "[scale] | contacts <domain> | draft <case> <domain> "
+                    "[contact]")
+        verb = parts[0].lower()
+        if verb == "score":
+            if len(parts) < 2:
+                return ("usage: /disclose score <kind> [sensitivity] "
+                        "[reach] [scale]")
+            kw = {}
+            if len(parts) > 2:
+                kw["sensitivity"] = parts[2]
+            if len(parts) > 3:
+                kw["reach"] = parts[3]
+            if len(parts) > 4:
+                kw["scale"] = parts[4]
+            outcome = self.context.tools.call(
+                "severity_score", kind=parts[1], **kw)
+            if not outcome.ok:
+                return (f"score failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            bd = v.get("breakdown") or {}
+            return (f"{v.get('kind')}: {v.get('score')}/100 "
+                    f"{v.get('tier')} — kind {bd.get('kind')}, "
+                    f"sensitivity {bd.get('sensitivity')}, "
+                    f"reach {bd.get('reach')}, scale {bd.get('scale')}")
+        if verb == "contacts":
+            if len(parts) < 2:
+                return "usage: /disclose contacts <domain>"
+            outcome = self.context.tools.call(
+                "disclose_contacts", domain=parts[1])
+            if not outcome.ok:
+                return (f"contacts failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            contacts = v.get("contacts") or []
+            if not contacts:
+                return f"{parts[1]}: {v.get('note', 'no contact published')}"
+            lines = [f"{parts[1]}: {v.get('count', 0)} contact(s)"]
+            for c in contacts:
+                lines.append(f"  {c['email']} ({c['source']})")
+            return "\n".join(lines)
+        if verb == "draft":
+            if len(parts) < 3:
+                return ("usage: /disclose draft <case> <domain> "
+                        "[contact]")
+            outcome = self.context.tools.call(
+                "disclose_draft", case=parts[1], domain=parts[2],
+                contact=parts[3] if len(parts) > 3 else "")
+            if not outcome.ok:
+                return (f"draft failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            return (f"disclosure draft at {v.get('file')} — "
+                    f"{v.get('records', 0)} record(s), "
+                    f"integrity {v.get('integrity', '?')}")
+        return ("usage: /disclose score <kind> [sensitivity] [reach] "
+                "[scale] | contacts <domain> | draft <case> <domain> "
+                "[contact]")
+
     def _control_toolhub(self, tail: str, chat_key: str = "") -> Any:
         """Tool hub: /toolhub | /toolhub proxy [run] | /toolhub bin [digits] | /toolhub help.
 

@@ -19,6 +19,7 @@ from typing import Any, Optional
 
 from ..core.errors import ToolError
 from ..core.logging_setup import get_logger
+from ..core.policy import Capability
 from .audit_report import (
     SEVERITY_ORDER,
     _remediation_for,
@@ -161,6 +162,13 @@ class EngagementReport:
 
     def render(self) -> tuple[str, dict[str, Any]]:
         integrity = verify_chain(self.chain_path)
+        if integrity["state"] != "intact":
+            # A report renders findings as fact; a broken chain cannot
+            # carry them. Refuse, like the disclosure draft does —
+            # the description of this tool promises exactly that.
+            raise ToolError(
+                f"evidence chain is {integrity['state']} at record "
+                f"{integrity['broken_at']} — fix before reporting")
         rows = self._load()
         inv = self._inventory()
         graded = self._grade(rows)
@@ -185,10 +193,6 @@ class EngagementReport:
                                    if summary["counts"].get(s)))
         else:
             out.append("No findings outside the informational band.")
-        if integrity["state"] != "intact":
-            out.append(f"\n> **Chain integrity {integrity['state']} at record "
-                       f"{integrity['broken_at']}** — treat as unproven below "
-                       f"that index.")
         out.append("")
 
         out += ["## Surface", "",
@@ -241,7 +245,7 @@ class EngagementReport:
                 "Records are append-only and hash-linked; each carries its "
                 "predecessor's digest. Any edit breaks verification at the "
                 "modified index.", "",
-                "```", f"nm evidence verify {self.dir.name}", "```", ""]
+                "```", f"/chain verify {self.dir.name}", "```", ""]
 
         manifest = {
             "domain": self.domain, "client": self.client,

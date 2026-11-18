@@ -115,13 +115,7 @@ def enum_email(email: str, *, timeout: float = 15.0,
     )
     out: list[Hit] = []
     for sid, url, marker in checks:
-        hit = _probe(sid, url, marker, email, timeout, proxy)
-        if hit.state == "taken":
-            body_ok = True
-            if body_ok:
-                out.append(hit)
-        else:
-            out.append(hit)
+        out.append(_probe(sid, url, marker, email, timeout, proxy))
     return out
 
 

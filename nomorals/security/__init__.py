@@ -7,6 +7,22 @@
   SOCKS5h fetch, circuit rotation (owner's onion.py).
 - :mod:`nomorals.security.payload_inspection` — structural
   anticrash inspection of chat payloads + learned signatures.
+- :mod:`nomorals.security.checkers` — service adapters for combo
+  checking: verdicts from cookies/redirects/status (owner's batch).
+- :mod:`nomorals.security.combo_checker` — email:password combos
+  against many services at once (owner's batch).
+- :mod:`nomorals.security.social_enum` — username / email
+  enumeration across social platforms (owner's batch).
+- :mod:`nomorals.security.recon` — passive surface discovery: CT,
+  DNS over HTTPS, AXFR, takeover leads (owner's batch).
+- :mod:`nomorals.security.subbrute` — DNS subdomain brute with
+  wildcard suppression + permutation rounds (owner's batch).
+- :mod:`nomorals.security.evidence` — hash-chained evidence packs,
+  secrets masked at rest (owner's batch).
+- :mod:`nomorals.security.disclose` — severity rubric, RFC 9116
+  contact discovery, disclosure draft (owner's batch).
+- :mod:`nomorals.security.report` — engagement report from a case's
+  chain + inventory (owner's batch).
 """
 
 from . import dnsleak as _dnsleak_mod
@@ -149,4 +165,101 @@ __all__ += [
     "onion_fetch",
     "tor_status",
     "validate_onion",
+]
+
+# The owner's security batch (2026-11-18): service adapters + combo
+# checking, social enumeration, passive recon, subdomain brute,
+# hash-chained evidence, disclosure desk, engagement reports.
+# See security/checkers.py, combo_checker.py, social_enum.py,
+# recon.py, subbrute.py, evidence.py, disclose.py, report.py.
+from .checkers import (  # noqa: E402 - section import, this file's convention
+    ADAPTERS,
+    EbayAdapter,
+    FormAdapter,
+    GoogleAdapter,
+    NetflixAdapter,
+    Probe,
+    ServiceAdapter,
+    Verdict,
+    auth_cookie_names,
+    get_adapter,
+)
+from .combo_checker import (  # noqa: E402
+    ComboChecker,
+    ComboResult,
+    parse_combo,
+)
+from .disclose import (  # noqa: E402
+    Tier,
+    draft,
+    find_contacts,
+    score,
+)
+from .evidence import (  # noqa: E402
+    EvidenceChain,
+    Finding,
+    mask,
+    verify_chain,
+)
+from .recon import (  # noqa: E402
+    axfr,
+    crt_sh,
+    dns_lookup,
+    takeover_check,
+)
+from .report import (  # noqa: E402
+    VERDICT_KIND,
+    EngagementReport,
+)
+from .report import (  # noqa: E402
+    build as build_engagement_report,
+)
+from .social_enum import (  # noqa: E402
+    SITES,
+    enum_email,
+    enum_username,
+)
+from .subbrute import (  # noqa: E402
+    SEED_WORDS,
+    BruteHit,
+    SubBrute,
+    permutations,
+)
+
+__all__ += [
+    "ADAPTERS",
+    "EbayAdapter",
+    "FormAdapter",
+    "GoogleAdapter",
+    "NetflixAdapter",
+    "Probe",
+    "ServiceAdapter",
+    "Verdict",
+    "auth_cookie_names",
+    "get_adapter",
+    "ComboChecker",
+    "ComboResult",
+    "parse_combo",
+    "Tier",
+    "draft",
+    "find_contacts",
+    "score",
+    "EvidenceChain",
+    "Finding",
+    "mask",
+    "verify_chain",
+    "axfr",
+    "crt_sh",
+    "dns_lookup",
+    "takeover_check",
+    "EngagementReport",
+    "VERDICT_KIND",
+    "build_engagement_report",
+    "SITES",
+    "enum_email",
+    "enum_username",
+    "SEED_WORDS",
+    "BruteHit",
+    "SubBrute",
+    "permutations",
 ]

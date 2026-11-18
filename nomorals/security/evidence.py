@@ -25,7 +25,7 @@ from ..core.policy import Capability
 from ..core.logging_setup import get_logger
 
 _log = get_logger(__name__)
-__all__ = ["EvidenceChain", "mask", "verify_chain", "register"]
+__all__ = ["EvidenceChain", "Finding", "mask", "verify_chain", "register"]
 
 _GENESIS = "0" * 64
 _SECRET_HEADERS = re.compile(
@@ -37,6 +37,13 @@ _SECRET_SHAPES = (
     re.compile(r"\b(?:sk|pk|rk|ghp|gho|xox[baprs])_[A-Za-z0-9_\-]{16,}"),
     re.compile(r"\b[A-Fa-f0-9]{40,}\b"),
 )
+
+
+def _slug(case: str) -> str:
+    """One slug rule for every entry point: the chain directory, the
+    verify tool and the export tool must agree, or a case created under
+    one spelling is invisible to the other."""
+    return re.sub(r"[^a-z0-9_\-]+", "-", (case or "").strip().lower()).strip("-")
 
 
 def _tail(value: str) -> str:
@@ -73,7 +80,7 @@ class Finding:
 
     def masked(self) -> dict[str, Any]:
         req = dict(self.request)
-        headers = {k: (mask(v) if _SECRET_HEADERS.match(k) else mask(v))
+        headers = {k: (mask(v) if _SECRET_HEADERS.match(k) else v)
                    for k, v in (req.get("headers") or {}).items()}
         req["headers"] = headers
         if "body" in req:
@@ -92,7 +99,7 @@ class EvidenceChain:
     """One case, append-only, tamper-evident."""
 
     def __init__(self, root: str | Path, case: str) -> None:
-        slug = re.sub(r"[^a-z0-9_\-]+", "-", (case or "").strip().lower()).strip("-")
+        slug = _slug(case)
         if not slug:
             raise ToolError("evidence needs a case name")
         self.case = slug
@@ -155,6 +162,24 @@ class EvidenceChain:
     def export(self, out_dir: Optional[str | Path] = None) -> dict[str, Any]:
         target = Path(out_dir) if out_dir else self.dir / "export"
         target.mkdir(parents=True, exist_ok=True)
+        if not self.chain_path.is_file():
+            # A fresh case has no chain yet — an empty manifest, not a
+            # FileNotFoundError. verify_chain already reports "missing".
+            manifest = {
+                "case": self.case,
+                "generated": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "records": 0,
+                "head": self._head,
+                "verify": "missing",
+            }
+            (target / "manifest.json").write_text(
+                json.dumps(manifest, indent=2), encoding="utf-8")
+            (target / "chain.jsonl").write_text("", encoding="utf-8")
+            (target / "report.md").write_text(
+                f"# Evidence — {self.case}\n\nRecords: 0  \n"
+                f"Chain head: `{self._head}`  \nIntegrity: **missing**\n",
+                encoding="utf-8")
+            return {"dir": str(target), "records": 0, **manifest}
         rows = [json.loads(l) for l in
                 self.chain_path.read_text(encoding="utf-8").splitlines() if l.strip()]
         manifest = {
@@ -246,8 +271,7 @@ def register(registry: Any) -> None:
         parameters={"case": "str — case slug"},
     )
     def evidence_verify(case: str) -> dict[str, Any]:
-        return verify_chain(Path(root) / "evidence" /
-                            re.sub(r"[^a-z0-9_\-]+", "-", case.lower().strip("-"))
+        return verify_chain(Path(root) / "evidence" / _slug(case)
                             / "chain.jsonl")
 
     @registry.register(

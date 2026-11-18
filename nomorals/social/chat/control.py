@@ -883,6 +883,12 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "proxy": (0, 8),         # /proxy status|scrape|test|health|pool|pick|affinity|rotate on|set <url>|ssh <…>
     "tor": (0, 1),           # /tor status — Tor presence: SOCKS/control ports, rotation (owner-only)
     "onion": (0, None),      # /onion validate <addr> | fetch <url> [--rotate] — fetch through Tor (owner-only)
+    "combo": (1, 2),         # /combo <email:password> [service,...] — check one combo against service adapters (owner-only)
+    "enum": (1, 1),          # /enum <username|email> — username availability / email registration across social platforms (owner-only)
+    "recon": (1, 3),         # /recon <domain> [--no-ct] [--no-axfr] — passive surface discovery (owner-only)
+    "subbrute": (1, 2),      # /subbrute <domain> [rounds] — DNS subdomain brute, wildcard-suppressed (owner-only)
+    "chain": (1, 3),         # /chain <case> verify | export | report <domain> — hash-chained evidence packs (owner-only)
+    "disclose": (1, 4),      # /disclose score <kind> ... | contacts <domain> | draft <case> <domain> [contact] — disclosure desk (owner-only)
     "toolhub": (0, 2),       # /toolhub | /toolhub proxy [run] | /toolhub bin [digits] | /toolhub help — button tool hub (owner-only; NOT /hub, which is the media hub)
     "workspace": (0, 4),     # /workspace [status|scale <n>|up|down|pause|resume|add|remove]
     "gen": (2, None),        # /gen <kind> <name> [json config]
@@ -4263,6 +4269,30 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/onion validate <v3-onion-address> | /onion fetch <http(s)://url|.onion-url> [--rotate]",
               "example": "/onion fetch https://example.com",
               "related": "/tor /proxy"},
+    "combo": {"what": "Check one email:password combo against the service adapters (eBay, Netflix, Google, Amazon, Oracle, ElevenLabs). A verdict is measured from cookies, redirects and status — never from body text, because every one of these returns 200 on a failed login. Anything the adapter cannot prove is UNKNOWN, never VALID. Results land in data/combos_checked.jsonl (resumable). Owner-only.",
+              "usage": "/combo <email:password> [service,...]",
+              "example": "/combo user@example.com:hunter2 netflix,google",
+              "related": "/breach /chain"},
+    "enum": {"what": "Check a username's availability across social platforms, or an email's registration status where a platform answers anonymously. Availability is read from the platform's own profile URL: 404 / redirect to a signup page = free, 200 with a profile marker = taken. A site that answers 200 for everything is marked INCONCLUSIVE rather than counted free. Owner-only.",
+             "usage": "/enum <username|email>",
+             "example": "/enum peacethefirst",
+             "related": "/recon /breach"},
+    "recon": {"what": "Passive surface discovery for a domain: certificate transparency (crt.sh), DNS over HTTPS, a real zone-transfer attempt against each authoritative NS, wildcard suppression so a catch-all cannot invent subdomains, and takeover leads (CNAME against the provider table, then the provider's own unclaimed marker in the HTTP body — a CNAME alone proves nothing). Nothing is brute-forced here; that is /subbrute. Owner-only.",
+              "usage": "/recon <domain> [--no-ct] [--no-axfr]",
+              "example": "/recon example.com",
+              "related": "/subbrute /enum /chain"},
+    "subbrute": {"what": "DNS subdomain brute with wildcard suppression and permutation rounds. The wildcard is measured first; any name resolving to the wildcard IP is kept but tagged, never silently counted. Permutations are generated from names that ALREADY resolved, so the second pass is targeted rather than blind. Resolution is DNS over HTTPS — no resolver config, works behind a blocked UDP/53. Owner-only.",
+                 "usage": "/subbrute <domain> [rounds]",
+                 "example": "/subbrute example.com 2",
+                 "related": "/recon /chain"},
+    "chain": {"what": "Hash-chained evidence packs: every finding appends a record carrying the previous record's hash, so breaking one byte anywhere names the index on verify. Secrets are masked at rest, large bodies live in content-addressed blobs. verify re-derives the chain; export writes manifest + chain + markdown report; report assembles the engagement report from the case's chain and inventory — and refuses an unverifiable chain instead of rendering it as fact. Owner-only.",
+              "usage": "/chain <case> verify | export | report <domain>",
+              "example": "/chain demo verify",
+              "related": "/disclose /recon /subbrute"},
+    "disclose": {"what": "The disclosure desk: a deterministic severity rubric (kind × sensitivity × reach × scale, scored against a fixed table so two analysts reach the same tier), contact discovery following RFC 9116 (security.txt, SECURITY.md, RDAP abuse entities — every contact quoted with its source, none guessed), and a disclosure draft built from a verified evidence chain. Drafts only; sending is the owner's act. Owner-only.",
+                 "usage": "/disclose score <kind> [sensitivity] [reach] [scale] | contacts <domain> | draft <case> <domain> [contact]",
+                 "example": "/disclose score rce financial unauth bulk",
+                 "related": "/chain /audit"},
     "toolhub": {"what": "button tool hub — fresh tested proxies as a file, BIN lookup; per-screen inline buttons with Back navigation (owner-only).",
             "usage": "/toolhub | /toolhub proxy [run] | /toolhub bin <digits> | /toolhub help",
             "example": "/toolhub proxy",
@@ -5277,7 +5307,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["tts", "speak", "stt", "voice", "look", "image", "lens",
       "vision", "voices", "clonevoice", "sing", "translate", "tl"]),
     ("tools & automation",
-     ["schedule", "db", "artifact", "api", "proxy", "tor", "onion", "toolhub", "workspace", "record", "macro", "file",
+     ["schedule", "db", "artifact", "api", "proxy", "tor", "onion", "combo", "enum", "recon", "subbrute", "chain", "disclose", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "breach", "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe",
@@ -5759,6 +5789,12 @@ LIST_ONELINERS: dict[str, str] = {
     "breach": "breach exposure: has this email or password been in a breach (owner only)",
     "tor": "Tor status: SOCKS/control ports, circuit rotation (owner only)",
     "onion": "fetch a URL through Tor, validate v3 .onion addresses (owner only)",
+    "combo": "check an email:password combo against service adapters (owner only)",
+    "enum": "username availability / email registration across social platforms (owner only)",
+    "recon": "passive surface discovery for a domain: CT, DNS, AXFR, takeover leads (owner only)",
+    "subbrute": "DNS subdomain brute with wildcard suppression + permutation rounds (owner only)",
+    "chain": "hash-chained evidence packs: verify, export, engagement report (owner only)",
+    "disclose": "severity rubric, security-contact discovery, disclosure draft (owner only)",
     "map-route": "code-video: a route draws itself (no model)",
     "headline": "code-video: newspaper headline push-in (no model)",
     "teardown": "code-video: exploded parts diagram (no model)",

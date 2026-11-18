@@ -154,6 +154,7 @@ def _enc_name(name: str) -> bytes:
 def _read_name(buf: bytes, off: int) -> tuple[str, int]:
     labels: list[str] = []
     jumped = False
+    jumps = 0
     end = off
     while True:
         if off >= len(buf):
@@ -165,6 +166,12 @@ def _read_name(buf: bytes, off: int) -> tuple[str, int]:
                 end = off
             break
         if length & 0xC0 == 0xC0:
+            jumps += 1
+            if jumps > 10:
+                # A compression pointer that never lands is corrupt
+                # input, not a name — stop instead of looping forever
+                # on a hostile nameserver's reply.
+                break
             pointer = struct.unpack("!H", buf[off:off + 2])[0] & 0x3FFF
             if not jumped:
                 end = off + 2

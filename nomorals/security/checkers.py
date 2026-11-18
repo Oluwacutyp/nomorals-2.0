@@ -127,10 +127,7 @@ class EbayAdapter(ServiceAdapter):
         if early:
             return Probe(early, f"http {resp.status}")
         if self._cookie_proof(client):
-            sub = None
-            if re.search(r"my ebay|account settings|sign out", text, re.I):
-                sub = None
-            return Probe(Verdict.VALID, f"http {resp.status} ebay cookie", sub)
+            return Probe(Verdict.VALID, f"http {resp.status} ebay cookie", None)
         if re.search(r'name="pass"', text, re.I) or "signin" in (resp.location or ""):
             return Probe(Verdict.INVALID, f"http {resp.status} form re-rendered")
         return Probe(Verdict.UNKNOWN, f"http {resp.status}")
@@ -256,8 +253,10 @@ class FormAdapter(ServiceAdapter):
             sub = None
             if spec.get("subscribed_marker"):
                 sub = bool(re.search(spec["subscribed_marker"], text, re.I))
-                if sub is None and spec.get("free_marker"):
-                    sub = not re.search(spec["free_marker"], text, re.I)
+            elif spec.get("free_marker"):
+                # No subscribed marker: a free marker is the only
+                # signal, and its absence means subscribed.
+                sub = not bool(re.search(spec["free_marker"], text, re.I))
             v = (Verdict.VALID_SUBSCRIBED if sub is True
                  else Verdict.VALID_FREE if sub is False else Verdict.VALID)
             return Probe(v, f"http {resp.status} auth cookie", sub)

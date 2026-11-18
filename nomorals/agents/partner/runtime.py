@@ -11110,6 +11110,18 @@ class PartnerRuntime(
             return self._control_tor(command.tail or arg)
         if kind == "onion":
             return self._control_onion(command.tail or arg)
+        if kind == "combo":
+            return self._control_combo(command.tail or arg)
+        if kind == "enum":
+            return self._control_enum(command.tail or arg)
+        if kind == "recon":
+            return self._control_recon(command.tail or arg)
+        if kind == "subbrute":
+            return self._control_subbrute(command.tail or arg)
+        if kind == "chain":
+            return self._control_chain(command.tail or arg)
+        if kind == "disclose":
+            return self._control_disclose(command.tail or arg)
         if kind == "toolhub":
             return self._control_toolhub(command.tail or arg, chat_key)
         if kind == "workspace":

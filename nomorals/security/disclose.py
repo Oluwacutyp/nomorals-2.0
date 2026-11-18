@@ -84,10 +84,15 @@ def find_contacts(domain: str, *, timeout: float = 15.0) -> dict[str, Any]:
         except Exception:  # noqa: BLE001
             continue
         if resp.ok and "contact" in (resp.text or "").lower():
+            before = len(found)
             for m in _CONTACT_RE.finditer(resp.text or ""):
                 for mail in _MAILTO.findall(m.group(1)):
                     found.append({"email": mail, "source": url})
-            break
+            # Only stop at the first location that actually yielded a
+            # contact — a security.txt that mentions "contact" without a
+            # mailto: is not an answer.
+            if len(found) > before:
+                break
 
     for path in ("/SECURITY.md", "/.github/SECURITY.md", "/security.md"):
         url = f"https://{domain}{path}"
@@ -203,7 +208,7 @@ def draft(case: str, chain_path: str | Path, *, domain: str,
             "The evidence chain is append-only and hash-linked: each record "
             "carries its predecessor's digest. Any edit breaks verification at "
             "the modified index. Re-verify with:", "",
-            "```", "nm evidence verify " + case, "```", "",
+            "```", "/chain verify " + case, "```", "",
             "## Contact", ""]
     out += ([f"Sent to `{contact}`."] if contact else
             ["No published contact was found for this domain."])

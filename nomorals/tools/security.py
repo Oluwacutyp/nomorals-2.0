@@ -13,6 +13,22 @@ malware scanning + multi-engine verdicts.
 - tor_status / onion_validate / onion_fetch: Tor presence, v3 .onion
   validation, fetch through Tor (SOCKS5h) — the owner's onion organ,
   wired here like dnsleak/netleak; a missing Tor is named, never faked.
+- combo_check: email:password combos against service adapters
+  (eBay/Netflix/Google/Amazon/Oracle/ElevenLabs) — verdicts from
+  cookies/redirects/status, never body text (owner's combo checker).
+- social_enum: username availability / email registration across
+  social platforms, 404-or-marker discipline (owner's social_enum).
+- recon_domain: passive surface discovery — CT logs, DNS over HTTPS,
+  AXFR attempt, wildcard suppression, takeover leads (owner's recon).
+- subbrute: DNS subdomain brute with wildcard suppression and
+  permutation rounds (owner's subbrute).
+- evidence_add / evidence_verify / evidence_export: hash-chained
+  evidence packs, secrets masked at rest (owner's evidence).
+- severity_score / disclose_contacts / disclose_draft: deterministic
+  severity rubric, RFC 9116 contact discovery, disclosure draft from
+  a verified chain (owner's disclose).
+- report_build: engagement report from a case's chain + inventory;
+  refuses an unverifiable chain (owner's report).
 """
 
 from __future__ import annotations
@@ -252,3 +268,28 @@ def register(registry: Any) -> None:
     from ..security import onion as _onion
 
     _onion.register(registry)
+
+    # The owner's security batch (2026-11-18): combo checking, social
+    # enumeration, passive recon, subdomain brute, hash-chained
+    # evidence, disclosure desk, engagement reports. Each organ lives
+    # in security/ and registers its own tools here, like onion.
+    from ..security import combo_checker as _combo_checker
+    from ..security import disclose as _disclose
+    from ..security import evidence as _evidence
+    from ..security import report as _report
+    from ..security import social_enum as _social_enum
+    from ..security import subbrute as _subbrute
+
+    # NB: import recon's register() by dotted path, not through the
+    # package — a bare `recon` name in the package namespace would
+    # shadow the submodule (the recon() function is deliberately NOT
+    # exported bare from nomorals/security for exactly this reason).
+    from ..security.recon import register as _register_recon
+
+    _combo_checker.register(registry)
+    _social_enum.register(registry)
+    _register_recon(registry)
+    _subbrute.register(registry)
+    _evidence.register(registry)
+    _disclose.register(registry)
+    _report.register(registry)
