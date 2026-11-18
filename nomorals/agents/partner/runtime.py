@@ -57,6 +57,7 @@ from .runtime_mock_screens import RuntimeMockScreensMixin
 from .runtime_fonts import RuntimeFontsMixin
 from .runtime_workflow import RuntimeWorkflowMixin
 from .runtime_plan import RuntimePlanMixin
+from .runtime_grill import RuntimeGrillMixin
 from .failures import failure_count, recent_failures, record_failure
 from .reply_guard import (
     deliberation_reason,
@@ -424,6 +425,7 @@ class PartnerRuntime(
     RuntimeChatOpsMixin,
     RuntimeWorkflowMixin,
     RuntimePlanMixin,
+    RuntimeGrillMixin,
 ):
     """Runs the partner across all configured platforms, at the same time."""
 
@@ -10055,6 +10057,9 @@ class PartnerRuntime(
 
         if kind == "plan":
             return self._control_plan(command.tail or "", message)
+
+        if kind == "grill-me":
+            return self._control_grill_me(command.tail or "", message)
 
         if kind == "computer":
             return self._control_computer(command.tail or "", message)

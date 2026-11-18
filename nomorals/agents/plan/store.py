@@ -38,7 +38,10 @@ __all__ = [
 
 #: Stored states. Terminal states are derived (see derive_plan_state);
 #: the stored value is the last known state, starting at "running".
-STATES = ("running", "done", "failed")
+#: "cancelled" is the one stored state derivation never overwrites:
+#: the owner stopped the plan on purpose, and a later refresh must
+#: not resurrect it as running/failed from its runs.
+STATES = ("running", "done", "failed", "cancelled")
 
 _LIVE_RUN_STATES = ("running", "steering", "finalizing")
 _FAILED_RUN_STATES = ("failed", "cancelled")
@@ -96,8 +99,12 @@ def derive_plan_state(record: dict[str, Any], get_run: Any) -> str:
     when the run is gone).  Any live run → ``running``; any failed,
     cancelled, or missing run → ``failed``; every run terminal and
     successful → ``done``.  A plan with no runs at all failed to
-    start (empty plan, or nothing the roster could run).
+    start (empty plan, or nothing the roster could run).  A plan
+    the owner cancelled stays ``cancelled`` whatever its runs say —
+    the cancel is a decision, not a derivation.
     """
+    if record.get("state") == "cancelled":
+        return "cancelled"
     runs = record.get("runs") or []
     if not runs:
         return "failed"
@@ -175,7 +182,8 @@ class PlanStore:
                 row.get("unassigned") if isinstance(row.get("unassigned"), list) else [],
                 str(row.get("plan_error", "")),
                 str(row.get("chat_key", "")))
-            for key in ("state", "created_at", "updated_at"):
+            for key in ("state", "created_at", "updated_at",
+                        "cancelled_at", "cancelled_by"):
                 if key in row:
                     record[key] = row[key]
             if record["state"] not in STATES:
@@ -289,3 +297,67 @@ class PlanStore:
             record["updated_at"] = time.time()
             self._save()
             return copy.deepcopy(record)
+
+    def cancel(self, plan_id: str, *, by: str = "owner",
+               manager: Any = None) -> dict[str, Any]:
+        """Cancel a running plan on the owner's word.
+
+        ``running`` → ``cancelled``, durable at once: the record
+        carries ``cancelled_at``/``cancelled_by`` and derivation
+        never overwrites the state afterwards (see
+        :func:`derive_plan_state`). When a delegation manager is
+        given, each live run behind the plan is stopped through
+        :meth:`DelegationManager.cancel_run` first — a run that
+        already finished is left alone and named as terminal, never
+        clobbered. Returns the saved record plus the outcome:
+        ``already_cancelled`` and the ``runs_cancelled`` /
+        ``runs_terminal`` id lists. A finished plan refuses with
+        :class:`PlanError` — there is nothing left to stop.
+        """
+        with self._lock:
+            record = self._plans.get(plan_id)
+            if record is None:
+                raise PlanError(f"no plan {plan_id!r}")
+            if record.get("state") == "cancelled":
+                return {
+                    "record": copy.deepcopy(record),
+                    "already_cancelled": True,
+                    "runs_cancelled": [],
+                    "runs_terminal": [
+                        r.get("id") for r in record.get("runs") or []
+                        if isinstance(r, dict) and r.get("id")],
+                    "runs_untouched": [],
+                }
+            if record.get("state") in ("done", "failed"):
+                raise PlanError(
+                    f"plan {plan_id!r} is already "
+                    f"{record['state']} — nothing to cancel")
+            runs_cancelled: list[str] = []
+            runs_terminal: list[str] = []
+            runs_untouched: list[str] = []
+            for run in record.get("runs") or []:
+                run_id = run.get("id") if isinstance(run, dict) else None
+                if not run_id:
+                    continue
+                if manager is None:
+                    # No manager to stop them through: the runs keep
+                    # going detached. Named, never silently dropped.
+                    runs_untouched.append(run_id)
+                    continue
+                outcome = manager.cancel_run(run_id, by=by)
+                if outcome.get("cancelled"):
+                    runs_cancelled.append(run_id)
+                else:
+                    runs_terminal.append(run_id)
+            record["state"] = "cancelled"
+            record["cancelled_at"] = time.time()
+            record["cancelled_by"] = by
+            record["updated_at"] = time.time()
+            self._save()
+            return {
+                "record": copy.deepcopy(record),
+                "already_cancelled": False,
+                "runs_cancelled": runs_cancelled,
+                "runs_terminal": runs_terminal,
+                "runs_untouched": runs_untouched,
+            }

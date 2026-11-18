@@ -969,6 +969,58 @@ class DelegationManager:
                 record_failure("delegation_manager.resume_all", exc)
         return resumed
 
+    def cancel_run(self, run_id: str, *, by: str = "owner"
+                   ) -> dict[str, Any]:
+        """Cancel a live run on the owner's word.
+
+        The conditional UPDATE is the claim, mirroring
+        :meth:`_claim_timeout`: the first caller flips the row to
+        ``cancelled``; a racing finalizer (the worker finished in
+        the same instant) sees zero rows and the cancel stands
+        down, reporting what the run actually is. The worker
+        thread itself cannot be killed in-process — it keeps
+        running detached, and its late output is fenced by the
+        cancelled status claim and the generation check in
+        :meth:`_finalize`, never recorded. A cancelled run is
+        terminal: it does not resume (see :meth:`resume`).
+        """
+        run = self.get_run(run_id)
+        if run is None:
+            raise DelegationError(f"no delegation run {run_id!r}")
+        if run.terminal:
+            return {"run_id": run.id, "cancelled": False,
+                    "status": run.status}
+        now = time.time()
+        error = (f"cancelled by {by} — the run was stopped on the "
+                 "owner's word")
+        cursor = self.db.execute(
+            "UPDATE delegation_runs SET status = 'cancelled',"
+            " error = ?, completed_at = ?, updated_at = ?"
+            " WHERE id = ? AND status IN ('running', 'steering')",
+            (error, now, now, run_id))
+        if not bool(getattr(cursor, "rowcount", 0)):
+            fresh = self.get_run(run_id)
+            return {"run_id": run.id, "cancelled": False,
+                    "status": fresh.status if fresh is not None
+                    else run.status}
+        with self._futures_lock:
+            entry = self._futures.pop(run_id, None)
+        if entry is not None:
+            with contextlib.suppress(Exception):
+                entry[0].cancel()
+        self._retire_identity(run.identity_id)
+        contract = self.store.get_contract(run.contract_id)
+        if contract is not None and not contract.terminal:
+            try:
+                from .plan_contracts import fail_step_contract
+
+                fail_step_contract(self.store, contract, detail=error)
+            except Exception as exc:  # noqa: BLE001 - recorded
+                record_failure(
+                    "delegation_manager.cancel.fail_contract", exc)
+        return {"run_id": run.id, "cancelled": True,
+                "status": "cancelled"}
+
     # -- recover / poll -------------------------------------------------------
 
     def recover(self) -> list[DelegationRun]:

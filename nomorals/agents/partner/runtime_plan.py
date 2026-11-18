@@ -15,6 +15,7 @@ Owner-only: absent from PUBLIC_COMMANDS, like /workflow.
 from __future__ import annotations
 
 import contextlib
+import time
 from pathlib import Path
 
 from .failures import record_failure
@@ -65,8 +66,9 @@ class RuntimePlanMixin:
         """``/plan`` — plan+run a task, or list/show/status saved plans.
 
         A bare task surveys the code, plans, saves, shows, and runs.
-        ``list`` / ``show`` / ``status`` manage saved plans. A
-        two-word tail whose first word is a verb is the verb; a longer
+        ``list`` / ``show`` / ``status`` manage saved plans. ``cancel``
+        stops a running plan (and its live runs) on the owner's word.
+        A two-word tail whose first word is a verb is the verb; a longer
         tail starting with a verb word is a task (``show me the
         files`` plans, it does not look for a plan called ``me``).
         """
@@ -118,6 +120,15 @@ class RuntimePlanMixin:
                 if row is None:
                     return error
                 return self._plan_show_text(store, row)
+            if verb == "cancel" and len(parts) == 1:
+                return ("usage: /plan cancel <id> — "
+                        "/plan list shows them.")
+            if verb == "cancel" and len(parts) == 2:
+                row, error = self._resolve_plan(store, parts[1])
+                if row is None:
+                    return error
+                return self._plan_cancel_text(
+                    store, row, manager=self._plan_manager())
             # Everything else is a task: survey, plan, save, show, run.
             return self._plan_run(store, text, chat_key)
         except PlanError as exc:
@@ -164,6 +175,40 @@ class RuntimePlanMixin:
         from ...agents.plan.render import render_plan_md
 
         return render_plan_md(row)
+
+    def _plan_cancel_text(self, store, row, manager=None):  # type: ignore[no-untyped-def]
+        """Cancel one saved plan and say what stopped."""
+        outcome = store.cancel(row["id"], by="owner", manager=manager)
+        record = outcome["record"]
+        if outcome.get("already_cancelled"):
+            when = record.get("cancelled_at")
+            stamp = ""
+            if when:
+                stamp = (" (cancelled "
+                         + time.strftime("%Y-%m-%d %H:%M",
+                                         time.localtime(when)) + ")")
+            return (f"plan {record['id']} was already cancelled{stamp} "
+                    "— the plan stays saved.")
+        lines = [f"plan {record['id']} cancelled — "
+                 f"'{record.get('task', '')}' is stopped."]
+        stopped = outcome.get("runs_cancelled") or []
+        if stopped:
+            lines.append(
+                f"stopped {len(stopped)} live run"
+                + ("s" if len(stopped) != 1 else "")
+                + ": " + ", ".join(stopped))
+        finished = outcome.get("runs_terminal") or []
+        if finished:
+            lines.append(
+                "already finished, left alone: "
+                + ", ".join(finished))
+        untouched = outcome.get("runs_untouched") or []
+        if untouched:
+            lines.append(
+                "no delegation manager to stop them through — "
+                "these runs keep going: " + ", ".join(untouched))
+        lines.append("the plan stays saved — /plan list shows it.")
+        return "\n".join(lines)
 
     def _plan_run(self, store, task, chat_key):  # type: ignore[no-untyped-def]
         """Survey, plan, spawn, save, and show one task."""
