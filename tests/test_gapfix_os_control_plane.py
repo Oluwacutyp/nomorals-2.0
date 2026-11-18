@@ -29,6 +29,17 @@ import unittest
 from nomorals.core.events import EventBus
 from nomorals.os.kernel import OSKernel
 from nomorals.os.services import ServiceNotFound, ServiceRegistry
+from tests.frozen_clock import MIDDAY_TS
+
+# H42 clock trace: 8 of the file's 10 direct reads are converted —
+# the kill seed freezes to MIDDAY_TS - 3600 (still past the probe's
+# 10s threshold on the real clock; the restarted thread ticks real
+# time again), the three wait-loop deadlines go to monotonic, and the
+# beacon _started seed freezes to MIDDAY_TS (uptime_s is carried data,
+# unasserted — that test pins the kernel section's presence, not the
+# uptime). 2 reads stay real, grandfathered with reasons at the reads:
+# _FakeScheduler._loop's live tick and _scheduler_probe's age read —
+# the tick IS the heartbeat and the probe IS the freshness judgment.
 
 
 class _FakeScheduler:
@@ -53,6 +64,13 @@ class _FakeScheduler:
 
     def _loop(self) -> None:
         while not self._stop.is_set():
+            # GRANDFATHERED (H42): the live tick stays on the real
+            # clock. This thread IS the scheduler's heartbeat —
+            # _scheduler_probe judges its freshness against
+            # time.time(), and the kernel supervisor restarts while
+            # the probe reads stale. A frozen tick would read ~35
+            # days stale forever, so the supervisor would burn its
+            # whole restart budget restarting a healthy scheduler.
             self._last_tick_at = time.time()
             self._stop.wait(0.05)
 
@@ -70,7 +88,10 @@ class _FakeScheduler:
         """Simulate a dead scheduler: thread gone, clock stale."""
         self._stop.set()
         self._thread = None
-        self._last_tick_at = time.time() - 3600.0
+        # Frozen (H42): reads ~35 days stale on the real clock, still
+        # past the probe's 10s threshold, so the dead verdict holds;
+        # the restarted thread ticks real time again.
+        self._last_tick_at = MIDDAY_TS - 3600.0
 
 
 class _FakeAdapter:
@@ -145,6 +166,10 @@ def _scheduler_probe(sched: _FakeScheduler) -> tuple[bool, str]:
     last = sched._last_tick_at
     if last is None:
         return True, "scheduler started, no tick yet"
+    # GRANDFATHERED (H42): the freshness judgment itself stays on
+    # the real clock. A frozen now would make any live tick read a
+    # negative age, so the probe could never detect a genuinely
+    # stale tick — freezing its now defeats the job it exists for.
     age = time.time() - last
     if age > 10.0:
         return False, f"scheduler tick is {age:.0f}s stale"
@@ -239,8 +264,8 @@ class SuperviseTests(unittest.TestCase):
         kernel = self._kernel_with_scheduler(sched)
         try:
             sched.kill()
-            deadline = time.time() + 10.0
-            while time.time() < deadline and not sched.running():
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not sched.running():
                 time.sleep(0.05)
             self.assertTrue(sched.running(),
                             "supervisor did not restart the scheduler")
@@ -266,9 +291,9 @@ class SuperviseTests(unittest.TestCase):
         kernel.supervise(interval_s=0.05, restart_delays=(0.01, 0.01),
                          max_restarts=2)
         try:
-            deadline = time.time() + 10.0
+            deadline = time.monotonic() + 10.0
             summary = kernel.supervision_summary()
-            while time.time() < deadline and not summary.get("gave_up"):
+            while time.monotonic() < deadline and not summary.get("gave_up"):
                 time.sleep(0.05)
                 summary = kernel.supervision_summary()
             gave_up = summary.get("gave_up") or {}
@@ -316,8 +341,8 @@ class SuperviseTests(unittest.TestCase):
         kernel.supervise(interval_s=0.05)
         try:
             adapter.give_up()
-            deadline = time.time() + 10.0
-            while time.time() < deadline and not adapter.health()["running"]:
+            deadline = time.monotonic() + 10.0
+            while time.monotonic() < deadline and not adapter.health()["running"]:
                 time.sleep(0.05)
             self.assertTrue(adapter.health()["running"],
                             "supervisor did not re-attempt the gave-up adapter")
@@ -366,7 +391,11 @@ class BeaconTests(unittest.TestCase):
         kernel.start()
         try:
             runtime = type("R", (), {
-                "brain": None, "_started": time.time(), "stats": {},
+                # Frozen (H42): uptime_s is carried data — the beacon
+                # computes it against the real clock and no assertion
+                # reads it; this test pins the kernel section's
+                # presence, not the uptime value.
+                "brain": None, "_started": MIDDAY_TS, "stats": {},
                 "gateway": None, "context": None,
                 "_kernel": kernel,
             })()

@@ -153,6 +153,25 @@ BASELINE: dict[str, int] = {
     # the never-raises test's instant is never read (construction
     # booms first).
     "tests/test_gapfix_health_drift.py": 3,
+    # Grandfathered (batch H42): 2 reads stay on the real clock.
+    # (1) _FakeScheduler._loop's live tick — the thread IS the
+    # scheduler's heartbeat; _scheduler_probe judges its freshness
+    # against time.time(), and the kernel supervisor restarts while
+    # the probe reads stale, so a frozen tick would read ~35 days
+    # stale forever and burn the whole restart budget restarting a
+    # healthy scheduler. (2) _scheduler_probe's own age read — the
+    # freshness judgment itself; a frozen now would make any live
+    # tick read a negative age, so it could never detect a genuinely
+    # stale tick. Threading a now seam through the probe/tick would
+    # be a production API change in a hygiene lane for a
+    # non-regression (H21 precedent). The file's other 8 reads are
+    # converted: the kill seed freezes to MIDDAY_TS - 3600 (still
+    # past the 10s probe threshold on the real clock, and the
+    # restarted thread ticks real time again), the three wait-loop
+    # deadlines go to monotonic, and the beacon _started seed
+    # freezes to MIDDAY_TS (uptime_s is carried data, unasserted —
+    # the test pins the kernel section's presence).
+    "tests/test_gapfix_os_control_plane.py": 2,
     # Grandfathered (batch H40): 8 reads stay on the real clock — the
     # run seeds in PickTopicsTests (3 tests) and TickTests stamp a run
     # "10 seconds ago" that pick_topics judges on its own real clock
