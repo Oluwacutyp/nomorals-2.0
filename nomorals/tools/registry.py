@@ -645,6 +645,7 @@ class ToolRegistry:
             "pagewise",  # page surgery over PDFs — merge/select/rotate/stamp/compress/repair/protect/unlock/archive/scan/sign (Smallpdf + ILovePDF core)
             "learning",  # free-learning collection — vetted courses/textbooks/audiobooks/ebooks/movies/lessons, live search second (OpenCulture core)
             "optimize",  # image optimisation — codec ladder with measured trials + recommendation (Squoosh core)
+            "price_history",  # retail price history — watches, journalled points, drop/stock alerts, chart (CamelCamelCamel core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",

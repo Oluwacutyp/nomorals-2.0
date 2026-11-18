@@ -14,6 +14,15 @@ from .support import Ticket, SLA_TARGETS_S, SupportInbox
 from .tax import Jurisdiction, JURISDICTIONS, jurisdictions, compute_tax, NIGERIA_VAT_BPS
 from .analytics import revenue_by_day, revenue_by_channel, monthly_client_report, period_summary
 from .catalog import Catalog, diff_catalogs
+from .price_history import (
+    MARKETPLACES, AMAZON_SERIES, SERIES_LABELS,
+    PriceWatch, PricePoint, PriceAlert, ChartResult,
+    PriceHistoryStore, parse_price_request, trend_stats,
+    format_minor, format_alert, format_watches, format_history,
+    render_price_chart, run_price_history_tick_once,
+    ensure_price_history_job, check_all as check_price_watches,
+    PRICE_HISTORY_ACTION, PRICE_HISTORY_JOB, PRICE_HISTORY_SPEC,
+)
 
 __all__ = [
     "CartRecovery", "Cart", "RecoveryStep", "STEPS", "normalize_webhook",
@@ -33,4 +42,11 @@ __all__ = [
     "revenue_by_day", "revenue_by_channel",
     "monthly_client_report", "period_summary",
     "Catalog", "diff_catalogs",
+    "MARKETPLACES", "AMAZON_SERIES", "SERIES_LABELS",
+    "PriceWatch", "PricePoint", "PriceAlert", "ChartResult",
+    "PriceHistoryStore", "parse_price_request", "trend_stats",
+    "format_minor", "format_alert", "format_watches", "format_history",
+    "render_price_chart", "run_price_history_tick_once",
+    "ensure_price_history_job", "check_price_watches",
+    "PRICE_HISTORY_ACTION", "PRICE_HISTORY_JOB", "PRICE_HISTORY_SPEC",
 ]

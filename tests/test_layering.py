@@ -396,6 +396,12 @@ MODULE_PINS: dict[str, int] = {
     # not an L4 foundation tool. The registry loads it
     # dynamically by dotted name, never by static import.
     "nomorals.tools.codecard": 5,
+    # tools/price_history is the same shape: a tool *surface* over
+    # the L4 commerce organ (the retail price-history watches),
+    # whose live fetcher is built on the L5 shopping engine — not
+    # an L4 foundation tool. The registry loads it dynamically by
+    # dotted name, never by static import.
+    "nomorals.tools.price_history": 5,
     # tools/flight_track is the same shape: a tool *surface* over the
     # L5 travel organ (the live flight-tracking organ), not an L4
     # foundation tool. The registry loads it dynamically by dotted

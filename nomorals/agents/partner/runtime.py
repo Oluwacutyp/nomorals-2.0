@@ -2604,9 +2604,25 @@ class PartnerRuntime(
                     _log.warning("music-full reply send failed: %s", exc)
                 return
         # Build-map #71: "track this flight for me" → price watcher.
-        # Owner only, non-slash.
+        # Owner only, non-slash. The retail price hook runs first:
+        # a product "track the price ..." line would otherwise be
+        # eaten by the flight hook (CamelCamelCamel #22).
         if (message.incoming and self._is_operator(message)
                 and not message.text.strip().startswith("/")):
+            try:
+                price_reply = self._price_watch_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("price watch hook failed")
+                price_reply = None
+            if price_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, price_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      price_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("price watch reply send failed: %s", exc)
+                return
             try:
                 track_reply = self._track_hook(message)
             except Exception:  # noqa: BLE001 - the hook must never eat chat
@@ -3551,6 +3567,19 @@ class PartnerRuntime(
                     ensure_flight_track_job(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("flight track job not registered: %s",
+                                 exc)
+                # Commerce: the price-history tick (daily 07:00 —
+                # armed retail price watches checked against the
+                # live shopping engine; one alert per drop level /
+                # back-in-stock, silent otherwise). Idempotent by
+                # name; a stale spec is replaced.
+                try:
+                    from ...commerce.price_history import (
+                        ensure_price_history_job)
+
+                    ensure_price_history_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("price history job not registered: %s",
                                  exc)
                 # Sources: the watchtower tick (every 4 minutes —
                 # watched external services probed from this host;
@@ -6735,6 +6764,149 @@ class PartnerRuntime(
         if result.get("error"):
             return f"couldn't send: {result['error']}"
         return None
+
+    def _price_watch_hook(self, message: ChatMessage) -> str | None:
+        """CamelCamelCamel (#22): "watch this on Amazon, tell me
+        under $50" → retail price watch; "price history of X" →
+        the chart from her own journal.
+
+        Returns a reply string when a price intent fired, else
+        None. Runs before the flight track hook: a product
+        "track the price ..." line would otherwise be eaten by it.
+        Never raises.
+        """
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        from ...commerce.price_history import (
+            PriceHistoryStore,
+            _db_path_for,
+            parse_price_request,
+        )
+        parsed = parse_price_request(text)
+        if parsed is None:
+            return None
+        try:
+            settings = getattr(self.context, "settings", None)
+            home = getattr(settings, "home", None) if settings else None
+            store = getattr(self, "_price_history", None)
+            if store is None:
+                store = PriceHistoryStore(
+                    _db_path_for(str(home)) if home else "")
+                self._price_history = store
+            if parsed["kind"] == "history":
+                return self._price_history_reply(store, parsed, message)
+            product = (parsed.get("product_ref") or "").strip()
+            if not product:
+                return ("sure — which product? e.g. 'watch the "
+                        "iPhone 15 on Amazon under $900'.")
+            marketplace = parsed.get("marketplace") or ""
+            if not marketplace:
+                return ("which marketplace — Amazon, Jumia, Konga, "
+                        "Jiji, Kara, SLOT, Temu, AliExpress, eBay or "
+                        "Banggood?")
+            try:
+                watch = store.watch(
+                    product, marketplace,
+                    series=parsed.get("series") or "",
+                    target_minor=int(parsed.get("target_minor") or 0),
+                    currency=parsed.get("currency") or "")
+            except ValueError as exc:
+                return f"couldn't start the watch: {exc}"
+            try:
+                from ...tools.price_history import build_fetcher
+                fetcher = build_fetcher()
+            except Exception:  # noqa: BLE001 - watch stands without a live fetcher
+                fetcher = None
+            try:
+                result = store.check(watch, fetcher)
+            except Exception as exc:  # noqa: BLE001 - the hook must never eat chat
+                record_failure("runtime.PartnerRuntime._price_watch_hook",
+                               exc)
+                result = None
+            msg = (f"👀 watching {watch.label} "
+                   f"(id {watch.id}).")
+            if watch.target_minor:
+                from ...commerce.price_history import format_minor
+                msg += (f" I'll tell you when it drops to "
+                        f"{format_minor(watch.target_minor, watch.currency)}.")
+            if result is not None:
+                alert = result.get("alert")
+                if alert is not None:
+                    msg += "\n" + alert.text
+                elif result.get("fetch_error"):
+                    msg += f"\nfirst check: {result['fetch_error']}"
+            return msg
+        except Exception as exc:  # noqa: BLE001 - the hook must never eat chat
+            _log.exception("price watch hook failed: %s", exc)
+            return None
+
+    def _price_history_reply(self, store: Any, parsed: dict[str, Any],
+                             message: ChatMessage) -> str | None:
+        """Render + send the price-history chart for a watch."""
+        product = (parsed.get("product_ref") or "").strip()
+        if not product:
+            return ("which product's history? e.g. 'price history "
+                    "of the iPhone 15 on Amazon'.")
+        found = store.find_by_product(
+            product, parsed.get("marketplace") or "")
+        if not found:
+            return (f"no price watch for {product!r} yet — say "
+                    f"'watch {product} on amazon under $50' to "
+                    f"start one.")
+        if len(found) > 1:
+            lines = [f"a few watches match {product!r}:"]
+            for w in found:
+                lines.append(f"• {w.label} (id {w.id})")
+            lines.append("say the full name or the marketplace to pick one.")
+            return "\n".join(lines)
+        watch = found[0]
+        points = store.history(watch.id)
+        if not points:
+            return (f"watching {watch.label} but no price points "
+                    f"yet — the first check is pending.")
+        chart = store.chart_for(watch.id)
+        try:
+            settings = getattr(self.context, "settings", None)
+            home = getattr(settings, "home", None) if settings else None
+            from ...commerce.price_history import format_history
+            from ...tools.price_history import _chart_path
+            chart_path = _chart_path(
+                str(home) if home else None, watch.id, watch.product_ref)
+            if chart is not None:
+                from pathlib import Path as _Path
+                _Path(chart_path).write_bytes(chart.png)
+                # The media rides with a one-line caption; the full
+                # summary comes back as the hook's text reply.
+                self._send_chart_media(
+                    message, chart_path, f"📈 {watch.label}")
+            return format_history(watch, points, chart_path=chart_path
+                                  if chart is not None else "")
+        except Exception:  # noqa: BLE001 - a failed chart never kills the reply
+            _log.debug("price history chart failed", exc_info=True)
+            return format_history(watch, points)
+
+    def _send_chart_media(self, message: ChatMessage, path: str,
+                          caption: str) -> bool:
+        """Send a chart PNG to the chat that asked. False → text only."""
+        try:
+            from ...social.chat.base import MediaRef
+            platform = str(message.chat.platform or "")
+            adapter = (getattr(self.gateway, "adapters", {})
+                       or {}).get(platform)
+            fn = getattr(adapter, "send_media", None) \
+                if adapter is not None else None
+            if fn is None:
+                return False
+            ref = MediaRef(path=str(path), kind="image",
+                           mime="image/png")
+            result = fn(message.chat, ref, caption=caption)
+            if isinstance(result, dict):
+                return bool(result.get("ok"))
+            return bool(getattr(result, "ok", False))
+        except Exception:  # noqa: BLE001 - media failure is text-only
+            _log.debug("price chart send failed", exc_info=True)
+            return False
 
     def _track_hook(self, message: ChatMessage) -> str | None:
         """Build-map #71: "track LOS LHR flights for me" → price watcher.

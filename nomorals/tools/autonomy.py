@@ -808,6 +808,37 @@ def register(registry: Any) -> None:
                     "error": f"flight track tick failed: {exc}"}
 
     @registry.register(
+        "__price_history_tick__",
+        description="Run one price-history tick (CamelCamelCamel "
+        "extend): check every armed retail price watch against "
+        "the live shopping engine and publish one Notifier note "
+        "per watch that dropped below target (or a new low) or "
+        "came back in stock — one alert per drop level, never "
+        "twice. Scheduler-internal; runs daily at 07:00. Routine "
+        "and silent when nothing changed; a quiet tick (no "
+        "watches) makes no network call at all; a fetch failure "
+        "is reported, never a dead job.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _price_history_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..commerce.price_history import run_price_history_tick_once
+        from .price_history import build_fetcher
+
+        try:
+            try:
+                fetcher = build_fetcher()
+            except Exception:  # noqa: BLE001 - tick reports, never raises
+                fetcher = None
+            return run_price_history_tick_once(
+                context=_context, notifier=Notifier(_context),
+                fetcher=fetcher)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"price history tick failed: {exc}"}
+
+    @registry.register(
         "__watchtower_tick__",
         description="Run one watchtower tick (Downdetector "
         "build-new): probe every watched external service and "
