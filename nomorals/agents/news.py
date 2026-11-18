@@ -67,6 +67,7 @@ import calendar
 import email.utils
 import html as _html
 import json
+import logging
 import re
 import time
 import xml.etree.ElementTree as ET
@@ -78,6 +79,8 @@ from ..core.ids import new_id
 from ..core.http import HttpClient
 from .search.engine import SearchEngine
 from .failures import record_failure
+
+_log = logging.getLogger(__name__)
 
 __all__ = ["DEFAULT_FEEDS", "DEFAULT_CATEGORIES", "FEED_CATEGORIES",
            "FEED_REGIONS", "NEWS_GLOBAL_REGIONS", "NEWS_FEED_TIMEOUT_S",
@@ -550,6 +553,15 @@ PUSH_CAP_DEFAULT = 6
 _SCORE_BATCH = 20
 _SCORE_MAX_PER_POLL = 80
 _TIER_BACKLOG_MAX = 200
+#: Rows older than this are dropped by the retention prune.  The
+#: dedupe contracts live inside the window (14-day title window, feed
+#: horizon of days), and undelivered rows are live work that the prune
+#: never touches — so pruning a delivered/pushed/digested/archived row
+#: past 90 days removes only seen-memory, never a story still owed.
+NEWS_RETENTION_DAYS = 90.0
+#: At most one opportunistic prune per poll per hour (mirrors the
+#: trajectories store's ``_PRUNE_INTERVAL_S``).
+_NEWS_PRUNE_INTERVAL_S = 3600.0
 
 
 def _ensure_delivery_columns(db: Any) -> None:
@@ -733,6 +745,9 @@ class NewsAgent:
         #: last scoring outcome ("ok" / "unavailable" / "error: …") —
         #: surfaced by status() so degradation is never silent.
         self._interest_state: str | None = None
+        #: -inf so the first poll() always runs the retention prune,
+        #: regardless of process uptime (monotonic clocks start near 0).
+        self._last_prune_news = float("-inf")
         tools = getattr(self.settings, "tools", None)
         self._client = HttpClient(
             timeout=NEWS_FEED_TIMEOUT_S,
@@ -860,6 +875,58 @@ class NewsAgent:
                     known.add(url)
         return known
 
+    # ── retention prune ────────────────────────────────────────────────
+    def prune_news_items(
+        self, older_than_days: float = NEWS_RETENTION_DAYS,
+    ) -> int:
+        """Delete settled news rows older than ``older_than_days``.
+
+        Returns the number of rows deleted.  Only rows whose delivery
+        is settled (pushed / digested / archived, or the pre-state-machine
+        NULL) are dropped: undelivered rows are live work — a story
+        still owed delivery is never pruned however old it is — and the
+        dedupe contracts (URL lookup, 14-day title window) live well
+        inside 90 days, so a pruned row can never cause a re-delivery
+        of a story the poll still cares about.  Without this the table
+        grows forever (every poll stores every fresh story) and every
+        delivery-state scan in the poll walks the whole history.
+        """
+        if self.db is None:
+            return 0
+        cutoff = time.time() - float(older_than_days) * 86400.0
+        try:
+            items = self._items()
+            if items is not None:
+                dropped = 0
+                for row in items.find({"created_at": {"$lt": cutoff}}) or []:
+                    if ((row.get("delivery_state") or "") != STATE_UNDELIVERED
+                            and items.delete(row.get("id"))):
+                        dropped += 1
+                return dropped
+            cur = self.db.execute(
+                "DELETE FROM news_items WHERE created_at < ? "
+                "AND COALESCE(delivery_state, '') != ?",
+                (cutoff, STATE_UNDELIVERED),
+            )
+            return int(cur.rowcount or 0)
+        except Exception as exc:  # noqa: BLE001 - pruning is hygiene
+            record_failure("news.prune", exc)
+            return 0
+
+    def _maybe_prune_news(self) -> None:
+        """Opportunistic retention prune — at most once an hour, never raises."""
+        now_m = time.monotonic()
+        if now_m - self._last_prune_news < _NEWS_PRUNE_INTERVAL_S:
+            return
+        self._last_prune_news = now_m
+        try:
+            dropped = self.prune_news_items()
+        except Exception:  # noqa: BLE001 - pruning is hygiene, not load-bearing
+            _log.debug("news auto-prune failed", exc_info=True)
+        else:
+            if dropped:
+                _log.info("news prune dropped %d stale rows", dropped)
+
     # ── poll: fetch + store + score + tier (pass #85) ──────────────────
     def poll(self) -> dict[str, Any]:
         """Fetch every feed, store EVERY fresh story as undelivered,
@@ -872,6 +939,11 @@ class NewsAgent:
         (polled / scored / pushed / archived / held, the interest
         state, and the discipline flags quiet_hold / push_cap_reached).
         """
+        # Retention first: the table grows forever without this (every
+        # poll stores every fresh story), and the delivery-state scans
+        # below walk the whole history.  Opportunistic, hourly, never
+        # raises — a failed prune never stops the poll.
+        self._maybe_prune_news()
         from ..agency.sourcehealth import SourceHealth, SourceSpec, RSS
 
         fetched: list[dict[str, str]] = []

@@ -73,6 +73,8 @@ CREATE INDEX IF NOT EXISTS idx_cog_traj_skill
     ON cog_trajectories(skill_id, created_at);
 CREATE INDEX IF NOT EXISTS idx_cog_traj_created
     ON cog_trajectories(created_at);
+CREATE INDEX IF NOT EXISTS idx_cog_traj_success_created
+    ON cog_trajectories(success, created_at);
 """
 
 # ── error normalization ──────────────────────────────────────────────────
@@ -750,7 +752,8 @@ class TrajectoryStore:
 
     # ── failure clustering ───────────────────────────────────────────────
     def failure_clusters(
-        self, task_kind: str | None = None, limit: int = 10
+        self, task_kind: str | None = None, limit: int = 10,
+        since_days: float = DEFAULT_RETENTION_DAYS,
     ) -> list[dict]:
         """Group failures by failure class + fingerprint (Sentry-style).
 
@@ -768,9 +771,22 @@ class TrajectoryStore:
         (unix time), ``models_affected`` (sorted distinct model ids),
         ``example_ids`` (up to 5 trajectory ids).
         ``task_kind=None`` aggregates across all task kinds.
+
+        The rows scanned are bounded to ``since_days`` (default the
+        retention window): the query is an index range scan on
+        ``(success, created_at)`` instead of a full-table scan, and
+        cluster counts reflect the window — the same contract
+        :meth:`prune` documents (a 90-day-old outcome carries ~1%
+        scoring weight at the 14-day half-life, so nothing the triage
+        can act on is lost).  Pass ``since_days=None`` only for an
+        explicitly unbounded read (exports, audits); the failure loop
+        tick and the KB triage never do.
         """
         params: list = []
         where = "success = 0"
+        if since_days is not None:
+            where += " AND created_at >= ?"
+            params.append(time.time() - float(since_days) * _SECONDS_PER_DAY)
         if task_kind is not None:
             where += " AND task_kind = ?"
             params.append(task_kind)

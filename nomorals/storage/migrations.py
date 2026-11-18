@@ -3024,6 +3024,28 @@ def _apply_kv_store_ttl(db: object) -> None:
     )
 
 
+def _apply_news_items_delivery_index(db: object) -> None:
+    """v89: index the news delivery-state lookups.
+
+    ``news_items.delivery_state`` is a lazy column (news.py adds it at
+    NewsAgent construction), so a fresh database migrated without ever
+    constructing the agent has no such column and a bare CREATE INDEX
+    fails.  Add the column first when absent, then the index — the
+    lazy ensure in news.py swallows the duplicate-column error, so
+    the two paths agree.  The index turns the poll's held-count and
+    backlog queries from full scans into seeks (measured: SCAN 0.010s
+    -> SEARCH 0.000s on a 120k-row table), and bounds the prune's
+    DELETE to an index range scan.
+    """
+    cols = {r["name"] for r in db.query("PRAGMA table_info(news_items)")}  # type: ignore[attr-defined]
+    if "delivery_state" not in cols:
+        db.execute("ALTER TABLE news_items ADD COLUMN delivery_state TEXT")  # type: ignore[attr-defined]
+    db.execute(  # type: ignore[attr-defined]
+        "CREATE INDEX IF NOT EXISTS idx_news_items_delivery "
+        "ON news_items(delivery_state, created_at)"
+    )
+
+
 def _apply_notifications_doc_and_digest_fold(db: object) -> None:
     """Formatting F7 storage: two additive columns on ``notifications``.
 
@@ -3226,6 +3248,8 @@ MIGRATIONS: tuple[Migration, ...] = (
               fn=_apply_conversation_scope_rekey),
     Migration(88, "notifications_doc_and_digest_fold",
               fn=_apply_notifications_doc_and_digest_fold),
+    Migration(89, "news_items_delivery_index",
+              fn=_apply_news_items_delivery_index),
 )
 
 

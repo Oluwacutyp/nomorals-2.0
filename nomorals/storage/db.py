@@ -64,6 +64,11 @@ _LOCK_RETRY_ATTEMPTS = 6
 _LOCK_RETRY_BASE_DELAY_S = 0.05
 #: Upper bound (seconds) for a single backoff sleep.
 _LOCK_RETRY_MAX_DELAY_S = 2.0
+#: Scheduler job that drains the WAL (see
+#: :meth:`Database.checkpoint_maintenance`): hourly, routine, silent.
+WAL_CHECKPOINT_JOB = "wal checkpoint tick"
+WAL_CHECKPOINT_TOOL = "__wal_checkpoint__"
+WAL_CHECKPOINT_SPEC = "every 1h"
 #: Bound (seconds) for acquiring the process-wide write lock in
 #: :meth:`Database.transaction`. The lock used to be acquired
 #: unboundedly: a worker abandoned mid-transaction held it forever
@@ -1146,14 +1151,23 @@ class Database:
         return dest_path
 
     def checkpoint(self, mode: str = "TRUNCATE") -> tuple[int, int]:
-        """Force a WAL checkpoint. Returns (busy, log_pages)."""
+        """Force a WAL checkpoint. Returns (busy, log_pages).
+
+        ``PRAGMA wal_checkpoint`` returns (busy, log, checkpointed):
+        busy is 1 when a reader held the log and the checkpoint could
+        not run to completion, log is the frames in the WAL.  (An
+        earlier version returned (log, checkpointed) under this
+        docstring, which made ``checkpoint_maintenance`` treat any
+        non-empty WAL as busy and retry TRUNCATE into the busy
+        timeout — fixed here.)
+        """
         if not self.wal:
             return (0, 0)
         row = self.query_one(f"PRAGMA wal_checkpoint({mode})")
         if row is None:
             return (0, 0)
         values = list(row.values())
-        return (int(values[1] or 0), int(values[2] or 0))
+        return (int(values[0] or 0), int(values[1] or 0))
 
     def wal_health(self) -> dict[str, Any]:
         """WAL health snapshot for the maintenance tick.
@@ -1189,20 +1203,34 @@ class Database:
         return health
 
     def checkpoint_maintenance(self) -> dict[str, Any]:
-        """Idle-time WAL maintenance: TRUNCATE checkpoint with busy retry.
+        """Idle-time WAL maintenance: checkpoint what can be checkpointed.
 
-        Call from a quiet-period scheduler tick (not the write hot path):
-        TRUNCATE rewinds the -wal file to zero bytes when no reader pins it.
-        Returns the checkpoint outcome; ``busy=True`` means a reader held the
-        log — retry on the next tick rather than forcing it.
+        Call from a quiet-period scheduler tick (not the write hot path).
+        The gate is ``wal_health()`` (a PASSIVE checkpoint — measured
+        0.000s with a reader holding a snapshot): only when its
+        ``lag_pages`` is 0 does TRUNCATE run, rewinding the -wal file
+        to zero bytes.  A nonzero lag means a reader pins the log, and
+        the call returns at once with ``busy=True`` instead of forcing
+        it — TRUNCATE and RESTART stall out the busy timeout when a
+        reader pins the log (measured 5.008s), and the old code retried
+        TRUNCATE three times into that stall.  PASSIVE's ``busy`` flag
+        cannot be the gate: it reports 0 even while pinned (it simply
+        checkpoints nothing); the lag is the signal.
+        Residual race: a reader starting in the microseconds between
+        the health check and TRUNCATE can still stall that one call
+        for up to the busy timeout (5s) — bounded, hourly, documented.
         """
         before = self.wal_size_bytes()
-        busy = log_pages = 0
-        for _ in range(3):
-            busy, log_pages = self.checkpoint("TRUNCATE")
-            if not busy:
-                break
-            time.sleep(0.5)
+        health = self.wal_health()
+        if health["lag_pages"]:
+            return {
+                "busy": True,
+                "log_pages": health["log_pages"],
+                "wal_bytes_before": before,
+                "wal_bytes_after": before,
+                "reclaimed_bytes": 0,
+            }
+        busy, log_pages = self.checkpoint("TRUNCATE")
         after = self.wal_size_bytes()
         return {
             "busy": bool(busy),
@@ -1339,6 +1367,46 @@ class Database:
                 )
             )
         return "\n".join(lines)
+
+
+def ensure_wal_checkpoint_job(scheduler: Any, *,
+                              spec: str = WAL_CHECKPOINT_SPEC) -> Any | None:
+    """Register the hourly WAL-checkpoint job; idempotent by name.
+
+    A job with the same name but a stale spec is replaced; a job that
+    already matches is returned untouched. Best-effort — a scheduler
+    that cannot store the job returns None rather than raising.
+    The job runs the ``__wal_checkpoint__`` tool (tools/autonomy.py),
+    which calls :meth:`Database.checkpoint_maintenance` on the
+    workspace DB: PASSIVE first (never blocks), TRUNCATE only when
+    nothing pins the log, so the -wal file drains instead of growing
+    to its 64MB cap while long reads hold snapshots.
+    """
+    if scheduler is None:
+        return None
+    try:
+        for job in scheduler.list_jobs() or []:
+            if isinstance(job, dict):
+                name, job_spec, job_id = (job.get("name"),
+                                          job.get("spec"),
+                                          job.get("id"))
+            else:
+                name = getattr(job, "name", None)
+                job_spec = getattr(job, "spec", None)
+                job_id = getattr(job, "id", None)
+            if name != WAL_CHECKPOINT_JOB:
+                continue
+            if job_spec == spec:
+                return job
+            # noqa: BLE001 - stale job removal is best-effort
+            with suppress(Exception):
+                scheduler.remove(job_id)
+            break
+        return scheduler.add(WAL_CHECKPOINT_JOB, spec, "tool",
+                             {"tool": WAL_CHECKPOINT_TOOL, "args": {}},
+                             routine=True)
+    except Exception:  # noqa: BLE001 - scheduling is best-effort
+        return None
 
 
 def _fmt_bytes(value: Any) -> str:

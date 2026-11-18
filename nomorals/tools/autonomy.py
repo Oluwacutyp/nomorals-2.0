@@ -518,6 +518,27 @@ def register(registry: Any) -> None:
                     "error": f"failure loop pass failed: {exc}"}
 
     @registry.register(
+        "__wal_checkpoint__",
+        description="Run one WAL maintenance pass on the workspace DB: "
+        "PASSIVE checkpoint first (never blocks — a reader holding a "
+        "snapshot reports busy at once), TRUNCATE only when nothing "
+        "pins the log, rewinding the -wal file to zero bytes. The WAL "
+        "otherwise grows to its 64MB cap while long reads hold "
+        "snapshots, and every new connection pays the walk. "
+        "Scheduler-internal; runs every ~1h. Routine and silent.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _wal_checkpoint_tool() -> dict[str, Any]:
+        try:
+            db = getattr(_context, "db", None) or _db(_context)
+            report = db.checkpoint_maintenance()
+            return {"ok": True, **report}
+        except Exception as exc:  # noqa: BLE001 - one bad pass never kills the job
+            return {"ok": False,
+                    "error": f"wal checkpoint pass failed: {exc}"}
+
+    @registry.register(
         "__calibration_loop__",
         description="Run one calibration -> abstention -> learning-"
         "targets pass: replay trajectory rows into a fresh "

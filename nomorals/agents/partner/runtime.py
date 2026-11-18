@@ -4184,6 +4184,21 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "failure loop job not registered: %s", exc)
+                # WAL checkpoint: one durable "wal checkpoint tick"
+                # job (every 1h) draining the -wal file — PASSIVE
+                # first (never blocks), TRUNCATE only when no reader
+                # pins the log.  Before this wiring nobody called
+                # checkpoint() on a schedule, so the WAL sat at its
+                # 64MB cap while minute-long reads held snapshots and
+                # every new connection paid the walk.  Idempotent;
+                # best-effort.
+                try:
+                    from ...storage.db import ensure_wal_checkpoint_job
+
+                    ensure_wal_checkpoint_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning(
+                        "wal checkpoint job not registered: %s", exc)
                 # Calibration loop (audit gap R1-9): one durable
                 # "calibration loop tick" job (every 1h) replaying
                 # trajectory rows into a fresh calibration store,
