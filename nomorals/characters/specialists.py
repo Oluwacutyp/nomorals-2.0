@@ -35,7 +35,7 @@ from typing import Any
 from ..core.logging_setup import get_logger
 
 __all__ = ["character_voice", "swap_voice", "lora_for", "lora_speak",
-           "swap_face"]
+           "swap_face", "face_for"]
 
 _log = get_logger(__name__)
 
@@ -239,6 +239,53 @@ def lora_speak(char: Any, prompt: str, *, base_model: str = "",
         return {"ok": False, "reason": f"LoRA generate failed: {exc}"}
 
 
+def _face_vault(vault_dir: str | Path | None) -> Path:
+    """The faces vault: an explicit dir, else ~/.nomorals/faces."""
+    if vault_dir is not None:
+        return Path(vault_dir)
+    return Path(os.path.expanduser("~")) / ".nomorals" / "faces"
+
+
+def face_for(char: Any, *, vault_dir: str | Path | None = None
+             ) -> dict[str, Any]:
+    """Resolve the character's face reference inside the faces vault.
+
+    Returns ``{"ok": True, "path": ...}`` when the reference named on
+    the character resolves to a file inside the vault (an absolute path
+    under it, or a vault-relative name). Otherwise ``{"ok": False,
+    "reason": ...}`` naming the wall: no reference named, the named
+    file missing, or the reference outside the vault. The mirror of
+    ``lora_for`` — the naming verb validates through this, never by
+    running a swap, and ``swap_face`` resolves through it too, so the
+    vault rule lives in exactly one place (the guard re-checks it at
+    swap time regardless).
+    """
+    ref = str(getattr(char, "face_ref", "") or "").strip()
+    if not ref:
+        return {"ok": False,
+                "reason": "no face reference for this character — "
+                          "face swap only runs where the character "
+                          "appears outside the game, and this "
+                          "character has no reference face"}
+    vault = _face_vault(vault_dir).resolve()
+    candidate = Path(ref)
+    if not candidate.is_absolute():
+        candidate = vault / candidate
+    try:
+        candidate = candidate.resolve()
+    except (OSError, RuntimeError):
+        return {"ok": False, "reason": f"face reference unusable: {ref}"}
+    if not candidate.is_relative_to(vault):
+        return {"ok": False,
+                "reason": f"face reference {ref} is not inside the "
+                          f"faces vault {vault} — reference material "
+                          "lives in the vault, never outside it"}
+    if not candidate.is_file():
+        return {"ok": False,
+                "reason": f"face reference not found: {ref}"}
+    return {"ok": True, "path": str(candidate)}
+
+
 def swap_face(char: Any, target_path: str, *,
               vault_dir: str | Path | None = None,
               out_path: str | Path | None = None) -> dict[str, Any]:
@@ -250,18 +297,16 @@ def swap_face(char: Any, target_path: str, *,
     NOT get faces — a character with no face reference is honestly
     unavailable, and the target image is delivered as-is.
     """
-    ref = str(getattr(char, "face_ref", "") or "").strip()
-    if not ref:
+    resolved = face_for(char, vault_dir=vault_dir)
+    if not resolved.get("ok"):
         return {"ok": False,
-                "reason": "no face reference for this character — "
-                          "face swap only runs where the character "
-                          "appears outside the game, and this "
-                          "character has no reference face"}
+                "reason": str(resolved.get("reason")
+                              or "no face reference for this character")}
+    ref = str(resolved["path"])
     try:
         from ..media_edit.faceswap_guard import FaceswapRequest, guarded_swap
 
-        vault = Path(vault_dir) if vault_dir is not None else Path(
-            os.path.expanduser("~")) / ".nomorals" / "faces"
+        vault = _face_vault(vault_dir)
         req = FaceswapRequest(
             source_ref=ref, target=target_path, vault_dir=vault,
             identity_id=str(getattr(char, "id", "") or "character"),

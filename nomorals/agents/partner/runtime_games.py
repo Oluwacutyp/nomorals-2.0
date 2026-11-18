@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import time
 from collections.abc import Callable
 from contextlib import contextmanager, nullcontext
@@ -119,6 +120,38 @@ def _character_voice_audio(char: Any, line: str) -> tuple[str, str, str]:
                    getattr(char, "name", "?"),
                    swapped.get("reason") or "unknown")
     return path, backend, ""
+
+
+def _character_face_image(char: Any, target_path: str, *,
+                          vault_dir: Any = None, out_path: Any = None
+                          ) -> tuple[str, str, str]:
+    """Put the character's face onto ``target_path`` via ``swap_face``.
+
+    The face rung's call site — ``/charagent swap`` renders the
+    character onto a target image through the guarded swap (vault,
+    identity lock, watermark, sidecar), exactly the ladder's
+    ``character_face`` job: the swap is the model rung, and the code
+    rung is the target image delivered as-is.
+
+    Returns (path, sidecar, reason): ``path`` is the swapped render
+    ("" when nothing was swapped), ``sidecar`` the guard's sidecar
+    ("" on failure), ``reason`` is "" on success and the specialist's
+    honest wall otherwise. Never raises.
+    """
+    from ...characters.specialists import swap_face
+
+    try:
+        res = swap_face(char, target_path, vault_dir=vault_dir,
+                        out_path=out_path)
+    except Exception as e:
+        record_failure("runtime_games._character_face_image", e)
+        return "", "", f"face swap failed: {e}"
+    if not res.get("ok"):
+        return "", "", str(res.get("reason") or "face swap failed")
+    path = str(res.get("path") or "")
+    if not path:
+        return "", "", "face swap produced no image"
+    return path, str(res.get("sidecar") or ""), ""
 
 
 class RuntimeGamesMixin:
@@ -2273,9 +2306,49 @@ class RuntimeGamesMixin:
         return ("usage: /npc list · /npc talk <name> <message> · "
                 "/npc mood <name>")
 
+    def _deliver_face_image(self, chat_key: str, path: str,
+                            caption: str) -> str:
+        """Send an image back into the chat; reply text.
+
+        Delivery goes through the gateway adapter's ``send_media``.
+        The reply only claims the image landed when a real bubble did;
+        when there is no transport, the artifact's path is named
+        rather than dropped — the same contract as
+        ``_deliver_voice_note``. Never raises.
+        """
+        try:
+            ref = self._ref_from_key(chat_key)
+            gateway = (getattr(self.context, "extras", None) or {}).get(
+                "gateway")
+            if gateway is not None and ref.platform in getattr(
+                    gateway, "adapters", {}):
+                from pathlib import Path
+
+                from ...social.chat.base import MediaRef
+
+                adapter = gateway._adapter_for(ref.platform)
+                if adapter is not None:
+                    mime = {".png": "image/png", ".jpg": "image/jpeg",
+                            ".jpeg": "image/jpeg",
+                            ".webp": "image/webp"}.get(
+                        Path(path).suffix.lower(), "image/png")
+                    result = adapter.send_media(
+                        ref, MediaRef(path=str(path), kind="image",
+                                      mime=mime),
+                        caption=caption[:1024])
+                    ok = (result.get("ok") if isinstance(result, dict)
+                          else getattr(result, "ok", False))
+                    if ok:
+                        return ""
+        except Exception as e:  # noqa: BLE001 - delivery is best-effort
+            record_failure(
+                "runtime_games.RuntimeGamesMixin._deliver_face_image", e)
+        return f"🖼️ image ready: {path}"
+
     def _control_charagent(self, tail: str, chat_key: str) -> str:
         """Character agents: /charagent list | create <name> [trait=0.8 ...]
-        [lora=<path>] | talk <name> <message> | lora <name> [path|none]
+        [lora=<path>] [face=<ref>] | talk <name> <message> | lora <name> [path|none]
+        | face <name> [ref|none] | swap <name> <target image>
         | play <game> <name...> | forget <name>."""
         from pathlib import Path
 
@@ -2286,7 +2359,7 @@ class RuntimeGamesMixin:
             converse,
             run_agent_match,
         )
-        from ...characters.specialists import lora_for
+        from ...characters.specialists import face_for, lora_for
         store = CharacterStore()
         parts = (tail or "").split(None, 1)
         verb = parts[0].lower() if parts else "list"
@@ -2301,23 +2374,28 @@ class RuntimeGamesMixin:
                 f"🎭 {c.name} — {', '.join(sorted(c.persona)[:4]) or 'no traits'}"
                 f"{' · voice: ' + c.voice_name if c.voice_name else ''}"
                 f"{' · lora: ' + Path(c.lora_file).name if c.lora_file else ''}"
+                f"{' · face: ' + Path(c.face_ref).name if c.face_ref else ''}"
                 for c in chars)
 
         if verb == "create":
             bits = rest.split()
             if not bits:
                 return ("usage: /charagent create <name> [trait=0.0-1.0 ...] "
-                        "[lora=<path to .gguf>]")
+                        "[lora=<path to .gguf>] [face=<ref in the vault>]")
             name = bits[0]
             if store.get_by_name(name):
                 return f"🎭 {name} already exists."
             persona: dict[str, float] = {}
             lora_arg = ""
+            face_arg = ""
             for b in bits[1:]:
                 if "=" in b:
                     k, v = b.split("=", 1)
                     if k.strip().lower() == "lora":
                         lora_arg = v.strip()
+                        continue
+                    if k.strip().lower() == "face":
+                        face_arg = v.strip()
                         continue
                     try:
                         persona[k.strip()] = max(0.0, min(1.0, float(v)))
@@ -2335,9 +2413,20 @@ class RuntimeGamesMixin:
                     lora_note = (f"\n🔌 LoRA adapter named: {lora_arg}\n"
                                  f"⚠️ {check.get('reason')} — talk falls "
                                  f"back to the shared base until it lands")
+            face_note = ""
+            if face_arg:
+                c.face_ref = face_arg
+                check = face_for(c)
+                if check.get("ok"):
+                    face_note = (f"\n🖼️ Face reference: "
+                                 f"{Path(face_arg).name} — validated")
+                else:
+                    face_note = (f"\n🖼️ Face reference named: {face_arg}\n"
+                                 f"⚠️ {check.get('reason')} — swap falls "
+                                 f"back to the target as-is until it lands")
             store.save(c)
             return (f"🎭 {name} is alive. Talk to them:\n"
-                    f"/charagent talk {name} hello{lora_note}")
+                    f"/charagent talk {name} hello{lora_note}{face_note}")
 
         if verb == "talk":
             bits = rest.split(None, 1)
@@ -2430,6 +2519,77 @@ class RuntimeGamesMixin:
                     f"⚠️ {check.get('reason')} — talk falls back to the "
                     "shared base until it lands.")
 
+        if verb == "face":
+            # Name / show / clear a character's face reference.
+            # Setting a name never needs the file to exist yet — the
+            # file may land in the vault later, and swap falls back
+            # honestly until then. Validation runs at set/show time
+            # and says so.
+            bits = rest.split(None, 1)
+            if not bits:
+                return ("usage: /charagent face <name> [ref in the vault|none] "
+                        "— show the face reference, or set/clear it")
+            c = store.get_by_name(bits[0])
+            if c is None:
+                return f"no character named '{bits[0]}'."
+            if len(bits) == 1:
+                if not (c.face_ref or "").strip():
+                    return (f"🎭 {c.name} has no face reference named — "
+                            f"set one:\n/charagent face {c.name} "
+                            "<ref in the vault>")
+                check = face_for(c)
+                if check.get("ok"):
+                    return (f"🎭 {c.name} · face "
+                            f"{Path(c.face_ref).name} — validated")
+                return (f"🎭 {c.name} · face {c.face_ref} — "
+                        f"{check.get('reason')}")
+            arg = bits[1].strip()
+            if arg.lower() == "none":
+                c.face_ref = ""
+                store.save(c)
+                return (f"🎭 {c.name} face reference cleared — swaps fall "
+                        "back to the target as-is from now on.")
+            c.face_ref = arg
+            store.save(c)
+            check = face_for(c)
+            if check.get("ok"):
+                return (f"🎭 {c.name} face reference set: "
+                        f"{Path(arg).name} — validated.")
+            return (f"🎭 {c.name} face reference named: {arg}\n"
+                    f"⚠️ {check.get('reason')} — swap falls back to the "
+                    "target as-is until it lands.")
+
+        if verb == "swap":
+            # The face rung's live call site: put the character's face
+            # onto a target image through the guarded swap and deliver
+            # the render. On any wall the target goes out as-is (the
+            # ladder's character_face code rung) with the reason named
+            # in the reply text — never silence, never a crash.
+            bits = rest.split(None, 1)
+            if len(bits) < 2:
+                return ("usage: /charagent swap <name> <target image> — "
+                        "put the character's face on the image")
+            c = store.get_by_name(bits[0])
+            if c is None:
+                return f"no character named '{bits[0]}'."
+            target = bits[1].strip()
+            if not os.path.isfile(target):
+                return f"🎭 {c.name}: target not found: {target}"
+            path, sidecar, reason = _character_face_image(c, target)
+            deliver = getattr(self, "_deliver_face_image", None)
+            if path:
+                if callable(deliver):
+                    caption = f"🎭 {c.name} — face-swapped"
+                    if sidecar:
+                        caption += f" · sidecar: {sidecar}"
+                    return deliver(chat_key, path, caption)
+                return f"🎭 {c.name} — face-swapped: {path}"
+            if callable(deliver):
+                deliver(chat_key, target,
+                        f"🎭 {c.name} — face swap failed")
+            return (f"🎭 {c.name}: face swap failed: {reason}\n"
+                    f"target as-is: {target}")
+
         if verb == "play":
             bits = rest.split()
             if len(bits) < 2:
@@ -2465,8 +2625,9 @@ class RuntimeGamesMixin:
             return f"🎭 {c.name} is gone."
 
         return ("usage: /charagent list · create <name> [trait=0.8] "
-                "[lora=<path>] · talk <name> <msg> · lora <name> [path|none] "
-                "· play <game> <names...> · forget <name>")
+                "[lora=<path>] [face=<ref>] · talk <name> <msg> · "
+                "lora <name> [path|none] · face <name> [ref|none] · "
+                "swap <name> <image> · play <game> <names...> · forget <name>")
 
     def _control_dm(self, tail: str, chat_key: str) -> str:
         """DM persona: /dm [mood <m>] | say <text> | intro — the narrator

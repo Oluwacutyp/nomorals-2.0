@@ -494,7 +494,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     # math class — standalone game command (wired handler, not engine game)
     "math": (0, None),       # /math [tier|answer <a>|leaderboard|streak|daily|duel ...|set|teach ...|upvote ...|balance]
     "npc": (0, None),        # /npc list | talk <name> <msg> | mood <name> — the living cast
-    "charagent": (0, None),  # /charagent list | create | talk | play | forget — persistent agents
+    "charagent": (0, None),  # /charagent list | create | talk | lora | face | swap | play | forget — persistent agents
     "dm": (0, 2),            # /dm mood [mood] — the narrator's persona
     # wave 87: direct game-start commands — games are social, so they work in
     # EVERY chat. In non-owner chats these commands are the ONLY game trigger;
@@ -2749,6 +2749,9 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                          "hosts and room participants.",
             "usage": "/charagent list · /charagent create <name> [trait=0.8] · "
                      "/charagent talk <name> <message> · "
+                     "/charagent lora <name> [path|none] · "
+                     "/charagent face <name> [ref|none] · "
+                     "/charagent swap <name> <image> · "
                      "/charagent play <game> <names...> · /charagent forget <name>",
             "example": "/charagent create Zara witty=0.9  ·  "
                        "/charagent play auction Zara Kilo",

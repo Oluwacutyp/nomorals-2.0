@@ -41,9 +41,12 @@ three. Once provisioned, the voice rungs light up through
 ``/charagent talk`` (audit gap R1-44): a character with a cloned voice
 speaks their line as a voice note, RVC-swapped when an RVC model is
 named, with the text reply as the fallback when the render fails.
-``swap_face`` has no live call site yet — there is no out-of-game
-character render path for a face swap — so it stays a named remainder,
-not silently wired. ``lora_for`` IS wired: ``Character.speak`` resolves
+``swap_face`` IS wired: ``/charagent swap`` puts the character's face
+onto a target image through it (``characters/specialists.py swap_face``
++ ``media_edit/faceswap_guard.py`` guarded swap — vault, identity
+lock, watermark, sidecar), ``/charagent face`` names the reference,
+and the target goes out as-is with the wall named when the swap
+cannot run. ``lora_for`` IS wired: ``Character.speak`` resolves
 the adapter through it and generates the line through a per-adapter
 local server (``characters/specialists.py lora_speak`` +
 ``llm/local_server.py ensure_lora_server`` — a second llama-server
