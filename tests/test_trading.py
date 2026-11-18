@@ -131,6 +131,13 @@ class _FakeRegistry:
         return deco
 
 
+def _no_macro(symbol):
+    # The macro feed is live in analyze() now; this test pins the
+    # committee on trend bars, so the wind stays unavailable here.
+    # The wind itself is covered by tests/test_gapfix_macrofeed.py.
+    raise market_data.MarketDataError("no macro feed in this test")
+
+
 def _ctx(db=None, live_enabled=False):
     db = db or Database(":memory:")
     db.migrate()
@@ -240,7 +247,8 @@ class FinancialExpertTests(unittest.TestCase):
 
     def test_analyze_plain_language(self):
         self._mock_bars.return_value = self._trend()
-        rep = FinancialExpert(self.ctx).analyze("BTC/USDT")
+        rep = FinancialExpert(self.ctx,
+                              macro_fetcher=_no_macro).analyze("BTC/USDT")
         self.assertEqual(rep.symbol, "BTC/USDT")
         text = rep.summary_text()
         self.assertIn("trending", text)          # plain regime words

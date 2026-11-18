@@ -829,8 +829,13 @@ def normalize_symbol(symbol: str, market: str = "crypto") -> dict[str, str]:
     Returns dict with ``base``/``quote`` plus source spellings. Never
     raises on odd input — garbage in, best-effort out.
     """
-    raw = (symbol or "").strip().upper().replace("-", "/")
+    raw = (symbol or "").strip().upper()
     market = (market or "crypto").strip().lower()
+    # Yahoo-style symbols (DX-Y.NYB, ^TNX, GC=F) are single tickers, not
+    # base/quote pairs: the dash in DX-Y.NYB is part of the ticker, so
+    # the dash→slash split below must not touch them.
+    if not any(ch in raw for ch in ".^="):
+        raw = raw.replace("-", "/")
     if "/" in raw:
         base, quote_c = raw.split("/", 1)
     elif market == "commodities":

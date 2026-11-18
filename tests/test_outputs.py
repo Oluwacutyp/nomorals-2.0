@@ -33,12 +33,21 @@ class TestHonestPartials(unittest.TestCase):
     def _expert(self, n_bars: int):
         from nomorals.agents.financial_expert import FinancialExpert
 
-        expert = FinancialExpert(SimpleNamespace(db=None, settings=None))
+        # The macro feed is live in analyze() now; these tests pin the
+        # bars_note, so the wind stays unavailable here. The wind
+        # itself is covered by tests/test_gapfix_macrofeed.py.
+        def _no_macro(symbol):
+            raise RuntimeError("no macro feed in this test")
+
+        expert = FinancialExpert(SimpleNamespace(db=None, settings=None),
+                                 macro_fetcher=_no_macro)
         fake_df = list(range(n_bars))  # len() is all analyze() needs
 
         class FakePipeline:
             @staticmethod
-            def analyze(_df):
+            def analyze(_df, profile=None, macro=None, equity=None,
+                        rate_tuner=None):
+                # Same contract as the real ta.pipeline.analyze.
                 return {
                     "bars": n_bars, "regime_label": "trend",
                     "bias": 0.5, "agreement": 0.8, "position_now": 0.0,

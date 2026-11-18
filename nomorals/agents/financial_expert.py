@@ -29,11 +29,83 @@ __all__ = [
     "Signal",
     "Comparison",
     "TradeIdea",
+    "MacroReport",
     "SentinelMarketProvider",
     "DISCLAIMER",
 ]
 
 _log = get_logger(__name__)
+
+#: Daily bars fetched per macro leg (120d of history feeds the 55-bar
+#: trinity window; 200 asks for a 6-month Yahoo range).
+_MACRO_BARS = 200
+
+#: A daily reading older than this is stale (matches the market-data
+#: layer's own daily grace: 5 days covers weekends + holidays).
+_MACRO_STALE_AFTER_S = 5 * 86400.0
+
+
+def _fmt_date(ts: float | None) -> str:
+    """Epoch → YYYY-MM-DD (UTC), or "unknown"."""
+    if not ts:
+        return "unknown"
+    try:
+        return time.strftime("%Y-%m-%d", time.gmtime(float(ts)))
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+
+
+def _reading_line(label: str, reading: dict[str, Any] | None,
+                  now: float) -> str:
+    """One plain-language macro leg: value, as-of date, source, staleness."""
+    if not reading or reading.get("status") != "ok":
+        err = (reading or {}).get("error") or "no data"
+        return f"{label}: missing — {err}"
+    value = reading.get("close")
+    ts = reading.get("ts")
+    stale = (isinstance(ts, (int, float)) and (now - ts) > _MACRO_STALE_AFTER_S)
+    return (f"{label} {value:,.3f} (as of {_fmt_date(ts)}, "
+            f"via {reading.get('source') or 'unknown'}"
+            f"{', stale' if stale else ''})")
+
+
+def _macro_summary_line(macro: dict[str, Any]) -> str:
+    """One line on the macro wind for a report: live values, or the
+    honest reason the read ran without them. Never invents a bias."""
+    if not macro:
+        return "Macro feed: no read attempted."
+    status = macro.get("status")
+    if status == "live":
+        bias = macro.get("bias") or {}
+        readings = macro.get("readings") or {}
+        now = time.time()
+        dxy = _reading_line("DXY", readings.get("dxy"), now)
+        tny = _reading_line("US10Y", readings.get("tny"), now)
+        reasons = bias.get("reasons") or []
+        return (f"Macro wind: {dxy}; {tny} — "
+                f"{bias.get('bias', 'neutral')} for gold"
+                + (f" ({reasons[0]})" if reasons else ""))
+    if status == "partial":
+        readings = macro.get("readings") or {}
+        bad = [f"{k}: {(v or {}).get('error') or 'no data'}"
+               for k, v in readings.items() if (v or {}).get("status") != "ok"]
+        return ("Macro wind partial — " + "; ".join(bad)
+                + " — analysis ran without the macro read.")
+    return (f"Macro feed unavailable: {macro.get('reason') or 'no data'} "
+            "— analysis ran without the macro read.")
+
+
+def _equity_summary_line(equity: dict[str, Any],
+                         adaptive: dict[str, Any]) -> str:
+    """One line on the desk equity feed: curve state + throttle."""
+    points = (equity or {}).get("points") or []
+    if not points:
+        return "Desk equity: no journal history — sizing unthrottled."
+    last = (equity or {}).get("last")
+    return (f"Desk equity ${last:,.2f} ({len(points)} observations, "
+            f"last {_fmt_date((equity or {}).get('last_ts'))}); "
+            f"drawdown {(adaptive or {}).get('drawdown', 0.0):.1%}, "
+            f"throttle {(adaptive or {}).get('throttle_factor', 1.0):.2f}.")
 
 DISCLAIMER = (
     "For research and education only — not financial advice. "
@@ -97,6 +169,16 @@ class AnalysisReport:
     # was available; otherwise names the shortfall, e.g.
     # "zone book thinner than requested (1h: 729/2000 bars)".
     bars_note: str = ""
+    # Live macro read (see FinancialExpert._macro_read): bias dict +
+    # per-symbol readings (DXY / US10Y / gold closes with timestamps).
+    # {} when the feed was unavailable — never invented.
+    macro: dict[str, Any] = field(default_factory=dict)
+    # Desk equity feed (trading journal): {"points", "last", "last_ts",
+    # "count"}. {} / empty points when the journal has no observations.
+    equity: dict[str, Any] = field(default_factory=dict)
+    # The pipeline's adaptive record: adjustments, throttle_factor,
+    # drawdown, macro — proves which feeds actually shaped the read.
+    adaptive: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -110,6 +192,8 @@ class AnalysisReport:
             "stop_distance_pct": self.stop_distance_pct,
             "strategies": self.strategies, "n_strategies": self.n_strategies,
             "created_at": self.created_at, "disclaimer": DISCLAIMER,
+            "macro": self.macro, "equity": self.equity,
+            "adaptive": self.adaptive,
         }
 
     def summary_text(self) -> str:
@@ -135,6 +219,8 @@ class AnalysisReport:
             lines.append(
                 f"Suggested risk size ~{self.size_fraction:.1%} of equity, "
                 f"stop ~{self.stop_distance_pct:.1%} away.")
+        lines.append(_macro_summary_line(self.macro))
+        lines.append(_equity_summary_line(self.equity, self.adaptive))
         lines.append(DISCLAIMER)
         return "\n".join(lines)
 
@@ -241,6 +327,10 @@ class TradeIdea:
     confidence: float = 0.0
     rationale: str = ""
     created_at: float = 0.0
+    # Same live feeds as AnalysisReport (see there for the contract).
+    macro: dict[str, Any] = field(default_factory=dict)
+    equity: dict[str, Any] = field(default_factory=dict)
+    adaptive: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -252,12 +342,17 @@ class TradeIdea:
             "risk_reward": self.risk_reward, "confidence": self.confidence,
             "rationale": self.rationale,
             "created_at": self.created_at, "disclaimer": DISCLAIMER,
+            "macro": self.macro, "equity": self.equity,
+            "adaptive": self.adaptive,
         }
 
     def summary_text(self) -> str:
         if self.direction == "flat":
             return (f"Trade idea {self.symbol} [{self.market}, {self.profile}]: "
-                    f"FLAT — {self.rationale}\n{DISCLAIMER}")
+                    f"FLAT — {self.rationale}\n"
+                    f"{_macro_summary_line(self.macro)}\n"
+                    f"{_equity_summary_line(self.equity, self.adaptive)}\n"
+                    f"{DISCLAIMER}")
         lines = [
             f"Trade idea {self.symbol} [{self.market}, {self.profile}]: "
             f"{self.direction.upper()} (confidence {self.confidence:.0%})",
@@ -266,18 +361,80 @@ class TradeIdea:
             f"  risk:reward ~1:{self.risk_reward:.1f} | "
             f"size ~{self.size_fraction:.1%} of equity",
             f"  why: {self.rationale}",
+            _macro_summary_line(self.macro),
+            _equity_summary_line(self.equity, self.adaptive),
             DISCLAIMER,
         ]
+        return "\n".join(lines)
+
+
+@dataclass
+class MacroReport:
+    """The live macro wind + desk equity state, on its own.
+
+    ``status`` is live | partial | unavailable; ``bias`` is the
+    trinity-bias dict ({} when unavailable); ``readings`` maps
+    xau/dxy/tny → {close, ts, source, status, error}; ``equity`` is
+    the journal equity curve dict. Nothing here is ever filled from
+    another source — a missing leg says so.
+    """
+    status: str = "unavailable"
+    bias: dict[str, Any] = field(default_factory=dict)
+    readings: dict[str, Any] = field(default_factory=dict)
+    fetched_at: float = 0.0
+    reason: str = ""
+    equity: dict[str, Any] = field(default_factory=dict)
+    created_at: float = 0.0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status, "bias": self.bias,
+            "readings": self.readings, "fetched_at": self.fetched_at,
+            "reason": self.reason, "equity": self.equity,
+            "created_at": self.created_at, "disclaimer": DISCLAIMER,
+        }
+
+    def summary_text(self) -> str:
+        now = time.time()
+        if self.status == "live":
+            lines = [f"Macro wind (live, fetched {_fmt_date(self.fetched_at)}):"]
+            for label, key in (("DXY", "dxy"), ("US10Y", "tny"),
+                               ("Gold GC=F", "xau")):
+                lines.append("  " + _reading_line(
+                    label, (self.readings or {}).get(key), now))
+            bias = self.bias or {}
+            reasons = bias.get("reasons") or []
+            lines.append(f"  Bias: {bias.get('bias', 'neutral')} for gold"
+                         + (f" — {reasons[0]}" if reasons else ""))
+            if bias.get("decoupled"):
+                lines.append("  XAU/DXY decoupled — treat the bias with "
+                             "skepticism.")
+        elif self.status == "partial":
+            lines = ["Macro wind (partial — bias needs all three legs):"]
+            for label, key in (("DXY", "dxy"), ("US10Y", "tny"),
+                               ("Gold GC=F", "xau")):
+                lines.append("  " + _reading_line(
+                    label, (self.readings or {}).get(key), now))
+        else:
+            lines = [f"Macro feed unavailable: "
+                     f"{self.reason or 'no data'}."]
+        lines.append(_equity_summary_line(self.equity, {}))
+        lines.append(DISCLAIMER)
         return "\n".join(lines)
 
 
 class FinancialExpert:
     """The conversational trading brain. Paper-first; live is gated elsewhere."""
 
-    def __init__(self, context: Any) -> None:
+    def __init__(self, context: Any, macro_fetcher=None) -> None:
         self.context = context
         self.db = getattr(context, "db", None)
         self.settings = getattr(context, "settings", None)
+        # Test seam / override: ``macro_fetcher(symbol)`` returns
+        # (closes, last_bar_ts, source). None → the keyless
+        # market-data chain (Yahoo chart API → stooq).
+        self._macro_fetcher = macro_fetcher
+        self._macro = None
 
     # ── internals ─────────────────────────────────────────────────────
     def _bar(self) -> dict[str, float]:
@@ -327,14 +484,124 @@ class FinancialExpert:
         except Exception:  # noqa: BLE001 - logging never breaks analysis
             pass
 
+    # ── live feeds: macro (DXY / US10Y) + journal equity ─────────────
+    @staticmethod
+    def _market_data_closes(symbol: str):
+        """Daily closes for one Yahoo macro symbol via the keyless
+        market-data chain (Yahoo chart API → stooq, stdlib only).
+
+        Returns ``(closes, last_bar_ts, source)``. Raises
+        ``MarketDataError`` when every source fails — the caller
+        records it, never invents a value.
+        """
+        from ..integrations import market_data
+
+        df = market_data.get_ohlcv(symbol, market="stocks",
+                                   timeframe="1d", bars=_MACRO_BARS)
+        closes = [float(c) for c in df["close"].dropna().tolist()]
+        if not closes:
+            raise market_data.MarketDataError(f"no closes for {symbol}")
+        last_ts = None
+        try:
+            idx = df.index
+            if len(idx):
+                last = idx[-1]
+                last_ts = (float(last.value // 10 ** 9)
+                           if hasattr(last, "value") else float(last))
+        except Exception:  # noqa: BLE001 - ts is surface only
+            pass
+        source = getattr(df, "attrs", {}).get("source")
+        return closes, last_ts, source or "market_data"
+
+    def _macro_provider(self):
+        """The cached TrinityBias provider (one per expert instance)."""
+        if self._macro is None:
+            from ..ta.macro import TrinityBias
+
+            fetcher = self._macro_fetcher or self._market_data_closes
+            self._macro = TrinityBias(fetch_closes=fetcher)
+        return self._macro
+
+    def _macro_read(self) -> dict[str, Any]:
+        """Live macro read: bias + per-symbol readings. Never raises.
+
+        Sync-refreshes when the cache is empty/stale (bounded by the
+        fetchers' own timeouts); a failed fetch reports
+        ``status="unavailable"`` (or ``"partial"`` when some legs
+        landed) with the reason named.
+        """
+        provider = self._macro_provider()
+        try:
+            if provider.get() is None:
+                provider.refresh()
+        except Exception as exc:  # noqa: BLE001 - feed failure ≠ crash
+            _log.debug("financial_expert macro refresh failed: %s", exc,
+                       exc_info=True)
+        bias = provider.get()
+        readings = provider.readings()
+        if bias is not None:
+            return {"status": "live", "bias": bias, "readings": readings,
+                    "fetched_at": bias.get("_ts"), "reason": ""}
+        ok_legs = [v for v in (readings or {}).values()
+                   if (v or {}).get("status") == "ok"]
+        if readings is not None and ok_legs:
+            bad = "; ".join(
+                f"{k}: {(v or {}).get('error') or 'no data'}"
+                for k, v in readings.items()
+                if (v or {}).get("status") != "ok")
+            return {"status": "partial", "bias": {}, "readings": readings,
+                    "fetched_at": provider.fetched_at,
+                    "reason": bad or "bias needs all three legs"}
+        return {"status": "unavailable", "bias": {}, "readings": readings or {},
+                "fetched_at": provider.fetched_at,
+                "reason": provider.last_error or "no macro data fetched"}
+
+    def equity_curve(self) -> dict[str, Any]:
+        """The desk's equity curve from the trading journal.
+
+        ``{"points", "last", "last_ts", "count"}`` — chronological
+        ``equity_observation`` records. Empty when the journal has
+        none; never raises.
+        """
+        try:
+            from ..finance import trading_journal
+
+            return trading_journal.equity_curve(settings=self.settings)
+        except Exception as exc:  # noqa: BLE001 - feed failure ≠ crash
+            _log.debug("financial_expert equity_curve failed: %s", exc,
+                       exc_info=True)
+            return {"points": [], "last": None, "last_ts": None, "count": 0}
+
+    def macro_report(self) -> MacroReport:
+        """The live macro wind + desk equity state, on its own."""
+        read = self._macro_read()
+        return MacroReport(
+            status=read["status"], bias=read.get("bias") or {},
+            readings=read.get("readings") or {},
+            fetched_at=read.get("fetched_at") or 0.0,
+            reason=read.get("reason") or "",
+            equity=self.equity_curve(), created_at=time.time(),
+        )
+
     # ── public API ────────────────────────────────────────────────────
     def analyze(self, symbol: str, market: str = "crypto",
                 timeframe: str = "1h", bars: int = 2000) -> AnalysisReport:
-        """Regime + committee read-out, fully native (no submodule needed)."""
+        """Regime + committee read-out, fully native (no submodule needed).
+
+        The live macro wind (DXY / US10Y) and the desk equity curve
+        feed the pipeline as live inputs — a macro bias opposing the
+        committee halves the bias, and the equity curve throttles
+        sizing by drawdown. Either feed missing runs without it and
+        says so in the report.
+        """
         ta_pipeline, _, _, _ = self._ta()
         df = self._load_bars(symbol, market, timeframe, bars)
+        macro_read = self._macro_read()
+        equity = self.equity_curve()
         try:
-            res = ta_pipeline.analyze(df)
+            res = ta_pipeline.analyze(
+                df, macro=self._macro_provider(),
+                equity=equity["points"] or None)
         except ValueError as exc:
             raise bridge.SentinelError(f"analysis failed: {exc}") from exc
         # Honest partial (spec §6.2): a thin zone book must say so in the
@@ -365,6 +632,8 @@ class FinancialExpert:
             strategies=_top_strategies(res["ranked"]),
             n_strategies=res["n_strategies"],
             created_at=time.time(),
+            macro=macro_read, equity=equity,
+            adaptive=res.get("adaptive") or {},
         )
         self._room_log(f"analyze {symbol}: {out.regime_label.strip()} "
                        f"bias={out.bias:+.2f}")
@@ -509,8 +778,12 @@ class FinancialExpert:
             raise bridge.SentinelError(
                 f"unknown profile {profile!r}")
         df = self._load_bars(symbol, market, "1h", 600)
+        macro_read = self._macro_read()
+        equity = self.equity_curve()
         try:
-            res = ta_pipeline.analyze(df, profile=profile)
+            res = ta_pipeline.analyze(df, profile=profile,
+                                      macro=self._macro_provider(),
+                                      equity=equity["points"] or None)
         except ValueError as exc:
             raise bridge.SentinelError(f"analysis failed: {exc}") from exc
         pos = res["position_now"]
@@ -549,6 +822,8 @@ class FinancialExpert:
             size_fraction=res["size_fraction"],
             risk_reward=rr, confidence=confidence, rationale=rationale,
             created_at=time.time(),
+            macro=macro_read, equity=equity,
+            adaptive=res.get("adaptive") or {},
         )
         self._room_log(f"trade idea {symbol}: {direction} rr={rr}")
         return out

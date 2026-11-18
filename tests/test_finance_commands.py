@@ -33,8 +33,16 @@ def _trend_bars(n=600, drift=0.002, seed=0):
          "close": close, "volume": 1000.0}, index=idx)
 
 
-def _expert():
-    return fe.FinancialExpert(SimpleNamespace(db=None, settings=None))
+def _no_macro(symbol):
+    # The macro feed is live in analyze() now; this test pins the
+    # committee on trend bars, so the wind stays unavailable here.
+    # The wind itself is covered by tests/test_gapfix_macrofeed.py.
+    raise MarketDataError("no macro feed in this test")
+
+
+def _expert(macro_fetcher=None):
+    return fe.FinancialExpert(SimpleNamespace(db=None, settings=None),
+                              macro_fetcher=macro_fetcher)
 
 
 # The Sentinel.py submodule is private; CI and external checkouts cannot
@@ -93,7 +101,7 @@ class AnalyzeTests(unittest.TestCase):
     def test_analyze_report_shape(self):
         df = _trend_bars()
         with patch.object(market_data, "get_ohlcv", return_value=df):
-            rep = _expert().analyze("BTC", "crypto")
+            rep = _expert(macro_fetcher=_no_macro).analyze("BTC", "crypto")
         self.assertEqual(rep.symbol, "BTC")
         self.assertEqual(rep.regime_label, "TREND_UP")
         self.assertGreater(rep.bias, 0.5)

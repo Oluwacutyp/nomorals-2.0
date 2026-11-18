@@ -2683,6 +2683,7 @@ class RuntimeLiveMixin:
         /finance compare <sym1,sym2,..> [market]
         /finance watch <symbol> <above|below> <price> [market]
         /finance doctor
+        /finance macro — live DXY / US10Y wind + desk equity
         """
         from ..financial_expert import FinancialExpert
         from ...integrations import sentinel_bridge as bridge
@@ -2702,6 +2703,7 @@ class RuntimeLiveMixin:
                 "/finance compare <s1,s2,..> [market]\n"
                 "/finance watch <symbol> <above|below> <price> [market] — price alert\n"
                 "/finance doctor — integration health\n"
+                "/finance macro — live DXY / US10Y wind + desk equity\n"
                 "markets: crypto (default) | forex | stocks")
 
         if verb in ("", "help"):
@@ -2715,6 +2717,9 @@ class RuntimeLiveMixin:
         try:
             if verb == "doctor":
                 return bridge.doctor().summary_text()
+
+            if verb == "macro":
+                return FinancialExpert(self.context).macro_report().summary_text()
 
             if verb == "strategies":
                 rows = FinancialExpert(self.context).strategies()

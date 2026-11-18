@@ -222,6 +222,25 @@ def register(registry: Any) -> None:
                                   strategy=strategy)
         return summary.to_dict() if hasattr(summary, "to_dict") else {"result": str(summary)}
 
+    @registry.register(
+        "finance_macro",
+        description=(
+            "The live macro wind for gold/trading: DXY (dollar index) "
+            "and US10Y (10-year yield) latest values with timestamps "
+            "and sources, the trinity bias, plus the desk equity curve "
+            "from the trading journal. Use it before answering any "
+            "macro question — never quote DXY/US10Y from memory. "
+            "A missing leg is reported as missing, never invented."
+        ),
+        capability="network",
+        parameters={},
+    )
+    def finance_macro(context: Any) -> dict[str, Any]:
+        expert = _expert_class()(context)
+        report = expert.macro_report()
+        return report.to_dict() if hasattr(report, "to_dict") else {
+            "result": str(report)}
+
     # Expense tracking + conversational budgeting (Naira-first). Lives in
     # nomorals/finance/; registered here alongside the market tools.
     from ..finance.tools import register as _register_finance_tools

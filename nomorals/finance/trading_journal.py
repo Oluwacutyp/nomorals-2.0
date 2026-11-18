@@ -136,3 +136,38 @@ def latest_event(event: str, *, settings: Any = None,
             if isinstance(rec, dict) and rec.get("event") == event:
                 return rec
     return None
+
+
+def equity_curve(*, limit: int = 500, settings: Any = None,
+                 path: str | Path | None = None) -> dict[str, Any]:
+    """The desk's equity curve from the journal, oldest first.
+
+    Reads ``equity_observation`` records (written by the execution
+    desk on every risk check — see ``agents/execution.py``) and
+    returns ``{"points", "last", "last_ts", "count"}``. A missing
+    journal reads as empty — never an error, never invented equity.
+    Records without a numeric ``equity`` are skipped.
+    """
+    records = read_events(limit=limit, event="equity_observation",
+                          settings=settings, path=path)
+    points: list[float] = []
+    last_ts: float | None = None
+    for rec in reversed(records):  # read_events is newest-first
+        try:
+            value = float(rec.get("equity"))
+        except (TypeError, ValueError):
+            continue
+        if value != value:  # NaN is not an observation
+            continue
+        points.append(value)
+        last_ts = rec.get("ts")
+    try:
+        last_ts = float(last_ts) if last_ts is not None else None
+    except (TypeError, ValueError):
+        last_ts = None
+    return {
+        "points": points,
+        "last": points[-1] if points else None,
+        "last_ts": last_ts,
+        "count": len(points),
+    }
