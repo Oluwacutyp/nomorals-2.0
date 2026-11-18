@@ -613,6 +613,16 @@ class GitHubConnector(Connector):
         )
         return self._summarize_issue(raw if isinstance(raw, dict) else {})
 
+    def set_issue_labels(self, full_name: str, number: int,
+                         labels: list[str]) -> dict[str, Any]:
+        """Replace an issue's labels (the triage Label stage's write
+        seam: settled type labels go back to GitHub)."""
+        raw = self._api(
+            "PATCH", f"/repos/{full_name}/issues/{number}",
+            {"labels": list(labels)},
+        )
+        return self._summarize_issue(raw if isinstance(raw, dict) else {})
+
     @staticmethod
     def _summarize_pr(raw: dict[str, Any]) -> dict[str, Any]:
         head = raw.get("head") or {}

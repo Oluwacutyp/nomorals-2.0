@@ -112,6 +112,12 @@ LAYERS: dict[str, int] = {
     # (L5, same layer) and posts back through social/chat (L4).
     # L5, peer of agents/connectors.
     "relay": 5,
+    # triage/ is the issue triage organ (autocraft port): it mirrors
+    # tracked repos' GitHub issues through connectors/github (L5,
+    # same layer), judges duplicates/classification through the
+    # brain (L3, downward) and posts back through social/chat (L4).
+    # L5, peer of relay/connectors.
+    "triage": 5,
     # datasci/ is the data-science workspace (pandas datasets, queries,
     # plots as artifacts): a service organ at L4, reaching only downward.
     "datasci": 4,
@@ -470,6 +476,11 @@ MODULE_PINS: dict[str, int] = {
     # L5 GitHub connector it files issues through. The registry
     # loads it dynamically by dotted name, never by static import.
     "nomorals.tools.ticket_relay": 5,
+    # tools/triage is the same shape: a tool *surface* over the L5
+    # triage organ (the autocraft port) and the L5 GitHub connector
+    # it mirrors issues through. The registry loads it dynamically
+    # by dotted name, never by static import.
+    "nomorals.tools.triage": 5,
     # The prompt-compiler tool surface composes the L5 organs that own
     # the graded journals (games.npc_learn, characters.learn) into a
     # compile/status surface — it IS the L5 composition layer, not an

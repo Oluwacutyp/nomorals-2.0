@@ -3730,6 +3730,16 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("ticket relay job not registered: %s",
                                  exc)
+                # Triage sync (autocraft port): one durable "triage
+                # sync" job (hourly) mirroring every tracked repo's
+                # issues and running the code-rung triage pass (the
+                # model rung only when the brain is up). Idempotent
+                # by name; a no-op when no repo is tracked.
+                try:
+                    from ...triage.jobs import ensure_triage_job
+                    ensure_triage_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("triage job not registered: %s", exc)
                 # Scheduled backups (gapfix 2): the encrypted offsite
                 # 3-2-1 pipeline — daily generation at 02:00 + monthly
                 # restore drill on the 1st at 03:00. Idempotent by name;
@@ -11509,6 +11519,9 @@ class PartnerRuntime(
                                          chat_key=chat_key)
         if kind == "ticket":
             return self._control_ticket(command.tail or arg,
+                                        chat_key=chat_key)
+        if kind == "triage":
+            return self._control_triage(command.tail or arg,
                                         chat_key=chat_key)
         if kind == "drafts":
             return self._control_drafts(command.tail or arg,

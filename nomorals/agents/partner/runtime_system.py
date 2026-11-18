@@ -2696,6 +2696,192 @@ class RuntimeSystemMixin:
                 "<ref> | comment <ref> | <text> | close <ref> | "
                 "sync [ref]")
 
+    # ── issue triage: /triage ──────────────────────────────────────
+    def _triage_store(self) -> Any:
+        """The triage store — the injected store wins (the test seam,
+        same shape as the ticket relay's); otherwise the durable store
+        under the process home, the same file the triage brain tool
+        reads."""
+        injected = getattr(self, "_triage_store", None)
+        if injected is not None:
+            return injected() if callable(injected) else injected
+        from ...core.config import get_settings
+        from ...triage.store import TriageStore, triage_path
+
+        return TriageStore(triage_path(get_settings()))
+
+    def _triage_suggest(self) -> Any:
+        """A ``(prompt) -> text`` model callable, or None.
+
+        The injected suggest wins (the test seam); otherwise the
+        brain, wrapped the way the ladder wraps it.
+        """
+        injected = getattr(self, "_triage_suggest", None)
+        if injected is not None:
+            return injected() if callable(injected) else injected
+        try:
+            from ...llm.base import Message
+            from ...llm.brain import brain_for
+
+            brain = brain_for(self.context)
+        except Exception:  # noqa: BLE001 - no brain, no model rung
+            return None
+
+        def _call(prompt: str) -> str:
+            try:
+                resp = brain.chat(
+                    [Message(role="user", content=prompt)],
+                    task_kind="chat", timeout_s=30.0)
+                return getattr(resp, "text", "") or ""
+            except Exception:  # noqa: BLE001 - model must never kill a job
+                return ""
+
+        return _call
+
+    def _control_triage(self, tail: str, chat_key: str = "") -> Any:
+        """ /triage — issue triage over tracked GitHub repos
+        (autocraft port): mirror, duplicates, classify, P0–P4,
+        work rank, decisions.
+
+        /triage                          — the board: every tracked
+                                           repo, open counts, top items
+        /triage track <owner/repo>      — track a repo's backlog
+        /triage untrack <owner/repo>    — stop tracking it
+        /triage sync <owner/repo>       — mirror its issues now
+        /triage triage <owner/repo>     — one full pass: sync +
+                                           duplicates + classify +
+                                           prioritize
+        /triage queue [owner/repo]      — open items, highest rank
+                                           first
+        /triage item <owner/repo>#<n>   — one item whole
+        /triage duplicates <owner/repo> — find duplicate groups
+        /triage decisions [owner/repo]  — open decisions
+        /triage answer <id> <option>    — answer a decision
+        /triage apply <id>              — apply an answered decision
+
+        Owner-only. Without a GitHub credential every verb that needs
+        GitHub answers honestly as not connected, never a fabricated
+        link. With no model the code rung runs and model verdicts are
+        recorded as unavailable, never invented.
+        """
+        from ...triage import github as triage_github
+        from ...triage import surface as triage_surface
+        from ...triage.engine import TriageEngine
+
+        store = self._triage_store()
+        tail = (tail or "").strip()
+        verb, _, rest = tail.partition(" ")
+        verb = verb.lower()
+        rest = rest.strip()
+        if not tail or verb in ("list", "board"):
+            return triage_surface.render_board(store)
+        if verb == "track":
+            if not rest:
+                return "usage: /triage track <owner/repo>"
+            store.track(rest)
+            return f"tracking {rest} — /triage sync {rest} mirrors it."
+        if verb == "untrack":
+            if not rest:
+                return "usage: /triage untrack <owner/repo>"
+            store.untrack(rest)
+            return f"no longer tracking {rest}."
+        if verb == "decisions":
+            engine = TriageEngine(None, store,
+                                  suggest=self._triage_suggest())
+            return triage_surface.render_decisions(
+                engine.decisions(rest or None))
+        client = getattr(self, "_triage_github_client", None)
+        if client is None:
+            client = triage_github.github_client(self.context)
+        if client is None:
+            return triage_github.github_not_connected_reason()
+        engine = TriageEngine(client, store,
+                              suggest=self._triage_suggest())
+        if verb == "sync":
+            if not rest:
+                return "usage: /triage sync <owner/repo>"
+            out = engine.sync(rest)
+            if out.get("error"):
+                return f"sync of {rest} failed: {out['error']}"
+            return (f"synced {rest}: {out['new']} new, "
+                    f"{out['updated']} updated, "
+                    f"{out['unchanged']} unchanged.")
+        if verb == "triage":
+            if not rest:
+                return "usage: /triage triage <owner/repo>"
+            out = engine.triage(rest)
+            synced = out.get("synced", {})
+            return (f"triaged {rest}: {synced.get('new', 0)} new, "
+                    f"{out.get('groups', 0)} duplicate group(s), "
+                    f"{out.get('classified', 0)} classified, "
+                    f"{out.get('model_calls', 0)} model call(s).")
+        if verb == "queue":
+            repo = rest or (store.tracked()[0] if store.tracked()
+                            else "")
+            if not repo:
+                return ("no repos tracked — /triage track <owner/repo> "
+                        "to start.")
+            items = engine.queue(repo)
+            return triage_surface.render_queue(items, repo)
+        if verb == "item":
+            key = rest
+            item = store.get_item(key)
+            if item is None:
+                return (f"no item {key} mirrored — /triage sync the "
+                        "repo first.")
+            decisions = [d for d in engine.decisions()
+                         if d.get("item") == key]
+            return triage_surface.render_item(item, decisions)
+        if verb == "duplicates":
+            if not rest:
+                return "usage: /triage duplicates <owner/repo>"
+            groups = engine.find_duplicates(rest)
+            if not groups:
+                return f"no duplicate groups in {rest}."
+            lines = [f"duplicate groups in {rest}:"]
+            for group in groups:
+                members = ", ".join(
+                    f"#{m.rsplit('#', 1)[1]}"
+                    for m in group.get("members", []))
+                lines.append(
+                    f"• keep #{group.get('keep', '').rsplit('#', 1)[1]} "
+                    f"— {members} (decision "
+                    f"{group.get('decision_id')})")
+            return "\n".join(lines)
+        if verb == "answer":
+            dec_id, _, option = rest.partition(" ")
+            try:
+                decision = engine.answer_decision(
+                    dec_id.strip(), option.strip())
+            except ValueError as exc:
+                return str(exc)
+            return (f"decision {decision.get('id')} answered: "
+                    f"{decision.get('answer')} — /triage apply "
+                    f"{decision.get('id')} to act on it.")
+        if verb == "apply":
+            try:
+                out = engine.apply_decision(rest)
+            except ValueError as exc:
+                return str(exc)
+            if out.get("status") == "already-applied":
+                return f"decision {rest} is already applied."
+            if out.get("status") == "not-answered":
+                return str(out.get("reason", "answer it first."))
+            if out.get("status") == "failed":
+                return (f"couldn't apply {rest}: "
+                        f"{out.get('reason', '')}")
+            return (f"decision {rest} applied"
+                    + (f" — closed {out.get('closed', 0)} duplicate(s)"
+                       if out.get("closed") is not None else "")
+                    + (f" — wrote {out.get('wrote', '')}"
+                       if out.get("wrote") else "")
+                    + ".")
+        return ("usage: /triage [board] | track <owner/repo> | untrack "
+                "<owner/repo> | sync <owner/repo> | triage <owner/repo> "
+                "| queue [owner/repo] | item <owner/repo>#<n> | "
+                "duplicates <owner/repo> | decisions [owner/repo] | "
+                "answer <id> <option> | apply <id>")
+
     # ── ideas: /ideas (WS3 P5) ────────────────────────────────────────
     def _idea_tracker(self) -> Any:
         """IdeaTracker over the context db, or None when no db is

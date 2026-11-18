@@ -956,6 +956,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "careers": (0, None),     # /careers [list] | add <company> | <role> | move <app> <stage> | next <app> | <action> [by <date>] | note <app> | <text> | attach <app> <artifact> | remove <app> | stages — career pipeline (owner-only)
     "recruit": (0, None),     # /recruit [status [<vac>]] | add <title> | <employer> | scrape <vac> | source <vac> | <url> | candidate <vac> | <name> | <email> | tier <cand> | close|open <vac> | remove <vac> | list — recruitment module, per-vacancy jobs + tiering + /status board (owner-only)
     "ticket": (0, None),      # /ticket [list] | open <owner/repo> | <title> [| <body>] [| type: X] [| labels: a, b] | status <ref> | comment <ref> | <text> | close <ref> | sync [ref] — Discord tickets filed as GitHub issues, both ways (owner-only)
+    "triage": (0, None),      # /triage [board] | track <owner/repo> | untrack <owner/repo> | sync <owner/repo> | triage <owner/repo> | queue [owner/repo] | item <owner/repo>#<n> | duplicates <owner/repo> | decisions [owner/repo] | answer <id> <option> | apply <id> — issue triage over tracked GitHub repos (owner-only)
     "drafts": (0, None),      # /drafts [list] | show <n> | post <n> | discard <n> — post-draft review board (owner-only)
     "ideas": (0, None),       # /ideas [list] | add <title> [| <detail>] | show <n> | develop <n> [as goal|draft|mission|park] [in <class>] [when <trigger>] — raw ideas + the development cell (owner-only)
     "day": (0, None),         # /day [show] | tell <text> | yesterday | make | skip | unskip | export — the day record + derivation (owner-only)
@@ -3789,6 +3790,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/ticket [list] | open <owner/repo> | <title> [| <body>] [| type: X] [| labels: a, b] | status <ref> | comment <ref> | <text> | close <ref> | sync [ref]",
               "example": "/ticket open acme/widgets | Widget crashes on launch | it dies when opened",
               "related": "/careers /goals"},
+    "triage": {"what": "issue triage over tracked GitHub repos (autocraft port): Devon mirrors a repo's issues, finds duplicate groups, classifies type + flags, assigns P0–P4 priority and ranks the work, then asks you the scope questions. Duplicates are grouped only on a model verdict; with no model the pairs wait as candidates, never grouped. A scope question you answer take/small-extra/plugin/close/backlog is applied by the stored words — closing a duplicate posts 'Closing as a duplicate of #A.' and closes it, once, the write audit stopping repeats. Without a GitHub credential it answers honestly — run nm connectors connect --name github first. Owner-only.",
+              "usage": "/triage [board] | track <owner/repo> | untrack <owner/repo> | sync <owner/repo> | triage <owner/repo> | queue [owner/repo] | item <owner/repo>#<n> | duplicates <owner/repo> | decisions [owner/repo] | answer <id> <option> | apply <id>",
+              "example": "/triage triage Oluwacutyp/nomorals-2.0",
+              "related": "/ticket /recruit"},
     "drafts": {"what": "the post-draft review board: every draft Devon has queued for you — the weekly content batch, scheduled drafts, anything awaiting a decision — with its virality score, hook type and pillar on a styled card. Reviewing is per-draft: you see the exact draft, then post or discard THAT one (a tap or /drafts post <n> posts the draft you named, never a blind oldest-first pick). Nothing here posts on its own: a draft goes out only on your tap, your /drafts post, or your explicit 'post this' (build-map #43, unchanged). Draft numbers (#n) are the handles from the board — internal ids never print.",
               "usage": "/drafts [list] | show <n> | post <n> | discard <n>",
               "example": "/drafts show 2",
@@ -4997,7 +5002,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
                            "benchmark", "redteam", "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board", "photo", "extensions", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
-                          "balances", "goal", "goals", "careers", "recruit", "ticket", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
+                          "balances", "goal", "goals", "careers", "recruit", "ticket", "triage", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -5268,7 +5273,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "analytics", "airports", "flight", "burn", "share", "arena-research", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
-      "goals", "careers", "recruit", "ticket", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert", "cost", "heal", "tour", "pulse"]),
+      "goals", "careers", "recruit", "ticket", "triage", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
@@ -5752,6 +5757,7 @@ LIST_ONELINERS: dict[str, str] = {
     "careers": "career pipeline: applications by stage, next actions with due dates, stale/overdue called out",
     "recruit": "recruitment: per-vacancy jobs with their own queue, scraper, stats and CV flow — tiered candidates on the /recruit status board",
     "ticket": "ticket relay: Discord tickets filed as GitHub issues, both ways — replies here go to the issue, issue comments come back here",
+    "triage": "issue triage over tracked GitHub repos — mirror, duplicate groups, type + P0–P4, work rank, decisions you answer",
     "drafts": "post drafts awaiting your review: the batch board, per-draft cards, post/discard the one you name",
     "ideas": "raw ideas, grown: capture verbatim, develop into a goal, a draft, a mission, or park with a trigger",
     "day": "your day record: tell it what you did, see the day whole, and make draft posts from it",

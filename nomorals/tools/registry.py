@@ -660,6 +660,7 @@ class ToolRegistry:
             "recruitment",  # per-vacancy recruitment jobs + tiering + /status board (B42)
             "studio_extensions",  # Studio extensions — themes, plug-ins, resource packs (craft-extensions port)
             "ticket_relay",  # Discord tickets ↔ GitHub issues (ticket-relay port)
+            "triage",  # issue triage over tracked GitHub repos (autocraft port)
             "workspace",
             "trading",
             "characters",
