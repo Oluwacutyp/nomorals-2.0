@@ -422,6 +422,11 @@ MODULE_PINS: dict[str, int] = {
     # L2 foundation tool. The registry loads it dynamically by
     # dotted name, never by static import.
     "nomorals.tools.share": 5,
+    # tools/delete_guide is the same shape: a tool *surface* over the
+    # L2 accounts organ (the deletion-runbook registry), not an
+    # L2 foundation tool. The registry loads it dynamically by
+    # dotted name, never by static import.
+    "nomorals.tools.delete_guide": 5,
     # tools/backup is the same shape: it composes the L5 backup organ
     # (coordinator/report) + agents (L5, notifier) + connectors (L5,
     # GitHub) into the two scheduler-internal tick tools. Pinned L5

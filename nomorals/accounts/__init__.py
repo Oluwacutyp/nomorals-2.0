@@ -128,6 +128,22 @@ from .signup_driver import (
     render_attempt_summary,
     render_attempt_progress,
 )
+from .deletion import (
+    DIFFICULTIES,
+    STALE_AFTER_DAYS,
+    DeletionGuide,
+    DeletionStep,
+    DeletionStore,
+    SEEDS,
+    is_stale,
+    parse_delete_request,
+    render_guide,
+    render_walk_step,
+    slugify_service,
+    walk_advance,
+    walk_current,
+    walk_reset,
+)
 
 __all__ = [
     "CredentialVault",
@@ -227,4 +243,18 @@ __all__ = [
     "ALLOWED_TRANSITIONS",
     "render_attempt_summary",
     "render_attempt_progress",
+    "DIFFICULTIES",
+    "STALE_AFTER_DAYS",
+    "DeletionGuide",
+    "DeletionStep",
+    "DeletionStore",
+    "SEEDS",
+    "is_stale",
+    "parse_delete_request",
+    "render_guide",
+    "render_walk_step",
+    "slugify_service",
+    "walk_advance",
+    "walk_current",
+    "walk_reset",
 ]

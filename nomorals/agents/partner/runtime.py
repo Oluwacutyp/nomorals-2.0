@@ -2623,6 +2623,23 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("price watch reply send failed: %s", exc)
                 return
+            # AccountKiller (#28): "how do I delete my X account?"
+            # → the runbook; "close my X" → walk it with the owner.
+            # Owner only, non-slash, never eats chat.
+            try:
+                delete_reply = self._delete_guide_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("delete guide hook failed")
+                delete_reply = None
+            if delete_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, delete_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      delete_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("delete guide reply send failed: %s", exc)
+                return
             try:
                 snapshot_reply = self._snapshot_hook(message)
             except Exception:  # noqa: BLE001 - the hook must never eat chat
@@ -6979,6 +6996,56 @@ class PartnerRuntime(
         except Exception:  # noqa: BLE001 - media failure is text-only
             _log.debug("price chart send failed", exc_info=True)
             return False
+
+    def _delete_guide_hook(self, message: ChatMessage) -> str | None:
+        """AccountKiller (#28): "how do I delete my X account?" → the
+        runbook; "close my X" → walk it with the owner; a bare "done"
+        / "next" advances the walk in progress.
+
+        Returns a reply string when a deletion intent fired, else
+        None. Owner only, non-slash, never eats chat. Never raises.
+        """
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        from ...accounts.deletion import (
+            DeletionStore,
+            parse_delete_request,
+            render_guide,
+            walk_advance,
+            walk_current,
+        )
+        try:
+            settings = getattr(self.context, "settings", None)
+            home = getattr(settings, "home", None) if settings else None
+            store = (DeletionStore(str(home)) if home
+                     else DeletionStore(""))
+            parsed = parse_delete_request(text, store.known_names())
+            if parsed is None:
+                # A bare "done" / "next" advances the walk in progress.
+                if text.lower() not in ("done", "next", "next step"):
+                    return None
+                guide = store.active_walk()
+                if guide is None:
+                    return None
+                return walk_advance(store, guide)
+            guide = store.get(parsed["service"])
+            if guide is None:
+                if not parsed.get("has_account_word"):
+                    return None
+                return (
+                    f"I don't have a deletion guide for "
+                    f"{parsed['service']} yet — deletion flows churn, "
+                    "so I won't invent one. Tell me the service and "
+                    "I'll look into adding it."
+                )
+            if parsed["kind"] == "walk":
+                store.reset_walk(guide.service)
+                return walk_current(store, guide)
+            return render_guide(guide)
+        except Exception as exc:  # noqa: BLE001 - the hook must never eat chat
+            record_failure("runtime.PartnerRuntime._delete_guide_hook", exc)
+            return None
 
     def _track_hook(self, message: ChatMessage) -> str | None:
         """Build-map #71: "track LOS LHR flights for me" → price watcher.
