@@ -234,6 +234,20 @@ class UnifiedScheduler:
         atomic_write_json(self.queue_path,
                           {"version": 1, "missions": self._missions})
 
+    def refresh(self) -> None:
+        """Re-read the durable mission queue from disk.
+
+        The in-memory list is a snapshot from construction: a second
+        runtime sharing the queue file may have scheduled missions
+        since. Producers call this before deduping, so they see the
+        durable truth instead of scheduling a duplicate of a mission
+        another stack already persisted. (``run_due`` deliberately
+        does NOT refresh: a mission marked ``running`` mid-crash is
+        retried by design — at-least-once — and refreshing there
+        would only re-read the same running rows.)
+        """
+        self._load()
+
     # ── registration ─────────────────────────────────────────────
 
     def register_organ_tick(self, name: str, fn: Callable[..., Any],

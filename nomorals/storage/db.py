@@ -1409,6 +1409,38 @@ def ensure_wal_checkpoint_job(scheduler: Any, *,
         return None
 
 
+def remove_wal_checkpoint_job(scheduler: Any) -> bool:
+    """Remove the durable WAL-checkpoint job by name; idempotent.
+
+    The migration companion to :func:`ensure_wal_checkpoint_job`:
+    when the checkpoint moves onto the unified scheduler as an organ
+    tick, the old durable job must go — otherwise the
+    ``__wal_checkpoint__`` tool keeps firing from the live scheduler
+    alongside the unified tick and the checkpoint runs twice an hour.
+    Returns True when a job was actually removed, False when there
+    was nothing to remove (or no scheduler). Best-effort, never
+    raises.
+    """
+    if scheduler is None:
+        return False
+    try:
+        for job in scheduler.list_jobs() or []:
+            if isinstance(job, dict):
+                name, job_id = job.get("name"), job.get("id")
+            else:
+                name = getattr(job, "name", None)
+                job_id = getattr(job, "id", None)
+            if name != WAL_CHECKPOINT_JOB:
+                continue
+            try:
+                return bool(scheduler.remove(job_id))
+            except Exception:  # noqa: BLE001 - removal is best-effort
+                return False
+        return False
+    except Exception:  # noqa: BLE001 - removal is best-effort
+        return False
+
+
 def _fmt_bytes(value: Any) -> str:
     try:
         num = float(value or 0)

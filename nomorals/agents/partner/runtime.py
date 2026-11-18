@@ -4323,21 +4323,24 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "failure loop job not registered: %s", exc)
-                # WAL checkpoint: one durable "wal checkpoint tick"
-                # job (every 1h) draining the -wal file — PASSIVE
-                # first (never blocks), TRUNCATE only when no reader
-                # pins the log.  Before this wiring nobody called
-                # checkpoint() on a schedule, so the WAL sat at its
-                # 64MB cap while minute-long reads held snapshots and
-                # every new connection paid the walk.  Idempotent;
-                # best-effort.
+                # WAL checkpoint (audit gap R1-11 remainder): the old
+                # durable "wal checkpoint tick" job is RETIRED here —
+                # the hourly checkpoint now runs as the
+                # "wal-checkpoint" organ tick on the unified scheduler
+                # (registered on the boot-built stack below), so the
+                # -wal file still drains hourly (PASSIVE first, never
+                # blocks; TRUNCATE only when no reader pins the log)
+                # but through exactly one firing path. Leaving the
+                # durable job registered would fire the
+                # __wal_checkpoint__ tool alongside the unified tick.
+                # Idempotent; best-effort.
                 try:
-                    from ...storage.db import ensure_wal_checkpoint_job
+                    from ...storage.db import remove_wal_checkpoint_job
 
-                    ensure_wal_checkpoint_job(self._scheduler)
+                    remove_wal_checkpoint_job(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
-                        "wal checkpoint job not registered: %s", exc)
+                        "wal checkpoint job not retired: %s", exc)
                 # Calibration loop (audit gap R1-9): one durable
                 # "calibration loop tick" job (every 1h) replaying
                 # trajectory rows into a fresh calibration store,
@@ -4380,6 +4383,43 @@ class PartnerRuntime(
                     self.context.extras["autonomy_stack"] = (
                         self._autonomy_stack)
                     ensure_unified_scheduler_job(self._scheduler)
+                    # First live load on the unified scheduler (audit
+                    # gap R1-11 remainder): the WAL checkpoint tick
+                    # migrated off its retired durable job, the
+                    # notify_owner mission handler, and the
+                    # commitment-producer tick — due commitments
+                    # become durable nudge missions instead of
+                    # sitting unread in the ledger. All three ride
+                    # the shared stack, so they survive across ticks
+                    # and fire through the 5m driver above.
+                    from ...autonomy import missions as autonomy_missions
+                    from ...commitments.ledger import CommitmentLedger
+                    from ..notifier import Notifier
+
+                    _db = getattr(self.context, "db", None)
+                    if _db is None:
+                        from ...storage.db import Database
+
+                        _ws = getattr(getattr(self.context, "settings",
+                                              None),
+                                      "workspace_dir", ".")
+                        _db = Database(_ws or ".")
+
+                    def _notify_owner(kind: str, title: str,
+                                      body: str) -> Any:
+                        return Notifier(
+                            self.context,
+                            gateway=self.gateway).publish(
+                            kind, title, body)
+
+                    autonomy_missions.register_boot_autonomy(
+                        self._autonomy_stack,
+                        db=_db,
+                        ledger=CommitmentLedger(str(
+                            self.context.settings.home_path
+                            / "data" / "commitments.json")),
+                        notify_fn=_notify_owner,
+                        scheduler=self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning(
                         "unified scheduler job not registered: %s", exc)
