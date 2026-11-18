@@ -13,9 +13,12 @@ renderer:
 
 - **design scenes** (diagram / equation / chart) render through the
   motion-studio frame function — CPU-only, always available;
-- **HTML scenes** render through the browser organ (``Tab.evaluate`` +
-  ``Tab.screenshot_bytes``): the page is seeked to ``t`` with its own
-  seek hook and captured once per frame.
+- **HTML scenes** render through a real headless-Chromium tab
+  (``RenderedTab.evaluate`` + ``RenderedTab.screenshot_bytes`` from
+  the browser organ): the page is seeked to ``t`` with its own seek
+  hook and captured once per frame. A plain raw-HTTP tab cannot
+  render a page at all — it has neither method — so the HTML path
+  never opens one.
 
 The code rung is co-equal beside the diffusion rung (have-it-all): code
 for crisp, exact scenes — diagrams, maps, routes, text stories, data
@@ -60,6 +63,11 @@ __all__ = [
 CODE_DEFAULT_SIZE: tuple[int, int] = (1280, 720)
 CODE_DEFAULT_FPS = 24.0
 CODE_SESSION_NAME = "codevideo"
+
+#: Largest HTML scene accepted for capture (bytes of the source
+#: string). A scene bigger than this is refused before any browser
+#: work — a hostile or accidental giant page must not hang the render.
+_HTML_MAX_BYTES = 2_000_000
 
 #: JS evaluated once per frame in an HTML scene, with the frame time ``t``
 #: (seconds) as its argument — the same function-expression + arg idiom
@@ -166,8 +174,53 @@ def _render_design_scene(design: dict[str, Any], out: Path, *,
                                        "reason": ""}}
 
 
-def _open_browser_session(factory: Callable | None):
-    """A browser session for HTML capture — injected or the real organ."""
+class _RenderedSession:
+    """A session-shaped handle over one real headless-Chromium tab.
+
+    The browser organ's rendered tabs live outside ``SessionHandle``
+    (``BrowserService.open_rendered_tab``), but the video path only
+    needs ``open_tab`` / ``close`` — this adapter gives the rendered
+    tab that shape so ``_render_html_scene`` needs no second path.
+    The viewport is the scene size, so frames render at the scene
+    size natively instead of the organ's 1366x768 default.
+    """
+
+    def __init__(self, service: Any, size: tuple[int, int]) -> None:
+        self._service = service
+        self._size = (int(size[0]), int(size[1]))
+        self._tab: Any = None
+
+    def open_tab(self, url: str = "") -> Any:
+        if self._tab is not None:
+            raise VideogenError(
+                "code-video HTML capture opens exactly one tab")
+        self._tab = self._service.open_rendered_tab(
+            CODE_SESSION_NAME, url,
+            stealth={"viewport": {"width": self._size[0],
+                                  "height": self._size[1]}},
+            retries=0)
+        return self._tab
+
+    def close(self) -> None:
+        tab, self._tab = self._tab, None
+        if tab is not None:
+            with contextlib.suppress(Exception):
+                self._service.close_rendered_tab(tab.tab_id)
+        with contextlib.suppress(Exception):
+            self._service.shutdown()
+
+
+def _open_browser_session(factory: Callable | None, *,
+                          size: tuple[int, int] | None = None):
+    """A browser session for HTML capture — injected or the real organ.
+
+    The production path opens a REAL headless-Chromium tab through
+    ``BrowserService.open_rendered_tab`` — never a plain raw-HTTP tab,
+    which has no ``evaluate`` and no ``screenshot_bytes`` and cannot
+    render a page at all. Opening the tab starts the playwright
+    driver, which self-provisions (``browser.provision``) when the
+    engine is missing on the host.
+    """
     if factory is not None:
         try:
             return factory()
@@ -176,17 +229,14 @@ def _open_browser_session(factory: Callable | None):
                 "code-video HTML capture needs a headless browser: "
                 f"{exc}") from exc
     try:
-        from ...browser.service import BrowserError, BrowserService
+        from ...browser.service import BrowserService
     except Exception as exc:  # noqa: BLE001 - wrapped, never hidden
         raise VideogenError(
             "code-video HTML capture needs the browser organ: "
             f"{exc}") from exc
     try:
         svc = BrowserService()
-        try:
-            return svc.get_session(CODE_SESSION_NAME)
-        except BrowserError:
-            return svc.open_session(CODE_SESSION_NAME)
+        return _RenderedSession(svc, size or CODE_DEFAULT_SIZE)
     except Exception as exc:  # noqa: BLE001 - wrapped, never hidden
         raise VideogenError(
             "code-video HTML capture needs a headless browser: "
@@ -210,12 +260,18 @@ def _render_html_scene(scene: dict[str, Any], out: Path, *,
     if not isinstance(html, str) or not html.strip():
         raise VideogenError(
             "HTML scene needs a non-empty 'html' string")
+    html_bytes = len(html.encode("utf-8"))
+    if html_bytes > _HTML_MAX_BYTES:
+        raise VideogenError(
+            "HTML scene is too large for capture: "
+            f"{html_bytes} bytes (max {_HTML_MAX_BYTES})")
     seek_js = str(scene.get("seek") or DEFAULT_SEEK_JS)
     n_frames = max(1, int(round(duration * fps)))
     width, height = int(size[0]), int(size[1])
 
-    session = _open_browser_session(browser_session_factory)
+    session = _open_browser_session(browser_session_factory, size=size)
     tab = None
+    frame_size: list[int] | None = None
     with tempfile.NamedTemporaryFile(
             "w", suffix=".html", dir=str(out.parent), delete=False,
             encoding="utf-8") as tmp:
@@ -232,6 +288,7 @@ def _render_html_scene(scene: dict[str, Any], out: Path, *,
                 f"{exc}") from exc
 
         def _frame(i: int, t: float) -> Image.Image:
+            nonlocal frame_size
             try:
                 tab.evaluate(seek_js, t)
                 raw = tab.screenshot_bytes()
@@ -245,6 +302,10 @@ def _render_html_scene(scene: dict[str, Any], out: Path, *,
                 raise VideogenError(
                     "code-video HTML capture returned no image at frame "
                     f"{i}: {exc}") from exc
+            if frame_size is None:
+                # Native size of the first raw capture — proof the
+                # browser rendered at the scene size.
+                frame_size = [img.width, img.height]
             if img.size != (width, height):
                 img = img.resize((width, height))
             return img
@@ -264,6 +325,18 @@ def _render_html_scene(scene: dict[str, Any], out: Path, *,
             "fps": float(fps), "duration": float(duration),
             "path": str(out), "contact_sheet": str(sheet),
             "render_hash": render_hash, "deterministic": True,
+            "capture": {
+                # "real" = a live headless-Chromium tab rendered the
+                # page; "injected" = a factory-supplied session (tests)
+                # — never labelled real when it was not.
+                "browser": ("real" if browser_session_factory is None
+                            else "injected"),
+                "engine": ("playwright-chromium"
+                           if browser_session_factory is None
+                           else "factory"),
+                "viewport": [width, height],
+                "frame_size": frame_size or [width, height],
+            },
             "narration": narration or {"status": "off", "backend": "",
                                        "segments": 0, "audio": "",
                                        "reason": ""}}
@@ -284,7 +357,13 @@ def render_code_scene(scene: dict[str, Any],
     "equation" | "chart", ...}``) or an HTML scene (``{"html": ...}``).
     Returns the render record — ``path``, ``contact_sheet``,
     ``render_hash`` (identical across re-renders of the same scene),
-    ``frames`` / ``fps`` / ``duration``, plus ``narration``.
+    ``frames`` / ``fps`` / ``duration``, plus ``narration``. HTML
+    scenes also carry ``capture`` — ``browser`` (``"real"`` when a
+    live headless-Chromium tab rendered the page, ``"injected"`` for
+    a factory-supplied session), ``engine``, the ``viewport`` the
+    browser rendered at, and the native ``frame_size`` of the first
+    capture. An HTML scene larger than ``_HTML_MAX_BYTES`` is
+    refused before any browser work.
 
     Narration is ON by default — the video speaks its own script
     (the title and the labels of each build step, spoken through the

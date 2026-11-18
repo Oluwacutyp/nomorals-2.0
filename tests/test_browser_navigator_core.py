@@ -156,6 +156,12 @@ def test_service_gate_provisions_before_the_hint(monkeypatch):
     monkeypatch.setattr(
         "nomorals.browser.provision.ensure_playwright",
         lambda: calls.append(True) or False)
+    # The gate raises on the import check, not on the probes above —
+    # and Playwright is installed on this box (lane 82 provisioned
+    # the real browser rung), so the absence it pins must be faked
+    # explicitly instead of assumed from the environment.
+    monkeypatch.setattr(
+        "importlib.util.find_spec", lambda *args, **kwargs: None)
     with pytest.raises(service.BrowserError) as err:
         service._require_playwright_sync()
     assert calls == [True]  # provisioning was attempted first
@@ -167,6 +173,12 @@ def test_cdp_driver_provisions_before_the_honest_error(monkeypatch):
 
     monkeypatch.setattr(
         "nomorals.browser.provision.ensure_playwright", lambda: False)
+    # CdpDriver only reaches the provision branch when the sync-API
+    # import fails — and Playwright is installed on this box (lane 82
+    # provisioned the real browser rung), so the absence it pins must
+    # be faked explicitly instead of assumed from the environment.
+    # A None sys.modules entry makes the import raise ImportError.
+    monkeypatch.setitem(sys.modules, "playwright.sync_api", None)
     with pytest.raises(RuntimeError) as err:
         CdpDriver()
     assert "self-provisioning" in str(err.value)

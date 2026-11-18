@@ -138,6 +138,16 @@ def _record(site: str, exc: BaseException) -> None:
         pass
 
 
+def _is_pep668_refusal(cmd: list[str], tail: str) -> bool:
+    """True when a pip install step was refused by PEP 668 (Debian's
+    externally-managed environment) and a --break-system-packages
+    retry has not been tried yet."""
+    return (len(cmd) >= 5 and cmd[1] == "-m" and cmd[2] == "pip"
+            and cmd[3] == "install"
+            and "--break-system-packages" not in cmd
+            and "externally-managed" in tail)
+
+
 def ensure_playwright(*, runner: Callable[..., Any] | None = None,
                       profile_kind: str | None = None) -> bool:
     """Make the browser engine usable, installing it when missing.
@@ -184,16 +194,38 @@ def ensure_playwright(*, runner: Callable[..., Any] | None = None,
             _record("browser.provision.playwright", exc)
             return False
         if getattr(proc, "returncode", 1) != 0:
-            tail = (getattr(proc, "stderr", "")
-                    or getattr(proc, "stdout", "") or "")[-300:]
-            _log.info("browser engine self-provision step failed "
-                      "(%s rc=%s): %s", cmd[2:],
-                      getattr(proc, "returncode", "?"), tail)
-            _record("browser.provision.playwright",
-                    RuntimeError(
-                        f"install step {' '.join(cmd[1:3])} rc="
-                        f"{getattr(proc, 'returncode', '?')}: {tail}"))
-            return False
+            full = (getattr(proc, "stderr", "")
+                    or getattr(proc, "stdout", "") or "")
+            # The marker can sit before the last 300 chars (pip prints
+            # its PEP 668 hint after it), so the retry check reads the
+            # full output while the log keeps the truncated tail.
+            tail = full[-300:]
+            if _is_pep668_refusal(cmd, full):
+                # Debian (PEP 668) refuses pip installs into the system
+                # interpreter; one retry with --break-system-packages —
+                # the install this seam already intended, made to work
+                # where the OS marks the environment externally managed.
+                retry = [cmd[0], "-m", "pip", "install",
+                         "--break-system-packages", "playwright"]
+                try:
+                    proc = run(retry, timeout_s)
+                except Exception as exc:  # noqa: BLE001 - as above
+                    _log.info("browser engine self-provision step failed "
+                              "to run (%s): %s", retry[2:], exc)
+                    _record("browser.provision.playwright", exc)
+                    return False
+                tail = (getattr(proc, "stderr", "")
+                        or getattr(proc, "stdout", "") or "")[-300:]
+                cmd = retry
+            if getattr(proc, "returncode", 1) != 0:
+                _log.info("browser engine self-provision step failed "
+                          "(%s rc=%s): %s", cmd[2:],
+                          getattr(proc, "returncode", "?"), tail)
+                _record("browser.provision.playwright",
+                        RuntimeError(
+                            f"install step {' '.join(cmd[1:3])} rc="
+                            f"{getattr(proc, 'returncode', '?')}: {tail}"))
+                return False
     ok = playwright_usable()
     _log.info("browser engine self-provision %s",
               "succeeded" if ok else
