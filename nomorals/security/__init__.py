@@ -110,3 +110,25 @@ __all__ += [
     "ExposureScanner", "Fetcher", "FetchResult",
     "ScanBudgetExceeded", "scan_url",
 ]
+
+# Tier 3: security -> the multi-engine verdict organ
+# (52-websites #24, VirusTotal shape, Devon-local): one
+# artefact in, five local engines, a verdict record with
+# per-engine results.  See security/verdict.py.
+from .verdict import (  # noqa: E402 - section import, this file's convention
+    EngineResult,
+    ScanSubject,
+    VerdictReport,
+    VerdictStore,
+    format_verdict_reply,
+    verdict_for,
+)
+
+__all__ += [
+    "EngineResult",
+    "ScanSubject",
+    "VerdictReport",
+    "VerdictStore",
+    "format_verdict_reply",
+    "verdict_for",
+]
