@@ -72,6 +72,14 @@ class FollowedStory:
     status: str = ""
     total_chapters: int = 0
     cover_url: str = ""
+    #: rights label copied from the source record at follow time
+    #: (e.g. "Public domain (US)" for Gutenberg) — the basis is
+    #: labelled on the record, never adjudicated per title.
+    licence: str = ""
+    #: delivery formats the source offers for this work (Gutendex
+    #: labels, e.g. ["Plain text", "EPUB", "HTML"]); [] when the
+    #: source declares none.
+    formats: list[str] = field(default_factory=list)
     # reading state
     current_chapter: int = 0
     current_offset: int = 0
@@ -349,13 +357,17 @@ class StoryReader:
             story.author = meta.author or story.author
             story.total_chapters = meta.total_chapters or story.total_chapters
             story.status = meta.status or story.status
+            story.licence = meta.licence or story.licence
+            if meta.formats:
+                story.formats = list(meta.formats)
         else:
             story = FollowedStory(
                 slug=slug, title=meta.title, url=meta.url,
                 source=adapter.name, author=meta.author,
                 synopsis=meta.synopsis, genres=meta.genres,
                 status=meta.status, total_chapters=meta.total_chapters,
-                cover_url=meta.cover_url, followed_at=_now())
+                cover_url=meta.cover_url, followed_at=_now(),
+                licence=meta.licence, formats=list(meta.formats))
         self._save(story)
         _log.info("following story %s (%s)", slug, adapter.name)
         # The trigger (see the module docstring): every follow path —
@@ -408,6 +420,7 @@ class StoryReader:
                 "slug": story.slug, "title": story.title,
                 "author": story.author, "source": story.source,
                 "status": story.status,
+                "licence": story.licence, "formats": list(story.formats),
                 "progress": f"{story.current_chapter}/{story.total_chapters or '?'}",
                 "current_chapter": story.current_chapter,
                 "total_chapters": story.total_chapters,
@@ -535,6 +548,7 @@ class StoryReader:
             "slug": slug, "title": story.title,
             "chapter": ch.number, "chapter_title": ch.title,
             "words": ch.words, "source": source_note,
+            "licence": story.licence, "formats": list(story.formats),
             "prev": bool(ch.prev_url), "next": bool(ch.next_url),
             "text": ch.text[:12000],
             "truncated": len(ch.text) > 12000,
@@ -716,6 +730,10 @@ class StoryReader:
                 meta = adapter.novel(story.url)
                 if meta.total_chapters:
                     story.total_chapters = meta.total_chapters
+                if meta.licence:
+                    story.licence = meta.licence
+                if meta.formats:
+                    story.formats = list(meta.formats)
             except SourceError as _exc:
                 record_failure("reader.sync", _exc)
             self._save(story)
@@ -778,6 +796,10 @@ class StoryReader:
                 story.total_chapters = meta.total_chapters
             if meta.status:
                 story.status = meta.status
+            if meta.licence:
+                story.licence = meta.licence
+            if meta.formats:
+                story.formats = list(meta.formats)
         except SourceError as exc:
             _log.warning("ingest %s: meta refresh failed: %s", slug, exc)
         try:

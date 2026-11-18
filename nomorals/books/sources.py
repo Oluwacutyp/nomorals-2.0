@@ -190,7 +190,9 @@ BOOK_SOURCE_BY_DOMAIN: dict[str, str] = {
 }
 
 #: The dedicated-adapter search pool, in search_all's day-one order.
-#: The working pool is ``ADAPTERS`` (``search_all`` iterates it); this
+#: The working pool is ``ADAPTERS`` (``search_all`` iterates it) plus
+#: the lazily-joined Gutenberg adapter (see :func:`_gutenberg_adapter`
+#: — descriptors imports this module, so the join is lazy); this
 #: tuple is the declared order — the two must move together when a
 #: probe lands for a new source.
 #: C4 verdict (2026-11-12, census §10 item 5 — the last census item):
@@ -201,10 +203,20 @@ BOOK_SOURCE_BY_DOMAIN: dict[str, str] = {
 #: owner has not provisioned, and webnovel's search page is live but
 #: its link-extraction shape is unverified.  The evidence and the named
 #: next probe for each live in the descriptor table's notes
-#: (books/descriptors.py).  Do NOT extend this tuple until a probe
-#: lands for that source.
+#: (books/descriptors.py).
+#: 52-websites #10 (2026-11-17) SUPERSEDES the C4 verdict for
+#: gutenberg ONLY: the re-probe still could not show Gutendex
+#: answering from this box (DNS → CGNAT 198.18.76.133, reads time
+#: out even at 30s; gutenberg.org itself in a maintenance window),
+#: but the adapter joins the pool with the failure cost engineered
+#: away — 8s search timeout, 15-minute cooldown after a failed
+#: search, last in pool order — so a down Gutendex costs at most
+#: one short bounded wait per cooldown window instead of 30s on
+#: every search.  The other four stay out until their probes land.
+#: Do NOT extend this tuple for them until then.
 BOOK_SEARCH_SOURCES: tuple[str, ...] = (
     "freewebnovel", "novelfull", "royalroad", "pandanovel",
+    "gutenberg",
 )
 
 
@@ -343,7 +355,8 @@ def _book_error_evidence(exc: Exception) -> tuple[str, str]:
         return "blocked", "bot_block"
     msg = str(exc or "").lower()
     if ("api needs" in msg or "not mapped" in msg
-            or "cannot parse" in msg or "no plain-text format" in msg):
+            or "cannot parse" in msg or "no plain-text format" in msg
+            or "cooling down" in msg):
         return "none", ""
     if ("no chapter body found" in msg
             or "could not isolate chapter prose" in msg
@@ -588,6 +601,10 @@ class StoryMeta:
     cover_url: str = ""
     updated: str = ""
     licence: str = ""  # rights label, recorded on every fetch
+    #: delivery formats the source offers for this work (Gutendex
+    #: format labels, e.g. ["Plain text", "EPUB", "HTML"]); [] when
+    #: the source does not declare any.
+    formats: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -1601,6 +1618,33 @@ def _make_adapters() -> list[SourceAdapter]:
 
 ADAPTERS: list[SourceAdapter] = _make_adapters()
 
+#: The search-pool Gutenberg adapter, cached per process so its
+#: search cooldown survives across searches (52-websites #10).
+#: None until first built; a failed build stays None and search_all
+#: simply runs without Gutenberg — the pool never breaks on it.
+_GUTENBERG_POOL_ADAPTER: Any | None = None
+
+
+def _gutenberg_adapter() -> Any | None:
+    """The Gutenberg adapter for the search pool, lazily imported.
+
+    A top-level import would be circular (descriptors imports this
+    module for the adapter base), so the join happens here, at
+    first use — long after both modules are loaded.  The returned
+    instance is the ONE search-pool Gutenberg: its cooldown state
+    is per-process, shared by every search.  Direct-URL paths keep
+    using :func:`adapter_for_url` (fresh descriptor instances),
+    which are never cooldown-gated.  Never raises."""
+    global _GUTENBERG_POOL_ADAPTER
+    if _GUTENBERG_POOL_ADAPTER is None:
+        try:
+            from .descriptors import GutenbergAdapter
+            _GUTENBERG_POOL_ADAPTER = GutenbergAdapter()
+        except Exception as exc:  # noqa: BLE001 - pool degrades, never breaks
+            record_failure("sources.gutenberg_adapter", exc)
+            return None
+    return _GUTENBERG_POOL_ADAPTER
+
 
 def adapter_for_url(url: str,
                     source_registry: Any = None) -> SourceAdapter:
@@ -1660,8 +1704,17 @@ def search_all(query: str, *, limit: int = 10,
     global adapters keep no stale registry) and ordered
     outcome-aware via :func:`ordered_book_adapters`: with zero
     learned state the order, and therefore the result, is exactly
-    the pre-#89 behaviour."""
+    the pre-#89 behaviour.
+
+    Gutenberg joins the pool lazily (52-websites #10), LAST, via
+    :func:`_gutenberg_adapter`: the proven four answer first and
+    ``search_all`` short-circuits once the limit is hit, so a
+    Gutenberg-only title is the only case that pays Gutenberg's
+    (bounded — 8s + cooldown) failure cost."""
     pool = list(ADAPTERS)
+    gutenberg = _gutenberg_adapter()
+    if gutenberg is not None:
+        pool.append(gutenberg)
     previous: list[tuple[SourceAdapter, Any]] = []
     if source_registry is not None:
         pool = ordered_book_adapters(pool, source_registry)

@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
@@ -138,10 +139,21 @@ def _descriptor_table() -> list[SourceDescriptor]:
                   "ebooks), not by generic HTML scraping. C4 probe "
                   "2026-11-12: Gutendex API down (HTTP 503 + 30s read "
                   "timeouts; gutenberg.org itself HTTP 200) — search not "
-                  "verifiable live today. Do NOT add gutenberg to "
-                  "BOOK_SEARCH_SOURCES until a re-probe shows Gutendex "
-                  "answering; wiring it now would make every search pay "
-                  "a 30s timeout against a down API.",
+                  "verifiable live today. Re-probe 2026-11-17 (52-websites "
+                  "#10): Gutendex still unreachable from this box — DNS "
+                  "resolves to CGNAT 198.18.76.133 and reads time out even "
+                  "at 30s (box-egress-shaped, NOT proven down); "
+                  "gutenberg.org itself serves a genuine 'Temporarily "
+                  "Down for Maintenance' 503 page. The C4 'Do NOT add "
+                  "gutenberg to BOOK_SEARCH_SOURCES' is SUPERSEDED for "
+                  "gutenberg only by the #10 build: the adapter joins "
+                  "the search pool with the failure cost engineered away "
+                  "(8s search timeout, 15-minute cooldown after a failed "
+                  "search, last in pool order), so a down Gutendex costs "
+                  "at most one short bounded wait per cooldown window "
+                  "instead of 30s on every search. Live proof (a real "
+                  "search succeeding) is still owed on a host with real "
+                  "egress.",
         ),
         SourceDescriptor(
             id="scribblehub",
@@ -598,19 +610,74 @@ class GutenbergAdapter(SourceAdapter):
     """Project Gutenberg via the Gutendex catalogue API + plain-text
     ebooks. Public domain. Chapters = the book's own chapter splits
     (``library.split_chapters``); a book with no detectable chapters
-    is one chapter."""
+    is one chapter.
+
+    Failure discipline (52-websites #10, superseding the C4
+    not-wired verdict for gutenberg only): Gutendex is a
+    community-run API with no SLA and this box's egress to it is
+    unreliable (CGNAT blackhole + Gutenberg maintenance windows),
+    so a catalogue *search* — the speculative path — pays at most
+    one short bounded wait: an 8s timeout, then a 15-minute
+    cooldown during which search fails fast with an honest
+    message instead of burning another timeout. Direct-URL paths
+    (``novel`` / ``fetch_chapter`` — the owner pasted the URL or
+    followed a found hit) are never cooldown-gated."""
 
     name = "gutenberg"
     domains = ("gutenberg.org", "www.gutenberg.org")
     verified = True
     _API = "https://gutendex.com/books"
+    #: catalogue search is the speculative path: fail fast.
+    _SEARCH_TIMEOUT_S = 8.0
+    #: after a failed search, skip the API for this long.
+    _SEARCH_COOLDOWN_S = 900.0
 
-    def _api(self, url: str) -> dict[str, Any]:
+    #: Gutendex format keys → the label shown on the catalogue
+    #: record, in display order (canonical first).
+    _FORMAT_LABELS: tuple[tuple[str, str], ...] = (
+        ("text/plain", "Plain text"),
+        ("text/html", "HTML"),
+        ("application/epub+zip", "EPUB"),
+        ("application/x-mobipocket-ebook", "Kindle"),
+        ("application/pdf", "PDF"),
+    )
+
+    def __init__(self, fetcher: Fetcher | None = None) -> None:
+        super().__init__(fetcher)
+        #: monotonic deadline of the current search cooldown (0 = none)
+        self._search_down_until: float = 0.0
+
+    def _api(self, url: str, *, timeout: float = 30.0) -> dict[str, Any]:
         req = urllib.request.Request(url, headers={
             "User-Agent": "Devon-BookForge/1.0 (public-domain reader)",
             "Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=30) as resp:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8", "replace"))
+
+    @classmethod
+    def _format_labels(cls, formats: dict[str, Any]) -> list[str]:
+        """Friendly format labels for a Gutendex ``formats`` map.
+
+        Matches on key prefix so ``text/plain; charset=utf-8`` and
+        ``text/plain; charset=us-ascii`` both read 'Plain text';
+        labels come out once each, in canonical display order."""
+        out: list[str] = []
+        keys = list((formats or {}).keys())
+        for prefix, label in cls._FORMAT_LABELS:
+            if any(k.startswith(prefix) for k in keys):
+                out.append(label)
+        return out
+
+    def _search_cooled_down(self) -> str:
+        """Non-empty reason when search is inside its cooldown."""
+        remaining = self._search_down_until - time.monotonic()
+        if remaining <= 0:
+            return ""
+        return (
+            "gutenberg: Gutendex unreachable — search cooling down "
+            f"for {int(remaining // 60)}m {int(remaining % 60)}s more "
+            "(a failed search pauses it for 15 minutes); paste the "
+            "gutenberg.org/ebooks/<id> URL directly to fetch anyway")
 
     def _book(self, book_id: int) -> dict[str, Any]:
         return self._api(f"{self._API}/{book_id}")
@@ -648,20 +715,30 @@ class GutenbergAdapter(SourceAdapter):
         return raw
 
     def search(self, query: str, *, limit: int = 10) -> list[SearchHit]:
+        cooled = self._search_cooled_down()
+        if cooled:
+            raise SourceError(cooled)
         try:
             data = self._api(
                 f"{self._API}?search={urllib.parse.quote_plus(query)}"
-                f"&page_size={max(1, min(limit, 25))}")
+                f"&page_size={max(1, min(limit, 25))}",
+                timeout=self._SEARCH_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001 - network, honest
+            self._search_down_until = (
+                time.monotonic() + self._SEARCH_COOLDOWN_S)
             raise SourceError(f"gutenberg search failed: {exc}") from exc
+        self._search_down_until = 0.0
         out = []
         for book in data.get("results", [])[:limit]:
             authors = ", ".join(
                 a.get("name", "") for a in book.get("authors", []))
+            count = book.get("download_count")
             out.append(SearchHit(
                 title=book.get("title", "Unknown"),
                 url=f"https://www.gutenberg.org/ebooks/{book.get('id')}",
-                source=self.name, author=authors))
+                source=self.name, author=authors,
+                snippet=(f"{count} downloads" if isinstance(count, int)
+                         else "")))
         return out
 
     def novel(self, url: str) -> StoryMeta:
@@ -681,7 +758,8 @@ class GutenbergAdapter(SourceAdapter):
             url=f"https://www.gutenberg.org/ebooks/{book_id}",
             source=self.name, author=authors,
             synopsis="; ".join(subjects),
-            licence="Public domain (US)")
+            licence="Public domain (US)",
+            formats=self._format_labels(book.get("formats") or {}))
 
     def chapter_list(self, novel_url: str, *,
                      limit: int = 0) -> list[tuple[int, str, str]]:

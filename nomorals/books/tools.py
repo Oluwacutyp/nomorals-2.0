@@ -244,15 +244,16 @@ def register(registry: Any) -> None:
     @registry.register(
         "story_search",
         description=(
-            "Search webnovel archives (freewebnovel, novelfull, royalroad) "
-            "for a story by title. Returns matches with URLs — follow one "
-            "with story_follow."
+            "Search story archives for a story by title — webnovels "
+            "(freewebnovel, novelfull, royalroad) and public-domain "
+            "books (Project Gutenberg, via the Gutendex catalogue). "
+            "Returns matches with URLs — follow one with story_follow."
         ),
         capability=Capability.NET_OUT,
         parameters={
             "query": "str — story title to search",
             "limit": "int (optional, 10) — max hits",
-            "sources": "str (optional) — comma list: freewebnovel,novelfull,royalroad",
+            "sources": "str (optional) — comma list: freewebnovel,novelfull,royalroad,gutenberg",
         },
     )
     def story_search(query: str, *, limit: int = 10,
@@ -291,8 +292,9 @@ def register(registry: Any) -> None:
     @registry.register(
         "story_follow",
         description=(
-            "Follow a webnovel: give its archive URL (or just the title — "
-            "Devon searches the verified archives). Following is a "
+            "Follow a story: give its archive URL (or just the title — "
+            "Devon searches the verified archives, including Project "
+            "Gutenberg's public-domain catalogue). Following is a "
             "trigger: she immediately starts reading it herself — "
             "fetching every chapter into its library and digesting "
             "them into the story bible (the reading engine consumes "
