@@ -145,10 +145,16 @@ class TestDedupePlan(unittest.TestCase):
 
 class TestPrune(unittest.TestCase):
     def setUp(self) -> None:
-        N._LAST_PRUNE_NOTIFICATIONS_MONO = 0.0  # noqa: SLF001 - test gate reset
+        # Gate open at start.  0.0 only reads as "long ago" once the
+        # box's monotonic clock has passed the hourly interval — within
+        # the first hour after a boot/restart (monotonic() < 3600) the
+        # gate stays shut and no prune ever runs.
+        N._LAST_PRUNE_NOTIFICATIONS_MONO = (  # noqa: SLF001 - test gate reset
+            time.monotonic() - N._NOTIF_PRUNE_INTERVAL_S - 1.0)
 
     def tearDown(self) -> None:
-        N._LAST_PRUNE_NOTIFICATIONS_MONO = 0.0  # noqa: SLF001 - test gate reset
+        N._LAST_PRUNE_NOTIFICATIONS_MONO = (  # noqa: SLF001 - test gate reset
+            time.monotonic() - N._NOTIF_PRUNE_INTERVAL_S - 1.0)
 
     def _seed_states(self, db: Database, *, with_fold: bool = True) -> None:
         now = time.time()

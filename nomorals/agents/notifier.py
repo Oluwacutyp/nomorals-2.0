@@ -161,7 +161,8 @@ RETRYABLE_STATES = (STATE_PENDING, STATE_FAILED)
 #: retention for settled notification rows (mirrors the news prune,
 #: v89 / 796aa152: the table grows forever without one — every publish
 #: stores a row — and the dedupe scan walks the whole history).
-NOTIF_RETENTION_DAYS = 90.0
+#: Owner's call 2026-11-18: 60 days (was 90, matching the news prune).
+NOTIF_RETENTION_DAYS = 60.0
 
 #: opportunistic prune cadence, seconds.  The gate lives at module
 #: scope, not on the instance: Notifier instances are ephemeral —
@@ -939,7 +940,7 @@ class Notifier:
           reads it FIFO with no age bound for the next briefing fold —
           so digest rows are dropped only once folded
           (``digest_folded_at`` set);
-        * everything else is settled history after 90 days: sent,
+        * everything else is settled history after 60 days: sent,
           dead, superseded, disabled, muted, deduped, logged,
           held-brain-degraded (written once, read by no live path —
           the redelivery queue never picks it up), and pre-state-machine
