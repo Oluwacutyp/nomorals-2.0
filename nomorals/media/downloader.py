@@ -95,6 +95,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import time
 import urllib.parse
@@ -129,6 +131,12 @@ __all__ = [
     "StageLog",
     "DownloadReport",
     "MediaDownloader",
+    "FetchMediaResult",
+    "FETCH_WANTS",
+    "FETCH_QUALITY_LABELS",
+    "fetch_media",
+    "formats_for",
+    "is_bare_media_url",
     "classify_failure",
     "detect_profile",
     "set_connector_factory",
@@ -3677,3 +3685,567 @@ def _hls_variant_url(master_text: str, base_url: str) -> str:
                 best_url = urllib.parse.urljoin(base_url, line)
             pending_bw = 0
     return best_url
+
+
+# ── Cobalt: uniform paste-link surface (52-websites #1) ────────────────
+#
+# Cobalt is one loop — paste a link to content on a supported service,
+# choose format/quality (video, audio-only, GIF, photo), and download
+# the file.  Devon's loop already lived unassembled: this module's
+# chain, the film sources, and the music search→resolve→download→
+# enrich spine.  What this section adds is the uniform contract over
+# the existing per-service resolvers: one ``fetch_media(url, want,
+# quality)`` entry point, per-service format choices from the
+# extractor descriptors, health from the ONE source registry, and
+# honest refusals — a service that refuses says so by name, with its
+# own reason, and a dead extractor is marked dead by the health layer
+# instead of failing silently.  Never invent a file, a format, or a
+# duration: every figure on the result is measured from the landed
+# file or read from the source's own metadata.
+
+#: The format wants a pasted link may ask for.
+FETCH_WANTS = ("video", "audio", "image", "gif")
+
+#: The quality labels a pasted link may ask for (video only; audio
+#: has one row, ``bestaudio/best`` — see :func:`formats_for`).
+FETCH_QUALITY_LABELS = ("best", "1080p", "720p", "480p", "360p")
+
+#: yt-dlp format string per quality label.
+_FETCH_QUALITY_FORMATS = {
+    "best": "bestvideo*+bestaudio/best",
+    "1080p": "best[height<=1080]",
+    "720p": "best[height<=720]",
+    "480p": "best[height<=480]",
+    "360p": "best[height<=360]",
+}
+
+#: Extensions whose URL alone proves the link IS the file.
+FETCH_IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif",
+                    ".bmp")
+FETCH_VIDEO_EXTS = (".mp4", ".webm", ".mkv", ".mov", ".m4v", ".avi")
+FETCH_AUDIO_EXTS = (".mp3", ".m4a", ".ogg", ".opus", ".wav", ".flac")
+
+#: GIF conversion contract: first N seconds, width capped, fps.
+GIF_DEFAULT_SECONDS = 10.0
+GIF_DEFAULT_WIDTH = 480
+GIF_FPS = 10
+
+
+@dataclass
+class FetchMediaResult:
+    """The outcome of :func:`fetch_media` — never raises.
+
+    ``kind`` / ``format`` / ``duration_s`` describe what actually
+    landed, measured from the file (never the request): a link whose
+    media is a video stays a video even when ``want`` said image —
+    in that case ``ok`` is False and ``likely_cause`` names the real
+    kind.  ``path`` is kept on a refusal too (the file stays on disk;
+    the caller decides whether to send it — it does not).
+    """
+
+    ok: bool = False
+    url: str = ""
+    service: str = ""
+    want: str = "video"
+    quality: str = "best"
+    format: str = ""           # landed extension (mp4 / mp3 / jpg / gif)
+    kind: str = ""             # video | audio | image — what actually landed
+    path: str = ""
+    size_bytes: int = 0
+    duration_s: float | None = None
+    title: str = ""
+    licence: str = ""          # the serving service's licence label
+    service_health: str = "unknown"
+    failure: str = ""          # FailureKind value when not ok
+    likely_cause: str = ""
+    hint: str = ""
+    stages: list[str] = field(default_factory=list)
+    offered_formats: list[dict[str, Any]] = field(default_factory=list)
+    gif_source: str = ""       # want=gif: the source video the GIF came from
+
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-safe view for the brain tool and the chat reply."""
+        from dataclasses import asdict
+
+        return asdict(self)
+
+
+def _fetch_kind_of_path(path: str) -> str:
+    """video | audio | image from a landed file's extension."""
+    ext = Path(path or "").suffix.lower()
+    if ext in FETCH_VIDEO_EXTS:
+        return "video"
+    if ext in FETCH_AUDIO_EXTS:
+        return "audio"
+    if ext in FETCH_IMAGE_EXTS:
+        return "image"
+    return ""
+
+
+def _fetch_descriptor(url: str, dl: MediaDownloader) -> Any | None:
+    """The extractor descriptor claiming *url*; None when the
+    registry cannot be read — a registry failure is never a
+    download failure."""
+    try:
+        return dl._extractor_registry().best_for(url)
+    except Exception as e:  # noqa: BLE001
+        record_failure("_fetch_descriptor", e)
+        return None
+
+
+def _fetch_service_health(url: str, dl: MediaDownloader) -> str:
+    """The ONE source registry's health for the service behind
+    *url* — ``unknown`` when no registry source claims the host."""
+    try:
+        host = (urllib.parse.urlparse(url or "").hostname or "").lower()
+        if not host:
+            return "unknown"
+        reg = dl.source_registry()
+        for desc in reg.all():
+            domain = str(getattr(desc, "domain", "") or "").lower()
+            if domain and (host == domain
+                           or host.endswith("." + domain)):
+                return str(reg.health_for(desc))
+    except Exception as e:  # noqa: BLE001
+        record_failure("_fetch_service_health", e)
+    return "unknown"
+
+
+def _licence_label(value: Any) -> str:
+    """The plain licence word (``licensed`` / ``user-upload`` /
+    ``unlicensed`` / ``unknown``) — never the enum repr."""
+    if value is None:
+        return "unknown"
+    return str(getattr(value, "value", value) or "unknown")
+
+
+def formats_for(url: str, *, downloader: MediaDownloader | None = None,
+                context: Any = None) -> dict[str, Any]:
+    """Per-service format choices for *url* — the Cobalt picker.
+
+    Returns the service name, its licence label, whether the
+    registry marks it downloadable, its current health, and the
+    format rows: one per video quality label (the descriptor's own
+    mapping wins, the shared ladder fills the rest), plus the audio,
+    image and GIF rows.  Never raises: on a registry failure the
+    generic rows are returned with service ``generic``.
+    """
+    try:
+        dl = downloader or MediaDownloader(context)
+        desc = _fetch_descriptor(url or "", dl)
+        name = str(getattr(desc, "name", "") or "generic")
+        licence = _licence_label(
+            getattr(desc, "licence", None) if desc is not None else None)
+        downloadable = True
+        notes = ""
+        if desc is not None:
+            downloadable = bool(getattr(desc, "downloadable", True))
+            notes = str(getattr(desc, "notes", "") or "")
+        site_desc = None
+        try:
+            site_desc = dl._site_descriptor_for(url or "")
+        except Exception as e:  # noqa: BLE001
+            record_failure("formats_for.site_desc", e)
+        if site_desc is not None and not bool(
+                getattr(site_desc, "downloadable", True)):
+            downloadable = False
+            name = str(getattr(site_desc, "site", "") or name)
+            notes = str(getattr(site_desc, "notes", "") or notes)
+        quality_map: dict[str, str] = {}
+        if desc is not None:
+            try:
+                quality_map = {str(k): str(v)
+                               for k, v in (desc.quality_map or ())}
+            except Exception as e:  # noqa: BLE001
+                record_failure("formats_for.quality_map", e)
+        rows: list[dict[str, Any]] = []
+        for label in FETCH_QUALITY_LABELS:
+            rows.append({"label": label,
+                         "format_spec": quality_map.get(
+                             label, _FETCH_QUALITY_FORMATS[label]),
+                         "want": "video"})
+        rows.append({"label": "audio", "format_spec": "bestaudio/best",
+                     "want": "audio"})
+        rows.append({"label": "image",
+                     "format_spec": "original image file",
+                     "want": "image"})
+        rows.append({"label": "gif",
+                     "format_spec": (f"first {GIF_DEFAULT_SECONDS:.0f}s "
+                                      f"as GIF, width ≤{GIF_DEFAULT_WIDTH}px, "
+                                      f"{GIF_FPS} fps"),
+                     "want": "gif", "needs": "ffmpeg"})
+        return {"url": url or "", "service": name, "licence": licence,
+                "downloadable": downloadable,
+                "notes": notes,
+                "service_health": _fetch_service_health(url or "", dl),
+                "formats": rows}
+    except Exception as e:  # noqa: BLE001
+        record_failure("formats_for", e)
+        return {"url": url or "", "service": "generic",
+                "licence": "unknown", "downloadable": True, "notes": "",
+                "service_health": "unknown",
+                "formats": [{"label": label,
+                             "format_spec": _FETCH_QUALITY_FORMATS[label],
+                             "want": "video"}
+                            for label in FETCH_QUALITY_LABELS]}
+
+
+def is_bare_media_url(text: str, *,
+                      downloader: MediaDownloader | None = None,
+                      context: Any = None) -> str:
+    """The pasted link in *text*, or ``""``.
+
+    A bare URL is a fetch request only when Devon positively knows
+    it is media: a direct media file (video / audio / image
+    extension) or a URL claimed by a named extractor whose rule is
+    not ``none``.  A link the generic extractor would take (any
+    other http URL) is NOT claimed here — it flows to the brain as
+    conversation, exactly as before; ``/download`` still takes it
+    explicitly.  Never raises.
+    """
+    try:
+        candidate = (text or "").strip()
+        if not candidate or any(ch.isspace() for ch in candidate):
+            return ""
+        if not (candidate.startswith("http://")
+                or candidate.startswith("https://")):
+            return ""
+        parsed = urllib.parse.urlparse(candidate)
+        if not parsed.hostname:
+            return ""
+        ext = Path(parsed.path or "").suffix.lower()
+        if (ext in FETCH_VIDEO_EXTS or ext in FETCH_AUDIO_EXTS
+                or ext in FETCH_IMAGE_EXTS):
+            return candidate
+        dl = downloader or MediaDownloader(context)
+        desc = _fetch_descriptor(candidate, dl)
+        if desc is None:
+            return ""
+        if str(getattr(desc, "name", "")) == "ytdlp-generic":
+            return ""
+        if str(getattr(desc, "extraction_rule", "")) == "none":
+            return ""
+        if not bool(getattr(desc, "downloadable", True)):
+            return ""
+        return candidate
+    except Exception as e:  # noqa: BLE001
+        record_failure("is_bare_media_url", e)
+        return ""
+
+
+def _fetch_gif(source_path: str, dest_dir: Path, *,
+               seconds: float, width: int) -> tuple[str, str]:
+    """Turn the first *seconds* of *source_path* into a GIF.
+
+    Returns ``(gif_path, "")`` on success or ``("", reason)`` —
+    the ffmpeg error, trimmed, never invented.  The caller checks
+    ffmpeg exists first; this is the conversion only.
+    """
+    gif_path = dest_dir / (Path(source_path).stem + ".gif")
+    try:
+        proc = subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-i", source_path,
+             "-t", str(max(1.0, float(seconds))),
+             "-vf", f"scale={int(width)}:-1,fps={GIF_FPS}",
+             str(gif_path)],
+            capture_output=True, text=True, timeout=300)
+    except Exception as e:  # noqa: BLE001
+        return "", f"ffmpeg did not run: {e}"
+    if proc.returncode != 0 or not gif_path.is_file():
+        detail = (proc.stderr or "").strip().splitlines()
+        tail = detail[-1] if detail else "ffmpeg exited non-zero"
+        return "", f"ffmpeg could not make the GIF: {tail}"
+    return str(gif_path), ""
+
+
+def _fetch_youtube_thumbnail(url: str, dl: MediaDownloader,
+                             dest_dir: Path, timeout: float
+                             ) -> tuple[str, str]:
+    """A YouTube link's poster image, via the video organ's oEmbed
+    lookup — the link's own thumbnail, never a guessed URL.
+
+    Returns ``(path, "")`` when the thumbnail landed, else
+    ``("", reason)`` — the caller falls through to the general
+    chain on failure.
+    """
+    try:
+        from .video import video_details
+
+        details = video_details(url)
+        thumb = str((details or {}).get("thumbnail_url") or "")
+        if not thumb:
+            return "", "no thumbnail on the video record"
+        report = dl.download(thumb, dest_dir=dest_dir, timeout=timeout)
+        if not report.ok or not report.path:
+            return "", report.likely_cause or "thumbnail did not land"
+        if _fetch_kind_of_path(report.path) != "image":
+            return "", "thumbnail did not land as an image"
+        return report.path, ""
+    except Exception as e:  # noqa: BLE001
+        record_failure("_fetch_youtube_thumbnail", e)
+        return "", str(e) or "thumbnail lookup failed"
+
+
+def fetch_media(url: str, want: str = "video", quality: str = "best",
+                *, context: Any = None,
+                downloader: MediaDownloader | None = None,
+                dest_dir: str | Path | None = None,
+                timeout: float = 1800.0,
+                gif_seconds: float = GIF_DEFAULT_SECONDS,
+                gif_width: int = GIF_DEFAULT_WIDTH,
+                swarm: bool = False,
+                swarm_min_bytes: int | None = None) -> FetchMediaResult:
+    """Fetch one pasted link as the requested format.  Never raises.
+
+    The wrapper below is the guarantee: any unexpected failure
+    inside the fetch becomes a refusal naming the exception, never
+    a raise into the chat job — the same contract
+    :meth:`MediaDownloader.download` keeps.
+    """
+    try:
+        return _fetch_media_inner(
+            url, want=want, quality=quality, context=context,
+            downloader=downloader, dest_dir=dest_dir, timeout=timeout,
+            gif_seconds=gif_seconds, gif_width=gif_width, swarm=swarm,
+            swarm_min_bytes=swarm_min_bytes)
+    except Exception as e:  # noqa: BLE001
+        record_failure("fetch_media", e)
+        result = FetchMediaResult(url=url or "", want=want or "video",
+                                  quality=quality or "best")
+        result.failure = FailureKind.SITE_ERROR.value
+        result.likely_cause = (
+            f"the fetch failed before it could run: "
+            f"{type(e).__name__}: {e}")
+        return result
+
+
+def _fetch_media_inner(url: str, want: str = "video",
+                       quality: str = "best",
+                       *, context: Any = None,
+                       downloader: MediaDownloader | None = None,
+                       dest_dir: str | Path | None = None,
+                       timeout: float = 1800.0,
+                       gif_seconds: float = GIF_DEFAULT_SECONDS,
+                       gif_width: int = GIF_DEFAULT_WIDTH,
+                       swarm: bool = False,
+                       swarm_min_bytes: int | None = None
+                       ) -> FetchMediaResult:
+    """The fetch itself — see :func:`fetch_media` for the contract.
+
+    ``want`` is video | audio | image | gif; ``quality`` is one of
+    :data:`FETCH_QUALITY_LABELS` (video only — audio takes the best
+    audio stream).  The fetch rides the existing chain
+    (:meth:`MediaDownloader.download`) — resolve → direct → kit →
+    connector → proxy → rendered → browser — so health crediting,
+    the learned rules, the descriptor gates and the integrity ledger
+    all apply exactly as they do to ``/download``; this surface adds
+    the contract, not a second produce path.  The outcome credits
+    nothing twice: the chain's own ``_record_download_outcome`` is
+    the only credit.
+
+    Refusals name the service and the reason: an unknown want or
+    quality lists what is offered; a source the registry marks
+    not-downloadable is refused with its own notes before any byte
+    moves; a GIF without ffmpeg on the host is refused before any
+    download; an image want on a video link is refused naming the
+    real kind.  A landed file is verified (the shared orchestrator
+    contract) and its duration read from the file's own metadata —
+    never guessed, never the request echoed back.
+    """
+    dl = downloader or MediaDownloader(context)
+    result = FetchMediaResult(url=url or "", want=want or "video",
+                              quality=quality or "best")
+    offered = formats_for(url or "", downloader=dl)
+    result.service = str(offered.get("service") or "")
+    result.licence = str(offered.get("licence") or "unknown")
+    result.service_health = str(
+        offered.get("service_health") or "unknown")
+    result.offered_formats = list(offered.get("formats") or [])
+
+    def _refuse(failure: FailureKind, cause: str,
+                hint: str = "") -> FetchMediaResult:
+        result.failure = failure.value
+        result.likely_cause = cause
+        result.hint = hint
+        return result
+
+    if not (url or "").strip() or not (url or "").strip().startswith(
+            ("http://", "https://")):
+        return _refuse(
+            FailureKind.SITE_ERROR,
+            "not a link I can fetch — paste an http(s) link to media")
+    if result.want not in FETCH_WANTS:
+        return _refuse(
+            FailureKind.SITE_ERROR,
+            f"unknown format {result.want!r} — I can fetch "
+            f"{', '.join(FETCH_WANTS)}")
+    if result.want != "audio" and result.quality not in FETCH_QUALITY_LABELS:
+        return _refuse(
+            FailureKind.SITE_ERROR,
+            f"unknown quality {result.quality!r} — I offer "
+            f"{', '.join(FETCH_QUALITY_LABELS)}")
+    if not bool(offered.get("downloadable", True)):
+        notes = str(offered.get("notes") or "does not serve downloads")
+        return _refuse(
+            FailureKind.SITE_ERROR,
+            f"{result.service} does not serve downloads — {notes}",
+            "find the same title on a downloadable source, or play "
+            "it in the source's own app")
+    if result.want == "gif" and shutil.which("ffmpeg") is None:
+        return _refuse(
+            FailureKind.DEPENDENCY_MISSING,
+            "making a GIF needs ffmpeg, which is not installed on "
+            "this host — nothing was downloaded",
+            "fetch it as video instead")
+
+    target_dir = dl._dest_dir(dest_dir)
+    url_path_ext = Path(
+        urllib.parse.urlparse(url).path or "").suffix.lower()
+    if result.want == "image" and (
+            url_path_ext in FETCH_VIDEO_EXTS
+            or url_path_ext in FETCH_AUDIO_EXTS):
+        kind_word = ("video" if url_path_ext in FETCH_VIDEO_EXTS
+                     else "audio")
+        return _refuse(
+            FailureKind.NO_MEDIA_FOUND,
+            f"that link is a {kind_word}, not an image — fetch it "
+            "as video, or as a gif",
+            "fetch it as video, or as a gif")
+
+    # Image want: a YouTube link's poster comes from the video's own
+    # oEmbed record; anything else rides the chain and must land as
+    # an image (checked below) or be refused naming the real kind.
+    if result.want == "image" and result.service == "youtube":
+        thumb_path, _reason = _fetch_youtube_thumbnail(
+            url, dl, target_dir, timeout)
+        if thumb_path:
+            thumb_result = _fetch_finish(result, thumb_path, "image")
+            if thumb_result.ok:
+                return thumb_result
+            # The thumbnail path failed verification — fall through
+            # to the general chain, which refuses naming the kind.
+
+    format_spec = ("bestaudio/best" if result.want == "audio"
+                   else _FETCH_QUALITY_FORMATS[result.quality])
+    report = dl.download(
+        url, dest_dir=dest_dir, audio_only=(result.want == "audio"),
+        format_spec=format_spec, timeout=timeout, swarm=swarm,
+        swarm_min_bytes=swarm_min_bytes)
+    # Defensive report mapping: the chain returns a DownloadReport,
+    # but callers (and their fakes) may hand back a thinner shape —
+    # a missing attribute is never a crash, it is an unknown field.
+    tried = getattr(report, "tried", None)
+    result.stages = list(tried()) if callable(tried) else []
+    result.service = (getattr(report, "extractor", "")
+                      or result.service)
+    if not getattr(report, "ok", False) or not getattr(
+            report, "path", ""):
+        failure = getattr(report, "failure", FailureKind.SITE_ERROR)
+        result.failure = (failure.value
+                          if isinstance(failure, FailureKind)
+                          else str(failure or "site_error"))
+        result.likely_cause = (getattr(report, "likely_cause", "")
+                               or "the download produced nothing")
+        result.hint = getattr(report, "hint", "") or ""
+        return result
+    result = _fetch_finish(result, getattr(report, "path", ""),
+                           _fetch_kind_of_path(
+                               getattr(report, "path", ""))
+                           or _fetch_sniffed_kind(
+                               getattr(report, "path", "")),
+                           title=getattr(report, "title", "") or "",
+                           size_bytes=getattr(
+                               report, "size_bytes", 0) or 0)
+    if not result.ok:
+        return result
+    if result.want == "image" and result.kind != "image":
+        return _refuse(
+            FailureKind.NO_MEDIA_FOUND,
+            f"that link's media is {result.kind or 'not an image'}, "
+            "not an image — fetch it as "
+            f"{result.kind or 'video'}, or as a gif",
+            f"fetch it as {result.kind or 'video'}")
+    if result.want == "gif":
+        gif_path, gif_reason = _fetch_gif(
+            result.path, target_dir, seconds=gif_seconds,
+            width=gif_width)
+        if not gif_path:
+            return _refuse(FailureKind.DEPENDENCY_MISSING, gif_reason,
+                           "fetch it as video instead")
+        result.gif_source = result.path
+        result = _fetch_finish(result, gif_path, "image")
+        if not result.ok:
+            return result
+        result.format = "gif"
+        if result.duration_s is not None:
+            result.duration_s = min(float(gif_seconds),
+                                    result.duration_s)
+        else:
+            result.duration_s = float(gif_seconds)
+    return result
+
+
+def _fetch_sniffed_kind(path: str) -> str:
+    """The kind of a landed file whose extension says nothing —
+    the orchestrator's sniff (extension of the path, then the
+    container bytes); ``"file"`` when even that is silent."""
+    try:
+        from .download_orchestrator import infer_kind
+
+        return infer_kind(path) or "file"
+    except Exception as e:  # noqa: BLE001
+        record_failure("_fetch_sniffed_kind", e)
+        return "file"
+
+
+def _fetch_finish(result: FetchMediaResult, path: str, kind: str, *,
+
+                  title: str = "", size_bytes: int = 0) -> FetchMediaResult:
+    """Verify a landed file and read its own metadata onto *result*.
+
+    The shared orchestrator contract judges the file; the duration
+    comes from the file's metadata (mutagen → ffprobe → filename),
+    never from the request.  A verification failure keeps the path
+    on the result and marks it not-ok with the contract's reason.
+    """
+    from .download_orchestrator import DownloadOrchestrator
+
+    result.path = path
+    result.kind = kind
+    result.format = Path(path or "").suffix.lstrip(".").lower()
+    try:
+        result.size_bytes = int(size_bytes) or Path(path).stat().st_size
+    except OSError:
+        result.size_bytes = int(size_bytes) or 0
+    acceptance = DownloadOrchestrator().verify(path, kind or "file")
+    if not acceptance.ok:
+        result.failure = FailureKind.NO_MEDIA_FOUND.value
+        result.likely_cause = (
+            acceptance.reason or "the landed file did not verify")
+        result.hint = ""
+        return result
+    try:
+        from .library import read_metadata
+
+        meta = read_metadata(path) or {}
+        duration = meta.get("duration")
+        if isinstance(duration, (int, float)) and duration > 0:
+            result.duration_s = float(duration)
+        # The chain report's title is the source's own title and
+        # wins; the file's metadata title (often just the filename
+        # stem) only fills when the chain named nothing.
+        if title:
+            result.title = title
+        elif not result.title:
+            result.title = str(meta.get("title") or "")
+    except Exception as e:  # noqa: BLE001
+        record_failure("_fetch_finish.metadata", e)
+        if not result.title:
+            result.title = title or ""
+    if not result.title:
+        result.title = title or ""
+    result.failure = ""
+    result.likely_cause = ""
+    result.hint = ""
+    result.ok = True
+    return result

@@ -2037,6 +2037,38 @@ class PartnerRuntime(
         # never launches a game in a non-owner chat (wave 87). All other
         # slash commands stay owner-only: for everyone else a slash falls
         # through to her as text.
+        # Cobalt (52-websites #1): a bare media link pasted by the
+        # owner is a fetch request — the same /download contract,
+        # without the slash.  Owner-only, exactly like /download
+        # (which is NOT in PUBLIC_COMMANDS): a non-owner's link, a
+        # link that is not media, and any multi-token message all
+        # flow on to the brain as conversation, exactly as before.
+        # Placed after the games-only gate and the conversation
+        # claim above, so neither is bypassed.  The handler sends
+        # its own ack in chat mode and returns "" — a non-empty
+        # return (no resolvable chat) is sent here, mirroring the
+        # slash dispatch below.
+        if message.incoming and self._is_operator(message):
+            from ...media.downloader import is_bare_media_url
+
+            _bare_url = is_bare_media_url(message.text or "")
+            if _bare_url:
+                self._bump("controls")
+                try:
+                    _bare_reply = self._control_download(
+                        _bare_url, chat_key=message.chat.key)
+                except Exception as e:  # noqa: BLE001
+                    record_failure(
+                        "runtime.PartnerRuntime._process_inner.bare_url",
+                        e)
+                    _bare_reply = ""
+                if _bare_reply:
+                    try:
+                        self.gateway.send(message.chat.platform,
+                                          message.chat, _bare_reply)
+                    except Exception:  # noqa: BLE001
+                        _log.warning("bare-URL reply send failed")
+                return
         if message.incoming and message.text.strip().startswith("/"):
             from ...social.chat.control import (
                 GAME_COMMANDS, caller_may_run, parse_control,

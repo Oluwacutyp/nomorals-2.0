@@ -1273,48 +1273,45 @@ class RuntimeMediaMixin:
         return self._fmt_started(res, engine)
 
     def _download_produce(self, url: str, audio_only: bool,
-                          chat: Any, swarm: bool = False
-                          ) -> tuple[str, bool]:
+                          chat: Any, swarm: bool = False,
+                          *, want: str = "video",
+                          quality: str = "best") -> tuple[str, bool]:
         """The /download download+send body — runs on the job worker
         thread in chat mode, synchronously on CLI.  Returns (reply
         text, sent): ``sent`` is True only when the file actually
-        went out.  Never raises."""
+        went out.  Never raises.
+
+        Cobalt (52-websites #1): this body is the uniform
+        ``fetch_media`` contract, not a second produce path — the
+        chain, its verification and its metadata all live in
+        :mod:`nomorals.media.downloader`; this method only decides
+        what goes out in chat and how the outcome reads.  ``want``
+        is video | audio | image | gif; ``quality`` one of the
+        Cobalt labels (video only).
+        """
         from ...core.jobs import report_progress
-        from ...media.downloader import MediaDownloader
+        from ...media.downloader import fetch_media
 
-        downloader = MediaDownloader(self.context)
+        if audio_only and want == "video":
+            want = "audio"
         report_progress(f"downloading {url[:80]}")
-        report = downloader.download(url, audio_only=audio_only,
-                                     swarm=swarm)
-        if not report.ok:
-            # The report's own summary is the canonical per-leg account
-            # (stage, proxy, error class + reason or the leg's note,
-            # likely cause, hint).  The hand-rolled loop this replaces
-            # printed the bare word "failed" for every note-only leg
-            # (proxy pool unavailable, browser page opened) — the
-            # owner saw four legs and learned nothing from three.
-            from ...core.text import strip_ansi
-            body = report.summary().splitlines()[1:]  # skip its header
-            lines = [f"couldn't download {url[:80]}:"]
-            lines.extend(f"  {ln.strip()}" for ln in body if ln.strip())
-            return strip_ansi("\n".join(lines)), False
+        result = fetch_media(url, want=want, quality=quality,
+                             context=self.context, swarm=swarm)
+        if not result.ok:
+            # The refusal is the canonical account: the service and
+            # the reason, in plain words — never a bare "failed".
+            lines = [f"couldn't download {url[:80]}:",
+                     f"  {result.likely_cause}"]
+            if result.hint:
+                lines.append(f"  {result.hint}")
+            if result.stages:
+                lines.append(f"  tried: {', '.join(result.stages)}")
+            return "\n".join(lines), False
 
-        path = report.path
-        title = report.title or "download"
-        # Acceptance (Phase 2): the chain landing a file is not the
-        # file being what was asked for.  The per-type contract for
-        # the inferred kind runs BEFORE anything is sent — a chain
-        # that "succeeded" with an HTML error page or a zero-byte
-        # stub is reported as the failure it is, never delivered.
-        from ...media.download_orchestrator import DownloadOrchestrator, infer_kind
-
-        kind = infer_kind(path, url=url, audio_only=audio_only)
-        acc = DownloadOrchestrator().verify(path, kind)
-        if not acc.ok:
-            return (f"downloaded “{title}” but it isn't a usable "
-                    f"{kind}: {acc.reason} — not sent (the file is "
-                    f"saved on the server at {path})"), False
-        emoji = "🎵" if audio_only else "🎬"
+        path = result.path
+        title = result.title or "download"
+        kind = result.kind or ("audio" if audio_only else "video")
+        emoji = {"audio": "🎵", "video": "🎬", "image": "🖼️"}.get(kind, "🎬")
         if chat is not None:
             try:
                 from ...core.progress_events import UPLOADING, emit_stage
@@ -1322,7 +1319,7 @@ class RuntimeMediaMixin:
                 self.gateway.send_file(
                     chat.platform, f"{chat.platform}:{chat.chat_id}",
                     path, caption=f"{emoji} {title}"[:1024],
-                    kind="audio" if audio_only else "video")
+                    kind=kind)
                 # The item's own line is the final state — no size
                 # receipt, no "sent to this chat" (presentation law).
                 return f"{emoji} {title}", True
@@ -1332,16 +1329,25 @@ class RuntimeMediaMixin:
         return f"{emoji} downloaded: {path}", False
 
     def _control_download(self, tail: str, chat_key: str = "") -> str:
-        """/download <url> [audio] — download any media URL and send it here.
+        """Cobalt (52-websites #1): /download <url> [want] [quality].
 
-        Like @Anyurldownloader_bot: paste a link, get the file.  YouTube,
-        TikTok, Instagram, X/Twitter, SoundCloud, direct MP3/MP4 links —
-        yt-dlp handles 1000+ sites as the universal extractor, with the
-        proxy-lab and browser stages as fallback when direct fails.
+        Paste a link, get the file — video, audio-only, GIF or photo,
+        at the quality named.  YouTube, TikTok, Instagram, X/Twitter,
+        SoundCloud, direct MP3/MP4 links — yt-dlp handles 1000+ sites
+        as the universal extractor, with the proxy-lab and browser
+        stages as fallback when direct fails.  The fetch itself is
+        the uniform :func:`nomorals.media.downloader.fetch_media`
+        contract; this handler only parses the request and routes it.
 
-        /download <url>          → best quality video (or whatever the URL is)
-        /download <url> audio    → audio only (mp3)
-        /download <url> --swarm  → parallel segmented fetch for a
+        /download <url>               → best quality video (or whatever the URL is)
+        /download <url> audio         → audio only (mp3)
+        /download <url> gif           → first 10 seconds as a GIF (needs ffmpeg)
+        /download <url> image         → the photo (a direct image, or the
+                                         poster's thumbnail for a video link)
+        /download <url> 720p          → video at 720p (best | 1080p | 720p |
+                                         480p | 360p)
+        /download <url> audio 720p    → audio (quality is video-only)
+        /download <url> --swarm       → parallel segmented fetch for a
                                     large direct file (byte-range
                                     workers, resume, hash check);
                                     falls back to the single stream
@@ -1355,13 +1361,21 @@ class RuntimeMediaMixin:
                                     discarded, a queued job never
                                     runs)
 
+        The platform routes (TikTok, Instagram) run only for the
+        plain video/audio request they were built for — a format or
+        quality request goes through the uniform contract, which
+        honours the want instead of silently dropping it.  Spotify
+        always takes its identify-and-match route (its descriptor
+        refuses downloads; the match is the product).
+
         In chat the download runs as a background job (owner decision
         2026-10-19): the handler returns an ack immediately and the
         file is sent to the chat when the download lands.
         """
         tail = (tail or "").strip()
         if not tail:
-            return ("usage: /download <url> [audio] [--swarm]\n"
+            return ("usage: /download <url> [video|audio|image|gif] "
+                    "[best|1080p|720p|480p|360p] [--swarm]\n"
                     "paste any media URL — YouTube, TikTok, Instagram, X, "
                     "SoundCloud, direct mp3/mp4 links, 1000+ sites via yt-dlp.\n"
                     "/download status — the source registry's growth "
@@ -1381,13 +1395,32 @@ class RuntimeMediaMixin:
         if words and len(words) >= 2 and words[0].lower() == "swarm" \
                 and words[1].lower() == "cancel":
             return self._download_swarm_cancel(" ".join(words[2:]))
-        audio_only = any(w.lower() in ("audio", "--audio", "-a") for w in words)
-        swarm = any(w.lower() in ("swarm", "--swarm") for w in words)
+        lowered = [w.lower() for w in words]
+        audio_only = any(w in ("audio", "--audio", "-a") for w in lowered)
+        swarm = any(w in ("swarm", "--swarm") for w in lowered)
+        want = "video"
+        if "gif" in lowered:
+            want = "gif"
+        elif any(w in ("image", "photo", "picture") for w in lowered):
+            want = "image"
+        elif audio_only:
+            want = "audio"
+        quality = "best"
+        for label in ("1080p", "720p", "480p", "360p"):
+            if label in lowered:
+                quality = label
+                break
+        if "best" in lowered:
+            quality = "best"
         url = " ".join(w for w in words
-                       if w.lower() not in ("audio", "--audio", "-a",
-                                            "swarm", "--swarm")).strip()
+                       if w.lower() not in (
+                           "audio", "--audio", "-a", "video",
+                           "image", "photo", "picture", "gif",
+                           "best", "1080p", "720p", "480p", "360p",
+                           "swarm", "--swarm")).strip()
         if not url:
-            return "usage: /download <url> [audio]"
+            return ("usage: /download <url> [video|audio|image|gif] "
+                    "[best|1080p|720p|480p|360p]")
         if not url.lower().startswith(("http://", "https://")):
             return (f"that doesn't look like a URL: {url[:80]!r}\n"
                     "paste the full link starting with https://")
@@ -1396,20 +1429,26 @@ class RuntimeMediaMixin:
         # platform-shaped route per link — Spotify identifies and
         # matches (its own audio is previews; the chain's descriptor
         # gate would only refuse), TikTok gets the watermark-honest
-        # route, Instagram the login-wall-aware one.
+        # route, Instagram the login-wall-aware one.  The platform
+        # routes run only for the plain request they were built for;
+        # a format or quality request takes the uniform contract
+        # below, which honours the want instead of dropping it.
         from ...media.platforms import detect_platform
         _platform = detect_platform(url)
         if _platform == "spotify":
             return self._control_spotify(url, chat_key)
 
+        plain_request = (want in ("video", "audio")
+                         and quality == "best")
         chat = self._ref_from_key(chat_key) if chat_key else None
         if chat is not None:
-            if _platform == "tiktok":
+            if _platform == "tiktok" and plain_request:
                 return self._play_download_bg(
                     chat, chat_key, "⏳ fetching that TikTok…",
                     lambda: self._tiktok_produce(url, audio_only, chat),
                     title=url[:80])
-            if _platform == "instagram":
+            if _platform == "instagram" and want == "video" \
+                    and quality == "best":
                 return self._play_download_bg(
                     chat, chat_key, "⏳ fetching that Instagram post…",
                     lambda: self._instagram_produce(url, chat),
@@ -1417,16 +1456,19 @@ class RuntimeMediaMixin:
             return self._play_download_bg(
                 chat, chat_key, f"⏳ {url[:60]}",
                 lambda: self._download_produce(url, audio_only, chat,
-                                               swarm=swarm),
+                                               swarm=swarm, want=want,
+                                               quality=quality),
                 title=url[:80])
-        if _platform == "tiktok":
+        if _platform == "tiktok" and plain_request:
             text, _sent = self._tiktok_produce(url, audio_only, None)
             return text
-        if _platform == "instagram":
+        if _platform == "instagram" and want == "video" \
+                and quality == "best":
             text, _sent = self._instagram_produce(url, None)
             return text
         text, _sent = self._download_produce(url, audio_only, None,
-                                             swarm=swarm)
+                                             swarm=swarm, want=want,
+                                             quality=quality)
         return text
 
     def _download_swarm_status(self) -> str:

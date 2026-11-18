@@ -116,7 +116,7 @@ def _structural_fallbacks() -> list[ExtractorDescriptor]:
     catch-all (LAST in order — every specific descriptor wins)."""
     return [
         ExtractorDescriptor(
-            name="direct-media", url_patterns=(r"\.(mp3|m4a|ogg|opus|wav|flac|mp4|webm|mkv|mov)(\?|$)",),
+            name="direct-media", url_patterns=(r"\.(mp3|m4a|ogg|opus|wav|flac|mp4|webm|mkv|mov|jpg|jpeg|png|gif|webp|avif|bmp)(\?|$)",),
             extraction_rule="direct", quality_map=(("audio", "bestaudio/best"),),
             licence=Licence.UNKNOWN,
             notes="Direct media file URL — plain HTTP fetch"),

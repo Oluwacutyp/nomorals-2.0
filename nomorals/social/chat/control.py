@@ -4646,15 +4646,16 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/husbando",
               "example": "/husbando",
               "related": "/waifu · /charpic"},
-    "download": {"what": "any-URL media downloader: paste a link, get the file. "
+    "download": {"what": "any-URL media downloader: paste a link, get the file — "
+                         "video, audio-only, GIF or photo, at the quality named. "
                          "YouTube, TikTok, Instagram, X/Twitter, SoundCloud, "
                          "direct mp3/mp4 links — yt-dlp handles 1000+ sites, "
                          "with proxy and browser fallback stages. Spotify links "
                          "identify-and-match (full track from a real source); "
                          "TikTok/Instagram links take their dedicated routes. "
                          "The file is sent to this chat.",
-                 "usage": "/download <url> [audio]",
-                 "example": "/download https://youtube.com/watch?v=... audio",
+                 "usage": "/download <url> [video|audio|image|gif] [best|1080p|720p|480p|360p]",
+                 "example": "/download https://youtube.com/watch?v=... gif 720p",
                  "related": "/play (play/queue audio) · /video download (video search download) · /tiktok · /instagram · /spotify · /aio"},
     "tiktok": {"what": "TikTok downloader: paste a TikTok link (share links "
                        "included), get the video file. Fetches the "
@@ -5803,7 +5804,7 @@ LIST_ONELINERS: dict[str, str] = {
     "dislike": "last production missed — with notes: /dislike [notes…]",
     "distribute": "release walk-through: /distribute [song.wav] | legal",
     "dj": "radio show with voice breaks + the playable DJ desk: /dj [trending|<genre>] · /dj desk fetch|live|eq|fx|crate|record",
-    "download": "any-URL media downloader: /download <url> [audio]",
+    "download": "any-URL media downloader: /download <url> [video|audio|image|gif] [best|1080p|720p|480p|360p]",
     "tiktok": "TikTok downloader (no-watermark route first, labeled honestly): /tiktok <url> [audio]",
     "ttdl": "alias of /tiktok: /ttdl <url> [audio]",
     "instagram": "Instagram reel/post downloader (public; login wall named): /instagram <url>",
