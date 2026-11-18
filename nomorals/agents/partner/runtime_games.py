@@ -2275,7 +2275,10 @@ class RuntimeGamesMixin:
 
     def _control_charagent(self, tail: str, chat_key: str) -> str:
         """Character agents: /charagent list | create <name> [trait=0.8 ...]
-        | talk <name> <message> | play <game> <name...> | forget <name>."""
+        [lora=<path>] | talk <name> <message> | lora <name> [path|none]
+        | play <game> <name...> | forget <name>."""
+        from pathlib import Path
+
         from ...characters import (
             AgentSeat,
             Character,
@@ -2283,6 +2286,7 @@ class RuntimeGamesMixin:
             converse,
             run_agent_match,
         )
+        from ...characters.specialists import lora_for
         store = CharacterStore()
         parts = (tail or "").split(None, 1)
         verb = parts[0].lower() if parts else "list"
@@ -2296,27 +2300,44 @@ class RuntimeGamesMixin:
             return "\n".join(
                 f"🎭 {c.name} — {', '.join(sorted(c.persona)[:4]) or 'no traits'}"
                 f"{' · voice: ' + c.voice_name if c.voice_name else ''}"
+                f"{' · lora: ' + Path(c.lora_file).name if c.lora_file else ''}"
                 for c in chars)
 
         if verb == "create":
             bits = rest.split()
             if not bits:
-                return "usage: /charagent create <name> [trait=0.0-1.0 ...]"
+                return ("usage: /charagent create <name> [trait=0.0-1.0 ...] "
+                        "[lora=<path to .gguf>]")
             name = bits[0]
             if store.get_by_name(name):
                 return f"🎭 {name} already exists."
             persona: dict[str, float] = {}
+            lora_arg = ""
             for b in bits[1:]:
                 if "=" in b:
                     k, v = b.split("=", 1)
+                    if k.strip().lower() == "lora":
+                        lora_arg = v.strip()
+                        continue
                     try:
                         persona[k.strip()] = max(0.0, min(1.0, float(v)))
                     except ValueError as _partner_exc:
                         record_failure("runtime_games.RuntimeGamesMixin._control_charagent", _partner_exc)
             c = Character(name=name, persona=persona)
+            lora_note = ""
+            if lora_arg:
+                c.lora_file = lora_arg
+                check = lora_for(c)
+                if check.get("ok"):
+                    lora_note = (f"\n🔌 LoRA adapter: "
+                                 f"{Path(lora_arg).name} — validated")
+                else:
+                    lora_note = (f"\n🔌 LoRA adapter named: {lora_arg}\n"
+                                 f"⚠️ {check.get('reason')} — talk falls "
+                                 f"back to the shared base until it lands")
             store.save(c)
             return (f"🎭 {name} is alive. Talk to them:\n"
-                    f"/charagent talk {name} hello")
+                    f"/charagent talk {name} hello{lora_note}")
 
         if verb == "talk":
             bits = rest.split(None, 1)
@@ -2337,6 +2358,14 @@ class RuntimeGamesMixin:
                 return "…"
             line = last.text or ""
             reply = f"🎭 {c.name}: {line}"
+            # LoRA wall (lane 65): an adapter was named but could not
+            # speak — the line came from the brain or the fallback, and
+            # the owner is told why, not left wondering. When the
+            # adapter DID speak, the reply stays clean.
+            lora_status = getattr(c, "_last_lora_status", {}) or {}
+            if (c.lora_file or "").strip() and not lora_status.get("ok"):
+                reply += (f"\n🔌 LoRA: "
+                          f"{lora_status.get('reason') or 'unavailable'}")
             if line and c.voice_name:
                 # Voice rung (audit gap R1-44): a character with a
                 # cloned voice speaks their line. The voice note IS
@@ -2352,6 +2381,54 @@ class RuntimeGamesMixin:
                     return f"{reply}\n🔊 {path}"
                 return f"{reply}\n🔇 voice: {reason}"
             return reply
+
+        if verb == "lora":
+            # Name / show / clear a character's persona LoRA adapter.
+            # Setting a name never needs the file to exist yet — the
+            # file may land later, and talk falls back honestly until
+            # then. Validation runs at set/show time and says so.
+            bits = rest.split(None, 1)
+            if not bits:
+                return ("usage: /charagent lora <name> [path to .gguf|none] "
+                        "— show the adapter, or set/clear it")
+            c = store.get_by_name(bits[0])
+            if c is None:
+                return f"no character named '{bits[0]}'."
+            if len(bits) == 1:
+                if not (c.lora_file or "").strip():
+                    return (f"🎭 {c.name} has no LoRA adapter named — "
+                            f"set one:\n/charagent lora {c.name} "
+                            "<path to .gguf>")
+                check = lora_for(c)
+                serving = ""
+                try:
+                    from ...llm.local_server import lora_server_status
+
+                    st = lora_server_status(c.lora_file)
+                    if st.get("serving"):
+                        serving = f"\n🔌 serving at {st['url']}"
+                except Exception:  # noqa: BLE001 - status is a nicety
+                    pass
+                if check.get("ok"):
+                    return (f"🎭 {c.name} · LoRA "
+                            f"{Path(c.lora_file).name} — validated{serving}")
+                return (f"🎭 {c.name} · LoRA {c.lora_file} — "
+                        f"{check.get('reason')}{serving}")
+            arg = bits[1].strip()
+            if arg.lower() == "none":
+                c.lora_file = ""
+                store.save(c)
+                return (f"🎭 {c.name} LoRA adapter cleared — the shared "
+                        "base answers from now on.")
+            c.lora_file = arg
+            store.save(c)
+            check = lora_for(c)
+            if check.get("ok"):
+                return (f"🎭 {c.name} LoRA adapter set: "
+                        f"{Path(arg).name} — validated.")
+            return (f"🎭 {c.name} LoRA adapter named: {arg}\n"
+                    f"⚠️ {check.get('reason')} — talk falls back to the "
+                    "shared base until it lands.")
 
         if verb == "play":
             bits = rest.split()
@@ -2387,8 +2464,9 @@ class RuntimeGamesMixin:
             store.delete(c.id)
             return f"🎭 {c.name} is gone."
 
-        return ("usage: /charagent list · create <name> [trait=0.8] · "
-                "talk <name> <msg> · play <game> <names...> · forget <name>")
+        return ("usage: /charagent list · create <name> [trait=0.8] "
+                "[lora=<path>] · talk <name> <msg> · lora <name> [path|none] "
+                "· play <game> <names...> · forget <name>")
 
     def _control_dm(self, tail: str, chat_key: str) -> str:
         """DM persona: /dm [mood <m>] | say <text> | intro — the narrator

@@ -41,10 +41,15 @@ three. Once provisioned, the voice rungs light up through
 ``/charagent talk`` (audit gap R1-44): a character with a cloned voice
 speaks their line as a voice note, RVC-swapped when an RVC model is
 named, with the text reply as the fallback when the render fails.
-``swap_face`` and ``lora_for`` have no live call site yet — there is
-no out-of-game character render path for a face swap, and no live
-local server to implant a per-character LoRA into — so they stay
-named remainders, not silently wired.
+``swap_face`` has no live call site yet — there is no out-of-game
+character render path for a face swap — so it stays a named remainder,
+not silently wired. ``lora_for`` IS wired: ``Character.speak`` resolves
+the adapter through it and generates the line through a per-adapter
+local server (``characters/specialists.py lora_speak`` +
+``llm/local_server.py ensure_lora_server`` — a second llama-server
+instance on its own port, never a restart of the shared server);
+``/charagent lora`` names the adapter, and the shared base answers with
+an honest reason when no adapter or server is there.
 
 Honest box check: the provision MEASURES the box (RAM, free disk,
 CPUs, profile) and refuses a backend whose floor the box cannot meet,

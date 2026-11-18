@@ -503,9 +503,38 @@ class Character:
         prompt, version = self._speak_prompt(context, memories)
         line = ""
         kind = "fallback"
+        journal_version = version
         cand_texts: list[str] = []
         chosen = 0
-        if suggest is not None:
+        # LoRA rung (ladder ``character_lora``): a character with a named
+        # adapter speaks through their own LoRA server FIRST — the adapter
+        # is the persona, the brain's ``suggest`` is the fallback
+        # generator, the deterministic line the last resort. The attempt
+        # is cheap when no adapter is named (``lora_for`` returns the
+        # wall at once); a failed server is memoized in the specialist
+        # so a wedged boot is not re-attempted on every line. The outcome
+        # rides on ``_last_lora_status`` for the caller (the talk handler
+        # names the wall when the adapter could not speak).
+        lora_status: dict[str, Any] = {}
+        if (self.lora_file or "").strip():
+            try:
+                from .specialists import lora_speak
+
+                lora_status = lora_speak(self, prompt)
+            except Exception as e:
+                record_failure("character.speak:lora", e)
+                lora_status = {"ok": False,
+                               "reason": f"LoRA rung failed: {e}"}
+            if lora_status.get("ok") and (lora_status.get("text") or "").strip():
+                from pathlib import Path
+
+                line = str(lora_status["text"]).strip()[:600]
+                kind = "utterance"
+                journal_version = ("lora:"
+                                   + Path(str(lora_status.get("adapter")
+                                              or self.lora_file)).name)
+        self._last_lora_status = lora_status
+        if not line and suggest is not None:
             try:
                 n = candidates if candidates and candidates > 1 else 1
                 for _ in range(n):
@@ -543,7 +572,7 @@ class Character:
                     line, context=context, kind=kind,
                     candidates=cand_texts if len(cand_texts) > 1 else None,
                     chosen=chosen,
-                    prompt_version=(version if kind == "utterance"
+                    prompt_version=(journal_version if kind == "utterance"
                                     else "fallback"))
         except Exception as e:
             record_failure("character.speak:learn", e)

@@ -56,7 +56,12 @@ class _Client:
 
 
 def _client_factory(client):
-    return lambda timeout=None: client
+    # The double stands in for HttpClient's CONSTRUCTOR: it must accept
+    # whatever kwargs the production call passes (lane 65: health_status
+    # now passes allow_private_ips=True for loopback polling — the old
+    # ``timeout``-only signature rejected that kwarg and the control
+    # halves read "dead"). The pinned BEHAVIOUR below is untouched.
+    return lambda *args, **kwargs: client
 
 
 def test_health_status_non_json_200_with_body_is_ok(caplog):

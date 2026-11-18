@@ -28,12 +28,14 @@ with no weights is unavailable, never a fake render.
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 from typing import Any
 
 from ..core.logging_setup import get_logger
 
-__all__ = ["character_voice", "swap_voice", "lora_for", "swap_face"]
+__all__ = ["character_voice", "swap_voice", "lora_for", "lora_speak",
+           "swap_face"]
 
 _log = get_logger(__name__)
 
@@ -156,6 +158,85 @@ def lora_for(char: Any) -> dict[str, Any]:
         return {"ok": False,
                 "reason": f"LoRA adapter could not be checked: {path}"}
     return {"ok": True, "path": expanded}
+
+
+#: A failed LoRA-server boot is remembered per (base, adapter) so a
+#: wedged/OOM server is not re-booted on every spoken line — a boot costs
+#: a full model load. The memo is time-boxed (10 minutes): a box fixed
+#: in the meantime is picked up again, and the reason is always the last
+#: measured one, never a stale guess.
+_LORA_DOWN_TTL_S = 600.0
+_LORA_DOWN: dict[tuple[str, str], tuple[float, str]] = {}
+
+
+def reset_lora_down_cache() -> None:
+    """Forget remembered LoRA-server failures (tests / a repaired box)."""
+    _LORA_DOWN.clear()
+
+
+def lora_speak(char: Any, prompt: str, *, base_model: str = "",
+               timeout_s: float = 120.0, max_tokens: int = 512
+               ) -> dict[str, Any]:
+    """Generate ``prompt`` through the character's LoRA server.
+
+    The live call site ``lora_for`` was waiting for: the adapter is
+    resolved through ``lora_for`` (never bypassing its validation), a
+    per-adapter llama-server is ensured on its own port
+    (``llm/local_server.py ensure_lora_server`` — a second instance,
+    never a restart of the shared server), and the prompt is completed
+    through it. Returns ``{"ok": True, "text": ..., "adapter": ...,
+    "server": ...}`` or ``{"ok": False, "reason": ...}`` naming the wall
+    — no adapter named, no base model configured, no binary, too little
+    RAM for a second copy of the base, a failed boot, an empty answer.
+    Never raises: an unavailable LoRA rung is a fallback, not a crash.
+
+    ``base_model``: the shared base (a GGUF path or an HF repo id).
+    When empty it is read from ``llm.local_model``. There is NO silent
+    fallback to a catalog recommendation here — a base the owner never
+    configured must never trigger a multi-GB download mid-conversation.
+    """
+    resolved = lora_for(char)
+    if not resolved.get("ok"):
+        return {"ok": False,
+                "reason": str(resolved.get("reason") or "no LoRA adapter")}
+    adapter = str(resolved["path"])
+    base = (base_model or "").strip()
+    if not base:
+        try:
+            from ..core.config import get_settings
+
+            base = str(getattr(get_settings().llm, "local_model", "")
+                       or "").strip()
+        except Exception:  # noqa: BLE001 - no settings, no base
+            base = ""
+    if not base:
+        return {"ok": False,
+                "reason": "no local base model configured — set "
+                          "llm.local_model (nm models --promote-local "
+                          "<base .gguf>) so the LoRA server has a base "
+                          "to stack the adapter on"}
+    memo_key = (base, adapter)
+    memo = _LORA_DOWN.get(memo_key)
+    if memo is not None and (time.time() - memo[0]) < _LORA_DOWN_TTL_S:
+        return {"ok": False, "reason": memo[1]}
+    try:
+        from ..llm.local_server import ensure_lora_server
+
+        mgr, problem = ensure_lora_server(adapter, base_model=base)
+        if mgr is None:
+            _LORA_DOWN[memo_key] = (time.time(), problem)
+            return {"ok": False, "reason": problem}
+        text = mgr.complete(prompt, timeout_s=timeout_s,
+                            max_tokens=max_tokens)
+        if not (text or "").strip():
+            return {"ok": False,
+                    "reason": "LoRA server answered with no text"}
+        _LORA_DOWN.pop(memo_key, None)
+        return {"ok": True, "text": text.strip()[:600],
+                "adapter": adapter, "server": mgr.base_url}
+    except Exception as exc:  # noqa: BLE001 - a LoRA failure is a wall
+        _log.debug("character LoRA speak failed", exc_info=True)
+        return {"ok": False, "reason": f"LoRA generate failed: {exc}"}
 
 
 def swap_face(char: Any, target_path: str, *,

@@ -28,6 +28,7 @@ process on the same port is detected and reported.
 
 from __future__ import annotations
 
+import contextlib
 import glob
 import json
 import os
@@ -37,6 +38,7 @@ import signal
 import socket
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,11 +50,15 @@ from ..core.logging_setup import get_logger
 __all__ = [
     "GGUFDiagnosis",
     "GGUFServerManager",
+    "ensure_lora_server",
     "find_llama_binary",
     "find_gguf",
     "health_status",
+    "lora_server_port",
+    "lora_server_status",
     "port_in_use",
     "resolve_gguf_repo",
+    "stop_lora_servers",
 ]
 
 _log = get_logger(__name__)
@@ -171,7 +177,14 @@ def health_status(host: str, port: int, timeout: float = 3.0) -> str:
     Returns those words, or ``"dead"`` when nothing answers at all.
     """
     try:
-        client = HttpClient(timeout=timeout)
+        # Loopback by design: this module manages a server on
+        # 127.0.0.1, so the SSRF guard must be opened for exactly this
+        # call (``allow_private_ips`` exists for explicitly internal
+        # tooling). Without it the guard rejects every loopback health
+        # poll, ``_healthy()`` can never be True, and ``start()`` can
+        # never observe a boot succeed — proven with a stub server
+        # answering {"status": "ok"} and still reading "dead".
+        client = HttpClient(timeout=timeout, allow_private_ips=True)
         resp = client.get(f"http://{host}:{port}/health", timeout=timeout)
         if not resp.ok:
             return "dead"
@@ -475,6 +488,43 @@ class GGUFServerManager:
     @property
     def base_url(self) -> str:
         return f"http://{self.host}:{self.port}"
+
+    def complete(self, prompt: str, *, timeout_s: float = 120.0,
+                 max_tokens: int = 512, temperature: float = 0.7) -> str:
+        """Complete ``prompt`` through this server's OpenAI-compatible
+        chat API (``POST {base_url}/v1/chat/completions``).
+
+        Returns the assistant text (possibly ``""`` — an empty completion
+        is a model answer, not a transport failure; callers decide what
+        an empty answer means). Raises ``RuntimeError`` on transport
+        failure, a non-2xx status, or a response shape with no usable
+        choice — the caller names the wall, the completion never fakes
+        a line. Same ``HttpClient`` seam ``health_status`` uses, with
+        ``allow_private_ips=True`` — the server is loopback by design,
+        and the SSRF guard would reject every completion otherwise.
+        """
+        client = HttpClient(timeout=timeout_s, allow_private_ips=True)
+        try:
+            resp = client.post_json(
+                f"{self.base_url}/v1/chat/completions",
+                {"messages": [{"role": "user", "content": prompt}],
+                 "temperature": temperature,
+                 "max_tokens": max_tokens,
+                 "stream": False},
+                timeout=timeout_s)
+        except Exception as exc:  # noqa: BLE001 - transport is a wall
+            raise RuntimeError(
+                f"llama-server chat failed: {exc}") from exc
+        if not resp.ok:
+            raise RuntimeError(
+                f"llama-server chat failed: HTTP {resp.status}")
+        try:
+            payload = json.loads(resp.text or "")
+            text = payload["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            raise RuntimeError(
+                f"unexpected chat response shape: {exc}") from exc
+        return text or ""
 
     # ── download path ────────────────────────────────────────────────────────
     def fetch_gguf(self, repo_id: str, *, prefer_quant: str = "Q4_K_M") -> GGUFDiagnosis:
@@ -892,6 +942,147 @@ class GGUFServerManager:
             "model": self.model_path,
             "binary": self.binary,
         }
+
+
+# ── per-adapter LoRA servers (characters/specialists.py lora_for) ────────
+#
+# The design crux, settled from the code: a per-character LoRA is a SECOND
+# llama-server instance on its own port, never a restart of the shared
+# server. Restarting the shared manager would evict the brain's server
+# mid-conversation (``start`` reuses a healthy server "whatever the model
+# arg") and cost a full model reload on every character switch — in a
+# two-character scene, every turn. The one-manager-per-model-id pattern is
+# already the house answer (``llm/lifecycle.py LocalGGUFProvisioner``:
+# one manager per model id, second load gets the next free port); a LoRA
+# server is the same shape, keyed by adapter path instead of model id.
+# The price is honest and named: one full copy of the base weights in RAM
+# per live adapter — the RAM gate below refuses before spending a boot
+# the box cannot hold, naming the measured numbers.
+#
+# A manager is only ever started when a character with a validated
+# adapter actually speaks, and only once per adapter per process — the
+# registry is the cache, so the second line from the same character
+# reuses the healthy server. ``start()``'s "already serving — nothing to
+# do" early return is a TRAP here: a healthy foreign server on the port
+# would be mistaken for ours. A cached/started manager only counts when
+# it is OUR child (``_process`` alive) holding the model we asked for.
+
+_LORA_MANAGERS: dict[str, GGUFServerManager] = {}
+_LORA_LOCK = threading.Lock()
+
+#: LoRA servers live above the shared server's port: base + 16 .. base + 31.
+_LORA_PORT_OFFSET = 16
+_LORA_PORT_SPAN = 16
+
+#: The second copy of the base must fit in this fraction of total RAM
+#: (the rest is the first copy + KV cache + the rest of the system).
+_LORA_MAX_BASE_FRACTION = 0.4
+
+
+def lora_server_port(adapter_path: str | os.PathLike[str],
+                     *, base_port: int = 8080) -> int:
+    """The derived port for ``adapter_path``'s LoRA server.
+
+    Pure derivation (stable per adapter per process); the caller bumps
+    while the port is held by anyone else.
+    """
+    key = os.path.expanduser(str(adapter_path))
+    return (int(base_port) + _LORA_PORT_OFFSET
+            + (abs(hash(key)) % _LORA_PORT_SPAN))
+
+
+def ensure_lora_server(adapter_path: str | os.PathLike[str], *,
+                       base_model: str, host: str = "127.0.0.1",
+                       base_port: int = 8080,
+                       cache_dir: str = "models"
+                       ) -> tuple[GGUFServerManager | None, str]:
+    """Ensure a llama-server is serving ``base_model`` + ``adapter_path``.
+
+    Returns ``(manager, "")`` on success, ``(None, reason)`` naming the
+    wall otherwise. The adapter itself is NOT validated here — the caller
+    resolves it through ``characters/specialists.py lora_for`` first and
+    never bypasses that check. The base model is resolved by ``start()``
+    (a path, or an HF repo id it fetches); a base already on disk is
+    RAM-gated before the boot is spent.
+    """
+    key = os.path.expanduser(str(adapter_path))
+    with _LORA_LOCK:
+        mgr = _LORA_MANAGERS.get(key)
+        if mgr is not None:
+            alive = (mgr._process is not None
+                     and mgr._process.poll() is None)
+            if alive and mgr._healthy():
+                return mgr, ""
+            with contextlib.suppress(Exception):  # teardown never blocks rebuild
+                mgr.stop()
+            del _LORA_MANAGERS[key]
+    # RAM gate: the LoRA server holds a SECOND copy of the base weights.
+    # Refuse before spending a boot the box cannot hold.
+    model_path = find_gguf(base_model, cache_dir) if base_model else ""
+    if model_path:
+        try:
+            from ..core.profile import memory_mb
+
+            total_mb = float(memory_mb() or 0)
+            size_mb = os.path.getsize(model_path) / (1024.0 * 1024.0)
+            if total_mb and size_mb > total_mb * _LORA_MAX_BASE_FRACTION:
+                return None, (
+                    f"LoRA server needs a second copy of the base "
+                    f"({size_mb:.0f} MB) but this box has {total_mb:.0f} MB "
+                    f"RAM — the adapter stays unnamed until a smaller base "
+                    f"or a bigger box")
+        except Exception:  # noqa: BLE001 - the gate is best-effort
+            pass
+    # Port: derive, bump while held by anyone but our manager for this
+    # adapter. A foreign healthy server on the derived port must never be
+    # mistaken for ours (see the module note above).
+    port = lora_server_port(key, base_port=base_port)
+    for _ in range(_LORA_PORT_SPAN):
+        if not port_in_use(host, port):
+            break
+        port += 1
+    else:
+        return None, (f"no free port near {base_port + _LORA_PORT_OFFSET} "
+                      "for the LoRA server")
+    mgr = GGUFServerManager(host=host, port=port, cache_dir=cache_dir,
+                            lora_files=key)
+    diagnosis = mgr.start(base_model)
+    if not diagnosis.ok:
+        return None, "; ".join(diagnosis.problems) or (
+            "llama-server failed to start")
+    if mgr._process is None or not mgr.model_path:
+        # start() early-returned "already serving" on a port we did not
+        # boot — that server carries no LoRA. Never complete against it.
+        return None, (f"port {port} is already serving a server without "
+                      "this adapter — change llm.local_port or stop it")
+    with _LORA_LOCK:
+        _LORA_MANAGERS[key] = mgr
+    return mgr, ""
+
+
+def lora_server_status(adapter_path: str | os.PathLike[str]) -> dict[str, Any]:
+    """``{"serving": bool, "url": str}`` for ``adapter_path``'s server."""
+    key = os.path.expanduser(str(adapter_path))
+    with _LORA_LOCK:
+        mgr = _LORA_MANAGERS.get(key)
+    if mgr is None:
+        return {"serving": False, "url": ""}
+    alive = mgr._process is not None and mgr._process.poll() is None
+    return {"serving": bool(alive and mgr._healthy()),
+            "url": mgr.base_url if alive else ""}
+
+
+def stop_lora_servers() -> None:
+    """Stop every LoRA server started by :func:`ensure_lora_server`.
+
+    Shutdown/tests seam — the registry is process-lifetime by default.
+    """
+    with _LORA_LOCK:
+        managers = list(_LORA_MANAGERS.values())
+        _LORA_MANAGERS.clear()
+    for mgr in managers:
+        with contextlib.suppress(Exception):  # teardown never raises
+            mgr.stop()
 
 
 def _physical_cores() -> int:
