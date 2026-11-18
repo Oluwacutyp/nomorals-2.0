@@ -1411,6 +1411,21 @@ CREATE INDEX IF NOT EXISTS idx_notifications_retry
 """
 
 
+_V90_NOTIFICATIONS_DEDUPE_INDEX = """
+-- Dedupe index for Notifier._is_duplicate (2026-11-18 EC2: the dedupe
+-- SELECT ran 39.98s on every publish — full table scan, the table has
+-- no index on (kind, title, created_at) and is never pruned).
+-- kind + title equality narrows the scan to one alert's rows, then the
+-- created_at range keeps only the dedupe window; the delivery_state
+-- NOT IN exclusion is a residual filter on that handful.  sql= form
+-- (not fn): kind/title are migration-added (v37) and created_at is in
+-- the v1 DDL, so every migrated database has all three columns — unlike
+-- v89's lazy news delivery_state, nothing needs adding first.
+CREATE INDEX IF NOT EXISTS idx_notifications_dedupe
+    ON notifications(kind, title, created_at);
+"""
+
+
 _V84_NOTIFICATION_DELIVERIES = """
 -- Per-channel delivery attempts: every Notifier._deliver pass records one
 -- row per resolved owner target (state sent/failed/skipped, the platform's
@@ -3250,6 +3265,8 @@ MIGRATIONS: tuple[Migration, ...] = (
               fn=_apply_notifications_doc_and_digest_fold),
     Migration(89, "news_items_delivery_index",
               fn=_apply_news_items_delivery_index),
+    Migration(90, "notifications_dedupe_index",
+              sql=_V90_NOTIFICATIONS_DEDUPE_INDEX),
 )
 
 

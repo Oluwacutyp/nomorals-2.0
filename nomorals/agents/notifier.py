@@ -158,6 +158,20 @@ STATE_LOGGED = "logged"
 #: and the terminal ``dead`` state are never retried.
 RETRYABLE_STATES = (STATE_PENDING, STATE_FAILED)
 
+#: retention for settled notification rows (mirrors the news prune,
+#: v89 / 796aa152: the table grows forever without one — every publish
+#: stores a row — and the dedupe scan walks the whole history).
+NOTIF_RETENTION_DAYS = 90.0
+
+#: opportunistic prune cadence, seconds.  The gate lives at module
+#: scope, not on the instance: Notifier instances are ephemeral —
+#: call sites build a fresh ``Notifier(context)`` per publish — so an
+#: instance clock would never throttle and every publish would pay a
+#: prune attempt.  One process-wide monotonic clock prunes at most
+#: once an hour across all instances in the process.
+_NOTIF_PRUNE_INTERVAL_S = 3600.0
+_LAST_PRUNE_NOTIFICATIONS_MONO = 0.0
+
 #: per-channel attempt states recorded in ``notification_deliveries`` —
 #: one row per owner target per delivery pass, so ``/notify`` can show
 #: *why* a send didn't land instead of a bare "failed".
@@ -470,6 +484,11 @@ class Notifier:
         row exactly as before and simply has no ack — the bound is
         named, never papered over.
         """
+        # Retention first: the table grows forever without this (every
+        # publish stores a row), and the dedupe scan below walks the
+        # whole history.  Opportunistic, hourly, never raises — a
+        # failed prune never stops the publish.
+        self._maybe_prune_notifications()
         doc_json = ""
         if doc is not None:
             from ..social.chat.present import Doc as _Doc
@@ -902,6 +921,85 @@ class Notifier:
         except Exception as exc:  # noqa: BLE001 - dedupe is best-effort
             record_failure("notifier._is_duplicate", exc)
             return False
+
+    # ── retention prune (2026-11-18: third table of the same disease) ──
+    def prune_notifications(
+        self, older_than_days: float = NOTIF_RETENTION_DAYS,
+    ) -> int:
+        """Delete settled notification rows older than ``older_than_days``.
+
+        Returns the number of rows deleted.  Only rows no live path
+        can still deliver are dropped:
+
+        * the four states :meth:`_due_redeliveries` reads — pending,
+          failed, held-quiet-hours, held-focus — are live work and are
+          NEVER pruned however old they are (the news prune's
+          undelivered contract, in this table's vocabulary);
+        * an unfolded DIGEST row is live work too — ``digest_unfolded``
+          reads it FIFO with no age bound for the next briefing fold —
+          so digest rows are dropped only once folded
+          (``digest_folded_at`` set);
+        * everything else is settled history after 90 days: sent,
+          dead, superseded, disabled, muted, deduped, logged,
+          held-brain-degraded (written once, read by no live path —
+          the redelivery queue never picks it up), and pre-state-machine
+          NULL/empty rows.
+
+        Pre-F7 databases have no ``digest_folded_at`` column: the
+        folded-aware DELETE raises, and the fallback treats every
+        digest row as live work instead.  Never raises.
+        """
+        if self.db is None:
+            return 0
+        cutoff = time.time() - float(older_than_days) * 86400.0
+        live = (STATE_PENDING, STATE_FAILED, STATE_HELD_QUIET,
+                STATE_HELD_FOCUS)
+        try:
+            cur = self.db.execute(
+                "DELETE FROM notifications WHERE created_at < ? AND ("
+                "COALESCE(delivery_state, '') NOT IN (?, ?, ?, ?, ?) "
+                "OR (delivery_state = ? "
+                "AND COALESCE(digest_folded_at, 0) != 0))",
+                (cutoff, *live, STATE_DIGEST, STATE_DIGEST),
+            )
+            return int(cur.rowcount or 0)
+        except Exception:
+            # noqa: BLE001 - pre-F7: no digest_folded_at column
+            try:
+                cur = self.db.execute(
+                    "DELETE FROM notifications WHERE created_at < ? "
+                    "AND COALESCE(delivery_state, '') "
+                    "NOT IN (?, ?, ?, ?, ?)",
+                    (cutoff, *live, STATE_DIGEST),
+                )
+                return int(cur.rowcount or 0)
+            except Exception as exc:  # noqa: BLE001 - pruning is hygiene
+                record_failure("notifier.prune", exc)
+                return 0
+
+    def _maybe_prune_notifications(self) -> None:
+        """Opportunistic retention prune — at most once an hour, never raises.
+
+        Hooked at the top of :meth:`publish` (which every producer
+        funnels through, including ``publish_doc``): the table grows
+        forever without this — every publish stores a row — and the
+        dedupe scan below walks the whole history.  The clock is
+        module-scoped (see ``_LAST_PRUNE_NOTIFICATIONS_MONO``):
+        instances are ephemeral, so an instance clock would prune on
+        every publish instead of hourly.
+        """
+        global _LAST_PRUNE_NOTIFICATIONS_MONO
+        now_m = time.monotonic()
+        if now_m - _LAST_PRUNE_NOTIFICATIONS_MONO < _NOTIF_PRUNE_INTERVAL_S:
+            return
+        _LAST_PRUNE_NOTIFICATIONS_MONO = now_m
+        try:
+            dropped = self.prune_notifications()
+        except Exception:  # noqa: BLE001 - pruning is hygiene, not load-bearing
+            _log.debug("notifier auto-prune failed", exc_info=True)
+        else:
+            if dropped:
+                _log.info("notifier prune dropped %d stale rows", dropped)
 
     @staticmethod
     def _serialize_doc(doc: Any) -> str:
