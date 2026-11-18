@@ -3842,17 +3842,19 @@ class WhatsAppAdapter(ChatAdapter):
             "invite": str(group.get("invite") or ""),
         }
 
-    def group_participants(self, chat: ChatRef | str) -> list[dict[str, Any]]:
+    def group_participants(self, chat: ChatRef | str,
+                           timeout: float = 20) -> list[dict[str, Any]]:
         """The member roster: ``[{"jid", "name", "role"}]`` where role is
         ``""``/``"admin"``/``"superadmin"``. Names come from the local
         contact store and may be empty for strangers — never invented.
-        [] on failure.
-        """
+        [] on failure. ``timeout`` is the bridge wait per call
+        (the /lookup roster scan passes a short one so a bounded
+        scan can never stall a chat command)."""
         if not self.connected.is_set():
             return []
         response = self._send_cmd(
             {"cmd": "group_participants", "chat": self._group_jid(chat)},
-            timeout=20)
+            timeout=timeout)
         if not response.get("ok"):
             return []
         out = []

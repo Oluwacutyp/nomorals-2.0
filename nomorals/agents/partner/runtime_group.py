@@ -3292,7 +3292,7 @@ class RuntimeGroupMixin:
         anyone else is refused plainly.
         """
         from ...social.chat.account_age import render_account_age
-        from ...social.chat.base import ChatKind
+        from ...social.chat.base import ChatKind, ChatRef
         from ...social.chat.typography import Card, render_card
 
         surface = self._group_surface()
@@ -3301,8 +3301,11 @@ class RuntimeGroupMixin:
         in_group = (message.chat.kind == ChatKind.GROUP)
         group_key = (self._group_key_or_none(message)
                      if in_group else None)
+        platform = str(getattr(message.chat, "platform", "") or "")
+        is_whatsapp = platform in ("whatsapp", "wa")
         target_id = ""
         live: dict = {}
+        wa_scanned = 0
         if not wanted:
             target_id = sender
         else:
@@ -3315,7 +3318,7 @@ class RuntimeGroupMixin:
             if not target_id:
                 target_id, _groups = self._lookup_scan_ledger(
                     surface, token)
-            if not target_id:
+            if not target_id and not is_whatsapp:
                 adapter = self._group_adapter("telegram")
                 if adapter is not None:
                     if not token.isdigit():
@@ -3334,7 +3337,31 @@ class RuntimeGroupMixin:
                                                       or token) or {}
                         if live.get("id"):
                             target_id = str(live["id"])
+            if not target_id and is_whatsapp:
+                # WhatsApp has no username registry and the
+                # Telegram userbot cannot see WhatsApp accounts:
+                # the equivalent live read is the bounded roster
+                # scan across the groups Devon serves.
+                wa_adapter = self._group_adapter("whatsapp")
+                if wa_adapter is not None:
+                    found, wa_scanned = self._lookup_whatsapp_scan(
+                        wa_adapter, token, exclude_key=group_key)
+                    if found is not None:
+                        target_id = str(found["jid"])
+                        live = {"name": found["name"],
+                                "wa_role": found["role"],
+                                "found_in_group": found["group_key"],
+                                "found_in_title":
+                                    found["group_title"]}
         if not target_id:
+            if is_whatsapp:
+                scanned = (f" — the live roster scan of "
+                           f"{wa_scanned} WhatsApp group(s) "
+                           "didn't find it either"
+                           if wa_scanned else "")
+                return (f"no record of {wanted or 'that account'} "
+                        "in Devon's groups — not in the ledger"
+                        f"{scanned}.")
             return (f"no record of {wanted or 'that account'} in "
                     "Devon's groups, and the userbot couldn't see "
                     "it either.")
@@ -3354,10 +3381,38 @@ class RuntimeGroupMixin:
                       "name": live.get("name") or "",
                       "first_seen": None, "joined_ts": None,
                       "message_count": 0, "last_seen": None}
-        # Live identity refresh: what the userbot sees NOW
-        # outranks a stale ledger snapshot for the header.
+        # A scan find lives in a group the ledger never
+        # recorded: the Groups board names it, or the dossier
+        # would claim "no record in Devon's groups" about an
+        # account just found in one.
+        found_key = str(live.get("found_in_group") or "")
+        if found_key and not any(
+                str(entry.get("key") or "") == found_key
+                for entry in groups):
+            groups = [*groups, {"key": found_key,
+                                "title": str(live.get(
+                                    "found_in_title") or found_key)}]
+        # Live identity refresh: what the platform sees NOW
+        # outranks a stale ledger snapshot for the header —
+        # the userbot on Telegram, the group roster on
+        # WhatsApp (never the userbot for a WhatsApp target).
         if not live:
-            live = self._lookup_user_full(target_id) or {}
+            if is_whatsapp:
+                wa_adapter = self._group_adapter("whatsapp")
+                chat = message.chat if in_group else None
+                if wa_adapter is not None and chat is not None:
+                    live = self._lookup_whatsapp_live(
+                        wa_adapter, chat, target_id) or {}
+                elif wa_adapter is not None and found_key:
+                    live = self._lookup_whatsapp_live(
+                        wa_adapter,
+                        ChatRef(platform="whatsapp",
+                                chat_id=found_key.split(":", 1)[1]
+                                if ":" in found_key else found_key,
+                                kind=ChatKind.GROUP),
+                        target_id) or {}
+            else:
+                live = self._lookup_user_full(target_id) or {}
         username = (live.get("username")
                     or member.get("username") or "")
         name = live.get("name") or member.get("name") or ""
@@ -3388,34 +3443,69 @@ class RuntimeGroupMixin:
         if not full:
             return _member_card(surface, primary_key or group_key
                                 or "", member)
-        title = name or (f"@{username}" if username
-                         else f"Telegram {target_id}")
+        if is_whatsapp:
+            phone = (str(live.get("phone") or "")
+                     or "".join(c for c in str(target_id)
+                                if c.isdigit())
+                     or str(target_id))
+            title = name or f"WhatsApp {phone}"
+        else:
+            title = name or (f"@{username}" if username
+                             else f"Telegram {target_id}")
         card = Card("moderation", title=title, icon="🔍")
         first_seen = member.get("first_seen")
         total_messages = 0
         for entry in groups:
             rec = surface.member(entry["key"], target_id) or {}
             total_messages += int(rec.get("message_count") or 0)
-        rows = [("Telegram ID", target_id),
-                ("Handle", f"@{username}" if username
-                 else "no username"),
-                ("First seen by Devon", _fmt_ts(first_seen)),
-                ("Joined", _fmt_ts(member.get("joined_ts")
-                                   or first_seen)),
-                ("Messages", total_messages),
-                ("Last seen", _fmt_ts(member.get("last_seen"))),
-                ("Account age", render_account_age(target_id))]
-        phone = live.get("phone")
-        rows.append(("Phone",
-                     f"{phone} (mutual contact — visible to the "
-                     "userbot)" if phone else "not visible"))
-        flags = []
-        if live.get("bot"):
-            flags.append("bot account")
-        if live.get("premium"):
-            flags.append("Telegram Premium")
-        if flags:
-            rows.append(("Flags", ", ".join(flags)))
+        if is_whatsapp:
+            # WhatsApp has no handles, no account-age signal
+            # and no premium/bot flags: the identity IS the
+            # phone, the role comes from the live roster, and
+            # every row names what it actually is.
+            role = str(live.get("wa_role") or "")
+            role_label = ({"admin": "group admin",
+                           "superadmin": "group admin"}.get(
+                               role, "member") if role
+                          else "not on a live roster I checked")
+            phone = (str(live.get("phone") or "")
+                     or "".join(c for c in str(target_id)
+                                if c.isdigit())
+                     or str(target_id))
+            rows = [("WhatsApp",
+                     f"{phone} (the address itself — visible "
+                     "by construction)"),
+                    ("Display name",
+                     name or "no name on record"),
+                    ("Group role", role_label),
+                    ("First seen by Devon", _fmt_ts(first_seen)),
+                    ("Joined", _fmt_ts(member.get("joined_ts")
+                                       or first_seen)),
+                    ("Messages", total_messages),
+                    ("Last seen", _fmt_ts(member.get("last_seen"))),
+                    ("Account age",
+                     "not applicable on WhatsApp")]
+        else:
+            rows = [("Telegram ID", target_id),
+                    ("Handle", f"@{username}" if username
+                     else "no username"),
+                    ("First seen by Devon", _fmt_ts(first_seen)),
+                    ("Joined", _fmt_ts(member.get("joined_ts")
+                                       or first_seen)),
+                    ("Messages", total_messages),
+                    ("Last seen", _fmt_ts(member.get("last_seen"))),
+                    ("Account age", render_account_age(target_id))]
+            phone = live.get("phone")
+            rows.append(("Phone",
+                         f"{phone} (mutual contact — visible to the "
+                         "userbot)" if phone else "not visible"))
+            flags = []
+            if live.get("bot"):
+                flags.append("bot account")
+            if live.get("premium"):
+                flags.append("Telegram Premium")
+            if flags:
+                rows.append(("Flags", ", ".join(flags)))
         card.stats(rows)
         if groups:
             card.board("\n".join(
@@ -3426,12 +3516,15 @@ class RuntimeGroupMixin:
         else:
             card.board("no record in Devon's groups",
                        title="Groups")
-        common = self._lookup_common_chats(target_id)
-        if common:
-            card.board("\n".join(
-                f"{chat.get('title') or chat.get('id')}"
-                for chat in common),
-                title="Shared with the userbot account")
+        if not is_whatsapp:
+            # The userbot's shared chats are a Telegram read;
+            # a WhatsApp dossier never names them.
+            common = self._lookup_common_chats(target_id)
+            if common:
+                card.board("\n".join(
+                    f"{chat.get('title') or chat.get('id')}"
+                    for chat in common),
+                    title="Shared with the userbot account")
         history: list[dict] = []
         seen: set = set()
         for entry in groups:
@@ -3516,17 +3609,26 @@ class RuntimeGroupMixin:
     def _lookup_scan_ledger(self, surface, token: str
                             ) -> tuple[str, list[dict]]:
         """The ledger scan behind /lookup: an exact ID, or a
-        case-insensitive @handle, anywhere in Devon's groups."""
+        case-insensitive @handle, anywhere in Devon's groups.
+        A bare phone number also matches a WhatsApp JID key
+        (``23480…@s.whatsapp.net``) by its digits — the number
+        IS the address there, and a typed number must find
+        the member it belongs to."""
         wanted = str(token or "").strip().lstrip("@")
         if not wanted:
             return "", []
         lowered = wanted.lower()
+        digits = "".join(c for c in wanted if c.isdigit())
         target_id = ""
         for key in sorted(surface.store.data.keys()):
             for uid, member in (
                     surface.store.group(key).get("members")
                     or {}).items():
                 if uid == wanted:
+                    target_id = uid
+                    break
+                if digits and "@" in str(uid) and \
+                        str(uid).split("@", 1)[0] == digits:
                     target_id = uid
                     break
                 handle = str(member.get("username") or "").lower()
@@ -3538,6 +3640,114 @@ class RuntimeGroupMixin:
         if not target_id:
             return "", []
         return target_id, surface.groups_for_member(target_id)
+
+    def _lookup_whatsapp_live(self, adapter, chat,
+                              target_id: str) -> dict:
+        """The live identity read behind a WhatsApp dossier:
+        the target's roster row (phone, display name, group
+        role) in one group Devon serves. {} when the adapter
+        is absent, the roster won't load, or the target isn't
+        on it — the dossier then renders from the ledger
+        alone, never from the Telegram userbot."""
+        if adapter is None or chat is None:
+            return {}
+        fn = getattr(adapter, "group_participants", None)
+        if fn is None:
+            return {}
+        try:
+            rows = fn(chat)
+        except Exception:  # noqa: BLE001 - no proof, no detail
+            return {}
+        digits = "".join(c for c in str(target_id) if c.isdigit())
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            jid = str(row.get("jid") or "")
+            if not jid:
+                continue
+            if jid == str(target_id) or (
+                    digits and jid.split("@")[0] == digits):
+                return {"phone": jid.split("@")[0] or digits,
+                        "name": str(row.get("name") or ""),
+                        "username": "",
+                        "wa_role": str(row.get("role") or "")}
+        return {}
+
+    #: The cross-group roster scan is bounded on purpose: a
+    #: /lookup is a chat command, not a crawl — five groups,
+    #: five seconds a roster, first hit wins, and the
+    #: not-found line names the groups checked.
+    _WA_LOOKUP_SCAN_MAX_GROUPS = 5
+    _WA_LOOKUP_SCAN_TIMEOUT_S = 5.0
+
+    def _lookup_whatsapp_scan(
+            self, adapter, token: str, *,
+            exclude_key: str | None = None
+            ) -> tuple[dict | None, int]:
+        """Bounded cross-group roster scan: the WhatsApp
+        equivalent of Telegram's username registry. Finds a
+        phone number or display name in the live rosters of
+        the groups Devon serves (skipping the group the
+        resolver already checked and community containers,
+        which hold no roster). Returns (found, checked):
+        found is ``{"jid", "name", "role", "group_key",
+        "group_title"}`` or None; checked is how many groups'
+        rosters were actually read, so the not-found line can
+        say so honestly."""
+        from ...social.chat.base import ChatKind, ChatRef
+
+        fn_list = getattr(adapter, "group_list", None)
+        fn_parts = getattr(adapter, "group_participants", None)
+        if fn_list is None or fn_parts is None:
+            return None, 0
+        try:
+            groups = fn_list() or []
+        except Exception:  # noqa: BLE001 - no proof, no scan
+            return None, 0
+        digits = "".join(c for c in str(token) if c.isdigit())
+        want = str(token or "").lstrip("@").lower()
+        checked = 0
+        for entry in groups:
+            if checked >= self._WA_LOOKUP_SCAN_MAX_GROUPS:
+                break
+            if not isinstance(entry, dict):
+                continue
+            gid = str(entry.get("id") or "")
+            if not gid:
+                continue
+            key = f"whatsapp:{gid}"
+            if key == (exclude_key or ""):
+                continue
+            if entry.get("is_community"):
+                continue
+            chat = ChatRef(platform="whatsapp", chat_id=gid,
+                           kind=ChatKind.GROUP)
+            checked += 1
+            try:
+                rows = fn_parts(
+                    chat, timeout=self._WA_LOOKUP_SCAN_TIMEOUT_S)
+            except Exception:  # noqa: BLE001 - skip, never stall
+                continue
+            for row in rows or []:
+                if not isinstance(row, dict):
+                    continue
+                jid = str(row.get("jid") or "")
+                if not jid:
+                    continue
+                name_hit = want and str(
+                    row.get("name") or "").lower() == want
+                number_hit = bool(digits) \
+                    and jid.split("@")[0] == digits
+                if name_hit or number_hit:
+                    return {
+                        "jid": jid,
+                        "name": str(row.get("name") or ""),
+                        "role": str(row.get("role") or ""),
+                        "group_key": key,
+                        "group_title": str(
+                            entry.get("subject") or key),
+                    }, checked
+        return None, checked
 
     def _lookup_user_full(self, target_id: str) -> dict | None:
         """The live user read behind the dossier (userbot
