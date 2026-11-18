@@ -473,6 +473,84 @@ class Studio:
         return self.render_document(doc, save_to=save_to,
                                     prompt=prompt)
 
+    def remove_object(self, image_path: str, *, mask=None,
+                      description: str | None = None, prompt: str = "",
+                      method: str = "auto", locator=None,
+                      save_to: str | None = None) -> dict:
+        """Remove what ``mask`` or ``description`` names — the
+        Cleanup.pictures loop as one call.
+
+        Builds the remove-object document and renders it through the
+        document's own executor (neural rung when a pipeline is
+        available, CPU tiers otherwise); the op composites the
+        source pixels back outside the mask, so the delivered image
+        is byte-identical to the source everywhere except the
+        removed region. The document stays open for the Studio to
+        continue from — see :meth:`remove_object_document`.
+        Returns ``{"paths", "mask_rung", "mask_detail", "inpaint",
+        "mask_fraction", "synthesised", "description", "notes"}``.
+        """
+        from PIL import Image
+
+        from .cleanup import (
+            SYNTHESISED_FRACTION,
+            box_predictor_from_locator,
+            default_locator,
+            mask_fraction,
+            remove_object_document,
+        )
+        from .masks import MaskRef
+
+        locator = locator or default_locator
+        doc = remove_object_document(
+            image_path, mask=mask, description=description,
+            prompt=prompt, method=method, locator=locator)
+        # Resolve the mask once for the report (the op resolves the
+        # same recipe again at render — deterministic, same mask).
+        ref = MaskRef.from_dict(doc.ops[0].params["mask"])
+        with Image.open(image_path) as _im:
+            resolved = ref.resolve(_im.convert("RGB"))
+        pipeline = None
+        notes: list[str] = []
+        if method == "neural":
+            pipeline = self.pipeline()
+        elif method == "auto":
+            try:
+                pipeline = self.pipeline()
+            except ImgGenError as exc:
+                notes.append(
+                    f"neural pipeline unavailable ({exc}); "
+                    "CPU rungs used")
+        rendered = doc.render(
+            pipeline=pipeline,
+            box_predictor=box_predictor_from_locator(locator))
+        frac = mask_fraction(resolved.mask)
+        synthesised = frac >= SYNTHESISED_FRACTION
+        paths = self._finalize(
+            [rendered.image], prompt or description or "remove object",
+            save_to)
+        lines = [
+            f"remove_object: mask rung {resolved.tier} "
+            f"({resolved.detail})",
+            "remove_object: inpaint "
+            + (rendered.rungs[0] if rendered.rungs else "?"),
+            f"remove_object: mask covers {frac:.1%} of the image"
+            + (" — synthesised content" if synthesised else ""),
+        ]
+        lines += [f"note: {n}" for n in notes]
+        lines += [f"note: {n}" for n in rendered.notes]
+        if lines:
+            for path in paths:
+                with open(path + ".txt", "a") as f:
+                    f.write("\n" + "\n".join(lines))
+        return {"paths": paths, "mask_rung": resolved.tier,
+                "mask_detail": resolved.detail,
+                "inpaint": rendered.rungs[0] if rendered.rungs else "",
+                "mask_fraction": round(frac, 4),
+                "synthesised": synthesised,
+                "description": description or "",
+                "notes": notes + list(rendered.notes)}
+
     def outpaint(self, image_path: str, prompt: str, **kwargs):
         save_to = kwargs.pop("save_to", None)
         ext = {k: kwargs.pop(k) for k in
@@ -587,6 +665,23 @@ class Studio:
         return ImageDocument(image_path).inpaint(
             prompt, mask=ref, method=method, feather=feather, **kwargs)
 
+    def remove_object_document(self, image_path: str, *, mask=None,
+                               description: str | None = None,
+                               prompt: str = "", method: str = "auto",
+                               locator=None):
+        """An unrendered document holding one remove-object op.
+
+        ``mask``: a mask file path, a :class:`MaskRef`, or its dict;
+        ``description``: located once at build time through the
+        locator (default: the vision rungs) and stored as a MaskRef
+        recipe, so the document replays without re-locating. A PIL
+        mask cannot be embedded — save it and pass its path.
+        """
+        from .cleanup import remove_object_document as _build
+
+        return _build(image_path, mask=mask, description=description,
+                      prompt=prompt, method=method, locator=locator)
+
     def outpaint_document(self, image_path: str, prompt: str, *,
                           tier: str = "auto", **kwargs):
         """An unrendered document holding one outpaint op
@@ -622,8 +717,13 @@ class Studio:
             tier=tier, model=model, margin=margin, feather=feather)
 
     def render_document(self, doc, save_to: str | None = None,
-                        prompt: str = "") -> list[str]:
+                        prompt: str = "", box_predictor=None
+                        ) -> list[str]:
         """Replay an ImageDocument and save the result.
+
+        ``box_predictor`` is passed to the render for description
+        masks (a (image, text) -> box locator); documents whose
+        MaskRefs already carry a located box/point never call it.
 
         The Studio pipeline is built when an op requires it
         (img2img, neural inpaint/outpaint, diffusion upscale) —
@@ -658,7 +758,8 @@ class Studio:
                 notes.append(
                     f"neural pipeline unavailable ({exc}); "
                     "CPU rungs used where they exist")
-        rendered = doc.render(pipeline=pipeline)
+        rendered = doc.render(pipeline=pipeline,
+                              box_predictor=box_predictor)
         sidecar_prompt = (prompt or doc.source_prompt or doc.title
                           or "image document")
         paths = self._finalize([rendered.image], sidecar_prompt,

@@ -254,6 +254,7 @@ def _run_inpaint(img, params: dict, ctx: _RenderContext):
     prompt = str(p.pop("prompt", ""))
     feather = int(p.pop("feather", 8))
     method = str(p.pop("method", "auto"))
+    preserve = bool(p.pop("preserve_outside", False))
     gen = {k: p.pop(k) for k in list(p) if k in _INPAINT_GEN_KEYS}
     if p:
         raise ImgGenError(
@@ -267,16 +268,39 @@ def _run_inpaint(img, params: dict, ctx: _RenderContext):
                 "(Studio.pipeline()); use method='auto' for the "
                 "CPU tiers")
         out = inpaint(ctx.pipeline, img, res.mask, prompt,
-                      feather=feather, **gen)
-        return out[0], "neural-blended-diffusion", note
-    if method not in ("auto", "telea", "ns", "numpy"):
-        raise ImgGenError(
-            f"unknown inpaint method {method!r}; "
-            "use auto|neural|telea|ns|numpy")
-    out, label = inpaint_auto(
-        img, res.mask, prompt,
-        pipeline=ctx.pipeline if method == "auto" else None,
-        method=method, feather=feather, **gen)
+                      feather=feather, **gen)[0]
+        label = "neural-blended-diffusion"
+    else:
+        if method not in ("auto", "telea", "ns", "numpy"):
+            raise ImgGenError(
+                f"unknown inpaint method {method!r}; "
+                "use auto|neural|telea|ns|numpy")
+        out, label = inpaint_auto(
+            img, res.mask, prompt,
+            pipeline=ctx.pipeline if method == "auto" else None,
+            method=method, feather=feather, **gen)
+    if preserve:
+        # Byte-identity outside the mask, enforced in the op itself:
+        # the numpy rung resizes internally and the neural rung
+        # re-noises the known region, so neither guarantees untouched
+        # pixels by itself. Hard threshold, not the soft alpha: the
+        # rung already feather-blends its own output, and applying
+        # the soft alpha again would square it (a^2) and pull the
+        # original back into the feather band. Inside the hard mask
+        # the rung's output stands as delivered; outside it the
+        # source pixel stands, exactly (same blend shape as
+        # _run_develop's regional develop).
+        import numpy as np
+        from PIL import Image as _Image
+
+        a = (np.asarray(res.mask.convert("L")) > 127
+             ).astype(np.float64)[..., None]
+        base = np.asarray(img.convert("RGB")).astype(np.float64)
+        over = np.asarray(out.convert("RGB")).astype(np.float64)
+        out = _Image.fromarray(
+            np.clip(over * a + base * (1.0 - a) + 0.5, 0, 255
+                    ).astype(np.uint8), "RGB")
+        note += "; outside-mask pixels byte-identical to the source"
     return out, label, note
 
 
@@ -539,6 +563,44 @@ class ImageDocument:
         if mask is not None:
             params["mask"] = mask
         return self.push("inpaint", **params)
+
+    def remove_object(self, description: str = "", *,
+                      mask: MaskRef | dict | str | None = None,
+                      prompt: str = "", method: str = "auto",
+                      feather: int = 8, box=None,
+                      point=None) -> ImageDocument:
+        """A remove-object edit: an inpaint op whose mask is a MaskRef
+        recipe — ``description`` + located ``box``/``point`` (the
+        Cleanup.pictures loop), or an explicit ``mask`` (file path,
+        MaskRef, or its dict). Same op id as :meth:`inpaint`, so it
+        undoes and replays like every image-document op; ``method``
+        is validated here so a bad method fails at build, not render.
+        The op carries ``preserve_outside``: the executor composites
+        the source pixels back outside the mask, so the delivered
+        image is byte-identical to the source everywhere except the
+        removed region.
+        """
+        if method not in ("auto", "neural", "telea", "ns", "numpy"):
+            raise ImgGenError(
+                f"unknown inpaint method {method!r}; "
+                "use auto|neural|telea|ns|numpy")
+        if mask is not None:
+            if isinstance(mask, MaskRef):
+                ref = mask
+            elif isinstance(mask, dict):
+                ref = MaskRef.from_dict(mask)
+            else:
+                # A file mask is authoritative — no feather.
+                ref = MaskRef.file(str(mask))
+        elif description:
+            ref = MaskRef.auto(text=description, box=box, point=point,
+                               feather=feather)
+        else:
+            raise ImgGenError(
+                "remove_object needs a description or a mask")
+        return self.push("inpaint", prompt=prompt, mask=ref,
+                         method=method, feather=feather,
+                         preserve_outside=True)
 
     def outpaint(self, prompt: str = "", *, tier: str = "auto",
                  feather: int = 12, **ext) -> "ImageDocument":

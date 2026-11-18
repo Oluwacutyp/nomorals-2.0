@@ -368,6 +368,25 @@ def _voronoi_seed(arr: "np.ndarray", hole: "np.ndarray") -> "np.ndarray":
     return val
 
 
+def _relax(arr, hole, iters):
+    """Jacobi harmonic relaxation: hole pixels drift toward their
+    4-neighbour mean, known pixels pinned. Stops early when the
+    largest move in a sweep drops below 0.05 (converged)."""
+    import numpy as np
+
+    for _ in range(iters):
+        prev = arr[hole].copy()
+        up = np.roll(arr, 1, axis=0)
+        down = np.roll(arr, -1, axis=0)
+        left = np.roll(arr, 1, axis=1)
+        right = np.roll(arr, -1, axis=1)
+        arr[hole] = (up[hole] + down[hole] + left[hole]
+                     + right[hole]) / 4
+        if np.abs(arr[hole] - prev).max(initial=0) < 0.05:
+            break
+    return arr
+
+
 def _inpaint_numpy(image, mask, *, iters: int = 150,
                    work_px: int = 256):
     """Voronoi-seeded diffusion fill, pure numpy.
@@ -377,36 +396,78 @@ def _inpaint_numpy(image, mask, *, iters: int = 150,
     2. Iteratively relax masked pixels toward their 4-neighbour mean
        with known pixels pinned (harmonic/Laplacian smoothing).
 
+    Jacobi diffusion walks boundary information ~sqrt(n) pixels in
+    n iterations, so a hole of radius r needs O(r^2) iterations to
+    converge — 150 iterations never reach the middle of a 40px hole,
+    and the fill came back as the object itself (measured: a solid
+    red disc on a blue field returned mean (253, 1, 1) — unfilled).
+    Holes too big for the budget therefore warm up on a coarse grid
+    (4x down, where the hole is 4x smaller and the same iteration
+    budget converges) and upsample that as the initial guess for the
+    fine relaxation; small holes solve on the fine grid alone, as
+    before.
+    The solve hole is also dilated 1px past the mask so the
+    antialiased rim of the removed object is solved, not pinned as
+    background — delivery still uses the original mask (the feather
+    blend below), so nothing outside the mask changes.
+
     Real classical inpainting. Quality label is honest: smooth
     interpolation, not neural synthesis.
     """
     _require_numpy()
     import numpy as np
     _require_pil()
-    from PIL import Image
+    from PIL import Image, ImageFilter
 
     img = image.convert("RGB")
     w, h = img.size
     scale = min(1.0, work_px / max(w, h))
     sw, sh = max(1, round(w * scale)), max(1, round(h * scale))
     small = img.resize((sw, sh), Image.BICUBIC)
-    m = (np.asarray(mask.resize((sw, sh), Image.BICUBIC)
-                    .convert("L")) > 127)
+    m_img = mask.resize((sw, sh), Image.BICUBIC).convert("L")
+    m = np.asarray(m_img) > 127
     if not m.any():
         return img.copy(), "numpy: nothing masked"
-
-    arr = _voronoi_seed(np.asarray(small).astype(np.float64), m)
-    known = ~m
-    # Harmonic relaxation; known pixels pinned.
-    for _ in range(iters):
-        prev = arr[m].copy()
-        up = np.roll(arr, 1, axis=0)
-        down = np.roll(arr, -1, axis=0)
-        left = np.roll(arr, 1, axis=1)
-        right = np.roll(arr, -1, axis=1)
-        arr[m] = (up[m] + down[m] + left[m] + right[m]) / 4
-        if np.abs(arr[m] - prev).max(initial=0) < 0.05:
-            break
+    # Solve hole: the mask dilated 1px, so the antialiased rim of the
+    # removed object is filled, not pinned as background.
+    solve = np.asarray(m_img.filter(ImageFilter.MaxFilter(3))) > 127
+    # Coarse warm start, 4x down — only when the hole is far bigger
+    # than Jacobi can converge in the iteration budget (diffusion
+    # walks ~sqrt(n) pixels in n iterations, so a hole of inscribed
+    # radius r needs ~r^2 iterations). The bar is 4x the budget, not
+    # 1x: a hole only slightly over budget still converges well
+    # enough from the Voronoi seed, while the warm start's own
+    # coarse solve mixes the surroundings into small holes (a 27px
+    # hole inside a red square came back at R=162 with the warm
+    # start, R=255 without — the coarse hole is so small its
+    # boundary is the distant gradient, not the red ring).
+    r_est = (float(solve.sum()) / np.pi) ** 0.5
+    if r_est * r_est > 4 * iters:
+        # The coarse hole comes from the BINARY solve mask,
+        # thresholded low: a soft mask shrinks under downsampling
+        # and would put the coarse boundary inside the object,
+        # poisoning the warm start with the object's own colours
+        # (measured: a red disc's coarse solve came back (253, 1, 1)
+        # that way, (131, 156, 202) this way).
+        cw, ch = max(1, sw // 4), max(1, sh // 4)
+        coarse_img = small.resize((cw, ch), Image.BICUBIC)
+        coarse_m = (np.asarray(
+            Image.fromarray((solve * 255).astype(np.uint8)).resize(
+                (cw, ch), Image.BILINEAR)) > 25)
+        coarse = _voronoi_seed(
+            np.asarray(coarse_img).astype(np.float64), coarse_m)
+        coarse = _relax(coarse, coarse_m, iters)
+        # NEAREST prolongation: bicubic would mix the colours just
+        # outside the hole into its edge pixels; nearest keeps the
+        # coarse solution's colours pure and the fine polish (which
+        # kills high-frequency error fast) smooths the block edges.
+        arr = np.asarray(
+            Image.fromarray(np.clip(coarse, 0, 255).astype(np.uint8))
+            .resize((sw, sh), Image.NEAREST)).astype(np.float64)
+        arr[~solve] = np.asarray(small).astype(np.float64)[~solve]
+    else:
+        arr = _voronoi_seed(np.asarray(small).astype(np.float64), solve)
+    arr = _relax(arr, solve, iters)
     # Respect feather: soft-blend filled region with the original.
     alpha = (np.asarray(
         feather_mask(mask.resize((sw, sh), Image.BICUBIC),

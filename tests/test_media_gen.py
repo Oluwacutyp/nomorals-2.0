@@ -12,10 +12,10 @@ def registry():
     return r
 
 
-def test_all_six_registered(registry):
+def test_all_nine_registered(registry):
     for name in ("image_generate", "image_variation", "image_inpaint",
                  "image_outpaint", "image_batch", "video_generate",
-                 "video_animate", "poster_generate"):
+                 "video_animate", "poster_generate", "remove_object"):
         assert name in registry._tools, f"{name} not registered"
 
 

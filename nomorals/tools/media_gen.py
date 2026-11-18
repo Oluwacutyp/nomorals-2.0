@@ -119,6 +119,42 @@ def register(registry: Any) -> None:
         return {"paths": paths, "prompt": prompt}
 
     @registry.register(
+        "remove_object",
+        description=("Remove an object, person, watermark, text or "
+                     "defect from a photo — describe what to remove "
+                     "('remove the watermark', 'remove the person on "
+                     "the left', 'remove the man in red'). Provide the "
+                     "image and a description, or the image and a mask "
+                     "file (white = remove). The mask is drawn from the "
+                     "description through Devon's own segmentation "
+                     "rungs and the region is filled by inpainting; "
+                     "pixels outside the mask are untouched. Returns "
+                     "the saved path plus which mask rung and inpaint "
+                     "rung served it; large removals are labelled "
+                     "synthesised."),
+        capability=Capability.FS_WRITE,
+    )
+    def remove_object(image_path: str, *, description: str = "",
+                      mask_path: str = "", prompt: str = "",
+                      method: str = "auto") -> dict[str, Any]:
+        """Object removal by description or mask (Cleanup.pictures)."""
+        from ..media.imggen.studio import Studio
+        if not (description or "").strip() \
+                and not (mask_path or "").strip():
+            raise ValueError(
+                "remove_object needs a description ('remove the "
+                "watermark') or a mask_path")
+        src = _sandbox(context, image_path)
+        studio = Studio()
+        out = _out_dir(context, "images")
+        kwargs: dict[str, Any] = {"save_to": str(out)}
+        if (mask_path or "").strip():
+            kwargs["mask"] = str(_sandbox(context, mask_path))
+        return studio.remove_object(
+            str(src), description=(description or "").strip() or None,
+            prompt=prompt, method=method, **kwargs)
+
+    @registry.register(
         "image_outpaint",
         description=("Extend an image beyond its borders from a prompt "
                      "('continue the landscape to the left')."),
