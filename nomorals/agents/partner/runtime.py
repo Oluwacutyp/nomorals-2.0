@@ -9014,6 +9014,39 @@ class PartnerRuntime(
             _verb, _ref = _photo_parsed
             return self._control_photo(f"{_verb} {_ref}", message)
 
+        # Natural phrasing for the Studio extensions: "install this
+        # extension <path.zip>" / "studio theme <name>" / "studio
+        # extensions" — matched only when the text names the
+        # Studio's extensions or a theme, or a .zip package to
+        # install, so the question never steals an unrelated one.
+        # Owner-only, like /extensions.
+        from ...tools.studio_extensions import parse_studio_request
+
+        _studio_parsed = None
+        try:
+            from ...studio.store import StudioStore
+
+            _home = getattr(
+                getattr(self.context, "settings", None), "home", None)
+            _reader = StudioStore(
+                home=str(_home) if _home else None).reader()
+            _known = [(str(row.id), row.name)
+                      for row in _reader.installed()]
+            _studio_parsed = parse_studio_request(text, _known)
+        except Exception:  # noqa: BLE001 — no store, no hook
+            _studio_parsed = None
+        if _studio_parsed is not None:
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            _verb, _ref = _studio_parsed
+            if _verb == "install":
+                return self._control_extensions(
+                    f"install {_ref}", message)
+            if _verb == "theme":
+                return self._control_extensions(
+                    f"theme {_ref}", message)
+            return self._control_extensions("", message)
+
         # Living-card taps (Living Chat P2): a card button's
         # payload is a fencing stamp, not a command —
         # "cardtap <card_id> <revision> <index>". Checked before
@@ -10502,6 +10535,13 @@ class PartnerRuntime(
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
             return self._control_photo(command.tail or arg, message)
+        if kind == "extensions":
+            # Studio extensions (craft-extensions port, lane 80) —
+            # the themes and plug-ins the Studio wears and serves.
+            # Owner-only, like /photo.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_extensions(command.tail or arg, message)
         if kind == "immune":
             # Defensive immune system — owner-only, like /learn.
             if message is not None and not self._is_operator(message):

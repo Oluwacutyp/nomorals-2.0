@@ -658,6 +658,7 @@ class ToolRegistry:
             "group_health",  # churn / growth / topic clusters for WhatsApp group health
             "photo_editor",  # Studio photo editor — PSD documents, ladder edits, Studio page (PhotoCraft port)
             "recruitment",  # per-vacancy recruitment jobs + tiering + /status board (B42)
+            "studio_extensions",  # Studio extensions — themes, plug-ins, resource packs (craft-extensions port)
             "workspace",
             "trading",
             "characters",

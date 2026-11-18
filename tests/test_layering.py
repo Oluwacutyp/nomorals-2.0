@@ -157,6 +157,13 @@ LAYERS: dict[str, int] = {
     # rules, /status board. Imports core only; imported by tools
     # (L4, same layer) and agents (L5). L4, peer of careers.
     "recruitment": 4,
+    # studio/ is the Studio extensions organ (craft-extensions
+    # port, lane 80): the extension contract (manifest, theme
+    # palette, plug-in panels, trust tiers) and the durable store
+    # under <home>/studio/extensions/. Imports core only; imported
+    # by tools (L4, same layer), api (L7) and agents (L5). L4,
+    # peer of media/plugins.
+    "studio": 4,
     # legal/ is the legal-aid service organ: imports documents (L4),
     # imported by agents (L5). L4.
     "legal": 4,

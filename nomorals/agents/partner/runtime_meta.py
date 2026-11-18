@@ -1633,6 +1633,154 @@ class RuntimeMetaMixin:
             return (f"photo {verb} written. {note}")
         return usage
 
+    def _control_extensions(self, tail: str, message: Any = None) -> str:
+        """The /extensions reply: the Studio's extensions, in chat.
+
+        A thin dispatch to the same ``studio_extensions`` tool the
+        brain uses — no organ logic duplicated here, so the
+        command's output is the tool's output.
+
+        ``/extensions`` lists what is installed, what is
+        switched on, and which theme the Studio wears.
+        ``/extensions install <path-or-url>`` installs a package (a URL
+        needs its pinned digest: ``sha256=… size=…``).
+        ``/extensions enable|disable <id>`` switches one on or off.
+        ``/extensions uninstall <id>`` removes one everywhere.
+        ``/extensions theme <id>|none`` chooses the Studio's look.
+        ``/extensions themes`` lists the installed themes.
+        ``/extensions panels [photo]`` lists the panels enabled for a
+        page. Owner-only. A failure reports in words — never
+        silence, never a fake install.
+        """
+        import shlex
+
+        usage = ("/extensions | install <path-or-url> "
+                 "[sha256=… size=…] | enable|disable <id> | "
+                 "uninstall <id> | theme <id>|none | themes | "
+                 "panels [page]")
+        try:
+            words = shlex.split(tail or "")
+        except ValueError:
+            return "usage: " + usage
+        verb = words[0].lower() if words else "extensions"
+        if verb not in ("extensions", "install", "enable", "disable",
+                        "uninstall", "theme", "themes", "panels"):
+            return "usage: " + usage
+
+        def _call(action: str, **kwargs: Any) -> tuple[bool, dict]:
+            outcome = self.context.tools.call(
+                "studio_extensions", action=action, **kwargs)
+            if not outcome.ok:
+                error = getattr(outcome, "error", None)
+                text = getattr(error, "message", None) or str(error)
+                return False, {"error": text}
+            value = getattr(outcome, "value", None) or {}
+            if not isinstance(value, dict):
+                value = {"value": value}
+            return True, value
+
+        if verb == "extensions":
+            ok, value = _call("list")
+            if not ok:
+                return f"studio extensions failed: {value['error']}"
+            installed = value.get("installed") or []
+            lines = ["studio extensions:"]
+            if not installed:
+                lines.append("  none installed yet — /extensions install "
+                             "<path-or-url> installs one.")
+            for row in installed:
+                lines.append(
+                    f"  {row.get('id')} {row.get('version')} — "
+                    f"{row.get('kind')} — {row.get('name')} "
+                    f"({row.get('tier')})"
+                    + (" — on" if row.get("enabled_for_studio")
+                       else " — off"))
+            active = value.get("active_theme")
+            lines.append("theme: " + (active or "the Studio's own look"))
+            return "\n".join(lines)
+        if verb == "install":
+            if len(words) < 2:
+                return "usage: " + usage
+            target = words[1]
+            kwargs: dict[str, Any] = {}
+            for extra in words[2:]:
+                if "=" in extra:
+                    key, val = extra.split("=", 1)
+                    kwargs[key.strip().lower()] = val.strip()
+            if target.startswith(("http://", "https://")):
+                sha = kwargs.get("sha256", "")
+                size = kwargs.get("size", "")
+                if not sha or not size:
+                    return ("installing from a URL needs its pinned "
+                            "digest: /extensions install <url> "
+                            "sha256=<hex> size=<bytes>")
+                try:
+                    size_int = int(size)
+                except ValueError:
+                    return "/extensions install size= needs an integer."
+                ok, value = _call("install", url=target, sha256=sha,
+                                  size=size_int)
+            else:
+                ok, value = _call(
+                    "install", path=str(Path(target).expanduser()))
+            if not ok:
+                return f"studio install failed: {value['error']}"
+            return (f"installed {value.get('id')} "
+                    f"{value.get('version')} — {value.get('kind')} — "
+                    f"{value.get('name')} ({value.get('tier')})")
+        if verb in ("enable", "disable"):
+            if len(words) < 2:
+                return "usage: " + usage
+            ok, value = _call(verb, ext_id=words[1])
+            if not ok:
+                return f"studio {verb} failed: {value['error']}"
+            state = "on" if verb == "enable" else "off"
+            return f"{value.get('id')} is {state} for the Studio."
+        if verb == "uninstall":
+            if len(words) < 2:
+                return "usage: " + usage
+            ok, value = _call("uninstall", ext_id=words[1])
+            if not ok:
+                return f"studio uninstall failed: {value['error']}"
+            return f"{value.get('id')} is gone from the Studio."
+        if verb == "theme":
+            if len(words) < 2:
+                return "usage: " + usage
+            ok, value = _call("theme", ext_id=words[1])
+            if not ok:
+                return f"studio theme failed: {value['error']}"
+            active = value.get("active_theme")
+            if active is None:
+                return "the Studio is back to its own look."
+            return f"the Studio now wears {active}."
+        if verb == "themes":
+            ok, value = _call("themes")
+            if not ok:
+                return f"studio themes failed: {value['error']}"
+            themes = value.get("themes") or []
+            if not themes:
+                return ("no themes installed yet — /extensions install "
+                        "<theme zip> installs one.")
+            lines = ["themes:"]
+            for row in themes:
+                lines.append(f"  {row.get('id')} {row.get('version')} — "
+                             f"{row.get('name')}")
+            return "\n".join(lines)
+        if verb == "panels":
+            page = words[1] if len(words) > 1 else "photo"
+            ok, value = _call("panels", page=page)
+            if not ok:
+                return f"studio panels failed: {value['error']}"
+            panels = value.get("panels") or []
+            if not panels:
+                return f"no panels enabled for the {page} page."
+            lines = [f"panels on the {page} page:"]
+            for row in panels:
+                lines.append(f"  {row.get('id')} — {row.get('title')} "
+                             f"({row.get('slot')})")
+            return "\n".join(lines)
+        return "usage: " + usage
+
     def _control_arena_research(self, tail: str,
                                  message: Any = None) -> str:
         """The /arena-research reply: Devon researching herself, on

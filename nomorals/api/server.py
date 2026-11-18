@@ -306,6 +306,22 @@ def _require_capability(principal: Principal, capability: str) -> None:
         )
 
 
+def _read_panel_file(path: Any) -> Any:
+    """One plug-in's ``panel.json`` as a parsed panel, or None when
+    the file is missing or fails its own checks. A panel that fails
+    validation is absent from the page, never an error on it."""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    try:
+        from ..studio.panel import PanelFile
+
+        return PanelFile.parse(data)
+    except ValueError:
+        return None
+
+
 def _open_timeline(context: Any) -> Any:
     """Open an ``os.Timeline`` on the context's database (same helper the
     ``nm`` CLI uses). ``db_path`` may be ``None`` → in-memory timeline."""
@@ -1352,6 +1368,11 @@ class APIServer:
             "(/studio/photo/<id>), served as plain HTML — bearer-gated, "
             "Capability.MEDIA; unknown ids answer 404"
         )
+        self._route_docs[("GET", "/studio/extensions")] = (
+            "Studio extensions board (/studio/extensions), served as "
+            "plain HTML — bearer-gated, Capability.MEDIA; the list "
+            "of installed extensions and the theme the Studio wears"
+        )
 
 
 def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
@@ -1805,11 +1826,84 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                     if doc is None:
                         self._send_error(404, "no such photo")
                         return
-                    raw = photo_page_html(doc, doc_id=doc_id).encode(
+                    # The Studio wears its extensions here: the active
+                    # theme's palette and the enabled panels for the
+                    # photo page. The reader never writes and never
+                    # raises — a store it cannot read counts as
+                    # absent, so a broken extension store never
+                    # breaks the photo page.
+                    theme = None
+                    theme_name = ""
+                    panels = []
+                    try:
+                        from ..studio.store import StudioStore
+
+                        ext_store = StudioStore(home=home or None)
+                        active = ext_store.active_theme("studio")
+                        if active is not None:
+                            theme = active.palette
+                            theme_name = active.name
+                        for entry in ext_store.installed_for(
+                                "studio", "plugin"):
+                            parsed_panel = _read_panel_file(
+                                entry.dir / "panel.json")
+                            if parsed_panel is not None \
+                                    and parsed_panel.page == "photo":
+                                panels.append(parsed_panel)
+                    except Exception:  # noqa: BLE001 - extensions are optional
+                        _log.exception("studio extensions unreadable")
+                        theme = None
+                        theme_name = ""
+                        panels = []
+                    raw = photo_page_html(
+                        doc, doc_id=doc_id, theme=theme,
+                        theme_name=theme_name, panels=panels).encode(
                         "utf-8")
                 except Exception:  # noqa: BLE001 - a broken store is a 503, not a 500
                     _log.exception("studio photo page failed")
                     self._send_error(503, "photo page unavailable")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Security-Policy", CSP)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Frame-Options", "DENY")
+                request_id = getattr(self, "_request_id", "")
+                if request_id:
+                    self.send_header("X-Request-ID", request_id)
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            if method == "GET" and parsed.path == "/studio/extensions":
+                # Studio extensions board (craft-extensions port,
+                # lane 80): the installed extensions and the theme
+                # the Studio wears, as plain HTML — bearer-gated
+                # AFTER principal resolution, and the board rides
+                # Capability.MEDIA like the photo page. A damaged
+                # state file is a 503, never a list that lies.
+                try:
+                    _require_capability(principal, Capability.MEDIA)
+                except CapabilityDenied as exc:
+                    self._send_error(403, str(exc) or "capability denied",
+                                     extra={"kind": "CapabilityDenied"})
+                    return
+                from ..studio.page import extensions_board_html
+                from ..studio.store import StudioStore
+
+                home = getattr(
+                    getattr(server.context, "settings", None),
+                    "home", "") or ""
+                try:
+                    ext_store = StudioStore(home=home or None)
+                    raw = extensions_board_html(ext_store).encode(
+                        "utf-8")
+                except Exception:  # noqa: BLE001 - a broken store is a 503, not a 500
+                    _log.exception("studio extensions board failed")
+                    self._send_error(503, "extensions board unavailable")
                     return
                 self.send_response(200)
                 self.send_header("Content-Type",
