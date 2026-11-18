@@ -99,8 +99,13 @@ def _contact_sheet(sampled: dict[int, Image.Image], out: Path) -> Path:
 
 def _sequence(scene_kind: str, n_frames: int, width: int, height: int,
               fps: float, out: Path, frame_fn: Callable,
+              audio: str | os.PathLike | None = None,
               ) -> tuple[str, Path]:
-    """Encode ``frame_fn(i, t)`` to MP4; return (render_hash, contact)."""
+    """Encode ``frame_fn(i, t)`` to MP4; return (render_hash, contact).
+
+    ``audio`` is a wav muxed into the MP4 as its audio track — the
+    narration voice when one was rendered, else None (silent).
+    """
     from ..motion_studio._core import profile_defaults, render_sequence
 
     defaults = profile_defaults()
@@ -121,14 +126,18 @@ def _sequence(scene_kind: str, n_frames: int, width: int, height: int,
 
     render_sequence(n_frames, width, height, float(fps), out, _traced,
                     crf=int(defaults.get("crf", 20)),
-                    preset=str(defaults.get("preset", "veryfast")))
+                    preset=str(defaults.get("preset", "veryfast")),
+                    audio=audio)
     render_hash = hashlib.sha256(b"".join(digests)).hexdigest()
     return render_hash, _contact_sheet(sampled, out)
 
 
 def _render_design_scene(design: dict[str, Any], out: Path, *,
                          duration: float, size: tuple[int, int],
-                         fps: float) -> dict[str, Any]:
+                         fps: float,
+                         audio: str | os.PathLike | None = None,
+                         narration: dict[str, Any] | None = None
+                         ) -> dict[str, Any]:
     """An explainer design dict → MP4 via the frame function."""
     from ..motion_studio._core import MotionStudioError
     from ..motion_studio.explainers import frame_image, validate_design
@@ -146,12 +155,15 @@ def _render_design_scene(design: dict[str, Any], out: Path, *,
         return frame_image(design, (width, height), t, duration)
 
     render_hash, sheet = _sequence("design", n_frames, width, height,
-                                   fps, out, _frame)
+                                   fps, out, _frame, audio=audio)
     return {"engine": "code", "source": "design", "kind": spec["kind"],
             "title": spec.get("title", ""), "frames": n_frames,
             "fps": float(fps), "duration": float(duration),
             "path": str(out), "contact_sheet": str(sheet),
-            "render_hash": render_hash, "deterministic": True}
+            "render_hash": render_hash, "deterministic": True,
+            "narration": narration or {"status": "off", "backend": "",
+                                       "segments": 0, "audio": "",
+                                       "reason": ""}}
 
 
 def _open_browser_session(factory: Callable | None):
@@ -184,7 +196,9 @@ def _open_browser_session(factory: Callable | None):
 def _render_html_scene(scene: dict[str, Any], out: Path, *,
                        duration: float, size: tuple[int, int],
                        fps: float,
-                       browser_session_factory: Callable | None
+                       browser_session_factory: Callable | None,
+                       audio: str | os.PathLike | None = None,
+                       narration: dict[str, Any] | None = None,
                        ) -> dict[str, Any]:
     """An HTML scene → MP4: seek the live page to ``t``, capture a frame.
 
@@ -236,7 +250,7 @@ def _render_html_scene(scene: dict[str, Any], out: Path, *,
             return img
 
         render_hash, sheet = _sequence("html", n_frames, width, height,
-                                       fps, out, _frame)
+                                       fps, out, _frame, audio=audio)
     finally:
         if tab is not None:
             with contextlib.suppress(Exception):
@@ -249,7 +263,10 @@ def _render_html_scene(scene: dict[str, Any], out: Path, *,
             "title": str(scene.get("title", "")), "frames": n_frames,
             "fps": float(fps), "duration": float(duration),
             "path": str(out), "contact_sheet": str(sheet),
-            "render_hash": render_hash, "deterministic": True}
+            "render_hash": render_hash, "deterministic": True,
+            "narration": narration or {"status": "off", "backend": "",
+                                       "segments": 0, "audio": "",
+                                       "reason": ""}}
 
 
 def render_code_scene(scene: dict[str, Any],
@@ -257,7 +274,9 @@ def render_code_scene(scene: dict[str, Any],
                       duration: float = 5.0,
                       size: tuple[int, int] | None = None,
                       fps: float | None = None,
-                      browser_session_factory: Callable | None = None
+                      browser_session_factory: Callable | None = None,
+                      narrate: bool = True,
+                      tts_fn: Callable | None = None,
                       ) -> dict[str, Any]:
     """Render a scene spec to MP4 — deterministic seek(t) frames.
 
@@ -265,7 +284,19 @@ def render_code_scene(scene: dict[str, Any],
     "equation" | "chart", ...}``) or an HTML scene (``{"html": ...}``).
     Returns the render record — ``path``, ``contact_sheet``,
     ``render_hash`` (identical across re-renders of the same scene),
-    ``frames`` / ``fps`` / ``duration``.
+    ``frames`` / ``fps`` / ``duration``, plus ``narration``.
+
+    Narration is ON by default — the video speaks its own script
+    (the title and the labels of each build step, spoken through the
+    TTS ladder and muxed into the MP4). ``narrate=False`` renders
+    silent on purpose (``narration.status == "off"``). When narration
+    was requested but no TTS backend is installed, the video still
+    renders and ``narration`` reports ``status == "missing"`` with the
+    reason — a silent file is never passed off as narrated. When the
+    spoken words need more room than ``duration``, the render grows
+    to fit the voice (the record's ``duration`` is the final one).
+    ``tts_fn`` is an injectable ``(text, out_path) -> {"ok", ...}``
+    seam for tests; production always uses the ladder.
     """
     if not is_code_scene(scene):
         raise VideogenError(
@@ -281,16 +312,45 @@ def render_code_scene(scene: dict[str, Any],
                              or size[1] <= 0):
         raise VideogenError(f"code-video needs a positive size, got {size}")
     from ..motion_studio._core import profile_defaults
+    from .narration import scene_narration, synthesize_narration
 
     defaults = profile_defaults()
     size = size or tuple(defaults["size"])
     fps = fps or float(defaults["fps"])
     out_path = Path(out) if out is not None else _default_out()
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    narration: dict[str, Any] = {"status": "off", "backend": "",
+                                 "segments": 0, "audio": "", "reason": ""}
+    audio: str | None = None
+    if narrate:
+        segments = scene_narration(scene, duration=duration)
+        if not segments:
+            narration = {"status": "missing", "backend": "",
+                         "segments": 0, "audio": "",
+                         "reason": ("nothing to narrate — the scene "
+                                    "carries no speakable text")}
+        else:
+            synth = synthesize_narration(
+                segments, duration=duration, out_dir=str(out_path.parent),
+                name=out_path.stem + ".narration.wav", tts_fn=tts_fn)
+            if synth.get("ok"):
+                duration = float(synth["duration"])
+                audio = str(synth["path"])
+                narration = {"status": "spoken",
+                             "backend": str(synth.get("backend") or ""),
+                             "segments": len(synth["segments"]),
+                             "audio": audio, "reason": ""}
+            else:
+                narration = {"status": "missing", "backend": "",
+                             "segments": 0, "audio": "",
+                             "reason": str(synth.get("reason") or
+                                           "narration failed")}
     if "html" in scene:
         return _render_html_scene(scene, out_path, duration=duration,
                                   size=size, fps=fps,
                                   browser_session_factory=(
-                                      browser_session_factory))
+                                      browser_session_factory),
+                                  audio=audio, narration=narration)
     return _render_design_scene(scene, out_path, duration=duration,
-                                size=size, fps=fps)
+                                size=size, fps=fps, audio=audio,
+                                narration=narration)

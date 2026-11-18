@@ -6847,6 +6847,10 @@ class RuntimeMediaMixin:
 
         tail = (tail or "").strip()
         seconds = 5.0
+        narrate = True
+        if "--silent" in tail:
+            narrate = False
+            tail = tail.replace("--silent", " ").strip()
         sm = re.search(r"--seconds\s+([\d.]+)", tail)
         if sm:
             try:
@@ -6858,9 +6862,10 @@ class RuntimeMediaMixin:
             if kind == "map-route":
                 if not tail:
                     return ("usage: /map-route <A> to <B> [via <C>…] | "
-                            "/map-route <A>, <B>, <C> [--seconds N]")
+                            "/map-route <A>, <B>, <C> [--seconds N] "
+                            "[--silent]")
                 res = render_format("map-route", route=tail,
-                                    duration_s=seconds)
+                                    duration_s=seconds, narrate=narrate)
             elif kind == "headline":
                 lines = None
                 lm = re.search(r'--lines\s+"([^"]*)"', tail)
@@ -6869,21 +6874,23 @@ class RuntimeMediaMixin:
                     tail = (tail[:lm.start()] + tail[lm.end():]).strip()
                 if not tail:
                     return ('usage: /headline <text> [--lines "a|b"] '
-                            "[--seconds N]")
+                            "[--seconds N] [--silent]")
                 res = render_format("headline", headline=tail,
-                                    lines=lines, duration_s=seconds)
+                                    lines=lines, duration_s=seconds,
+                                    narrate=narrate)
             else:  # teardown
                 if not tail:
                     return ("usage: /teardown <thing> : <part>, <part>… "
-                            "[--seconds N]")
+                            "[--seconds N] [--silent]")
                 thing, sep, parts = tail.partition(":")
                 if not sep:
                     thing, sep, parts = tail.partition("—")
                 if not sep or not parts.strip():
                     return ("usage: /teardown <thing> : <part>, <part>… "
-                            "[--seconds N]")
+                            "[--seconds N] [--silent]")
                 res = render_format("teardown", thing=thing.strip(),
-                                    parts=parts, duration_s=seconds)
+                                    parts=parts, duration_s=seconds,
+                                    narrate=narrate)
         except VideogenError as exc:
             return f"{kind}: {exc}"
         except Exception as exc:  # noqa: BLE001 - chat surfaces as text

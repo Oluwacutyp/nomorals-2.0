@@ -253,9 +253,11 @@ def register(registry: Any) -> None:
                        width: int = 0, height: int = 0,
                        seed: int = 0, model: str = "",
                        lora: str = "", backend: str = "",
-                       scene: dict | None = None) -> dict[str, Any]:
+                       scene: dict | None = None,
+                       narrate: bool = True) -> dict[str, Any]:
         """Text-to-video via videogen (neural → motion fallback, or code
-        for a scene spec)."""
+        for a scene spec). Code scenes are narrated by default — the
+        video speaks its script; ``narrate=False`` renders silent."""
         from ..media.videogen.pipeline import generate
         if not (prompt or "").strip() and scene is None:
             raise ValueError("prompt is required (or a scene spec)")
@@ -265,12 +267,14 @@ def register(registry: Any) -> None:
                           backend=backend or "auto", scene=scene,
                           out=str(out / "clip.mp4"),
                           model=model or None, lora=loras or None,
+                          narrate=narrate,
                           **({"width": width} if width else {}),
                           **({"height": height} if height else {}))
         return {"path": result.path, "engine": result.engine,
                 "routed": result.routed, "note": result.note,
                 "model": result.meta.get("model", ""),
                 "scene_kind": result.meta.get("scene_kind", ""),
+                "narration": result.meta.get("narration", {}),
                 "prompt": prompt}
 
     @registry.register(

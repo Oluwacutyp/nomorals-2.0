@@ -249,6 +249,7 @@ def generate(prompt: str, *, backend: str = "auto",
              model: str | None = None,
              lora: Any = None,
              scene: dict[str, Any] | None = None,
+             narrate: bool = True,
              **kw) -> VideoResult:
     """Generate a video clip — neural when possible, motion otherwise.
 
@@ -315,20 +316,31 @@ def generate(prompt: str, *, backend: str = "auto",
         from .codegen import render_code_scene
 
         rec = render_code_scene(scene, out, duration=duration_s,
-                                size=size, fps=fps)
+                                size=size, fps=fps, narrate=narrate)
+        narr = rec.get("narration", {})
+        if narr.get("status") == "spoken":
+            narr_note = (f"narrated by {narr.get('backend') or 'TTS'} "
+                         f"({narr.get('segments', 0)} segments)")
+        elif narr.get("status") == "missing":
+            narr_note = ("silent — narration missing: "
+                         f"{narr.get('reason') or 'no TTS voice'}")
+        else:
+            narr_note = "silent (--silent)"
         result = VideoResult(
             path=rec["path"], engine="code", routed="code",
             note=(f"code-rendered {rec['kind']} scene: deterministic "
                   f"seek(t) frames ({rec['frames']} frames, render hash "
                   f"{rec['render_hash'][:12]}…) — no model, CPU-only; "
-                  f"contact sheet: {rec['contact_sheet']}"),
+                  f"contact sheet: {rec['contact_sheet']}\n"
+                  f"   narration: {narr_note}"),
             prompt=prompt,
             meta={"scene_kind": rec["kind"], "source": rec["source"],
                   "frames": rec["frames"], "fps": rec["fps"],
                   "duration": rec["duration"],
                   "render_hash": rec["render_hash"],
                   "contact_sheet": rec["contact_sheet"],
-                  "deterministic": True})
+                  "deterministic": True,
+                  "narration": narr})
         record_ledger({"kind": "videogen.generate", "path": rec["path"],
                        "engine": "code", "routed": "code",
                        "scene_kind": rec["kind"],

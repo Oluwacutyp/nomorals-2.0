@@ -242,7 +242,10 @@ def _render_variant(variant: dict[str, Any], *,
             from .codegen import render_code_scene
 
             rendered = render_code_scene(
-                scene, out_path, duration=duration_s, size=size, fps=fps)
+                scene, out_path, duration=duration_s, size=size, fps=fps,
+                narrate=False)  # QC variants are visual probes — the
+            # winner is re-rendered with narration by its caller, so
+            # speaking every variant would waste TTS for nothing.
             rec["status"] = "rendered"
             rec["path"] = rendered["path"]
             rec["render_hash"] = rendered["render_hash"]

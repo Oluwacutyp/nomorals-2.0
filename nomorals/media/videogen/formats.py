@@ -205,13 +205,17 @@ def build_format(name: str, **params: Any) -> dict[str, Any]:
 def render_format(name: str, *, duration_s: float = 5.0,
                   fps: float | None = None,
                   size: tuple[int, int] | None = None,
-                  out: str | None = None, **params: Any):
+                  out: str | None = None, narrate: bool = True,
+                  **params: Any):
     """Build a format's scene and render it on the code backend.
 
-    Returns the :class:`VideoResult` — a real MP4, engine ``"code"``.
+    Returns the :class:`VideoResult` — a real MP4, engine ``"code"``,
+    narrated by default (the format's script spoken through the TTS
+    ladder); ``narrate=False`` renders it silent on purpose.
     """
     from .pipeline import generate
 
     design = build_format(name, **params)
     return generate("", backend="code", scene=design,
-                    duration_s=duration_s, fps=fps, size=size, out=out)
+                    duration_s=duration_s, fps=fps, size=size, out=out,
+                    narrate=narrate)

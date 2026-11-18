@@ -68,8 +68,12 @@ def test_capability_report_names_the_code_rung():
 
 def test_code_renders_diagram_to_a_real_mp4(tmp_path):
     out = tmp_path / "route.mp4"
+    # narrate=False pins the silent contract this test owns — exact
+    # duration, exact frames. The narrated contract (duration grows to
+    # fit the voice) is covered by test_gapfix_vidnarrate.py.
     res = generate("Lagos to Abuja", backend="code", scene=dict(DIAGRAM),
-                   duration_s=2.0, fps=12.0, size=SIZE, out=str(out))
+                   duration_s=2.0, fps=12.0, size=SIZE, out=str(out),
+                   narrate=False)
     assert res.engine == "code"
     assert res.routed == "code"
     assert out.is_file() and out.stat().st_size > 1000
@@ -88,10 +92,14 @@ def test_code_frames_are_deterministic(tmp_path):
     b = frame_image(DIAGRAM, SIZE, 0.5, 2.0)
     assert a.tobytes() == b.tobytes()
     # and a whole render re-renders identically — the determinism receipt
+    # (silent here: this test pins frames/duration, narration's stretch
+    # is covered by test_gapfix_vidnarrate.py)
     rec1 = render_code_scene(dict(DIAGRAM), tmp_path / "one.mp4",
-                             duration=2.0, fps=12.0, size=SIZE)
+                             duration=2.0, fps=12.0, size=SIZE,
+                             narrate=False)
     rec2 = render_code_scene(dict(DIAGRAM), tmp_path / "two.mp4",
-                             duration=2.0, fps=12.0, size=SIZE)
+                             duration=2.0, fps=12.0, size=SIZE,
+                             narrate=False)
     assert rec1["render_hash"] == rec2["render_hash"]
     assert rec1["frames"] == rec2["frames"] == 24
 
@@ -224,8 +232,12 @@ def test_format_missing_params_raise_named():
 
 def test_format_renders_a_real_mp4(tmp_path):
     out = tmp_path / "map-route.mp4"
+    # silent here: this test pins the exact 2.0s duration; the
+    # narrated render (duration grows to fit the voice) is covered by
+    # test_gapfix_vidnarrate.py.
     res = render_format("map-route", route="Lagos to Abuja",
-                        duration_s=2.0, fps=12.0, size=SIZE, out=str(out))
+                        duration_s=2.0, fps=12.0, size=SIZE, out=str(out),
+                        narrate=False)
     assert res.engine == "code"
     assert out.is_file() and out.stat().st_size > 1000
     assert abs(probe_duration(str(out)) - 2.0) < 0.4
