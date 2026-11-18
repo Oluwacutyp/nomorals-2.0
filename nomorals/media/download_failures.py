@@ -41,6 +41,7 @@ Stdlib only besides the L1 store. Every public function never raises
 
 from __future__ import annotations
 
+import errno
 import re
 import socket
 import threading
@@ -102,6 +103,14 @@ def classify_failure(exc_or_reason: object) -> str:
     """One failure kind for an exception or a download-failure reason.
 
     Never raises; anything unrecognised is ``"download_error"``.
+
+    A LOCAL write failure is ``"local_error"`` — deliberately NOT in
+    ``SOURCE_DEAD_KINDS``: the box could not open the file (missing
+    parent directory, name too long, disk full), which is evidence
+    about this box, never about the source, so it condemns only its
+    own URL.  Owner report 2026-11-18: a missing-directory failure
+    on one mdundo copy was read as ``site_error`` and condemned every
+    mdundo copy for the song.
     """
     try:
         if isinstance(exc_or_reason, BaseException):
@@ -109,6 +118,9 @@ def classify_failure(exc_or_reason: object) -> str:
         text = str(exc_or_reason or "").lower()
         if not text:
             return "download_error"
+        if "local_write_error" in text or "local_error" in text \
+                or "unable to open for writing" in text:
+            return "local_error"
         if "timed out" in text or "timeout" in text \
                 or "timed-out" in text:
             return "timeout"
@@ -130,7 +142,15 @@ def classify_failure(exc_or_reason: object) -> str:
 
 
 def _classify_exception(exc: BaseException) -> str:
-    """Kind for a real exception (timeouts and HTTP errors first)."""
+    """Kind for a real exception (timeouts and HTTP errors first).
+
+    A local filesystem error is ``"local_error"``, never
+    ``"site_error"``: an ``OSError`` raised by opening a file on this
+    box (missing directory, permission, disk full, name too long) is
+    evidence about this box, not the site.  Network-shaped
+    ``OSError``s (reset, unreachable, refused) are not local errnos
+    and keep the existing ``"site_error"`` mapping.
+    """
     if isinstance(exc, urllib.error.HTTPError):
         code = int(getattr(exc, "code", 0) or 0)
         if code == 403:
@@ -146,7 +166,11 @@ def _classify_exception(exc: BaseException) -> str:
         return "timeout"
     if isinstance(exc, urllib.error.URLError):
         return "site_error"
-    if isinstance(exc, (ConnectionError, OSError)):
+    if isinstance(exc, OSError):
+        local_errno = getattr(exc, "errno", None)
+        if local_errno in (errno.ENOENT, errno.EACCES, errno.ENOSPC,
+                           errno.ENAMETOOLONG, errno.EROFS):
+            return "local_error"
         return "site_error"
     return "download_error"
 

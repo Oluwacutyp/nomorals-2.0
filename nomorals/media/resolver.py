@@ -134,8 +134,11 @@ def ensure_ytdlp() -> bool:
 #: Every text-search source /play tries, in chain order — single source
 #: of truth, imported from sources.py so the count is testable.
 #: Owner rule: MANY sources, never 1–2.
+from .sources import (  # noqa: E402
+    DEMOTED_CHAIN_SOURCES,
+    MUSIC_SOURCE_DOMAINS,
+)
 from .sources import MUSIC_SEARCH_SOURCES as PLAY_TEXT_STRATEGY_NAMES  # noqa: E402
-from .sources import MUSIC_SOURCE_DOMAINS  # noqa: E402
 
 _AUDIO_EXTS = (
     ".mp3", ".wav", ".flac", ".ogg", ".m4a", ".opus",
@@ -402,6 +405,13 @@ class SourceResolver:
           the active ordering (the #86 vocabulary) but the chain
           still tries them last rather than pretending they do not
           exist — the attempt log stays truthful.
+        * sources the owner explicitly demoted
+          (``DEMOTED_CHAIN_SOURCES`` — mdundo, 2026-11-18) sort
+          after every non-demoted ACTIVE source, in chain order,
+          and before the stood-down / dead ones: a high learned
+          score never floats a demoted source back up on a box
+          where it has served often.  Demotion is an order, not a
+          health verdict — the source's health is untouched.
         Never raises; a registry hiccup returns the chain as-is."""
         try:
             evidence = False
@@ -419,9 +429,13 @@ class SourceResolver:
                       if it[2] is None or reg.is_active(it[2])]
             inactive = [it for it in items
                         if it[2] is not None and not reg.is_active(it[2])]
+            demoted = [it for it in active
+                       if it[0] in DEMOTED_CHAIN_SOURCES]
             active.sort(key=lambda it: -reg.score(it[2])
                         if it[2] is not None else 0.0)
-            return active + inactive
+            kept = [it for it in active
+                    if it[0] not in DEMOTED_CHAIN_SOURCES]
+            return kept + demoted + inactive
         except Exception:  # noqa: BLE001
             return items
 
@@ -545,16 +559,20 @@ class SourceResolver:
             ("bandcamp-search", self._bandcamp_search_many),
             ("youtube-search", self._youtube_search_many),
             ("youtube-music-search", self._youtube_music_search_many),
-            ("mdundo-search", self._mdundo_search_many),
             ("archiveorg-search", self._archiveorg_search_many),
             ("jamendo-search", self._jamendo_search_many),
             ("fma-search", self._fma_search_many),
             ("jiosaavn-search", self._jiosaavn_search_many),
+            ("deezer-search", self._deezer_search_many),
+            # Mdundo last among the audio-capable sources (owner
+            # order 2026-11-18 — see MUSIC_SEARCH_SOURCES): the sweep
+            # limit truncates after the first entries, so a source
+            # this low never crowds real sources out of the list.
+            ("mdundo-search", self._mdundo_search_many),
             ("musicbrainz-search", self._musicbrainz_search_many),
             ("openverse-search", self._openverse_search_many),
             ("wikimedia-search", self._wikimedia_search_many),
             ("itunes-search", self._itunes_search_many),
-            ("deezer-search", self._deezer_search_many),
         ]
         # Pass #88: the sweep is a real music path — its outcomes
         # land in the same registry (served / no-result / failure per
@@ -1107,12 +1125,13 @@ class SourceResolver:
                       result: ResolvedAudio) -> ResolvedAudio:
         # MANY sources, in chain order (see MUSIC_SEARCH_SOURCES).
         # Downloadable/full-track sources first; regional blogs before
-        # globals; metadata-only (Boomplay, MusicBrainz) + 30s-preview
-        # APIs (iTunes/Deezer) + Spotify last. Boomplay is back in the
+        # globals; metadata-only (MusicBrainz) + 30s-preview APIs
+        # (iTunes/Deezer) + Spotify last. Boomplay is back in the
         # chain via browser-backed search (verified live 2026-10-18).
-        # Mdundo is the exception: it sits after the big globals by the
-        # owner's order 2026-11-17 (its loose search surfaced
-        # irrelevant tracks too early).
+        # Mdundo sits last among the audio-capable sources by the
+        # owner's order 2026-11-18 (it was "after the big globals"
+        # by his order 2026-11-17; his live report 2026-11-18
+        # countermanded it — see MUSIC_SEARCH_SOURCES).
         # GLOBAL coverage: Nigeria/Africa is one region
         # among many — the chain spans worldwide catalogs (YouTube
         # Music, MusicBrainz, Openverse, Wikimedia, iTunes, Deezer).
@@ -1135,8 +1154,6 @@ class SourceResolver:
             ("youtube-search", lambda: self._s_youtube_search(query)),
             ("youtube-music-search",
              lambda: self._s_youtube_music_search(query)),
-            ("mdundo-search", lambda: self._s_blog_search(
-                query, "MdundoSource", "mdundo")),
             ("archiveorg-search", lambda: self._s_archiveorg_search(query)),
             ("jamendo-search", lambda: self._s_blog_search(
                 query, "JamendoSource", "jamendo")),
@@ -1149,6 +1166,13 @@ class SourceResolver:
                 "JioSaavn — track identified, no audio; open the "
                 "track page or the JioSaavn app")),
             ("boomplay-search", lambda: self._s_boomplay_search(query)),
+            ("deezer-search", lambda: self._s_preview_search(
+                query, "DeezerSource", "deezer")),
+            ("spotify-search", lambda: self._s_spotify_search(query)),
+            # Mdundo last among the audio-capable sources (owner
+            # order 2026-11-18 — see MUSIC_SEARCH_SOURCES).
+            ("mdundo-search", lambda: self._s_blog_search(
+                query, "MdundoSource", "mdundo")),
             ("musicbrainz-search", lambda: self._s_metadata_search(
                 query, "MusicBrainzSource", "musicbrainz",
                 "MusicBrainz metadata only — no audio; find the track "
@@ -1159,9 +1183,6 @@ class SourceResolver:
                 query, "WikimediaSource", "wikimedia")),
             ("itunes-search", lambda: self._s_preview_search(
                 query, "ITunesSource", "itunes")),
-            ("deezer-search", lambda: self._s_preview_search(
-                query, "DeezerSource", "deezer")),
-            ("spotify-search", lambda: self._s_spotify_search(query)),
         ]
         # Pass #88: the chain learns.  Each strategy is wrapped so
         # its outcome lands in the ONE source registry against the

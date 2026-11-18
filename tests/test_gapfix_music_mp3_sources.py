@@ -139,10 +139,15 @@ class ChainMembershipTests(unittest.TestCase):
         self.assertIn("mp3juice-search", chain_names)
 
     def test_order_after_regional_blogs_not_first(self):
-        # Owner order 2026-11-17: mdundo moved down, after the big
-        # globals — its loose search surfaced irrelevant tracks too
-        # early. mp3pm/mp3juice keep their 2026-11-16 placement (after
-        # the regional blogs, before SoundCloud).
+        # Owner order 2026-11-18 (supersedes 2026-11-17 "after the
+        # big globals"): mdundo moved to the BOTTOM of the
+        # audio-capable sources — below every real download source
+        # including mp3.pm, YouTube Music, Archive.org, Deezer and
+        # Spotify — after it filled a whole /play run with its own
+        # copies while its direct leg was failing.  It stays above
+        # the metadata-only sources.  mp3pm/mp3juice keep their
+        # 2026-11-16 placement (after the regional blogs, before
+        # SoundCloud).
         self.assertEqual(MUSIC_SEARCH_SOURCES[0], "workspace-scan")
         mdundo = MUSIC_SEARCH_SOURCES.index("mdundo-search")
         self.assertLess(MUSIC_SEARCH_SOURCES.index("mp3pm-search"),
@@ -154,8 +159,10 @@ class ChainMembershipTests(unittest.TestCase):
         self.assertGreater(mdundo,
                            MUSIC_SEARCH_SOURCES.index(
                                "youtube-music-search"))
+        self.assertGreater(mdundo,
+                           MUSIC_SEARCH_SOURCES.index("spotify-search"))
         self.assertLess(mdundo,
-                        MUSIC_SEARCH_SOURCES.index("archiveorg-search"))
+                        MUSIC_SEARCH_SOURCES.index("musicbrainz-search"))
 
 
 class ResolverWiringTests(unittest.TestCase):

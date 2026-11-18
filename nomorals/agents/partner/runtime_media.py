@@ -3393,6 +3393,32 @@ class RuntimeMediaMixin:
     _PREVIEW_KINDS = frozenset({"itunes", "deezer"})
 
     @classmethod
+    def _music_chain_index(cls, kind: str) -> int:
+        """Position of a source kind in the owner-ordered music chain.
+
+        The pick / attempt order is the match score first and the
+        chain order as the tiebreak: when a real source and a demoted
+        one (mdundo, owner order 2026-11-18) match equally well, the
+        real source is attempted first.  Unknown kinds sort last —
+        never ahead of a known source.  The index is built once from
+        ``MUSIC_SEARCH_SOURCES`` (the one canonical order) and cached
+        on the class; a hiccup returns "last" rather than raising.
+        """
+        try:
+            idx = cls.__dict__.get("_CHAIN_INDEX")
+            if idx is None:
+                from ...media.sources import MUSIC_SEARCH_SOURCES
+
+                idx = {
+                    name.removesuffix("-search"): pos
+                    for pos, name in enumerate(MUSIC_SEARCH_SOURCES)
+                }
+                cls._CHAIN_INDEX = idx
+            return idx.get(str(kind or ""), len(idx))
+        except Exception:  # noqa: BLE001
+            return 1 << 30
+
+    @classmethod
     def _play_is_preview_item(cls, item: Any) -> bool:
         """Is this candidate preview-class (flag or preview kind)?"""
         try:
@@ -3742,13 +3768,18 @@ class RuntimeMediaMixin:
             # Right-artifact law: the canonical recording first —
             # edit-marked candidates (Nightcore/remix/cover…) sort
             # AFTER every clean confident match, best score first
-            # within each class.  An edit may still win, but only
-            # when no original is obtainable — and then it is
-            # labeled as an edit (see the success path below).
+            # within each class, chain order breaking ties — so when
+            # a real source and a demoted one (mdundo, owner order
+            # 2026-11-18) match equally well, the real source is
+            # attempted first and mdundo surfaces only when nothing
+            # real matches.  An edit may still win, but only when
+            # no original is obtainable — and then it is labeled as
+            # an edit (see the success path below).
             confident.sort(key=lambda pair: (
                 1 if self._edit_marker_of(
                     str(pair[1].get("title", "") or "")) else 0,
-                -pair[0]))
+                -pair[0],
+                self._music_chain_index(str(pair[1].get("kind", "")))))
             attempt_items = [it for _score, it in confident]
         outcomes: dict[str, str] = {}
         # Failure memory (lane 26): source kinds that already failed

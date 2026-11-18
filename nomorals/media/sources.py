@@ -1691,9 +1691,15 @@ class DiscoveredBlogSource(NetNaijaSource):
 
 #: Text-search priority for /play.  Regional blogs first (direct MP3s
 #: beat metadata), proven globals next, metadata-only last.
-#: Mdundo is the exception: it sits after the big globals (SoundCloud,
-#: YouTube, YouTube Music) by the owner's order 2026-11-17 — its loose
-#: search was surfacing irrelevant tracks too early.
+#: Mdundo sits LAST among the audio-capable sources by the owner's
+#: order 2026-11-18 (it was "after the big globals" by his order
+#: 2026-11-17; his live report 2026-11-18 countermanded it — "move
+#: it down" below every real download source, mp3.pm included — after
+#: it filled a whole /play run with its own copies while its direct
+#: leg was failing).  It stays ABOVE the metadata-only sources so a
+#: "find anything" fallback can still reach it; it is demoted, not
+#: deleted.  Deezer/Spotify sit with the audio-capable block (they
+#: serve preview audio) rather than after the metadata block.
 #: Each entry: (strategy name, source instance or None for legacy paths).
 SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("netnaija-search", NetNaijaSource()),
@@ -1702,16 +1708,16 @@ SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
     ("mp3pm-search", MP3PMSource()),
     ("mp3juice-search", MP3JuiceSource()),
     ("bandcamp-search", BandcampSource()),
-    ("mdundo-search", MdundoSource()),
     ("archiveorg-search", ArchiveOrgSource()),
     ("jamendo-search", JamendoSource()),
     ("fma-search", FMASource()),
     ("jiosaavn-search", JioSaavnSource()),
+    ("deezer-search", DeezerSource()),
+    ("mdundo-search", MdundoSource()),
     ("musicbrainz-search", MusicBrainzSource()),
     ("openverse-search", OpenverseSource()),
     ("wikimedia-search", WikimediaSource()),
     ("itunes-search", ITunesSource()),
-    ("deezer-search", DeezerSource()),
     # soundcloud-search / youtube-search / youtube-music-search /
     # spotify-search stay on their existing paths in resolver.py (API
     # adapters + yt-dlp) — they are proven and this module does not
@@ -1722,6 +1728,11 @@ SOURCE_CHAIN: list[tuple[str, AudioSource]] = [
 #: Every text-search source /play tries, in chain order.  The resolver
 #: builds its chain from this list so the count is single-sourced and
 #: testable — the owner rule is MANY sources, never 1–2.
+#: Mdundo is last among the audio-capable sources (owner order
+#: 2026-11-18 — see SOURCE_CHAIN above): below mp3.pm, mp3juice,
+#: SoundCloud, Bandcamp, YouTube, YouTube Music, Archive.org, Jamendo,
+#: FMA, JioSaavn, Boomplay, Deezer and Spotify; above the
+#: metadata-only sources (MusicBrainz, Openverse, Wikimedia, iTunes).
 MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "workspace-scan",
     "netnaija-search",
@@ -1733,19 +1744,31 @@ MUSIC_SEARCH_SOURCES: tuple[str, ...] = (
     "bandcamp-search",
     "youtube-search",
     "youtube-music-search",
-    "mdundo-search",
     "archiveorg-search",
     "jamendo-search",
     "fma-search",
     "jiosaavn-search",
     "boomplay-search",
+    "deezer-search",
+    "spotify-search",
+    "mdundo-search",
     "musicbrainz-search",
     "openverse-search",
     "wikimedia-search",
     "itunes-search",
-    "deezer-search",
-    "spotify-search",
 )
+
+#: Sources the owner has explicitly demoted in the chain order
+#: (2026-11-18: mdundo to the bottom of the audio-capable sources).
+#: The static lists above are only the tiebreak: the learned ordering
+#: in :meth:`nomorals.media.resolver.SourceResolver._order_music`
+#: sorts active sources by registry score, so without this a high
+#: learned score would float a demoted source straight back up on a
+#: box where it has served often.  A demoted source sorts after every
+#: non-demoted ACTIVE source and before stood-down / dead ones — it
+#: is deprioritised, never stood down (its health is untouched and a
+#: later success does not re-promote it; only the owner re-orders it).
+DEMOTED_CHAIN_SOURCES: frozenset[str] = frozenset({"mdundo-search"})
 
 #: The host each music chain strategy actually fetches from — the
 #: strategy's source in the ONE source registry (Pass #88).  This map

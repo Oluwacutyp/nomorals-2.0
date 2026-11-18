@@ -38,6 +38,46 @@ def _clean(name: str, limit: int = 120) -> str:
     return cleaned[:limit] or "media"
 
 
+#: yt-dlp's HTTP downloader failing to open its prepared filename
+#: because the parent directory does not exist.  The prepared name
+#: can carry a subdirectory the title/id introduced (on the box's
+#: yt-dlp the generic-extractor id is the raw query string of a
+#: signed URL), or the directory can have vanished under the
+#: download — either way yt-dlp creates no directories itself.
+#: Owner report 2026-11-18: a mdundo copy died on exactly this
+#: ("unable to open for writing: [Errno 2] No such file or
+#: directory").  The group is the file yt-dlp could not open; the
+#: caller creates its parent and retries once.
+_WRITE_ENOENT_RE = re.compile(
+    r"unable to open for writing: \[Errno 2\] No such file or "
+    r"directory: '([^']+)'")
+
+
+def _missing_write_path(text: str) -> str | None:
+    """The file yt-dlp could not open for writing, or None.
+
+    Only the missing-parent shape matches: any other failure (a
+    403, a timeout, a dead link) is not a directory to create.
+    """
+    match = _WRITE_ENOENT_RE.search(text or "")
+    return match.group(1) if match else None
+
+
+def _destination_from_stdout(stdout_text: str) -> str | None:
+    """The file yt-dlp said it was writing to, or None.
+
+    yt-dlp prints ``[download] Destination: <path>`` BEFORE opening
+    the file, so the destination is in stdout even when the open
+    failed — the CLI retry uses it to create the missing parent.
+    """
+    for line in (stdout_text or "").splitlines():
+        if "Destination: " in line:
+            candidate = line.split("Destination: ", 1)[1].strip()
+            if candidate:
+                return candidate
+    return None
+
+
 #: Error text shared by every backend when a job cancellation lands.
 CANCELLED_MESSAGE = "download cancelled by request"
 
@@ -84,10 +124,18 @@ def _snapshot_dir(target_dir: Path) -> dict[str, tuple[int, int]]:
 
 def _fresh_files(target_dir: Path,
                  before: dict[str, tuple[int, int]]) -> list[Path]:
-    """Non-empty files created or changed since the *before* snapshot."""
+    """Non-empty files created or changed since the *before* snapshot.
+
+    Recursive: a download whose prepared filename carries a
+    subdirectory (the retry that creates a missing parent — owner
+    report 2026-11-18) lands one level down, and the top-level scan
+    alone would never see it.  The snapshot is name-keyed, so a
+    subdir file is fresh when no top-level file of that name matches
+    its size + mtime — the same attribution rule as the flat case.
+    """
     out: list[Path] = []
     try:
-        entries = list(target_dir.iterdir())
+        entries = list(target_dir.rglob("*"))
     except OSError:
         return out
     for entry in entries:
@@ -356,16 +404,37 @@ def _download_python_api(
     try:
         info, filename = _extract(options)
     except MediaError as exc:
-        # A 403 WITH cookies riding along is usually the cookies
-        # themselves: a stale CloudFront ``__cf_bm`` bot-management
-        # cookie is a known 403 trigger (current yt-dlp even clears
-        # it on a Cloudflare 403), and the estate cookies the box
-        # exports are exactly what rides.  The same signed URL
-        # fetched bare returns 200 (live probe, 2026-11-17), so one
-        # bare retry is the honest next step — once, and only when
-        # cookies were actually used.  A bare failure stands: the
-        # original error is re-raised, never the retry's.
-        if _cookie_opts and "403" in str(exc):
+        # A missing parent directory on yt-dlp's write path: create
+        # it and run once more — yt-dlp never creates directories
+        # itself (owner report 2026-11-18: the mdundo direct leg
+        # died on "unable to open for writing: [Errno 2] No such
+        # file or directory").  A second failure stands with the
+        # ORIGINAL error, never the retry's — same convention as the
+        # bare-cookie retry below.
+        write_path = _missing_write_path(str(exc))
+        if write_path is not None:
+            try:
+                Path(write_path).parent.mkdir(
+                    parents=True, exist_ok=True)
+            except OSError:
+                raise exc from None
+            try:
+                info, filename = _extract(options)
+            except MediaError:
+                # from None: the original error is re-raised, never
+                # the retry's.
+                raise exc from None
+        elif _cookie_opts and "403" in str(exc):
+            # A 403 WITH cookies riding along is usually the cookies
+            # themselves: a stale CloudFront ``__cf_bm``
+            # bot-management cookie is a known 403 trigger (current
+            # yt-dlp even clears it on a Cloudflare 403), and the
+            # estate cookies the box exports are exactly what rides.
+            # The same signed URL fetched bare returns 200 (live
+            # probe, 2026-11-17), so one bare retry is the honest
+            # next step — once, and only when cookies were actually
+            # used.  A bare failure stands: the original error is
+            # re-raised, never the retry's.
             _log.info("yt-dlp 403 with cookies for %s — retrying "
                       "bare", url)
             bare_options = {k: v for k, v in options.items()
@@ -439,45 +508,67 @@ def _download_cli(
     if _cancel_requested():
         raise MediaError(CANCELLED_MESSAGE)
     before = _snapshot_dir(target_dir)
-    # Popen + communicate slices (not subprocess.run): the loop is the
-    # cancellation checkpoint for this backend — a cancelled job
-    # terminates the subprocess instead of letting it run to timeout.
-    try:
-        proc = subprocess.Popen(
-            argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding="utf-8", errors="replace")
-    except OSError as exc:
-        raise MediaError(f"yt-dlp failed to start: {exc}") from exc
-    deadline = time.perf_counter() + timeout
-    stdout_text, stderr_text = "", ""
-    while True:
+
+    def _run_cli() -> tuple[int, str, str]:
+        # Popen + communicate slices (not subprocess.run): the loop
+        # is the cancellation checkpoint for this backend — a
+        # cancelled job terminates the subprocess instead of letting
+        # it run to timeout.
         try:
-            stdout_text, stderr_text = proc.communicate(timeout=0.25)
-            break
-        except subprocess.TimeoutExpired:
-            if _cancel_requested():
-                proc.terminate()
-                try:
-                    proc.communicate(timeout=5)
-                except Exception:  # noqa: BLE001 - already terminating
+            proc = subprocess.Popen(
+                argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace")
+        except OSError as exc:
+            raise MediaError(
+                f"yt-dlp failed to start: {exc}") from exc
+        deadline = time.perf_counter() + timeout
+        while True:
+            try:
+                out, err = proc.communicate(timeout=0.25)
+                return proc.returncode, out, err
+            except subprocess.TimeoutExpired:
+                if _cancel_requested():
+                    proc.terminate()
+                    try:
+                        proc.communicate(timeout=5)
+                    except Exception:  # noqa: BLE001 - already terminating
+                        proc.kill()
+                    raise MediaError(CANCELLED_MESSAGE) from None
+                if time.perf_counter() > deadline:
                     proc.kill()
-                raise MediaError(CANCELLED_MESSAGE) from None
-            if time.perf_counter() > deadline:
-                proc.kill()
-                try:
-                    proc.communicate(timeout=5)
-                except Exception:  # noqa: BLE001 - already killing
-                    pass
-                raise MediaError(
-                    f"download timed out after {timeout}s") from None
-    if proc.returncode != 0:
+                    try:
+                        proc.communicate(timeout=5)
+                    except Exception:  # noqa: BLE001 - already killing
+                        pass
+                    raise MediaError(
+                        f"download timed out after {timeout}s") from None
+
+    returncode, stdout_text, stderr_text = _run_cli()
+    first_stderr = stderr_text
+    if returncode != 0:
+        # A missing parent directory on yt-dlp's write path (same
+        # failure as the python-API retry — owner report 2026-11-18):
+        # yt-dlp prints its destination BEFORE opening it, so the
+        # path is in stdout even when the open failed.  Create the
+        # parent and run once more; a second failure stands with the
+        # FIRST attempt's error, never the retry's.
+        dest = _destination_from_stdout(stdout_text) \
+            or _missing_write_path(stderr_text)
+        if dest is not None:
+            try:
+                Path(dest).parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                dest = None
+            else:
+                returncode, stdout_text, stderr_text = _run_cli()
+    if returncode != 0:
         # yt-dlp colorizes stderr even when piped — strip the escapes
         # here, at the last point before the text becomes an error
         # message a chat surface will show.
         from ..core.text import strip_ansi
         raise MediaError(
             f"yt-dlp failed: "
-            f"{strip_ansi((stderr_text or '').strip())[-400:]}")
+            f"{strip_ansi((first_stderr or '').strip())[-400:]}")
     # Attribute the result to THIS run: files yt-dlp named on stdout
     # (Destination / already-downloaded / merge target) inside the
     # target dir win; otherwise the largest file that is new/changed
@@ -501,7 +592,12 @@ def _download_cli(
         if candidate:
             p = Path(candidate)
             try:
-                if p.is_file() and p.parent == target_dir:
+                # The named file lives in the download tree — flat
+                # in target_dir, or one level down when the retry
+                # created a missing parent yt-dlp's prepared name
+                # introduced (owner report 2026-11-18).  A path
+                # outside the tree is still never attributed.
+                if p.is_file() and target_dir in p.parents:
                     named.append((p, already))
             except OSError:
                 continue

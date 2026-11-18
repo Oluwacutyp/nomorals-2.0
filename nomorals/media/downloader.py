@@ -156,6 +156,12 @@ class FailureKind(str, Enum):
     NETWORK_FAILURE = "network_failure"  # timeout, reset, DNS, 5xx
     NO_MEDIA_FOUND = "no_media_found"  # page fetched but no media link
     DEPENDENCY_MISSING = "dependency_missing"  # yt-dlp absent, etc.
+    LOCAL_WRITE_ERROR = "local_write_error"  # the box could not open
+    # the file for writing (missing parent directory, name too long,
+    # disk full, read-only fs) — a LOCAL failure, never a site error:
+    # it must not condemn the source (owner report 2026-11-18 — a
+    # missing directory on the Bulldog copy was read as a site error
+    # and condemned every mdundo copy for the song).
 
 
 _DEPENDENCY_MARKERS = (
@@ -217,6 +223,28 @@ _NETWORK_MARKERS = (
     "gateway timeout",
 )
 
+#: Text of a LOCAL write failure (yt-dlp's HTTP downloader failing
+#: to open its prepared filename, or the kit's own open): the parent
+#: directory does not exist, the name is too long for the filesystem,
+#: the disk is full, the filesystem is read-only.  None of these is
+#: evidence about the SITE — they are evidence about this box — so
+#: they classify as LOCAL_WRITE_ERROR, never SITE_ERROR (the default
+#: below).  Owner report 2026-11-18: "unable to open for writing:
+#: [Errno 2] No such file or directory" on a mdundo copy was read as
+#: a site error and condemned the whole kind for the song.
+_LOCAL_WRITE_MARKERS = (
+    "unable to open for writing",
+    "no such file or directory",
+    "file name too long",
+    "filename too long",
+    "no space left on device",
+    "disk full",
+    "read-only file system",
+    "errno 2",
+    "errno 28",
+    "errno 36",
+)
+
 
 def classify_failure(exc: BaseException | str | None) -> FailureKind:
     """Map an exception/message to the shared failure taxonomy."""
@@ -236,6 +264,9 @@ def classify_failure(exc: BaseException | str | None) -> FailureKind:
     for marker in _NETWORK_MARKERS:
         if marker in low:
             return FailureKind.NETWORK_FAILURE
+    for marker in _LOCAL_WRITE_MARKERS:
+        if marker in low:
+            return FailureKind.LOCAL_WRITE_ERROR
     if isinstance(exc, (TimeoutError, ConnectionError)):
         return FailureKind.NETWORK_FAILURE
     return FailureKind.SITE_ERROR
