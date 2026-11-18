@@ -639,6 +639,7 @@ class ToolRegistry:
             "speedtest",  # throughput measurement — down/up + loaded latency, journaled baseline (Fast.com core)
             "datatools",  # text-transformation family — parse, validate, transform with located errors (CodeBeautify core)
             "fetch_media",  # paste-link media fetch — video/audio/image/gif over the per-service resolvers (Cobalt core)
+            "watchtower",  # outward outage watch — baseline deviation over probes + feeds (Downdetector core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",

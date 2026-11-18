@@ -1000,6 +1000,53 @@ class SpeedBriefingProvider(_Provider):
             source="health", lines=lines)
 
 
+class WatchtowerBriefingProvider(_Provider):
+    """Outward outage watch (Downdetector core): one section when a
+    watched service has an active incident.
+
+    The tick pages the owner for a critical target going down; this
+    provider is the digest for everything else — a non-critical
+    ``down``, a ``possible``, and the recovery that follows. Absent
+    when nothing is open (the house rule: never pad). Never raises —
+    a watchtower hiccup must not sink the morning briefing.
+    """
+
+    name = "watchtower"
+    title = "Services watched"
+    priority = 84  # above Health drift (85): a service he depends on
+    # being down outranks drift
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx, since)
+        except Exception as exc:  # noqa: BLE001 — watchtower is optional
+            _log.debug("watchtower provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        from ..sources.watchtower import VANTAGE, WatchtowerStore
+
+        settings = getattr(ctx, "settings", None)
+        home = getattr(settings, "home_path", None) if settings else None
+        home = home or getattr(settings, "home", None) if settings else None
+        if not home:
+            return None
+        store = WatchtowerStore(str(home))
+        incidents = store.list_incidents(active_only=True)
+        if not incidents:
+            return None
+        lines = []
+        for incident in incidents:
+            failures = incident.evidence.get("probe_failures", "?")
+            lines.append(
+                f"{incident.target} is {incident.state.upper()} — "
+                f"{failures} failures in the recent window. "
+                f"[{VANTAGE}]")
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="health", lines=lines)
+
+
 class TriageProvider(_Provider):
     """Smart notification triage (audit gap R1-3): what actually
     needed the owner — the durable triage log's digest since the
@@ -1806,6 +1853,12 @@ class BriefingComposer:
             self.providers.append(SpeedBriefingProvider())
         except Exception as exc:  # noqa: BLE001
             record_failure("morning_briefing.BriefingComposer.__init__.speed", exc)
+        # Outward outage watch (Downdetector core): local class, no
+        # import to fail. No open incident → provider returns None.
+        try:
+            self.providers.append(WatchtowerBriefingProvider())
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.watchtower", exc)
 
     def register(self, provider: _Provider) -> None:
         self.providers.append(provider)

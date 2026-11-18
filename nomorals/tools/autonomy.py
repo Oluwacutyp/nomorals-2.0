@@ -808,6 +808,29 @@ def register(registry: Any) -> None:
                     "error": f"flight track tick failed: {exc}"}
 
     @registry.register(
+        "__watchtower_tick__",
+        description="Run one watchtower tick (Downdetector "
+        "build-new): probe every watched external service and "
+        "page the owner once when a critical target goes down — "
+        "one alert per incident, never twice. Scheduler-internal; "
+        "runs every 4 minutes. Routine and silent when nothing "
+        "changed; a quiet tick (no targets) makes no network call "
+        "at all; a probe failure is a sample, never a dead job.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _watchtower_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..sources.watchtower import run_watchtower_tick_once
+
+        try:
+            return run_watchtower_tick_once(
+                context=_context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"watchtower tick failed: {exc}"}
+
+    @registry.register(
         "__burn_note_tick__",
         description="Run one burn-note sweep (Privnote build-new): "
         "delete expired unread burn notes from the durable store "

@@ -3552,6 +3552,18 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("flight track job not registered: %s",
                                  exc)
+                # Sources: the watchtower tick (every 4 minutes —
+                # watched external services probed from this host;
+                # a critical target going down pages the owner once,
+                # silent otherwise). Idempotent by name; a stale
+                # spec is replaced.
+                try:
+                    from ...sources.watchtower import ensure_watchtower_job
+
+                    ensure_watchtower_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("watchtower job not registered: %s",
+                                 exc)
                 # Memory: the burn-note sweep (hourly — expired
                 # unread notes are deleted; a live note is never
                 # touched). Idempotent by name; a stale spec is
