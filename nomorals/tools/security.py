@@ -10,6 +10,9 @@ malware scanning + multi-engine verdicts.
 - file_verdict: multi-engine verdict on a file, URL or hash — the
   VirusTotal shape, Devon-local (five local engines, per-engine
   lines, aggregate; unknown means no determination, never clean).
+- tor_status / onion_validate / onion_fetch: Tor presence, v3 .onion
+  validation, fetch through Tor (SOCKS5h) — the owner's onion organ,
+  wired here like dnsleak/netleak; a missing Tor is named, never faked.
 """
 
 from __future__ import annotations
@@ -242,3 +245,10 @@ def register(registry: Any) -> None:
             return {"ok": False, "error": str(exc)}
         return {"ok": True, **report.to_dict(),
                 "reply": format_verdict_reply(report)}
+
+    # Tor / .onion (owner's security/onion.py): presence, v3 validation,
+    # SOCKS5h fetch. Wired here like dnsleak/netleak — the organ lives
+    # in security/, the registry entry lives in this tools module.
+    from ..security import onion as _onion
+
+    _onion.register(registry)

@@ -48,7 +48,11 @@ def _socks_addr() -> Optional[tuple[str, int]]:
     env = os.environ.get("NM_TOR_SOCKS", "")
     if env:
         h, _, p = env.partition(":")
-        return (h, int(p or 9050))
+        try:
+            return (h, int(p or 9050))
+        except ValueError:
+            raise ToolError("NM_TOR_SOCKS is set but not host[:port]: "
+                            f"{env!r}") from None
     for host, port in _SOCKS_CANDIDATES:
         try:
             with socket.create_connection((host, port), timeout=1.0):
@@ -88,7 +92,11 @@ class TorControl:
                     row = f.readline().decode("utf-8", "replace").rstrip("\r\n")
                     out.append(row)
                     if len(row) > 3 and row[3] == " ":
-                        return "\n".join(out)
+                        break
+                first = out[0] if out else ""
+                if not first[:3].isdigit() or not first.startswith("2"):
+                    raise ToolError(f"Tor control refused: {first[:120]}")
+                return "\n".join(out)
             if self.cookie:
                 send(f'AUTHENTICATE {self.cookie}')
             elif self.password:
@@ -96,7 +104,7 @@ class TorControl:
             else:
                 try:
                     send("AUTHENTICATE")
-                except OSError:
+                except (OSError, ToolError):
                     raise ToolError("Tor control needs a cookie or password "
                                     "(NM_TOR_COOKIE / NM_TOR_CONTROL_PASSWORD)")
             return send(line)
@@ -109,7 +117,11 @@ class TorControl:
 
 
 def tor_status() -> dict[str, Any]:
-    socks = _socks_addr()
+    try:
+        socks = _socks_addr()
+    except ToolError as exc:
+        return {"socks": None, "control": None, "rotation": False,
+                "installed": False, "note": str(exc)}
     control = TorControl.detect()
     out: dict[str, Any] = {
         "socks": f"{socks[0]}:{socks[1]}" if socks else None,
@@ -139,14 +151,13 @@ def onion_fetch(url: str, *, timeout: float = 45.0, max_bytes: int = 2_000_000,
         if control:
             control.newnym()
             time.sleep(5.0)
-    import socks as pysocks
     import urllib.request
-    sock = pysocks.socksocket()
-    sock.set_proxy(pysocks.SOCKS5, socks[0], socks[1], rdns=True)
-    sock.settimeout(timeout)
-    opener = urllib.request.build_opener(
-        urllib.request.SOCKSHandler if hasattr(urllib.request, "SOCKSHandler") else object)
-    import sockshandler  # from PySocks
+    try:
+        import socks as pysocks
+        import sockshandler  # from PySocks
+    except ImportError:
+        raise ToolError("PySocks is not installed (pip install PySocks) — "
+                        "Tor fetch needs it") from None
     opener = urllib.request.build_opener(sockshandler.SocksiPyHandler(
         pysocks.SOCKS5, socks[0], socks[1], True))
     req = urllib.request.Request(url, headers={

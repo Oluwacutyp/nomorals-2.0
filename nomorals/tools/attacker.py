@@ -176,6 +176,31 @@ def _mangle(login: str) -> list[str]:
     return [w for w in out if w]
 
 
+def _ssh_check(host: str, port: int, login: str, password: str,
+               timeout: float) -> tuple[bool, str]:
+    # Restored 2026-11-18 (lane 55): the v2 refactor dropped this while
+    # the constructor still calls it, so every Attacker() raised
+    # NameError. Verbatim pre-refactor body — paramiko is an optional
+    # dependency, missing means an honest ToolError, never a fake pass.
+    try:
+        import paramiko
+    except ImportError as exc:
+        raise ToolError(
+            "SSH brute needs paramiko: python -m pip install paramiko") from exc
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    try:
+        client.connect(host, port=port, username=login, password=password,
+                       look_for_keys=False, allow_agent=False,
+                       timeout=timeout, banner_timeout=timeout,
+                       auth_timeout=timeout)
+        return True, "ssh authenticated"
+    except paramiko.AuthenticationException:
+        return False, "ssh auth refused"
+    finally:
+        client.close()
+
+
 class Attacker:
     def __init__(
         self,
@@ -582,3 +607,180 @@ class Attacker:
                         if not self._errors else
                         f"{self._errors} transport error(s) — check reachability")
         return res
+
+
+# ── functional entry point + registry ──────────────────────────────────────
+# Restored 2026-11-18 (lane 55): the v2 refactor dropped both module-level
+# names its own __all__ still promises, so register_builtins recorded
+# "attacker" as a failed module and the brain tool never existed. The
+# bodies below are the pre-refactor entry point + registration, extended
+# with the v2 knobs (mangle / all_hits / stop_on_lockout / resume_file /
+# baseline_tries / confirm_tries) and the per-attempt proxy rotation the
+# v2 constructor exposes, wired to the owner's rotation pool.
+
+
+def run_attack(
+    host: str,
+    *,
+    port: int = 0,
+    protocol: str = "http_form",
+    usernames: str = "",
+    passwords: str = "",
+    wordlist: str = "",
+    path: str = "/",
+    method: str = "POST",
+    basic: bool = False,
+    form_user: str = "username",
+    form_pass: str = "password",
+    fail_string: str = "",
+    workers: int = 8,
+    rate: float = 10.0,
+    delay: float = 0.2,
+    jitter: float = 0.5,
+    timeout: float = 10.0,
+    max_attempts: int = 20_000,
+    out_file: str = "",
+    quiet: bool = False,
+    mangle: bool = False,
+    all_hits: bool = False,
+    stop_on_lockout: bool = False,
+    resume_file: str = "",
+    proxy_factory: Callable[[], str | None] | None = None,
+    proxy_report: Callable[[str, bool, float], None] | None = None,
+    baseline_tries: int = 3,
+    confirm_tries: int = 2,
+) -> dict[str, Any]:
+    """Functional entry point (CLI + registry share this)."""
+    users = [u.strip() for u in usernames.replace(";", ",").split(",")]
+    pws = [p.strip() for p in passwords.replace(";", ",").split(",")
+           if p.strip()]
+    attacker = Attacker(
+        host, port=int(port or 0), protocol=protocol,
+        usernames=users, passwords=pws, wordlist=wordlist, path=path,
+        method=method, basic=basic, form_user=form_user, form_pass=form_pass,
+        fail_string=fail_string, workers=workers, rate=rate, delay=delay,
+        jitter=jitter, timeout=timeout, max_attempts=max_attempts,
+        out_file=out_file, quiet=quiet, mangle=mangle, all_hits=all_hits,
+        stop_on_lockout=stop_on_lockout, resume_file=resume_file,
+        proxy_factory=proxy_factory, proxy_report=proxy_report,
+        baseline_tries=baseline_tries, confirm_tries=confirm_tries,
+    )
+    return attacker.run().as_dict()
+
+
+def register(registry: Any) -> None:
+    context = registry.context
+
+    @registry.register(
+        "attacker",
+        description=(
+            "Network credential brute for security testing: http_form "
+            "(custom fields + fail string), http_basic, ssh (paramiko), ftp. "
+            "Baseline-differential: a guaranteed-bad pair fingerprints the "
+            "failure response first; attempts departing on two axes are "
+            "candidates, confirmed by re-tries. CSRF fields harvested, "
+            "keep-alive reuse, credential mangling, lockout/429 backoff, "
+            "resumable checkpoint, per-attempt proxy rotation over the "
+            "owner's pool. For systems you own or have explicit written "
+            "permission to test."
+        ),
+        capability=Capability.NET_OUT,
+        parameters={
+            "host": "str — target host/IP (operator-specified)",
+            "port": "int (optional, per-protocol default 80/80/22/21)",
+            "protocol": "str — http_form | http_basic | ssh | ftp",
+            "usernames": "str — comma list of logins to try",
+            "passwords": "str (optional) — comma list of inline passwords",
+            "wordlist": "str (optional) — path to a password file",
+            "path": "str (http) — login path, default /",
+            "method": "str (http) — POST | GET, default POST",
+            "form_user": "str (http_form) — user field name",
+            "form_pass": "str (http_form) — password field name",
+            "fail_string": "str (http_form) — text that marks a failed login",
+            "workers": "int (optional, 8, max 64)",
+            "rate": "float (optional, 10) — max attempts/second",
+            "delay": "float (optional, 0.2) — seconds between attempts",
+            "jitter": "float (optional, 0.5) — random delay spread",
+            "timeout": "float (optional, 10) — per-attempt seconds",
+            "max_attempts": "int (optional, 20000)",
+            "out_file": "str (optional) — save found credentials here",
+            "mangle": "bool (optional) — also try hydra -e nsr variants",
+            "all_hits": "bool (optional) — keep going after the first hit",
+            "stop_on_lockout": "bool (optional) — halt after 3 lockouts",
+            "resume_file": "str (optional) — JSONL checkpoint to resume from",
+            "baseline_tries": "int (optional, 3) — bad-pair fingerprint tries",
+            "confirm_tries": "int (optional, 2) — re-tries before a hit counts",
+        },
+    )
+    def attacker(
+        host: str,
+        *,
+        port: str = "",
+        protocol: str = "http_form",
+        usernames: str = "",
+        passwords: str = "",
+        wordlist: str = "",
+        path: str = "/",
+        method: str = "POST",
+        form_user: str = "username",
+        form_pass: str = "password",
+        fail_string: str = "",
+        workers: str = "",
+        rate: str = "",
+        delay: str = "",
+        jitter: str = "",
+        timeout: str = "",
+        max_attempts: str = "",
+        out_file: str = "",
+        mangle: str = "",
+        all_hits: str = "",
+        stop_on_lockout: str = "",
+        resume_file: str = "",
+        baseline_tries: str = "",
+        confirm_tries: str = "",
+    ) -> dict[str, Any]:
+        def f(key: str, default: float) -> float:
+            try:
+                return float(key) if str(key).strip() else default
+            except ValueError:
+                return default
+
+        def truthy(key: str) -> bool:
+            return (key or "").strip().lower() in {"1", "true", "yes"}
+
+        wl = wordlist
+        if wl and context is not None and not Path(wl).is_absolute():
+            from .filesystem import safe_path
+
+            wl = str(safe_path(context, wl))
+        proxy_factory = None
+        proxy_report = None
+        try:
+            from .proxy_rotation import pool_from_context
+
+            pool = pool_from_context(context)
+            if len(pool):
+                pool.probe_all()
+
+                def _report(u: str, ok: bool, ms: float) -> None:
+                    pool.report(u, ok=ok, latency_ms=ms)
+
+                proxy_factory = pool.acquire
+                proxy_report = _report
+        except Exception as exc:  # noqa: BLE001 - no pool, go direct
+            _log.debug("attacker: no rotation pool: %s", exc)
+        return run_attack(
+            host, port=int(f(port, 0)), protocol=protocol,
+            usernames=usernames, passwords=passwords, wordlist=wl,
+            path=path, method=method, basic=False,
+            form_user=form_user, form_pass=form_pass,
+            fail_string=fail_string, workers=int(f(workers, 8)),
+            rate=f(rate, 10.0), delay=f(delay, 0.2), jitter=f(jitter, 0.5),
+            timeout=f(timeout, 10.0), max_attempts=int(f(max_attempts, 20000)),
+            out_file=out_file, quiet=True, mangle=truthy(mangle),
+            all_hits=truthy(all_hits), stop_on_lockout=truthy(stop_on_lockout),
+            resume_file=resume_file, proxy_factory=proxy_factory,
+            proxy_report=proxy_report,
+            baseline_tries=int(f(baseline_tries, 3)),
+            confirm_tries=int(f(confirm_tries, 2)),
+        )

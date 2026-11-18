@@ -712,6 +712,66 @@ class RuntimeSystemMixin:
                 "bind|lookup|release|list | rotate on [strategy] | rotate-probe | rotate-pick | schedule "
                 "on [min] | ssh start <name> <host> <user>")
 
+    def _control_tor(self, tail: str, chat_key: str = "") -> str:
+        # /tor status — Tor presence: SOCKS/control ports, rotation.
+        # A missing Tor is named, never faked (the organ's own rule).
+        parts = (tail or "").split()
+        verb = parts[0].lower() if parts else "status"
+        if verb != "status":
+            return "usage: /tor status"
+        outcome = self.context.tools.call("tor_status")
+        if not outcome.ok:
+            return (f"tor failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        v = outcome.value
+        lines = [f"tor: {'running' if v.get('installed') else 'not running'}",
+                 f"  socks: {v.get('socks') or '—'}",
+                 f"  control: {v.get('control') or '—'}",
+                 f"  rotation: {'yes' if v.get('rotation') else 'no'}"]
+        if v.get("note"):
+            lines.append(f"  {v['note']}")
+        return "\n".join(lines)
+
+    def _control_onion(self, tail: str, chat_key: str = "") -> str:
+        # /onion validate <address> | fetch <url> [--rotate] — the
+        # owner's onion organ: v3 validation (version byte + SHA3-256
+        # checksum) and fetch through Tor (SOCKS5h, hostname resolves
+        # at the exit). No Tor → an honest refusal, never a direct fetch.
+        parts = (tail or "").split()
+        verb = parts[0].lower() if parts else ""
+        if verb == "validate":
+            if len(parts) < 2:
+                return "usage: /onion validate <v3-onion-address>"
+            outcome = self.context.tools.call(
+                "onion_validate", address=parts[1])
+            if not outcome.ok:
+                return (f"validate failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            return (f"{v['address']}: "
+                    f"{'valid v3 .onion' if v.get('valid') else 'NOT a valid v3 .onion'}")
+        if verb == "fetch":
+            rest = [p for p in parts[1:] if p != "--rotate"]
+            if not rest:
+                return "usage: /onion fetch <http(s)://url|.onion-url> [--rotate]"
+            outcome = self.context.tools.call(
+                "onion_fetch", url=rest[0],
+                rotate="true" if "--rotate" in parts else "")
+            if not outcome.ok:
+                return (f"fetch failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            lines = [f"🔗 {v['url']} → {v['status']} "
+                     f"({v['bytes']} bytes, {v['elapsed_s']}s)"]
+            if v.get("content_type"):
+                lines.append(f"  {v['content_type']}")
+            text = (v.get("text") or "")[:1500]
+            if text:
+                lines.append(text)
+            return "\n".join(lines)
+        return ("usage: /onion validate <v3-onion-address> | "
+                "fetch <http(s)://url|.onion-url> [--rotate]")
+
     def _control_toolhub(self, tail: str, chat_key: str = "") -> Any:
         """Tool hub: /toolhub | /toolhub proxy [run] | /toolhub bin [digits] | /toolhub help.
 

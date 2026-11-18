@@ -3,6 +3,8 @@
 - :mod:`nomorals.security.dnsleak` — DNS leak check (bash.ws nonce technique).
 - :mod:`nomorals.security.netleak` — WebRTC-style (STUN) + IPv6 leak checks.
 - :mod:`nomorals.security.exif` — lossless image metadata stripping.
+- :mod:`nomorals.security.onion` — Tor / .onion: v3 validation,
+  SOCKS5h fetch, circuit rotation (owner's onion.py).
 - :mod:`nomorals.security.payload_inspection` — structural
   anticrash inspection of chat payloads + learned signatures.
 """
@@ -131,4 +133,20 @@ __all__ += [
     "VerdictStore",
     "format_verdict_reply",
     "verdict_for",
+]
+
+# Tor / .onion organ (owner's onion.py): v3 address validation,
+# SOCKS5h fetch, circuit rotation. See security/onion.py.
+from .onion import (  # noqa: E402 - section import, this file's convention
+    TorControl,
+    onion_fetch,
+    tor_status,
+    validate_onion,
+)
+
+__all__ += [
+    "TorControl",
+    "onion_fetch",
+    "tor_status",
+    "validate_onion",
 ]

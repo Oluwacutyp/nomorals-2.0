@@ -881,6 +881,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "whois": (1, 3),         # /whois <domain>
     "ports": (0, 1),         # /ports — what is listening here
     "proxy": (0, 8),         # /proxy status|scrape|test|health|pool|pick|affinity|rotate on|set <url>|ssh <…>
+    "tor": (0, 1),           # /tor status — Tor presence: SOCKS/control ports, rotation (owner-only)
+    "onion": (0, None),      # /onion validate <addr> | fetch <url> [--rotate] — fetch through Tor (owner-only)
     "toolhub": (0, 2),       # /toolhub | /toolhub proxy [run] | /toolhub bin [digits] | /toolhub help — button tool hub (owner-only; NOT /hub, which is the media hub)
     "workspace": (0, 4),     # /workspace [status|scale <n>|up|down|pause|resume|add|remove]
     "gen": (2, None),        # /gen <kind> <name> [json config]
@@ -1212,6 +1214,8 @@ _HELP_TEXT = "\n".join(
         "  /proxy sources — health of every source (retired ones auto-retry)",
         "  /proxy schedule on [min] — auto re-check the pool every N minutes",
         "  /proxy ssh start <name> <host> <user> [key] [port] — SSH → SOCKS5 tunnel",
+        "  /tor status                               Tor presence: SOCKS/control, rotation",
+        "  /onion validate <addr> | fetch <url> [--rotate] — through Tor, never direct",
         "  /workspace [status|scale <n>|up|down|pause|resume|add|remove] the virtual CPU farm",
         "  /gen <kind> <name> [json]               generate a validated script",
         "  /osint <domain|ip|url|email>            read-only public-intel report",
@@ -4251,6 +4255,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/proxy status|list|test|set <url>|clear | scrape|refresh|health|pool [scheme]|pick [udp] [country=XX] | affinity bind|lookup|release|list | discover [seeds] | sources | schedule on [min] | rotate on | ssh start <n> <host> <user>",
               "example": "/proxy health",
               "related": "/scan /osint"},
+    "tor": {"what": "Tor presence on this box: which SOCKS port answers (9050/9150, or NM_TOR_SOCKS), which control port answers (9051/9151), whether circuit rotation is available. A missing Tor is named, never faked — start the daemon (tor / Tor Browser) or set NM_TOR_SOCKS. Owner-only.",
+            "usage": "/tor status",
+            "example": "/tor status",
+            "related": "/onion /proxy"},
+    "onion": {"what": "Fetch a URL through Tor, or validate a .onion address. Validation is real: 56 base32 chars, version byte 3, SHA3-256 checksum — a flipped character fails. Fetch goes through SOCKS5h so the hostname resolves at the exit, never here; --rotate asks the control port for a new circuit first (cookie or password auth, NM_TOR_COOKIE / NM_TOR_CONTROL_PASSWORD). No Tor running, or no PySocks installed, refuses honestly and never falls back to a direct fetch. Owner-only.",
+              "usage": "/onion validate <v3-onion-address> | /onion fetch <http(s)://url|.onion-url> [--rotate]",
+              "example": "/onion fetch https://example.com",
+              "related": "/tor /proxy"},
     "toolhub": {"what": "button tool hub — fresh tested proxies as a file, BIN lookup; per-screen inline buttons with Back navigation (owner-only).",
             "usage": "/toolhub | /toolhub proxy [run] | /toolhub bin <digits> | /toolhub help",
             "example": "/toolhub proxy",
@@ -5265,7 +5277,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["tts", "speak", "stt", "voice", "look", "image", "lens",
       "vision", "voices", "clonevoice", "sing", "translate", "tl"]),
     ("tools & automation",
-     ["schedule", "db", "artifact", "api", "proxy", "toolhub", "workspace", "record", "macro", "file",
+     ["schedule", "db", "artifact", "api", "proxy", "tor", "onion", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "breach", "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe",
@@ -5745,6 +5757,8 @@ LIST_ONELINERS: dict[str, str] = {
     "video": "find videos across the web (ranked, enriched) + download",
     "videocall": "LiveKit video: Devon publishes her video in a room and watches it (owner only)",
     "breach": "breach exposure: has this email or password been in a breach (owner only)",
+    "tor": "Tor status: SOCKS/control ports, circuit rotation (owner only)",
+    "onion": "fetch a URL through Tor, validate v3 .onion addresses (owner only)",
     "map-route": "code-video: a route draws itself (no model)",
     "headline": "code-video: newspaper headline push-in (no model)",
     "teardown": "code-video: exploded parts diagram (no model)",

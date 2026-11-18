@@ -11106,6 +11106,10 @@ class PartnerRuntime(
             return self._control_ports(command.tail or arg)
         if kind == "proxy":
             return self._control_proxy(command.tail or arg)
+        if kind == "tor":
+            return self._control_tor(command.tail or arg)
+        if kind == "onion":
+            return self._control_onion(command.tail or arg)
         if kind == "toolhub":
             return self._control_toolhub(command.tail or arg, chat_key)
         if kind == "workspace":

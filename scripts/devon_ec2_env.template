@@ -469,6 +469,12 @@
 # NM_PROXY_ACTIVE=
 # Config key read by Devon code.
 # NM_PROXY_KNOWN=
+# Tor SOCKS address (host[:port]) — overrides the 9050/9150 probe. /tor status, /onion fetch.
+# NM_TOR_SOCKS=
+# Tor control-port cookie (contents of the control_auth_cookie file) for circuit rotation.
+# NM_TOR_COOKIE=
+# Tor control-port password (alternative to the cookie) for circuit rotation.
+# NM_TOR_CONTROL_PASSWORD=
 # Config key read by Devon code.
 # NM_DDGS_BACKEND=
 # Config key read by Devon code.
