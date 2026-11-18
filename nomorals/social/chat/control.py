@@ -793,7 +793,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "joinq": (0, None),       # /joinq [approve|decline <id>|all] — the admin join queue: requests + raid holds (§28)
     "console": (0, None),     # /console [gN [section [grammar]]] — the DM admin console: groups the sender admins, configured in tappable sections (§30)
     "groups": (0, None),      # /groups — the §8 dashboard: every group/channel you admin — status, member count, economy health, pending actions — deep-links into /console
-    "ghealth": (0, None),     # /ghealth [name] [refresh] — WhatsApp group health analytics: churn, rhythm, silent members (census §6 #6; admins)
+    "ghealth": (0, None),     # /ghealth [name] [refresh] — WhatsApp group health analytics: churn, growth, topics, rhythm, silent members (census §6 #6; admins)
     "digest": (0, None),      # /digest [group] [policy <always|only-when-mentioned|never>] — WhatsApp group digests: what needs you (mentions, decisions, resolved threads) from the recorded log (audit gap R2-20; admins)
     "community": (0, None),   # /community — the §16 community board: Telegram Communities + WhatsApp communities over one surface — list, show, link, unlink, sync (DM-first, admins)
     "gbackup": (0, None),     # /gbackup — the §9.8 group backup/export: one group's full state (settings, roster, economy ledger, audit log) as a file, restorable, on a schedule (DM-only, admins)
@@ -1167,7 +1167,7 @@ _HELP_TEXT = "\n".join(
         "  /legacy show | create <owner> | <executor> | beneficiary <name> | asset <label> | instruction <text> | witness <name> | seal <text> | reveal | reset yes",
         "  /family list | add <person_id> <name> [| role | locale] | revoke <person_id> | role <person_id> <role> | item <person_id> <kind> <title> [| body | shared|private] | items <person_id> | show <person_id> <item_id> | share <person_id> <item_id> | delete <person_id> <item_id> | audit | check <role> <text> | policy",
         "  /presence watch <contact> [status|online|join ...] | unwatch <contact> [status|online|join ...] | list | status — alert when a named contact posts a status, comes online, or joins a channel",
-        "  /ghealth [name] [refresh] — WhatsApp group health: churn, rhythm, silent members (admins)",
+        "  /ghealth [name] [refresh] — WhatsApp group health: churn, growth, topics, rhythm, silent members (admins)",
         "  /publicface list | draft <pack> | <title> | <content> | approve <id> | unpublish <id> | remove <id> | show <id>",
         "  /subscriptions [list | upcoming [days] | used <merchant> [YYYY-MM-DD] | cancel <merchant>]   detected subscriptions, renewals, unused flags, draft cancel notes",
         "  /backup status | verify                backup health (read-only; runs need the vault, stay scheduled)",
@@ -3922,7 +3922,7 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "groups": {"what": "the §8 dashboard: message Devon privately and she lists every group and channel where YOU hold admin — status, member count, economy health (treasury, holders, active members, faucet throttle), and pending actions (join requests, restricted holds, flag proposals, governance proposals, open appeals) — with deep-links into /console per group. The operator sees all; anyone else sees only groups they actually admin.",
             "usage": "/groups",
             "example": "/groups"},
-    "ghealth": {"what": "WhatsApp group health analytics (census §6 #6): churn, activity rhythm and silent members from the records Devon already keeps — the member ledger, the audit ring, the 10-day rhythm counters and the roster-diff state. In a group it reports that group; in DM it boards every WhatsApp group you admin. /ghealth refresh runs one live roster diff first, then reports. Group admins only — Devon checks your platform admin status. Nothing is invented: a count is only claimed for the window the records cover.",
+    "ghealth": {"what": "WhatsApp group health analytics (census §6 #6): churn rate, growth rate and trend, topic clusters from the recorded messages, activity rhythm and silent members from the records Devon already keeps — the member ledger, the audit ring, the 10-day rhythm counters, the recorded message log and the roster-diff state. In a group it reports that group; in DM it boards every WhatsApp group you admin. /ghealth refresh runs one live roster diff first, then reports. Group admins only — Devon checks your platform admin status. Nothing is invented: a count is only claimed for the window the records cover.",
             "usage": "/ghealth | /ghealth <name> | /ghealth refresh | /ghealth <name> refresh",
             "example": "/ghealth",
             "related": "/groups /console /gsettings"},
@@ -5859,7 +5859,7 @@ LIST_ONELINERS: dict[str, str] = {
     "life": "life archive — the private, append-only life log (owner-only): /life list [kind] [n] | add <kind> | <text> [| source | provenance | YYYY-MM-DD] | show <id> | search <query>",
     "prefs": "learned taste (owner-only): /prefs list | show <domain> | like <domain> | axis:value ... | dislike <domain> | axis:value ... | rank <domain> | <label>=axis:value,... | ... | signals [domain] [n] | learn",
     "presence": "presence watch (owner-only): /presence watch <contact> [status|online|join ...] | unwatch <contact> [status|online|join ...] | list | status — alert when a named contact posts a status, comes online, or joins a channel",
-    "ghealth": "WhatsApp group health (admins): /ghealth [name] [refresh] — churn, activity rhythm and silent members from the records already kept",
+    "ghealth": "WhatsApp group health (admins): /ghealth [name] [refresh] — churn, growth, topics, activity rhythm and silent members from the records already kept",
     "digest": "WhatsApp group digests (admins): /digest [group] [policy <always|only-when-mentioned|never>] — what needs you: mentions, decisions, resolved threads from the recorded log",
     "publicface": "public face — owner-approved publishing gate: /publicface list | draft <pack> | <title> | <content> | approve <id> | unpublish <id> | remove <id> | show <id>",
     "backup": "backup health (read-only): /backup status | verify — generations, manifest, DB integrity",

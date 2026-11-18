@@ -33,7 +33,7 @@ __all__ = ["events", "groups", "meetups", "miniapps", "policy", "registry",
 # mini-apps — as long as it cannot reach owner data. Containment of
 # data, not poverty of features.
 __all__ += ["ajo", "miniapps2", "audio", "bridges", "group_memory",
-            "persona", "insights"]
+            "persona", "insights", "growth"]
 
 # GROUPS Tier 1 — welcome/moderation + digest/rituals (same isolation contract).
 from .digest import GroupDigest, Ritual, RitualScheduler, build_digest

@@ -8957,6 +8957,34 @@ class PartnerRuntime(
             except Exception as exc:  # noqa: BLE001 — never breaks chat
                 return f"couldn't pull that up: {exc}"
 
+        # Natural phrasing for group health: "how is <group>
+        # doing?" / "is <group> growing?" / "what is <group>
+        # talking about?" — the group must be one Devon serves,
+        # checked against the store, so the question never steals
+        # an unrelated one. Routes to /ghealth, so the same admin
+        # gate applies.
+        from ...tools.group_health import parse_group_health_question
+
+        _gh_parsed = None
+        try:
+            _gh_surface = self._group_surface()
+            _gh_known: list[str] = []
+            for _gh_key in (
+                    getattr(_gh_surface.store, "data", None) or {}):
+                _gh_entry = _gh_surface.store.group(_gh_key)
+                _gh_known.append(str(
+                    _gh_entry.get("title")
+                    or _gh_entry.get("name") or _gh_key))
+                _gh_known.append(str(_gh_key))
+            _gh_parsed = parse_group_health_question(text, _gh_known)
+        except Exception:  # noqa: BLE001 — no surface, no hook
+            _gh_parsed = None
+        if _gh_parsed is not None:
+            # Every intent routes to the same report — it carries
+            # the growth numbers and the topic clusters alike.
+            _, _gh_name = _gh_parsed
+            return self._control_ghealth(_gh_name, message)
+
         # Living-card taps (Living Chat P2): a card button's
         # payload is a fencing stamp, not a command —
         # "cardtap <card_id> <revision> <index>". Checked before

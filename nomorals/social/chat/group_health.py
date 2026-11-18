@@ -44,8 +44,10 @@ from typing import Any
 
 __all__ = [
     "SILENT_DAYS", "WINDOW_DAYS", "SILENT_LIST_CAP",
+    "TOPIC_READ_LIMIT",
     "build_group_health", "build_overview",
-    "render_group_health", "render_overview", "one_line",
+    "render_group_health", "render_overview", "render_topics",
+    "one_line", "read_group_messages",
     "refresh_live_roster",
 ]
 
@@ -55,6 +57,9 @@ SILENT_DAYS = 14
 WINDOW_DAYS = 7
 #: Names shown on the silent list before "and N more".
 SILENT_LIST_CAP = 10
+#: Recorded messages read for the topic clusters — the same bound
+#: the digest read uses, so one /ghealth never scans the whole log.
+TOPIC_READ_LIMIT = 500
 
 #: Platforms this surface covers.  The organ math is platform
 #: agnostic (it reads the store), but the command is scoped to
@@ -90,10 +95,63 @@ def _fmt_day(ts: float) -> str:
     return time.strftime("%d %b", time.localtime(ts))
 
 
+def read_group_messages(log: Any, group_key: str, *,
+                        since: float, limit: int = TOPIC_READ_LIMIT
+                        ) -> list[dict[str, Any]] | None:
+    """The group's recorded messages since ``since`` from the
+    brain's persisted log — the same rows the digest reads
+    (``messages_after``), mapped to the organ's plain dicts.
+    None when the log is unavailable; a read failure is never
+    dressed as an empty room."""
+    if log is None:
+        return None
+    try:
+        rows = log.messages_after(group_key, since, limit=limit) or []
+    except Exception:  # noqa: BLE001 - no log, no topics
+        return None
+    return [{
+        "sender": str(row.get("name") or "?"),
+        "text": str(row.get("content") or ""),
+        "ts": float(row.get("created_at") or 0.0),
+    } for row in rows]
+
+
+def _fmt_rate(rate: float | None) -> str:
+    return f"{rate * 100:.1f}%" if rate is not None else "—"
+
+
+def render_topics(topics: dict[str, Any] | None) -> str:
+    """The topics block: what the group talked about, or the
+    honest line when there is no message record to cluster."""
+    if topics is None:
+        return ("Topics: no message record for this group yet — "
+                "nothing to cluster.")
+    clusters = topics.get("clusters") or []
+    if not clusters:
+        return (f"Topics: {topics.get('messages_scanned', 0)} messages "
+                "in the last 7 days fit no topic.")
+    lines = [f"Talking about (last 7 days, "
+             f"{topics.get('messages_scanned', 0)} messages):"]
+    for cluster in clusters:
+        label = " · ".join(cluster.get("label") or [])
+        senders = cluster.get("senders") or []
+        top = ", ".join(f"{name} ({count})" for name, count in senders[:2])
+        example = str(cluster.get("example") or "")[:120]
+        lines.append(
+            f"· {label} — {cluster.get('messages', 0)} messages "
+            f"({cluster.get('share', 0.0) * 100:.0f}%)"
+            + (f" · top: {top}" if top else "")
+            + (f' — e.g. "{example}"' if example else ""))
+    if topics.get("unclustered"):
+        lines.append(f"· {topics['unclustered']} message(s) fit no topic.")
+    return "\n".join(lines)
+
+
 def build_group_health(surface: Any, group_key: str,
                        now: float | None = None, *,
                        silent_days: int = SILENT_DAYS,
-                       window_days: int = WINDOW_DAYS
+                       window_days: int = WINDOW_DAYS,
+                       messages: list[dict[str, Any]] | None = None
                        ) -> dict[str, Any] | None:
     """One WhatsApp group's health from the store, or None when
     the store has never seen the group (a pure read — it creates
@@ -109,6 +167,20 @@ def build_group_health(surface: Any, group_key: str,
         claim = {"claimed": False, "source": ""}
     members = entry.get("members") or {}
     window_after = now - window_days * 86400.0
+
+    # Churn / growth / topic clusters (the R2-27 remainder): the
+    # new organ reads the same ledger the report already reads —
+    # joins and leaves are exact over any window, since a member's
+    # joined_ts / left_ts pins them — and the supplied messages.
+    # No messages supplied (the board, a db-less rig) → topics is
+    # None and the render says so, never a faked cluster.
+    from ...community import growth as _growth
+
+    growth = _growth.churn_and_growth(
+        [m for m in members.values() if isinstance(m, dict)],
+        window_days=window_days, now=now)
+    topics = (_growth.topic_clusters(messages)
+              if messages is not None else None)
 
     current: list[dict[str, Any]] = []
     bots = 0
@@ -275,6 +347,8 @@ def build_group_health(surface: Any, group_key: str,
         "rhythm_days_kept": len(kept),
         "newcomers_7d": newcomers,
         "leavers_7d": leavers,
+        "growth": growth,
+        "topics": topics,
         "audit_covers_since": audit_covers_since,
         "audit_window_complete": audit_window_complete,
         "roster": roster,
@@ -318,6 +392,7 @@ def build_overview(surface: Any, now: float | None = None, *,
             "msgs_7d": sum(g["msgs_7d"] for g in groups),
             "joins_7d": sum(g["joins_7d"] for g in groups),
             "leaves_7d": sum(g["leaves_7d"] for g in groups),
+            "net_7d": sum(g["growth"]["current"]["net"] for g in groups),
         },
     }
 
@@ -364,6 +439,17 @@ def render_group_health(health: dict[str, Any]) -> str:
         f"Churn: +{health['joins_7d']} joined, "
         f"−{health['leaves_7d']} left in the last 7 days "
         f"(from the daily counts)")
+    growth = health.get("growth") or {}
+    current = growth.get("current") or {}
+    direction = growth.get("direction") or "no data"
+    lines.append(
+        f"Growth: {current.get('net', 0):+d} net in 7 days "
+        f"· churn {_fmt_rate(current.get('churn_rate'))} "
+        f"· growth {_fmt_rate(current.get('growth_rate'))}"
+        + (f" · {direction} vs the prior 7 days"
+           if direction != "no data" else
+           " · no prior window to compare"))
+    lines.append(render_topics(health.get("topics")))
     if health["newcomers_7d"]:
         lines.append("New: " + ", ".join(
             f"{item['name']} ({_fmt_day(item['ts'])})"
@@ -418,7 +504,8 @@ def render_overview(overview: dict[str, Any]) -> str:
         f"{totals['members']} members · "
         f"{totals['active_7d']} spoke in the last 7 days · "
         f"{totals['silent']} silent · "
-        f"{totals['msgs_7d']} msgs in 7 days"]
+        f"{totals['msgs_7d']} msgs in 7 days · "
+        f"net {totals.get('net_7d', 0):+d} in 7 days"]
     for health in overview["groups"]:
         label = health["title"] or health["group_key"]
         lines.append(f"— {label}: {one_line(health)} · "

@@ -6734,11 +6734,11 @@ class RuntimeGroupMixin:
                 if result.get("truncated"):
                     head += (" · list truncated — leaves were not "
                              "asserted this run")
-                health = _gh.build_group_health(surface, key)
+                health = _gh.build_group_health(surface, key, messages=self._health_messages(surface, key))
                 if health is None:
                     return head
                 return head + "\n\n" + _gh.render_group_health(health)
-            health = _gh.build_group_health(surface, key)
+            health = _gh.build_group_health(surface, key, messages=self._health_messages(surface, key))
             if health is None:
                 return "I have no record of this group yet."
             return _gh.render_group_health(health)
@@ -6775,6 +6775,8 @@ class RuntimeGroupMixin:
                 "msgs_7d": sum(h["msgs_7d"] for h in visible),
                 "joins_7d": sum(h["joins_7d"] for h in visible),
                 "leaves_7d": sum(h["leaves_7d"] for h in visible),
+                "net_7d": sum(h["growth"]["current"]["net"]
+                              for h in visible),
             }
             return _gh.render_overview(
                 {"platform": "whatsapp", "groups": visible,
@@ -6799,9 +6801,13 @@ class RuntimeGroupMixin:
                 return ("the roster refresh couldn't run: "
                         + str(result.get("error")
                               or "no member-list route") + ".")
-            health = _gh.build_group_health(surface, group_key)
-            if health is None:
-                return "I have no record of that group yet."
+        # Rebuild the one group with its recorded messages — the
+        # board health above carries no topics.
+        health = _gh.build_group_health(
+            surface, group_key,
+            messages=self._health_messages(surface, group_key))
+        if health is None:
+            return "I have no record of that group yet."
         return _gh.render_group_health(health)
 
     def _control_digest(self, tail, message):  # type: ignore[no-untyped-def]
@@ -6923,6 +6929,24 @@ class RuntimeGroupMixin:
             return (f"more than one group matches {selector!r}: "
                     f"{names} — name one.")
         return matches[0]
+
+    def _health_messages(self, surface, group_key):  # type: ignore[no-untyped-def]
+        """This group's recorded messages for the health window, or
+        None when the brain log is unavailable — the topics half
+        reads the same ConversationLog the digest reads. A missing
+        log is never dressed as an empty room."""
+        try:
+            db = getattr(getattr(self, "context", None), "db", None)
+            if db is None:
+                return None
+            from ...social.chat import group_health as _gh
+            from ...storage.conversations import ConversationLog
+
+            since = time.time() - _gh.WINDOW_DAYS * 86400.0
+            return _gh.read_group_messages(
+                ConversationLog(db), group_key, since=since)
+        except Exception:  # noqa: BLE001 - no log, no topics
+            return None
 
     def _digest_build(self, surface, group_key):  # type: ignore[no-untyped-def]
         """This group's digest dict, or None when the group is unknown."""
