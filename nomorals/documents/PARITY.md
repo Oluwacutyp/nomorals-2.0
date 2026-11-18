@@ -32,11 +32,29 @@ full-text token multiset (prose formats).
 
 Shortfalls, named: markdown loses the two table names (its table block has no caption — see "What does not convert"); docx loses the three list-bullet markers (a paragraph style, not text); the WinAnsi PDF loses exactly the tokens containing the characters counted below. Nothing else is lost in any format.
 
-Embedded-PDF detail: font `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` carries 6253 glyphs; the subset embedded in the corpus PDF carries 74 — subsetting keeps the file small while the text stays exact. (Byte sizes are not printed: the page footer carries a timestamp, so a PDF's exact length is time-dependent at the ±1-byte level and would make this doc lie about being stale.)
+Embedded-PDF detail: font `/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf` carries 6253 glyphs; the subset embedded in the corpus PDF carries 75 — subsetting keeps the file small while the text stays exact. (Byte sizes are not printed: the page footer carries a timestamp, so a PDF's exact length is time-dependent at the ±1-byte level and would make this doc lie about being stale.)
 
 XLSX typed-cell census (independent reader, openpyxl data_type): b=3, d=3, n=7, s=34 — `n` numeric, `d` date, `b` boolean, `s` string. Typed writing is real: values a spreadsheet can type are typed, and values that would lose information typed (leading-zero codes, thousands separators) stay strings.
 
 The WinAnsi PDF writer cannot represent 11 of the fixture's non-Latin-1 characters (Α ή α θ ν М а в к о с) — they become `?` there; the embedded-font writer carries all of them. That gap is the reason the embedded path exists.
+
+## Page surgery (pagewise — Smallpdf #48 + ILovePDF #49)
+
+Measured on real output bytes: a merge extracts as A-then-B, a rotation changes the page box (not the text), a stamp is extractable alongside the original text, compression reports its measured size delta, repair reports recovered pages per corruption class, and protect/unlock round-trips with the plaintext absent from the locked bytes.
+
+| Op | Result |
+|---|---|
+| merge | 3 pages, A-then-B extraction ok |
+| merge (real writer) | 4 pages, order ok |
+| select | 1 page, text ok |
+| rotate | /Rotate 90 present: yes, text unchanged |
+| stamp | page numbers extractable: yes |
+| compress | 5734 → 3272 bytes (saved 2462), text ok |
+| repair | truncated-xref: 3 pages; broken-offsets: 3 pages; missing-trailer: 3 pages; garbage-prefix: 3 pages; truncated-file: 2 pages |
+| protect/unlock | encrypted: yes, plaintext absent from locked bytes: yes, round-trip: ok |
+| archive | XMP (pdfaid:part): yes; pdfa_level: 1b; xmp_metadata: embedded; markinfo: marked; lang: en-US; font not embedded: Helvetica; output_intent_missing: no sRGB ICC profile installed on this machine — archival shape without OutputIntent; validated: false (conformance validation is a separate, unbuilt rung) |
+
+Honest limits, carried in the code: repair cannot recover bytes that are gone — the truncated-file row above recovers 2 of 3 pages and says so; PDF/A is the archival *shape* (XMP, MarkInfo, Lang, non-archival features stripped), not veraPDF-grade conformance validation; protect/unlock is the 40-bit RC4 standard handler (V=1, R=3), the only PDF encryption the stdlib can do; e-sign ceremonies are out of scope — the native slice is placing a signature image/annotation.
 
 ## Error system
 

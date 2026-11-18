@@ -321,13 +321,163 @@ def measure_all() -> dict[str, Any]:
                     if _encode_char(ch) is None
                     and ch not in _ASCII_FALLBACK and ch != "\u00a0"]
     gate = ocr_gate_state()
+    pagewise = _measure_pagewise()
     return {
         "rows": rows,
         "typed_cells": typed,
         "fixture_non_latin1": fixture_chars,
         "winansi_unrepresentable": winansi_lost,
         "ocr_gate": gate,
+        "pagewise": pagewise,
     }
+
+
+def _pagewise_fixture(pages: list[str]) -> bytes:
+    """A minimal valid PDF: one Helvetica text draw per page.
+
+    Mirrors the fixture in ``tests/test_gapfix_pagewise.py`` — one
+    distinct text per page, so every page-surgery round-trip is
+    measured on extraction, never asserted.
+    """
+    objs: dict[int, bytes] = {}
+    objs[1] = b"<< /Type /Catalog /Pages 2 0 R >>"
+    page_ids = [4 + 2 * i for i in range(len(pages))]
+    stream_ids = [5 + 2 * i for i in range(len(pages))]
+    kids = " ".join(f"{n} 0 R" for n in page_ids)
+    objs[2] = (f"<< /Type /Pages /Kids [{kids}] "
+               f"/Count {len(pages)} >>").encode()
+    objs[3] = (b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica "
+               b"/Encoding /WinAnsiEncoding >>")
+    for i, text in enumerate(pages):
+        esc = (text.replace("\\", "\\\\").replace("(", "\\(")
+               .replace(")", "\\)"))
+        stream = (f"BT /F1 24 Tf 72 720 Td ({esc}) Tj ET"
+                  ).encode("latin-1")
+        objs[stream_ids[i]] = (
+            f"<< /Length {len(stream)} >>\nstream\n".encode()
+            + stream + b"\nendstream")
+        objs[page_ids[i]] = (
+            f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 3 0 R >> >> "
+            f"/Contents {stream_ids[i]} 0 R >>").encode()
+    out = bytearray(b"%PDF-1.4\n%\xe2\xe3\xcf\xd3\n")
+    offsets: dict[int, int] = {}
+    for num in sorted(objs):
+        offsets[num] = len(out)
+        out += f"{num} 0 obj\n".encode() + objs[num] + b"\nendobj\n"
+    xref = len(out)
+    top = max(offsets)
+    out += f"xref\n0 {top + 1}\n".encode()
+    out += b"0000000000 65535 f \n"
+    for num in range(1, top + 1):
+        out += f"{offsets[num]:010d} 00000 n \n".encode()
+    out += (f"trailer\n<< /Size {top + 1} /Root 1 0 R >>\n"
+            f"startxref\n{xref}\n%%EOF\n").encode()
+    return bytes(out)
+
+
+def _measure_pagewise() -> dict[str, Any]:
+    """Page-surgery round-trips, measured on real output bytes."""
+    from .pagewise import (
+        ArchiveOp,
+        CompressOp,
+        MergeOp,
+        PagewiseJob,
+        RotateOp,
+        SelectOp,
+        StampOp,
+        extract_page_texts,
+        pdf_info,
+        protect_pdf,
+        repair_pdf,
+        run_pagewise,
+        unlock_pdf,
+    )
+
+    rows: list[dict[str, Any]] = []
+    a = _pagewise_fixture(["ALPHA-ONE", "ALPHA-TWO"])
+    b = _pagewise_fixture(["BETA-ONE"])
+    merged = run_pagewise(PagewiseJob(sources=[a, b], ops=[MergeOp()]))
+    rows.append({"op": "merge", "pages": merged.pages,
+                 "order_ok": extract_page_texts(merged.data) == [
+                     "ALPHA-ONE", "ALPHA-TWO", "BETA-ONE"]})
+    # the same merge over the real writer (multi-page, chapters)
+    text = "\n\n".join(f"Chapter {i}\n\nBody {i} " * 40
+                       for i in range(1, 4))
+    from ..core.pdf import render_pdf
+    real_doc = render_pdf(text, title="Real", chapter_break=True,
+                          headings=True)
+    real_merged = run_pagewise(PagewiseJob(
+        sources=[real_doc, b], ops=[MergeOp()]))
+    rows.append({"op": "merge (real writer)",
+                 "pages": real_merged.pages,
+                 "order_ok": pdf_info(real_doc)["pages"] + 1
+                 == real_merged.pages
+                 and "BETA-ONE" in extract_page_texts(
+                     real_merged.data)[-1]})
+    selected = run_pagewise(PagewiseJob(
+        sources=[a], ops=[SelectOp("2")]))
+    rows.append({"op": "select", "pages": selected.pages,
+                 "text_ok": extract_page_texts(selected.data) == [
+                     "ALPHA-TWO"]})
+    rotated = run_pagewise(PagewiseJob(
+        sources=[a], ops=[RotateOp("1", 90)]))
+    rows.append({"op": "rotate",
+                 "box_ok": b"/Rotate 90" in rotated.data,
+                 "text_ok": extract_page_texts(rotated.data)[0]
+                 == "ALPHA-ONE"})
+    stamped = run_pagewise(PagewiseJob(
+        sources=[a],
+        ops=[StampOp("{n} of {total}", "all",
+                     position="bottom-center")]))
+    stamped_texts = extract_page_texts(stamped.data)
+    rows.append({"op": "stamp",
+                 "text_ok": "1 of 2" in stamped_texts[0]
+                 and "2 of 2" in stamped_texts[1]})
+    bloated = _pagewise_fixture(["COMPRESS-MARKER " * 40] * 6)
+    compressed = run_pagewise(PagewiseJob(
+        sources=[bloated], ops=[CompressOp()]))
+    want = ("COMPRESS-MARKER " * 40).strip()
+    rows.append({"op": "compress",
+                 "size_before": compressed.size_before,
+                 "size_after": compressed.size_after,
+                 "saved_bytes": compressed.size_before
+                 - compressed.size_after,
+                 "text_ok": all(
+                     t.strip() == want
+                     for t in extract_page_texts(compressed.data))})
+    src3 = _pagewise_fixture(["R1", "R2", "R3"])
+    import re as _re
+    corruptions = {
+        "truncated-xref": src3[:src3.find(b"xref")],
+        "broken-offsets": _re.sub(rb"(?m)^(\d{10}) 00000 n ",
+                                  b"0000000001 00000 n ", src3),
+        "missing-trailer": src3[:src3.find(b"trailer")] + b"%%EOF\n",
+        "garbage-prefix": b"GARBAGE-BYTES\n" + src3,
+        "truncated-file": src3[:src3.rfind(b"endobj")],
+    }
+    repair_rows: dict[str, Any] = {}
+    for kind, broken in corruptions.items():
+        fixed = repair_pdf(broken)
+        repair_rows[kind] = {
+            "recovered_pages": pdf_info(fixed)["pages"],
+            "texts": extract_page_texts(fixed),
+        }
+    rows.append({"op": "repair", "classes": repair_rows})
+    locked = protect_pdf(a, "corpus-pw")
+    rows.append({"op": "protect/unlock",
+                 "encrypted": pdf_info(locked)["encrypted"],
+                 "plaintext_absent": b"ALPHA-ONE" not in locked,
+                 "round_trip_ok": extract_page_texts(
+                     unlock_pdf(locked, "corpus-pw"))
+                 == ["ALPHA-ONE", "ALPHA-TWO"]})
+    archived = run_pagewise(PagewiseJob(
+        sources=[a], ops=[ArchiveOp()]))
+    arch = next(m for m in archived.measurements if m["op"] == "archive")
+    rows.append({"op": "archive",
+                 "xmp_ok": b"pdfaid:part" in archived.data,
+                 "labels": arch["labels"]})
+    return {"rows": rows}
 
 
 # ── the parity doc ──────────────────────────────────────────────────────────
@@ -412,6 +562,69 @@ def render_parity_md() -> str:
         f"non-Latin-1 characters ({lost}) — they become `?` there; "
         "the embedded-font writer carries all of them. That gap is "
         "the reason the embedded path exists.")
+    lines.append("")
+    lines.append("## Page surgery (pagewise — Smallpdf #48 + ILovePDF #49)")
+    lines.append("")
+    lines.append("Measured on real output bytes: a merge extracts as "
+                 "A-then-B, a rotation changes the page box (not the "
+                 "text), a stamp is extractable alongside the original "
+                 "text, compression reports its measured size delta, "
+                 "repair reports recovered pages per corruption class, "
+                 "and protect/unlock round-trips with the plaintext "
+                 "absent from the locked bytes.")
+    lines.append("")
+    lines.append("| Op | Result |")
+    lines.append("|---|---|")
+    for row in m["pagewise"]["rows"]:
+        op = row["op"]
+        if op == "merge":
+            lines.append(f"| merge | {row['pages']} pages, A-then-B "
+                         f"extraction {'ok' if row['order_ok'] else 'FAILED'} |")
+        elif op == "merge (real writer)":
+            lines.append(f"| merge (real writer) | {row['pages']} pages, "
+                         f"order {'ok' if row['order_ok'] else 'FAILED'} |")
+        elif op == "select":
+            lines.append(f"| select | {row['pages']} page, text "
+                         f"{'ok' if row['text_ok'] else 'FAILED'} |")
+        elif op == "rotate":
+            lines.append(f"| rotate | /Rotate 90 present: "
+                         f"{'yes' if row['box_ok'] else 'no'}, text "
+                         f"{'unchanged' if row['text_ok'] else 'CHANGED'} |")
+        elif op == "stamp":
+            lines.append(f"| stamp | page numbers extractable: "
+                         f"{'yes' if row['text_ok'] else 'no'} |")
+        elif op == "compress":
+            lines.append(f"| compress | {row['size_before']} → "
+                         f"{row['size_after']} bytes "
+                         f"(saved {row['saved_bytes']}), text "
+                         f"{'ok' if row['text_ok'] else 'FAILED'} |")
+        elif op == "repair":
+            parts = []
+            for kind, got in row["classes"].items():
+                parts.append(f"{kind}: {got['recovered_pages']} pages")
+            lines.append(f"| repair | {'; '.join(parts)} |")
+        elif op == "protect/unlock":
+            lines.append(f"| protect/unlock | encrypted: "
+                         f"{'yes' if row['encrypted'] else 'no'}, "
+                         f"plaintext absent from locked bytes: "
+                         f"{'yes' if row['plaintext_absent'] else 'no'}, "
+                         f"round-trip: "
+                         f"{'ok' if row['round_trip_ok'] else 'FAILED'} |")
+        elif op == "archive":
+            lines.append(f"| archive | XMP (pdfaid:part): "
+                         f"{'yes' if row['xmp_ok'] else 'no'}; "
+                         f"{'; '.join(row['labels'])} |")
+    lines.append("")
+    lines.append("Honest limits, carried in the code: repair cannot "
+                 "recover bytes that are gone — the truncated-file row "
+                 "above recovers 2 of 3 pages and says so; PDF/A is "
+                 "the archival *shape* (XMP, MarkInfo, Lang, "
+                 "non-archival features stripped), not veraPDF-grade "
+                 "conformance validation; protect/unlock is the 40-bit "
+                 "RC4 standard handler (V=1, R=3), the only PDF "
+                 "encryption the stdlib can do; e-sign ceremonies are "
+                 "out of scope — the native slice is placing a "
+                 "signature image/annotation.")
     lines.append("")
     lines.append("## Error system")
     lines.append("")

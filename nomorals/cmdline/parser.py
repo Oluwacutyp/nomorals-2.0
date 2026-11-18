@@ -5008,7 +5008,8 @@ def _parser() -> argparse.ArgumentParser:
                      "nm doc show <file>\n"
                      "nm doc diff <file-a> <file-b> [--json]\n"
                      "nm doc summarize <file> [--sentences N] [--json]\n"
-                     "nm doc ocr <scanned.pdf> [--lang eng] [--dpi 200] [--json]"),
+                     "nm doc ocr <scanned.pdf> [--lang eng] [--dpi 200] [--json]\n"
+                     "nm doc pagewise <merge|select|delete|reorder|rotate|crop|stamp|compress|repair|protect|unlock|archive|scan|sign|info> <files...> --out PATH [--ranges R] [--pages P] [--order 3,1,2] [--degrees 90] [--box x0,y0,x1,y1] [--text T] [--position POS] [--password PW] [--level 1b]"),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     doc.add_argument("task", nargs="*", default=[], help="verb and arguments")
@@ -5020,6 +5021,16 @@ def _parser() -> argparse.ArgumentParser:
                      help="summarize: sentences to keep")
     doc.add_argument("--lang", default="eng", help="ocr: tesseract language")
     doc.add_argument("--dpi", type=int, default=200, help="ocr: render DPI")
+    doc.add_argument("--ranges", default="", help="pagewise: page ranges like 2-5,7")
+    doc.add_argument("--pages", default="", help="pagewise: pages like 1,3 or a single page number")
+    doc.add_argument("--order", default="", help="pagewise reorder: new order like 3,1,2")
+    doc.add_argument("--degrees", type=int, default=0, help="pagewise rotate: multiple of 90")
+    doc.add_argument("--box", default="", help="pagewise crop/sign: x0,y0,x1,y1 or x,y,w,h")
+    doc.add_argument("--text", default="", help="pagewise stamp: text, {n} and {total} expand")
+    doc.add_argument("--position", default="bottom-center", help="pagewise stamp: position")
+    doc.add_argument("--password", default="", help="pagewise protect/unlock: password")
+    doc.add_argument("--level", default="1b", help="pagewise archive: PDF/A level")
+    doc.add_argument("--rect", default="", help="pagewise sign: x,y,w,h")
     doc.add_argument("--json", action="store_true", help="Output as JSON")
 
     browse = sub.add_parser("browse", aliases=CLI_ALIASES["browse"],

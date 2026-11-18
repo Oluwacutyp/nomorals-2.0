@@ -9,7 +9,7 @@ from typing import Any
 
 
 def _cmd_doc(args: Any, context: Any) -> int:
-    """Route ``nm doc <parse|convert|search|show|diff|summarize|ocr>``."""
+    """Route ``nm doc <parse|convert|search|show|diff|summarize|ocr|pagewise>``."""
     words = list(getattr(args, "task", None) or [])
     if not words:
         print("usage: nm doc parse <file> [--json]\n"
@@ -18,7 +18,8 @@ def _cmd_doc(args: Any, context: Any) -> int:
               "       nm doc show <file>\n"
               "       nm doc diff <file-a> <file-b> [--json]\n"
               "       nm doc summarize <file> [--sentences N] [--json]\n"
-              "       nm doc ocr <scanned.pdf> [--lang eng] [--dpi 200] [--json]",
+              "       nm doc ocr <scanned.pdf> [--lang eng] [--dpi 200] [--json]\n"
+              "       nm doc pagewise <merge|select|delete|reorder|rotate|crop|stamp|compress|repair|protect|unlock|archive|scan|sign|info> <files...> --out PATH [--ranges R] [--pages P] [--order 3,1,2] [--degrees 90] [--box x0,y0,x1,y1] [--text T] [--position POS] [--password PW] [--level 1b]",
               file=sys.stderr)
         return 2
     verb = words[0]
@@ -36,6 +37,8 @@ def _cmd_doc(args: Any, context: Any) -> int:
         return _doc_summarize(args, words[1:])
     if verb == "ocr":
         return _doc_ocr(args, words[1:])
+    if verb == "pagewise":
+        return _doc_pagewise(args, words[1:])
     print(f"unknown doc verb: {verb}", file=sys.stderr)
     return 2
 
@@ -248,4 +251,146 @@ def _doc_ocr(args: Any, rest: list[str]) -> int:
     for sec in doc.sections:
         preview = sec.text.strip().replace("\n", " ")[:100]
         print(f"{sec.heading} — {preview}")
+    return 0
+
+
+def _doc_pagewise(args: Any, rest: list[str]) -> int:
+    from ...documents.pagewise import (
+        ArchiveOp,
+        CompressOp,
+        CropOp,
+        DeleteOp,
+        MergeOp,
+        PagewiseJob,
+        ProtectOp,
+        ReorderOp,
+        RepairOp,
+        RotateOp,
+        ScanOp,
+        SelectOp,
+        SignOp,
+        StampOp,
+        UnlockOp,
+        format_pagewise_reply,
+        pdf_info,
+        run_pagewise,
+    )
+
+    def _box(spec: str) -> tuple[float, float, float, float]:
+        parts = [p.strip() for p in spec.split(",")]
+        if len(parts) != 4:
+            raise ValueError("box needs four numbers: x0,y0,x1,y1")
+        nums = [float(p) for p in parts]
+        return (nums[0], nums[1], nums[2], nums[3])
+
+    if not rest:
+        print("usage: nm doc pagewise "
+              "<merge|select|delete|reorder|rotate|crop|stamp|compress|"
+              "repair|protect|unlock|archive|scan|sign|info> <files...> "
+              "--out PATH [--ranges R] [--pages P] [--order 3,1,2] "
+              "[--degrees 90] [--box x0,y0,x1,y1] [--text T] "
+              "[--position POS] [--password PW] [--level 1b]",
+              file=sys.stderr)
+        return 2
+    action = rest[0]
+    files = rest[1:]
+    out_path = getattr(args, "out", "") or ""
+    try:
+        if action == "info":
+            if not files:
+                print("usage: nm doc pagewise info <file>",
+                      file=sys.stderr)
+                return 2
+            info = pdf_info(Path(files[0]).expanduser().read_bytes())
+            if getattr(args, "json", False):
+                print(json.dumps(info, indent=2, default=str))
+                return 0
+            print(f"pages:     {info['pages']}")
+            print(f"encrypted: {info['encrypted']}")
+            print(f"size:      {info['size_bytes']} bytes")
+            if info.get("title"):
+                print(f"title:     {info['title']}")
+            if info["corruption"]:
+                print(f"corruption: {', '.join(info['corruption'])}")
+            return 0
+        if action == "merge":
+            ops = [MergeOp()]
+            sources: list[Any] = files
+        elif action == "select":
+            ops = [SelectOp(getattr(args, "ranges", "") or "all")]
+            sources = files[:1]
+        elif action == "delete":
+            ops = [DeleteOp(getattr(args, "pages", "")
+                            or getattr(args, "ranges", ""))]
+            sources = files[:1]
+        elif action == "reorder":
+            order = [int(p.strip()) for p in
+                     (getattr(args, "order", "") or "").split(",")
+                     if p.strip()]
+            ops = [ReorderOp(order)]
+            sources = files[:1]
+        elif action == "rotate":
+            ops = [RotateOp(getattr(args, "pages", "") or "all",
+                            int(getattr(args, "degrees", 0) or 0))]
+            sources = files[:1]
+        elif action == "crop":
+            ops = [CropOp(getattr(args, "pages", "") or "all",
+                          _box(getattr(args, "box", "") or ""))]
+            sources = files[:1]
+        elif action == "stamp":
+            ops = [StampOp(getattr(args, "text", "") or "",
+                           getattr(args, "pages", "") or "all",
+                           position=getattr(args, "position",
+                                            "bottom-center")
+                           or "bottom-center")]
+            sources = files[:1]
+        elif action == "compress":
+            ops = [CompressOp()]
+            sources = files[:1]
+        elif action == "repair":
+            ops = [RepairOp()]
+            sources = files[:1]
+        elif action == "protect":
+            ops = [ProtectOp(getattr(args, "password", "") or "")]
+            sources = files[:1]
+        elif action == "unlock":
+            ops = [UnlockOp(getattr(args, "password", "") or "")]
+            sources = files[:1]
+        elif action == "archive":
+            ops = [ArchiveOp(level=getattr(args, "level", "1b")
+                             or "1b")]
+            sources = files[:1]
+        elif action == "scan":
+            ops = [ScanOp(images=tuple(files))]
+            sources = []
+        elif action == "sign":
+            if len(files) < 2:
+                print("usage: nm doc pagewise sign <pdf> <image> "
+                      "--out PATH [--pages N] [--rect x,y,w,h]",
+                      file=sys.stderr)
+                return 2
+            rect = _box(getattr(args, "rect", "") or "") \
+                if getattr(args, "rect", "") else (400, 700, 120, 40)
+            ops = [SignOp(image=files[1],
+                          page=int(getattr(args, "pages", "") or 1),
+                          rect=rect)]
+            sources = files[:1]
+        else:
+            print(f"unknown pagewise action: {action}", file=sys.stderr)
+            return 2
+        if not sources and action != "scan":
+            print(f"error: pagewise {action} needs a source PDF",
+                  file=sys.stderr)
+            return 2
+        if not out_path:
+            print("error: --out PATH is required (pagewise writes a "
+                  "fresh PDF)", file=sys.stderr)
+            return 2
+        result = run_pagewise(PagewiseJob(sources=sources, ops=ops))
+    except Exception as exc:  # noqa: BLE001 - fail fast with the real error
+        print(f"error: {type(exc).__name__}: {exc}", file=sys.stderr)
+        return 1
+    Path(out_path).expanduser().write_bytes(result.data)
+    print(format_pagewise_reply(result))
+    print(f"wrote {len(result.data)} bytes -> {out_path}")
     return 0
