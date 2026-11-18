@@ -654,6 +654,7 @@ class ToolRegistry:
             "union_catalog",  # union catalogue over many libraries — one record per work, merged with provenance (Anna's Archive core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
+            "representation",  # "what did you tell X for me?" over the representation ledger
             "workspace",
             "trading",
             "characters",

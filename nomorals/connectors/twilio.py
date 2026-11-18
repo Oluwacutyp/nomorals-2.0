@@ -244,7 +244,11 @@ class TwilioConnector(Connector):
                 outcome="success",
                 metadata={"to": to, "sid": sid,
                           "counterparty": to,
-                          "segments": (len(body) // 160) + 1})
+                          "segments": (len(body) // 160) + 1},
+                # This runs only after confirm_or_checkpoint passed
+                # above: the exact SMS was owner-approved.
+                authority="owner-confirmed",
+            )
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
         return data if isinstance(data, dict) else {}

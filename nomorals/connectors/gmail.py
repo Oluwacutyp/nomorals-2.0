@@ -394,6 +394,9 @@ class GmailConnector(Connector, GoogleOAuth):
                     "message_id": data.get("id", ""),
                     "thread_id": data.get("threadId", ""),
                 },
+                # _send_now runs only after confirm_or_checkpoint passed
+                # in send_message: the exact payload was owner-approved.
+                authority="owner-confirmed",
             )
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass

@@ -272,7 +272,14 @@ class SocialManager:
                         f"{content[:80]}",
                 outcome=("success" if outcome.posted and not outcome.failed
                          else "partial" if outcome.posted else "failed"),
-                metadata=metadata)
+                metadata=metadata,
+                # A minted single-use confirmation token means the owner
+                # approved this exact post; actor "user" without one is
+                # the owner's direct instruction (execute_post's
+                # "the user's word is the authorization").  Any other
+                # actor names no grant here — left unrecorded.
+                authority=("owner-confirmed" if confirmation
+                           else "owner-direct" if actor == "user" else None))
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
         return outcome

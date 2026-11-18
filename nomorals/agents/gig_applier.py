@@ -513,7 +513,12 @@ class GigApplier:
                 "apply", f"gig application {app.status}: {gig_id}",
                 settings=self.settings,
                 metadata={"gig_id": gig_id, "explicit": explicit,
-                          "status": app.status})
+                          "status": app.status},
+                # explicit=True is the owner's own "submit"/"apply now";
+                # explicit=False means the caller was expected to have
+                # obtained confirmation already — a grant the code here
+                # does not name, so it stays unrecorded, never invented.
+                authority="owner-direct" if explicit else None)
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
         return app

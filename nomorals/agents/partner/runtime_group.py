@@ -414,10 +414,41 @@ class RuntimeGroupMixin:
         gateway contract (buttons + parse_mode) as every surface.
         Returns the gateway's SendResult (callers that need the
         posted message's id — the notice layer — read it there;
-        everyone else ignores it, as before)."""
-        return self.gateway.send(chat.platform, chat, str(text),
-                                 buttons=buttons,
-                                 parse_mode=parse_mode)
+        everyone else ignores it, as before).
+
+        Every send through here is also a representation record:
+        Devon posting in the owner's group under the owner's
+        standing designation of the bot as the room's system
+        sender (§33 gate) — action type "post", authority
+        "owner-designated".  Logging never breaks the send.
+        """
+        result = self.gateway.send(chat.platform, chat, str(text),
+                                   buttons=buttons,
+                                   parse_mode=parse_mode)
+        try:
+            from ...cognition.representation import (
+                log_representation_action,
+            )
+
+            mid = getattr(result, "message_id", "") or ""
+            log_representation_action(
+                "post",
+                f"group post to {getattr(chat, 'key', '') or '?'}: "
+                f"{str(text)[:80]}",
+                settings=getattr(getattr(self, "context", None),
+                                 "settings", None),
+                outcome="success",
+                metadata={
+                    "action_class": "post",
+                    "group_key": str(getattr(chat, "key", "") or ""),
+                    "platform": str(getattr(chat, "platform", "") or ""),
+                    "message_id": str(mid),
+                },
+                authority="owner-designated",
+            )
+        except Exception:  # noqa: BLE001 — the send already happened; the log never breaks it
+            pass
+        return result
 
     def _send_best_effort(self, chat, text: str, **kw):  # type: ignore[no-untyped-def]
         """A side-send from a control handler (a notice for an

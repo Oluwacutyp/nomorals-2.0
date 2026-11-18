@@ -99,6 +99,78 @@ class RuntimeMemoryMixin:
         except Exception as exc:  # noqa: BLE001 — review never breaks chat
             return f"couldn't pull the review: {exc}"
 
+    # ── representation records: /representations ──────────────────────
+    def _control_representations(self, tail: str, *,
+                                 chat_key: str = "") -> str:
+        """/representations [days] | show <id> | audit [id] — the raw
+        record list, one record, and the audit trail.  Owner-only.
+        /review is the quality-scored summary; this is the records
+        themselves, with the grant each ran under.  List/show reads
+        audit themselves (event "read", actor "owner"); reading the
+        audit trail does not audit itself."""
+        from ...cognition.representation import _ledger_for
+        from ...tools.representation import (
+            format_audit_trail,
+            format_record,
+        )
+
+        raw = (tail or "").strip()
+        verb, _, rest = raw.partition(" ")
+        verb = verb.lower()
+        try:
+            ledger = _ledger_for(
+                getattr(self, "context", None)
+                and getattr(self.context, "settings", None))
+        except Exception as exc:  # noqa: BLE001 — never breaks chat
+            return f"couldn't open the ledger: {exc}"
+        try:
+            if verb == "show":
+                rid = rest.strip().split()[0] if rest.strip() else ""
+                if not rid:
+                    return ("usage: /representations show <id>"
+                            " — e.g. /representations show rep_abc123")
+                rec = ledger.get(rid)
+                if rec is None:
+                    return f"no record with id {rid}."
+                trail = ledger.audit_trail(action_id=rid)
+                ledger.audit(rid, "owner", "read", "show record")
+                return format_record(rec, with_audit=True, audit_rows=trail)
+            if verb == "audit":
+                rid = rest.strip().split()[0] if rest.strip() else None
+                trail = ledger.audit_trail(action_id=rid, limit=50)
+                return format_audit_trail(trail, rid)
+            days = 30.0
+            if raw:
+                try:
+                    days = float(raw.split()[0])
+                except ValueError:
+                    return ("usage: /representations [days] | show <id>"
+                            " | audit [id]")
+                if not 0 < days <= 365:
+                    return "/representations takes 1–365 days"
+            recs = ledger.recent(limit=10, since_days=days)
+            ledger.audit(None, "owner", "read",
+                         f"list: {len(recs)} records, {int(days)}d")
+            if not recs:
+                return ("No autonomous actions on record yet — I haven't"
+                        " acted on your behalf in this window.")
+            lines = [f"Actions on your behalf"
+                     f" (last {int(days)}d, {len(recs)} shown):"]
+            for r in recs:
+                fb = {1: " 👍", -1: " 👎"}.get(r.owner_feedback, "")
+                when = time.strftime("%m-%d %H:%M",
+                                     time.localtime(r.created_at))
+                desc = (r.description[:80] + "…") \
+                    if len(r.description) > 80 else r.description
+                lines.append(
+                    f"• [{r.action_type}] {desc} — {r.outcome}{fb}"
+                    f" ({when}, via"
+                    f" {getattr(r, 'authority', None) or 'no grant recorded'}"
+                    f", id {r.id})")
+            return "\n".join(lines)
+        except Exception as exc:  # noqa: BLE001 — never breaks chat
+            return f"couldn't pull the records: {exc}"
+
     def _control_tutor(self, tail: str, *, chat_key: str = "") -> str:
         """/tutor — Socratic tutoring. Owner-only.
 

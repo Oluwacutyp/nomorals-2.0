@@ -692,6 +692,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "py": (1, None),         # /py <python code> — run in the sandbox (-s/-r sessions)
     "remember": (1, None),   # /remember <text> [kind] [tags:a,b]
     "review": (0, 1),       # /review [days] — "how did I do?" representation review
+    "representations": (0, None),  # /representations [days] | show <id> | audit [id] — raw representation records + audit trail (owner-only)
     "tutor": (0, None),       # /tutor [guide me] <topic> | answer <text> | hint | stop | status
     "learn": (0, None),        # /learn tutor|quiz|flashcards|mastery|waec|jamb — one front door over learn/
     "immune": (0, None),      # /immune status|scan|antibodies|corpus|feeds|mark-fp|quarantine|disarm|arrest|fever|drift|casefile — defensive immune system (owner-only)
@@ -3531,6 +3532,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/review [days]  (also: /how did I do)",
                  "example": "/review 7",
                  "related": "/spending"},
+    "representations": {"what": "the raw representation records behind /review — every autonomous action on your behalf with its outcome and the grant it ran under (owner-confirmed / owner-direct / owner-designated), plus the append-only audit trail of reads and edits. /review is the quality-scored summary; this is the records themselves.",
+                 "usage": "/representations [days] | show <id> | audit [id]",
+                 "example": "/representations show rep_abc123",
+                 "related": "/review"},
     "tutor": {"what": "socratic tutoring — guide-me questions or just-tell-me teaching, with a mistake notebook.",
                  "usage": "/tutor [guide me] <topic> | /tutor answer <text> | /tutor hint | /tutor status | /tutor stop",
                  "example": "/tutor guide me fractions",
@@ -4962,7 +4967,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "identity", "book", "books", "features",
                            "checkpoint", "checkpoints", "rewind", "novel"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board",
+                           "benchmark", "redteam", "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board",
                            "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
                           "balances", "goal", "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
@@ -5299,7 +5304,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "labels", "catalog", "broadcast", "wpay"]),
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
-      "review", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
+      "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
       "immune", "impossible", "scene", "board", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",

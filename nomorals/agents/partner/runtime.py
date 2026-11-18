@@ -8612,6 +8612,32 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_review("", chat_key=chat_key)
 
+        # Natural phrasing for the representation lookup: "what did you
+        # tell X for me?" (and variants) routes to the ledger lookup.
+        # Same owner-only gate as /review — the ledger is the owner's
+        # private record of what Devon did on their behalf.
+        from ...tools.representation import (
+            format_lookup,
+            parse_representation_lookup,
+        )
+        _who = parse_representation_lookup(text)
+        if _who is not None:
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            from ...cognition.representation import _ledger_for
+
+            try:
+                ledger = _ledger_for(
+                    getattr(self, "context", None)
+                    and getattr(self.context, "settings", None))
+                recs = ledger.lookup(counterparty=_who, limit=10)
+                ledger.audit(None, "owner", "read",
+                             f"lookup counterparty={_who}:"
+                             f" {len(recs)} records")
+                return format_lookup(recs, _who)
+            except Exception as exc:  # noqa: BLE001 — never breaks chat
+                return f"couldn't pull that up: {exc}"
+
         # Living-card taps (Living Chat P2): a card button's
         # payload is a fencing stamp, not a command —
         # "cardtap <card_id> <revision> <index>". Checked before
@@ -10901,6 +10927,11 @@ class PartnerRuntime(
                 return "that one's just for the owner."
             return self._control_review(command.tail or arg,
                                         chat_key=chat_key)
+        if kind == "representations":
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_representations(command.tail or arg,
+                                                 chat_key=chat_key)
         if kind == "tutor":
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."

@@ -506,6 +506,7 @@ class DuffelConnector(Connector):
                 f"({order.booking_reference})",
                 outcome="success",
                 metadata=metadata,
+                authority="owner-confirmed",
             )
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
@@ -548,6 +549,7 @@ class DuffelConnector(Connector):
                 f"flight order cancelled: {order_id}",
                 outcome="success",
                 metadata={"action_class": "cancel", "order_id": order_id},
+                authority="owner-confirmed",
             )
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass

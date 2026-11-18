@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS cog_representation (
     owner_feedback  INTEGER,                -- NULL none, +1 approve, -1 disapprove
     feedback_text   TEXT NOT NULL DEFAULT '',
     metadata_json   TEXT NOT NULL DEFAULT '{}',
+    authority       TEXT,                   -- NULL: no grant named at the site
     created_at      REAL NOT NULL,
     updated_at      REAL NOT NULL
 );
@@ -82,6 +83,18 @@ CREATE TABLE IF NOT EXISTS cog_representation_counterfactuals (
 );
 CREATE INDEX IF NOT EXISTS idx_cog_rep_cf_action
     ON cog_representation_counterfactuals(action_id);
+CREATE TABLE IF NOT EXISTS cog_representation_audit (
+    id          TEXT PRIMARY KEY,
+    action_id   TEXT,                   -- NULL: a ledger-wide read (list)
+    actor       TEXT NOT NULL DEFAULT '',  -- owner | brain | system
+    event       TEXT NOT NULL DEFAULT '',  -- create | outcome | counterfactual | read | export | import
+    detail      TEXT NOT NULL DEFAULT '',
+    created_at  REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_cog_rep_audit_action
+    ON cog_representation_audit(action_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_cog_rep_audit_time
+    ON cog_representation_audit(created_at);
 """
 
 
@@ -102,6 +115,13 @@ class ActionRecord:
     owner_feedback: int | None = None  # +1 approve / -1 disapprove / None
     feedback_text: str = ""
     metadata: dict[str, Any] = field(default_factory=dict)
+    #: Under what grant the action was taken — "owner-confirmed" (the
+    #: exact payload passed the confirmation gate or a minted
+    #: single-use token), "owner-direct" (the owner's explicit words),
+    #: "owner-designated" (the owner's standing designation of Devon
+    #: the bot as a room's system sender), or None when the code at
+    #: the write site names no grant.  Never invented.
+    authority: str | None = None
     created_at: float = 0.0
     updated_at: float = 0.0
     counterfactuals: list[dict[str, Any]] = field(default_factory=list)
@@ -116,6 +136,21 @@ class RepresentationLedger:
         else:
             self.db = Database(":memory:" if db is None else str(db))
         self.db.executescript(_REPRESENTATION_DDL)
+        # Migration-safe: a representation.db written before the
+        # authority column existed gains it here — existing rows keep
+        # authority NULL (no grant was recorded for them), new rows
+        # store theirs.  The ledger owns its own DDL, not the global
+        # migrations system, so the column is added in place.
+        try:
+            cols = {r["name"] for r in self.db.query(
+                "PRAGMA table_info(cog_representation)")}
+            if "authority" not in cols:
+                self.db.execute(
+                    "ALTER TABLE cog_representation"
+                    " ADD COLUMN authority TEXT")
+        except Exception as exc:  # noqa: BLE001 — a missing column never breaks reads
+            _log.warning("representation authority column check failed: %s",
+                         exc)
         self._lock = threading.RLock()
 
     # ── recording ────────────────────────────────────────────────────
@@ -127,6 +162,7 @@ class RepresentationLedger:
         outcome: str | None = None,
         metadata: dict[str, Any] | None = None,
         created_at: float | None = None,
+        authority: str | None = None,
     ) -> ActionRecord:
         """Log an autonomous action.  Never raises — a logging failure is
         logged, never propagated, so the observed action is never broken."""
@@ -134,12 +170,14 @@ class RepresentationLedger:
             return self._log_action(
                 action_type, description, outcome=outcome,
                 metadata=metadata, created_at=created_at,
+                authority=authority,
             )
         except Exception as exc:  # noqa: BLE001 — logging must not break actions
             _log.warning("representation log failed: %s", exc)
             return ActionRecord(
                 id="", action_type=action_type or "",
                 description=description or "",
+                authority=authority,
             )
 
     def _log_action(
@@ -150,6 +188,7 @@ class RepresentationLedger:
         outcome: str | None = None,
         metadata: dict[str, Any] | None = None,
         created_at: float | None = None,
+        authority: str | None = None,
     ) -> ActionRecord:
         if action_type not in ACTION_TYPES:
             raise ValueError(
@@ -164,6 +203,7 @@ class RepresentationLedger:
             description=description or "",
             outcome=outcome,
             metadata=dict(metadata or {}),
+            authority=authority,
             created_at=float(created_at if created_at is not None else now),
             updated_at=now,
         )
@@ -171,12 +211,60 @@ class RepresentationLedger:
             self.db.execute(
                 "INSERT INTO cog_representation (id, action_type, description,"
                 " outcome, owner_feedback, feedback_text, metadata_json,"
-                " created_at, updated_at)"
-                " VALUES (?, ?, ?, ?, NULL, '', ?, ?, ?)",
+                " authority, created_at, updated_at)"
+                " VALUES (?, ?, ?, ?, NULL, '', ?, ?, ?, ?)",
                 (rec.id, rec.action_type, rec.description, rec.outcome,
-                 json.dumps(rec.metadata), rec.created_at, rec.updated_at),
+                 json.dumps(rec.metadata), rec.authority,
+                 rec.created_at, rec.updated_at),
             )
+        self.audit(rec.id, "system", "create",
+                   f"{action_type}: {(description or '')[:80]}")
         return rec
+
+    # ── append-only audit: who did what to a record, and when ────────
+    def audit(
+        self,
+        action_id: str | None,
+        actor: str,
+        event: str,
+        detail: str = "",
+    ) -> str:
+        """Append one audit row.  Never raises — auditing is hygiene,
+        never load-bearing.  Returns the audit row id ("" on failure)."""
+        try:
+            row_id = new_short_id("aud_")
+            with self._lock:
+                self.db.execute(
+                    "INSERT INTO cog_representation_audit"
+                    " (id, action_id, actor, event, detail, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (row_id, action_id, actor or "", event or "",
+                     detail or "", time.time()),
+                )
+            return row_id
+        except Exception as exc:  # noqa: BLE001
+            _log.warning("representation audit failed: %s", exc)
+            return ""
+
+    def audit_trail(
+        self,
+        action_id: str | None = None,
+        *,
+        limit: int = 50,
+    ) -> list[dict[str, Any]]:
+        """The audit trail, newest first — every read/edit the ledger
+        recorded.  ``action_id`` narrows to one record; without it the
+        whole trail is returned.  Reading the trail does not audit
+        itself."""
+        sql = ("SELECT id, action_id, actor, event, detail, created_at"
+               " FROM cog_representation_audit")
+        params: list[Any] = []
+        if action_id:
+            sql += " WHERE action_id = ?"
+            params.append(action_id)
+        sql += " ORDER BY created_at DESC, rowid DESC LIMIT ?"
+        params.append(max(0, int(limit)))
+        return self.db.query(sql, params)
 
     def record_outcome(
         self,
@@ -209,7 +297,15 @@ class RepresentationLedger:
                     (outcome, fb, feedback_text or "",
                      time.time(), action_id),
                 )
-                return (cur.rowcount or 0) > 0
+                if (cur.rowcount or 0) > 0:
+                    self.audit(
+                        action_id,
+                        "owner" if fb is not None else "system",
+                        "outcome",
+                        f"outcome={outcome}"
+                        + (f" feedback={fb:+d}" if fb is not None else ""))
+                    return True
+                return False
         except Exception as exc:  # noqa: BLE001
             _log.warning("representation record_outcome failed: %s", exc)
             return False
@@ -235,6 +331,8 @@ class RepresentationLedger:
                     (note_id, action_id, better_action, why or "",
                      time.time()),
                 )
+            self.audit(action_id, "brain", "counterfactual",
+                       (better_action or "")[:80])
         except Exception as exc:  # noqa: BLE001
             _log.warning("representation counterfactual failed: %s", exc)
         return note_id
@@ -253,6 +351,7 @@ class RepresentationLedger:
             owner_feedback=row.get("owner_feedback"),
             feedback_text=row.get("feedback_text", ""),
             metadata=meta if isinstance(meta, dict) else {},
+            authority=row.get("authority"),
             created_at=float(row.get("created_at", 0.0)),
             updated_at=float(row.get("updated_at", 0.0)),
         )
@@ -295,6 +394,35 @@ class RepresentationLedger:
         sql += " ORDER BY created_at DESC LIMIT ?"
         params.append(int(limit))
         return [self._row_to_record(r) for r in self.db.query(sql, params)]
+
+    def lookup(
+        self,
+        *,
+        counterparty: str | None = None,
+        action_type: str | None = None,
+        since_days: float | None = None,
+        limit: int = 20,
+    ) -> list[ActionRecord]:
+        """Answer "what did you tell X for me?" — records whose
+        counterparty (or, failing that, description) names X, newest
+        first.  The counterparty lives in metadata JSON, so the match
+        is a case-insensitive substring over a bounded recent scan
+        (1000 rows) rather than a JSON query the store cannot index.
+        ``action_type`` / ``since_days`` narrow the same scan."""
+        needle = (counterparty or "").strip().lower()
+        recs = self.recent(limit=1000, since_days=since_days)
+        out: list[ActionRecord] = []
+        for rec in recs:
+            if action_type and rec.action_type != action_type:
+                continue
+            if needle:
+                cp = str((rec.metadata or {}).get("counterparty") or "").lower()
+                if needle not in cp and needle not in rec.description.lower():
+                    continue
+            out.append(rec)
+            if len(out) >= max(0, int(limit)):
+                break
+        return out
 
     # ── scoring ──────────────────────────────────────────────────────
     @staticmethod
@@ -554,21 +682,27 @@ class RepresentationLedger:
 
     # ── portable artifact (Letta-style export/import) ──────────────────
     def export_json(self, path: str | Path) -> dict:
-        """Export actions + counterfactuals to JSON.  Returns counts."""
+        """Export actions + counterfactuals + audit trail to JSON.
+        Returns counts."""
         actions = self.db.query("SELECT * FROM cog_representation")
         cfs = self.db.query(
             "SELECT * FROM cog_representation_counterfactuals")
+        audit = self.db.query("SELECT * FROM cog_representation_audit")
         payload = {
             "kind": "cognition-representation",
             "version": 1,
             "exported_at": time.time(),
             "actions": actions,
             "counterfactuals": cfs,
+            "audit": audit,
         }
         out = Path(path)
         out.write_text(json.dumps(payload), encoding="utf-8")
+        self.audit(None, "system", "export",
+                   f"{len(actions)} actions, {len(cfs)} counterfactuals,"
+                   f" {len(audit)} audit rows -> {out.name}")
         return {"actions": len(actions), "counterfactuals": len(cfs),
-                "path": str(out)}
+                "audit": len(audit), "path": str(out)}
 
     def import_json(self, path: str | Path) -> dict:
         """Import a payload written by :meth:`export_json`.  Upserts by
@@ -576,14 +710,15 @@ class RepresentationLedger:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
         if payload.get("kind") != "cognition-representation":
             raise ValueError("not a cognition-representation export")
-        n_a = n_c = 0
+        n_a = n_c = n_audit = 0
         with self._lock:
             for a in payload.get("actions", []):
                 self.db.execute(
                     "INSERT OR REPLACE INTO cog_representation (id,"
                     " action_type, description, outcome, owner_feedback,"
-                    " feedback_text, metadata_json, created_at, updated_at)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    " feedback_text, metadata_json, authority, created_at,"
+                    " updated_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (a.get("id") or new_short_id("rep_"),
                      a.get("action_type") or "",
                      a.get("description") or "",
@@ -591,6 +726,7 @@ class RepresentationLedger:
                      a.get("owner_feedback"),
                      a.get("feedback_text") or "",
                      a.get("metadata_json") or "{}",
+                     a.get("authority"),
                      float(a.get("created_at", time.time())),
                      float(a.get("updated_at", time.time()))),
                 )
@@ -608,7 +744,24 @@ class RepresentationLedger:
                      float(c.get("created_at", time.time()))),
                 )
                 n_c += 1
-        return {"actions": n_a, "counterfactuals": n_c}
+            for row in payload.get("audit", []):
+                self.db.execute(
+                    "INSERT OR REPLACE INTO cog_representation_audit"
+                    " (id, action_id, actor, event, detail, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (row.get("id") or new_short_id("aud_"),
+                     row.get("action_id"),
+                     row.get("actor") or "",
+                     row.get("event") or "",
+                     row.get("detail") or "",
+                     float(row.get("created_at", time.time()))),
+                )
+                n_audit += 1
+        self.audit(None, "system", "import",
+                   f"{n_a} actions, {n_c} counterfactuals,"
+                   f" {n_audit} audit rows <- {Path(path).name}")
+        return {"actions": n_a, "counterfactuals": n_c,
+                "audit": n_audit}
 
     # ── review surface ───────────────────────────────────────────────
     def summary(self, *, limit: int = 10,
@@ -698,6 +851,7 @@ def log_representation_action(
     settings: Any = None,
     outcome: str | None = None,
     metadata: dict[str, Any] | None = None,
+    authority: str | None = None,
 ) -> str:
     """One-line hook for autonomous-action sites.  Never raises — returns
     the action id ("" when logging failed).
@@ -713,7 +867,9 @@ def log_representation_action(
     and ``predicted_confidence``; anything else passes through
     untouched.  An unrecognized class/outcome or bad stakes falls back
     to the base ``log_action`` with the original metadata, so the
-    record is never lost for a vocabulary miss.
+    record is never lost for a vocabulary miss.  ``authority`` names
+    the grant the site acted under (owner-confirmed / owner-direct /
+    owner-designated); None when the site names none — never invented.
     """
     try:
         ledger = _ledger_for(settings)
@@ -723,6 +879,8 @@ def log_representation_action(
         counterparty = meta.pop("counterparty", "") or ""
         owner_feedback = meta.pop("owner_feedback", None)
         predicted_confidence = meta.pop("predicted_confidence", None)
+        if authority is None:
+            authority = meta.pop("authority", None)
         record_fn = getattr(ledger, "record_autonomous_action", None)
         if record_fn is not None:
             try:
@@ -735,13 +893,15 @@ def log_representation_action(
                     description=description,
                     predicted_confidence=predicted_confidence,
                     metadata=meta,
+                    authority=authority,
                 )
                 return rec.id
             except ValueError:
                 # Unknown class/outcome/stakes: base log keeps the record.
                 pass
         rec = ledger.log_action(
-            action_type, description, outcome=outcome, metadata=metadata)
+            action_type, description, outcome=outcome, metadata=metadata,
+            authority=authority)
         return rec.id
     except Exception as exc:  # noqa: BLE001
         _log.warning("representation hook failed: %s", exc)

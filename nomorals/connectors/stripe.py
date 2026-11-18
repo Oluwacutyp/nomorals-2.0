@@ -657,7 +657,8 @@ class StripeConnector(Connector):
             if pm_id:
                 metadata["payment_method_id"] = pm_id
             log_representation_action(
-                "purchase", description, outcome="success", metadata=metadata)
+                "purchase", description, outcome="success", metadata=metadata,
+                authority="owner-confirmed")
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
         return result
@@ -719,7 +720,8 @@ class StripeConnector(Connector):
             if pi_id:
                 metadata["payment_intent"] = pi_id
             log_representation_action(
-                "purchase", description, outcome="success", metadata=metadata)
+                "purchase", description, outcome="success", metadata=metadata,
+                authority="owner-confirmed")
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
         return result
@@ -784,6 +786,7 @@ class StripeConnector(Connector):
                 f"{currency.upper()} → {destination} ({transfer_id})",
                 outcome="success",
                 metadata=metadata,
+                authority="owner-confirmed",
             )
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
@@ -856,7 +859,8 @@ class StripeConnector(Connector):
             if isinstance(method, str) and method.strip():
                 metadata["method"] = method.strip()
             log_representation_action(
-                "purchase", description, outcome="success", metadata=metadata)
+                "purchase", description, outcome="success", metadata=metadata,
+                authority="owner-confirmed")
         except Exception:  # noqa: BLE001 — ledger never breaks the action
             pass
         return result

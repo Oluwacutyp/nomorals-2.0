@@ -117,6 +117,7 @@ class ExtendedRepresentationLedger:
         description: str = "",
         predicted_confidence: float | None = None,
         metadata: dict[str, Any] | None = None,
+        authority: str | None = None,
     ) -> Any:
         """Record one autonomous action with stakes + counterparty.
 
@@ -126,7 +127,8 @@ class ExtendedRepresentationLedger:
         with ``id == ""``, mirroring the base ledger's contract).
         Raises :class:`ValueError` for an unknown ``action_class``,
         unknown ``outcome``, or bad ``stakes`` — those are programmer
-        errors, not storage failures.
+        errors, not storage failures.  ``authority`` names the grant
+        the action ran under; None when the site names none.
         """
         action_class = normalize_action_class(action_class)
         outcome = outcome or "unknown"
@@ -154,6 +156,7 @@ class ExtendedRepresentationLedger:
                 + (f" with {counterparty}" if counterparty else ""),
                 outcome=outcome,
                 metadata=merged,
+                authority=authority,
             )
             if owner_feedback is not None and getattr(rec, "id", ""):
                 self.ledger.record_outcome(
@@ -171,6 +174,7 @@ class ExtendedRepresentationLedger:
                 description=description or "",
                 outcome=outcome,
                 metadata=merged,
+                authority=authority,
             )
 
     # ── prediction (advisory only — never permission) ─────────────────
