@@ -28,6 +28,7 @@ from .effects import (
     EFFECTS,
     deferred_effect_reason,
     effect_rung,
+    validate_effect_params,
 )
 from .frametime import FrameGrid
 from .keyframes import (
@@ -282,6 +283,27 @@ def _fx_record(fx: Effect, *, kind: str = "builder") -> dict[str, Any]:
                     "mask tracked from the source frame at the "
                     f"clip window start ({t_detail})")
         rec["mask"] = mask_rec
+    if fx.name == "remove_video_background":
+        # The composite's own honesty: what replaced the
+        # background, which path served the subject mask, and the
+        # shot structure the window was rendered over.
+        bg_img = params.get("background_image")
+        if bg_img:
+            rec["background"] = {"kind": "image",
+                                 "value": str(bg_img)}
+        else:
+            rec["background"] = {
+                "kind": "color",
+                "value": str(params.get("background", "#00ff00"))}
+        tracking = str(params.get("_mask_tracking", ""))
+        rec["mask_path"] = (
+            "per-frame segmentation" if tracking == "per-frame"
+            else "tracked" if tracking == "tracked"
+            else "partially tracked" if tracking == "partial"
+            else "anchor-and-hold")
+        shots = params.get("_shots")
+        if isinstance(shots, dict) and shots:
+            rec["shots"] = shots
     return rec
 
 
@@ -320,6 +342,132 @@ def _chain_masked(parts: list[str], cur: str, filt: str,
     parts.append(f"[{tag}mf]{filt}[{tag}me]")
     return _composite_masked(parts, f"{tag}mb", f"{tag}me",
                              mask_label, tag)
+
+
+def _bg_color_hex(value: Any) -> str:
+    """A background colour as bare ``RRGGBB`` hex (no ``#``).
+
+    Raises MediaEditError naming the accepted form — a bad colour
+    is an authoring error, never a silent default.
+    """
+    s = str(value or "").strip()
+    if len(s) == 7 and s.startswith("#") and all(
+            c in "0123456789abcdefABCDEF" for c in s[1:]):
+        return s[1:].lower()
+    raise MediaEditError(
+        f"remove_video_background background must be a #RRGGBB "
+        f"colour, got {value!r}")
+
+
+def _escape_movie_path(path: str) -> str:
+    """Escape a path for the ffmpeg ``movie`` source filter.
+
+    Backslash, single quote and colon are filter-specials (the
+    colon matters on Windows drive letters); everything else
+    passes through.
+    """
+    return (str(path).replace("\\", "\\\\")
+            .replace("'", "\\'").replace(":", "\\:"))
+
+
+def _chain_bg_replace(parts: list[str], cur: str, fx: Effect,
+                      ctx: dict[str, Any], tag: str) -> str:
+    """Composite the subject over a replacement background.
+
+    ``cur`` is the source stream; the subject is ``cur`` with the
+    resolved mask as its alpha (``alphamerge`` — the mask stream
+    is gray, produced by the tracked/per-frame rung or the held
+    anchor still), and the replacement is a ``color`` source or a
+    ``movie`` image, both bounded to the clip's duration so the
+    graph ends with the source. The composite lands exactly on
+    the requested tag — the chain contract every caller relies
+    on. Raises MediaEditError (never a silent unmasked render)
+    when the effect carries no resolved mask, no mask stream is
+    registered, the background colour is not #RRGGBB, or the
+    background image does not exist.
+    """
+    params = fx.params or {}
+    validate_effect_params(fx.name, params)
+    png = params.get("_mask_png")
+    if not png:
+        raise MediaEditError(
+            "remove_video_background needs a subject mask — "
+            "author it with video_four.remove_video_background "
+            "or pass mask=<MaskRef dict> (kind 'subject')")
+    mask_label = (ctx.get("mask_labels") or {}).get(png)
+    if mask_label is None:
+        raise MediaEditError(
+            "effect 'remove_video_background' carries a resolved "
+            "mask but no mask stream is registered in this render "
+            "— masks are resolved by the renderer before chaining")
+    w, h = ctx["w"], ctx["h"]
+    fps, dur = ctx["fps"], ctx["duration"]
+    bg_img = params.get("background_image")
+    if bg_img:
+        p = Path(str(bg_img))
+        if not p.exists():
+            raise MediaEditError(
+                "remove_video_background: no such background "
+                f"image: {bg_img}")
+        bg_src = (f"movie='{_escape_movie_path(str(p))}',"
+                  f"scale={w}:{h},setsar=1,loop=loop=-1:size=1,"
+                  f"trim=duration={dur:.3f}")
+    else:
+        color = _bg_color_hex(params.get("background", "#00ff00"))
+        bg_src = (f"color=c=0x{color}:s={w}x{h}:r={fps}:"
+                  f"d={dur:.3f}")
+    parts.append(f"[{cur}]format=yuva420p[{tag}f]")
+    parts.append(f"[{tag}f][{mask_label}]alphamerge[{tag}fg]")
+    parts.append(f"{bg_src}[{tag}bg]")
+    parts.append(f"[{tag}bg][{tag}fg]overlay=0:0,"
+                 f"format=yuv420p[{tag}]")
+    return tag
+
+
+def _chain_bg_replace_windowed(parts: list[str], cur: str, fx: Effect,
+                               ctx: dict[str, Any], tag: str) -> str:
+    """``remove_video_background`` over an optional window.
+
+    The same trim/split/concat window shape the generic chain
+    uses — head/tail pass through untouched, the window piece
+    gets the background replacement — so a windowed effect
+    composes exactly like every other effect in the engine.
+    """
+    at = fx.at
+    if not at:
+        return _chain_bg_replace(parts, cur, fx, ctx, tag)
+    a, b = float(at[0]), float(at[1])
+    dur = ctx["duration"]
+    a, b = max(0.0, a), min(dur, b)
+    if not a < b:
+        raise MediaEditError(
+            f"effect window at={(at[0], at[1])} is empty for a {dur:.2f}s clip")
+    eps = 0.001
+    segs: list[tuple[str, str]] = []  # (trim-args, piece-tag)
+    if a > eps:
+        segs.append((f"start=0:end={a:.4f}", f"{tag}p0"))
+    segs.append((f"start={a:.4f}:end={b:.4f}", f"{tag}p1"))
+    if b < dur - eps:
+        segs.append((f"start={b:.4f}", f"{tag}p2"))
+    if len(segs) == 1:
+        parts.append(f"[{cur}]trim={segs[0][0]},setpts=PTS-STARTPTS"
+                     f"[{tag}w]")
+        return _chain_bg_replace(parts, f"{tag}w", fx, ctx, tag)
+    outs = "".join(f"[{tag}s{i}]" for i in range(len(segs)))
+    parts.append(f"[{cur}]split={len(segs)}{outs}")
+    srcs = [f"{tag}s{i}" for i in range(len(segs))]
+    concat_in = ""
+    for (trim_args, ptag), s in zip(segs, srcs, strict=True):
+        if ptag == f"{tag}p1":
+            parts.append(f"[{s}]trim={trim_args},setpts=PTS-STARTPTS"
+                         f"[{ptag}w]")
+            _chain_bg_replace(parts, f"{ptag}w", fx, ctx, ptag)
+        else:
+            parts.append(f"[{s}]trim={trim_args},setpts=PTS-STARTPTS"
+                         f"[{ptag}]")
+        concat_in += f"[{ptag}]"
+    parts.append(f"{concat_in}concat=n={len(segs)}:v=1:a=0[{tag}]")
+    return tag
 
 
 def _chain_effect(parts: list[str], cur: str, fx: Effect,
@@ -362,6 +510,11 @@ def _chain_effect(parts: list[str], cur: str, fx: Effect,
         out = _chain_rgb_animated(parts, cur, fx, ctx, tag)
         if rec is not None:
             rec.append(_fx_record(fx, kind="animated-discretized"))
+        return out
+    if fx.name == "remove_video_background":
+        out = _chain_bg_replace_windowed(parts, cur, fx, ctx, tag)
+        if rec is not None:
+            rec.append(_fx_record(fx, kind="composite"))
         return out
     mask_label: str | None = None
     if masked:
@@ -847,6 +1000,115 @@ def _track_mask_attempt(source_path: str | os.PathLike[str], *,
         return ("held", f"the tracking attempt failed: {exc}", None)
 
 
+#: hard cap on per-frame segmented frames per mask (20 s at 30 fps):
+#: beyond it the render layer holds the anchor mask instead of
+#: paying unbounded per-frame segmentation cost — the cap is named
+#: in the effect record, never silently exceeded.
+MAX_PER_FRAME_FRAMES = 600
+
+
+def _per_frame_mask_attempt(source_path: str | os.PathLike[str], *,
+                            source_start: float, speed: float, fps: int,
+                            play_frames: int, width: int, height: int,
+                            tier: str, tmp: Path,
+                            tag: str) -> tuple[str, str, str | None]:
+    """Segment every played frame with the bgremove ladder → mask video.
+
+    The degradation path when the tracked anchor mask holds
+    nothing (or when the effect asks for per-frame outright):
+    each extracted frame is segmented on its own, so a
+    shape-changing subject is followed where translation tracking
+    cannot go. Returns ``("per-frame", detail, video_path|None)`` —
+    status/detail land verbatim in the effect record. NEVER raises:
+    every failure mode (still source, frame cap, extraction short,
+    a frame the ladder cannot segment) comes back as ``held`` with
+    the reason named, and the caller keeps the anchor mask. Frames
+    the ladder cannot segment hold the previous frame's mask and
+    are counted in the detail, never silently dropped.
+    """
+    try:
+        if _is_still(source_path):
+            return ("held", "the source is a still image — the "
+                            "anchor mask already is the per-frame "
+                            "mask", None)
+        if fps <= 0 or play_frames < 2:
+            return ("held", "the renderer supplied no frame "
+                            "timeline to segment over", None)
+        if play_frames > MAX_PER_FRAME_FRAMES:
+            return ("held",
+                    f"the clip plays {play_frames} frames — beyond "
+                    f"the {MAX_PER_FRAME_FRAMES}-frame per-frame "
+                    f"segmentation cap", None)
+        import numpy as np
+        from PIL import Image
+
+        from ..imggen.bgremove import remove_background as _remove_bg
+        step_s = max(float(speed), 1e-6) / float(fps)
+        paths = _extract_track_frames(
+            source_path, start_s=source_start, step_s=step_s,
+            count=play_frames, width=width, height=height,
+            tmp=tmp, tag=tag)
+        if len(paths) < 2:
+            return ("held",
+                    f"only {len(paths)} frame(s) could be "
+                    f"extracted from the source window", None)
+        seq_dir = tmp / f"pfseq{tag}"
+        seq_dir.mkdir(parents=True, exist_ok=True)
+        rungs: dict[str, int] = {}
+        held_frames = 0
+        last: Any = None
+        n = 0
+        for p in paths:
+            with Image.open(p) as im:
+                frame = im.convert("RGB")
+            try:
+                res = _remove_bg(frame, tier=tier or "auto")
+                m = res.mask
+                rungs[str(res.rung)] = rungs.get(str(res.rung), 0) + 1
+            except Exception:  # noqa: BLE001 — hold, count, continue
+                if last is None:
+                    return ("held",
+                            "the bgremove ladder could not segment "
+                            "the first frame — no mask to hold",
+                            None)
+                m = last
+                held_frames += 1
+            if m.size != (width, height):
+                m = m.resize((width, height))
+            last = m
+            Image.fromarray(
+                (np.asarray(m.convert("L")) > 127).astype("uint8")
+                * 255).save(str(seq_dir / f"m{n:05d}.png"))
+            n += 1
+        # the played span may outrun the extracted frames, and the
+        # still path's render-length loop is the same insurance as
+        # the tracked path's held tail: hold the last mask.
+        while n < play_frames:
+            Image.fromarray(
+                (np.asarray(last.convert("L")) > 127).astype("uint8")
+                * 255).save(str(seq_dir / f"m{n:05d}.png"))
+            n += 1
+        for _ in range(fps):
+            Image.fromarray(
+                (np.asarray(last.convert("L")) > 127).astype("uint8")
+                * 255).save(str(seq_dir / f"m{n:05d}.png"))
+            n += 1
+        out = tmp / f"maskpf{tag}.mkv"
+        run_ffmpeg(["-framerate", str(fps), "-i",
+                    str(seq_dir / "m%05d.png"),
+                    "-c:v", "ffv1", "-pix_fmt", "gray",
+                    "-y", str(out)])
+        detail = (f"segmented {len(paths)} frame(s) with the "
+                  f"bgremove ladder "
+                  f"({', '.join(f'{k} x{v}' for k, v in sorted(rungs.items()))})")
+        if held_frames:
+            detail += (f"; {held_frames} frame(s) held at the "
+                       f"previous mask")
+        return ("per-frame", detail, str(out))
+    except Exception as exc:  # noqa: BLE001 — held, named, recorded
+        return ("held", f"the per-frame attempt failed: {exc}", None)
+
+
 def _prepare_effects(effects: Any, *, source_path: str,
                      source_start: float, width: int, height: int,
                      tmp: Path, masks: _MaskStreams,
@@ -907,7 +1169,25 @@ def _prepare_effects(effects: Any, *, source_path: str,
         new_params["_mask_png"] = str(png)
         new_params["_mask_rung"] = result.tier
         new_params["_mask_detail"] = result.detail
-        if params.get("mask_track"):
+        if fx.name == "remove_video_background" and \
+                str(params.get("segmentation", "auto")).lower() \
+                == "per-frame":
+            # Per-frame outright: no tracking attempt — every played
+            # frame is segmented. A held outcome keeps the anchor
+            # mask and says why, exactly like the tracked path.
+            status, detail, video = _per_frame_mask_attempt(
+                source_path, source_start=source_start, speed=speed,
+                fps=fps, play_frames=play_frames, width=width,
+                height=height, tier=ref.tier, tmp=tmp,
+                tag=f"{tag_prefix}{i}")
+            new_params["_mask_tracking"] = status
+            new_params["_mask_track_detail"] = detail
+            if video is not None:
+                masks.register(video, kind="video")
+                new_params["_mask_png"] = video
+            else:
+                masks.register(str(png))
+        elif params.get("mask_track"):
             status, detail, video = _track_mask_attempt(
                 source_path, source_start=source_start, speed=speed,
                 fps=fps, play_frames=play_frames, width=width,
@@ -918,6 +1198,32 @@ def _prepare_effects(effects: Any, *, source_path: str,
             if video is not None:
                 masks.register(video, kind="video")
                 new_params["_mask_png"] = video
+            elif (fx.name == "remove_video_background"
+                    and status == "held"
+                    and str(params.get("segmentation", "auto")).lower()
+                    == "auto" and not _is_still(source_path)):
+                # Auto degradation: the tracked anchor holds
+                # nothing — fall back to per-frame segmentation
+                # (bounded). A held per-frame outcome keeps the
+                # anchor mask and the tracking reason stands. The
+                # still mask is registered ONLY when no video
+                # replaces it — an unconnected mask input is a
+                # hard ffmpeg error, and the record must name the
+                # path that actually served.
+                pf_status, pf_detail, pf_video = \
+                    _per_frame_mask_attempt(
+                        source_path, source_start=source_start,
+                        speed=speed, fps=fps,
+                        play_frames=play_frames, width=width,
+                        height=height, tier=ref.tier, tmp=tmp,
+                        tag=f"{tag_prefix}{i}")
+                if pf_video is not None:
+                    masks.register(pf_video, kind="video")
+                    new_params["_mask_png"] = pf_video
+                    new_params["_mask_tracking"] = pf_status
+                    new_params["_mask_track_detail"] = pf_detail
+                else:
+                    masks.register(str(png))
             else:
                 masks.register(str(png))
         else:
@@ -1034,7 +1340,8 @@ def apply_effect(src: str | os.PathLike[str], effect: str, *,
     if reason is not None:
         raise MediaEditError(
             f"effect {effect!r} is deferred, not unknown: {reason}")
-    if fx.name not in EFFECTS and fx.name != "velocity_ramp":
+    if fx.name not in EFFECTS and fx.name not in (
+            "velocity_ramp", "remove_video_background"):
         raise MediaEditError(
             f"unknown effect {effect!r}; use: {sorted(EFFECTS)}")
     info = video_probe(p)

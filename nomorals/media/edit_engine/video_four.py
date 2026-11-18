@@ -30,8 +30,12 @@ from .failures import record_failure
 
 __all__ = [
     "ASPECTS",
+    "BG_COLORS",
+    "bg_color",
     "reframe",
     "reframe_dims",
+    "remove_video_background",
+    "remove_video_background_params",
     "match_cut_score",
     "match_cuts",
     "auto_broll",
@@ -82,6 +86,135 @@ def reframe(clip: Clip | dict[str, Any], aspect: str, *,
             params["anchor_x"] = round(sum(cxs) / len(cxs), 3)
             params["anchor_y"] = round(sum(cys) / len(cys), 3)
     effects = tuple(c.effects) + (Effect(name="reframe", params=params),)
+    return Clip(path=c.path, start=c.start, end=c.end, at=c.at,
+                duration=c.duration, speed=c.speed, effects=effects,
+                gain=c.gain)
+
+
+#: colour names → #RRGGBB for background replacement (the NL
+#: surface's words for the effect's hex param).
+BG_COLORS: dict[str, str] = {
+    "green": "#00ff00", "blue": "#0000ff", "red": "#ff0000",
+    "black": "#000000", "white": "#ffffff", "yellow": "#ffff00",
+    "magenta": "#ff00ff", "cyan": "#00ffff", "orange": "#ff8800",
+    "purple": "#8800ff", "grey": "#808080", "gray": "#808080",
+}
+
+
+def bg_color(value: str) -> str:
+    """A background colour as ``#RRGGBB`` — a hex literal passes
+    through, a name resolves through :data:`BG_COLORS`, anything
+    else raises naming the accepted forms."""
+    s = str(value or "").strip()
+    if not s:
+        return "#00ff00"
+    if len(s) == 7 and s.startswith("#") and all(
+            c in "0123456789abcdefABCDEF" for c in s[1:]):
+        return s.lower()
+    named = BG_COLORS.get(s.lower())
+    if named is not None:
+        return named
+    raise MediaEditError(
+        f"unknown background colour {value!r}; use a #RRGGBB "
+        f"colour or one of {sorted(BG_COLORS)}")
+
+
+def _shots_for(clip: Clip) -> dict[str, Any]:
+    """Shot boundaries inside the clip window (best-effort).
+
+    Scene-intel segmentation supplies the shot structure the
+    effect record carries; a segmentation that cannot run returns
+    ``{}`` (the record omits ``shots``) instead of failing the
+    edit — the tracking status is the guarantee, the shots are
+    provenance.
+
+    Scene-intel's 1.0 s default minimum scene is tuned for
+    highlight windows on long movies; per-render shot structure
+    scales with the clip instead — a cut inside a 1 s clip must
+    still be named, because that cut is exactly why a tracked
+    mask goes partial. The floor is one frame at the clip's rate
+    (or 0.1 s when the rate is unknown).
+    """
+    try:
+        from ...media_edit.videos import video_probe
+        from ..scene_intel.segment import segment_movie
+        lo = float(clip.start or 0.0)
+        probe = video_probe(str(clip.path))
+        span = (float(clip.end) - lo) if clip.end else \
+            (float(probe.get("duration") or 0.0) - lo)
+        fps = probe.get("fps") or 0.0
+        frame = (1.0 / float(fps)) if fps and float(fps) > 0 else 0.1
+        min_length = max(frame, span / 20.0) if span > 0 else 0.1
+        seg = segment_movie(str(clip.path), min_length=min_length)
+        hi = float(clip.end) if clip.end else float(seg.duration or 0.0)
+        cuts = sorted({round(s.start, 3) for s in seg.segments
+                       if s.kind == "scene" and lo < s.start < hi})
+        return {"backend": seg.backend, "cuts": cuts,
+                "spans_cut": bool(cuts)}
+    except Exception:  # noqa: BLE001 — shots are provenance, not a gate
+        return {}
+
+
+def remove_video_background_params(
+        source_path: str, *, background: str = "",
+        background_image: str | None = None, tier: str = "auto",
+        track: bool = True,
+        segmentation: str = "auto") -> dict[str, Any]:
+    """The effect params for ``remove_video_background``.
+
+    Shared by the Clip helper and the Studio tool so the two
+    surfaces can never drift apart: a ``subject`` MaskRef (the
+    bgremove ladder) + ``mask_track`` + the replacement
+    background. ``segmentation`` is ``auto`` (tracked, per-frame
+    fallback only when tracking holds nothing), ``tracked``
+    (never segments per frame) or ``per-frame`` (segments every
+    frame, bounded).
+    """
+    mode = str(segmentation or "auto").strip().lower()
+    if mode not in ("auto", "tracked", "per-frame"):
+        raise MediaEditError(
+            "segmentation must be auto|tracked|per-frame, "
+            f"got {segmentation!r}")
+    from ..imggen.masks import MaskRef
+    params: dict[str, Any] = {
+        "mask": MaskRef(kind="subject",
+                        tier=str(tier or "auto")).to_dict(),
+        "mask_track": bool(track),
+        "background": bg_color(background),
+        "segmentation": mode,
+    }
+    if background_image:
+        params["background_image"] = str(background_image)
+    return params
+
+
+def remove_video_background(
+        clip: Clip | dict[str, Any], *,
+        background: str = "", background_image: str | None = None,
+        tier: str = "auto", track: bool = True,
+        segmentation: str = "auto") -> Clip:
+    """Attach the video background-removal effect to a clip.
+
+    Returns a Clip carrying one ``remove_video_background``
+    effect descriptor — the renderer resolves the subject mask
+    (bgremove ladder) at the clip window start, tracks it across
+    the frames (or segments per frame when tracking holds
+    nothing), and composites the subject over the replacement
+    background. The effect record states which path served and
+    which rung, and carries the window's shot structure when
+    scene-intel can supply it. Further effects chain after it
+    like any Studio effect.
+    """
+    c = clip if isinstance(clip, Clip) else Clip.from_dict(dict(clip))
+    params = remove_video_background_params(
+        c.path, background=background,
+        background_image=background_image, tier=tier, track=track,
+        segmentation=segmentation)
+    shots = _shots_for(c)
+    if shots:
+        params["_shots"] = shots
+    effects = tuple(c.effects) + (
+        Effect(name="remove_video_background", params=params),)
     return Clip(path=c.path, start=c.start, end=c.end, at=c.at,
                 duration=c.duration, speed=c.speed, effects=effects,
                 gain=c.gain)

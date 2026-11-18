@@ -174,6 +174,11 @@ class MaskRef:
       over ``text``/``point``/``box``; ``text`` needs a
       ``box_predictor`` at resolve time when no SAM checkpoint
       exists.
+    - ``"subject"`` — the bgremove ladder's subject mask for
+      ``image`` (rembg → SAM → GrabCut → flood → box, with the
+      subject sanity checks) — the video background-removal
+      anchor. ``tier`` selects the bgremove rung (``"auto"`` =
+      the ladder).
 
     ``rung``/``detail`` are provenance: empty until :meth:`resolve`
     runs; :meth:`resolved` returns a copy stamped with the tier
@@ -263,9 +268,20 @@ class MaskRef:
                 image, text=self.text or None, point=self.point,
                 box=self.box, box_predictor=box_predictor,
                 feather_radius=self.feather, tier=self.tier)
+        if self.kind == "subject":
+            # Lazy: bgremove imports masks at module level, so a
+            # top-level import here would be circular. The subject
+            # mask is bgremove's whole ladder (model → classical)
+            # with its subject sanity checks — the video
+            # background-removal anchor reuses it, never a second
+            # ladder.
+            from .bgremove import remove_background as _remove_bg
+            res = _remove_bg(image, tier=self.tier or "auto")
+            return MaskResult(mask=res.mask, tier=res.rung,
+                              detail=res.detail)
         raise ImgGenError(
             f"unknown MaskRef kind {self.kind!r}; "
-            "use file|box|point|auto")
+            "use file|box|point|auto|subject")
 
     def resolved(self, result: MaskResult) -> "MaskRef":
         """A copy of this ref stamped with the producing rung."""
@@ -294,9 +310,10 @@ class MaskRef:
         if not isinstance(d, dict):
             raise ImgGenError(f"MaskRef needs a dict, got {d!r}")
         kind = d.get("kind", "file")
-        if kind not in ("file", "box", "point", "auto"):
+        if kind not in ("file", "box", "point", "auto", "subject"):
             raise ImgGenError(
-                f"unknown MaskRef kind {kind!r}; use file|box|point|auto")
+                f"unknown MaskRef kind {kind!r}; use "
+                "file|box|point|auto|subject")
         box = d.get("box")
         point = d.get("point")
         return cls(

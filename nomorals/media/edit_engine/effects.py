@@ -471,6 +471,32 @@ EFFECT_PROPERTIES: dict[str, dict[str, ParamSpec]] = {
             doc="constant alpha; keyframes render as alpha windows "
                 "over the composite"),
     },
+    # Structural (render.py's _chain_bg_replace, not a filter
+    # builder): the video background-removal effect. The subject
+    # mask arrives as the reserved ``mask`` param (a MaskRef,
+    # kind "subject" via the bgremove ladder) with ``mask_track``
+    # asking the renderer to follow it; the composite is the
+    # subject over ``background`` (a #RRGGBB colour) or
+    # ``background_image``. Not keyframable: the background is an
+    # identity of the composite, not a value curve.
+    "remove_video_background": {
+        "background": ParamSpec(
+            "string", "#00ff00",
+            doc="replacement background as a #RRGGBB colour — the "
+                "green-screen default; background_image wins over "
+                "it when given"),
+        "background_image": ParamSpec(
+            "string", None,
+            doc="image file to place behind the subject — wins "
+                "over background when given"),
+        "segmentation": ParamSpec(
+            "enum", "auto", choices=("auto", "tracked", "per-frame"),
+            doc="how the subject mask follows the clip: auto tries "
+                "the tracked anchor mask and falls back to "
+                "per-frame segmentation only when tracking holds "
+                "nothing; tracked never segments per frame; "
+                "per-frame segments every frame (bounded)"),
+    },
     "velocity_ramp": {
         "speed": ParamSpec(
             "number", 2.0, 0.0, 16.0,
@@ -564,6 +590,8 @@ def effect_rung(name: str) -> str:
         return f"edit_engine.effects.{builder.__name__}"
     if name == "velocity_ramp":
         return "edit_engine.render._chain_velocity"
+    if name == "remove_video_background":
+        return "edit_engine.render._chain_bg_replace"
     if name in PROPERTY_EFFECTS:
         return "edit_engine.keyframes (keyframe layer)"
     return "unknown"
@@ -727,5 +755,6 @@ def _ctx(w: int, h: int, fps: int, duration: float, seed: int,
 
 
 def list_effects() -> list[str]:
-    """All registered effect names (plus the structural velocity_ramp)."""
-    return sorted(EFFECTS) + ["velocity_ramp"]
+    """All registered effect names (plus the structural velocity_ramp
+    and remove_video_background)."""
+    return sorted(EFFECTS) + ["velocity_ramp", "remove_video_background"]

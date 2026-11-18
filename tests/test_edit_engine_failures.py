@@ -74,9 +74,16 @@ def test_direct_import_surface_and_all_unchanged():
     # Rust rung exports (RustSceneRenderer, register_rust_renderer,
     # RENDERER_BOOTSTRAP_ISSUES), 179 after the assembly truth-fix
     # AA-01 (BlenderRenderer, register_blender_renderer — the Blender
-    # rung's exports, registered in the same bootstrap).
+    # rung's exports, registered in the same bootstrap), 191 after
+    # the 52-websites #18/#44 board organ (THEMES, SHAPE_TYPES,
+    # BoardShape, BoardBinding, BoardDocument, BoardError,
+    # BoardStore, board_from_diagram, board_live_html,
+    # default_boards_dir, render_board, write_board_page — twelve
+    # names the board ship added without bumping this pin; the
+    # Unscreen lane A/B-proved the drift on the pristine base and
+    # adds no names itself).
     assert "failures" not in edit_engine_all
-    assert len(edit_engine_all) == 179
+    assert len(edit_engine_all) == 191
 
 
 # --- document.duration / timeline.duration --------------------------------

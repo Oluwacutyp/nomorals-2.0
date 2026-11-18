@@ -96,6 +96,44 @@ def register(registry: Any) -> None:
         return auto_reframe(path, out=str(out), aspect=aspect)
 
     @registry.register(
+        "studio_remove_background",
+        description=("Remove the background of a video clip frame by frame — "
+                     "the subject stays, the background is replaced by a "
+                     "colour (default green) or an image ('put this behind "
+                     "her'). The subject mask is resolved once and tracked "
+                     "across the clip; the record says whether it tracked, "
+                     "partially tracked, held, or fell back to per-frame "
+                     "segmentation, and which rung served each. Returns the "
+                     "rendered clip plus the effects_applied record."),
+        capability=Capability.FS_WRITE,
+    )
+    def studio_remove_background(path: str, *, background: str = "",
+                                 image: str = "", tier: str = "auto",
+                                 segmentation: str = "auto") -> dict[str, Any]:
+        """Video background removal over the Studio render path."""
+        from ..media.edit_engine.render import render_timeline
+        from ..media.edit_engine.timeline import Clip, Timeline, Track
+        from ..media.edit_engine.video_four import remove_video_background
+        from ..media_edit.videos import video_probe
+        p = Path(path)
+        if not p.exists():
+            from ..media_edit.images import MediaEditError
+            raise MediaEditError(f"no such video: {path}")
+        info = video_probe(p)
+        clip = remove_video_background(
+            Clip(path=str(p)), background=background,
+            background_image=image or None, tier=tier,
+            segmentation=segmentation)
+        tl = Timeline(
+            video=Track(clips=[clip]),
+            width=int(info.get("width") or 0) or 1080,
+            height=int(info.get("height") or 0) or 1080,
+            fps=int(round(float(info.get("fps") or 30))))
+        out = _out_dir(context, "renders") / (
+            p.stem + ".bg-removed.mp4")
+        return render_timeline(tl, out=str(out), keep_clip_audio=True)
+
+    @registry.register(
         "studio_rough_cut",
         description=("Full auto-edit pass: cut silences then list scenes. "
                      "The starting point for an edit. ('rough cut this video', "
