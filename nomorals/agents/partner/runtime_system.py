@@ -2553,6 +2553,149 @@ class RuntimeSystemMixin:
                 "<url> | candidate <vac> | <name> | <email> | "
                 "tier <cand> | close|open <vac> | remove <vac>")
 
+    # ── ticket relay: /ticket ──────────────────────────────────────────
+    def _ticket_relay_store(self) -> Any:
+        """The ticket relay store — the injected store wins (the test
+        seam, same shape as the recruitment lane's injected client);
+        otherwise the durable store under the process home, the same
+        file the ticket_relay brain tool reads."""
+        injected = getattr(self, "_ticket_relay_store", None)
+        if injected is not None:
+            return injected() if callable(injected) else injected
+        from ...core.config import get_settings
+        from ...relay.store import TicketRelayStore, ticket_relay_path
+
+        return TicketRelayStore(ticket_relay_path(get_settings()))
+
+    def _ticket_send_fn(self) -> Any:
+        """A ``send(chat_key, text)`` callable over the live chat
+        gateway, or None when there is no live gateway — the engine
+        then queues sync events on the ticket as pending posts for
+        the next sync that has one."""
+        from ...agents.notifier import resolve_gateway
+
+        gateway = resolve_gateway(self.context)
+        if gateway is None:
+            return None
+
+        def _send(chat_key: str, text: str) -> Any:
+            platform = str(chat_key or "").split(":", 1)[0] or "discord"
+            return gateway.send(platform, chat_key, text)
+
+        return _send
+
+    def _control_ticket(self, tail: str, chat_key: str = "") -> Any:
+        """ /ticket — Discord tickets filed as GitHub issues, both ways.
+
+        /ticket                          — the board: every ticket,
+                                           one line each
+        /ticket list                     — the board
+        /ticket open <owner/repo> | <title> [| <body>]
+                       [| type: X] [| labels: a, b]
+                                         — file this channel's ticket
+                                           as an issue (one link per
+                                           ticket, never two issues)
+        /ticket status <ref>             — one ticket whole
+        /ticket comment <ref> | <text>   — a reply here → an issue
+                                           comment
+        /ticket close <ref>              — close the issue, note it
+                                           here
+        /ticket sync [ref]               — pull issue comments and
+                                           state changes back now
+                                           (the hourly tick does it
+                                           on its own)
+
+        Owner-only. No repo is invented — open without one refuses
+        honestly. Without a GitHub credential every mutating verb
+        answers honestly as not connected, never a fabricated link.
+        """
+        from ...relay import github as relay_github
+        from ...relay import surface as relay_surface
+        from ...relay.relay import RelayEngine
+
+        store = self._ticket_relay_store()
+        tail = (tail or "").strip()
+        verb, _, rest = tail.partition(" ")
+        verb = verb.lower()
+        rest = rest.strip()
+        if not tail or verb in ("list", "board"):
+            return relay_surface.render_ticket_board(store.list_all())
+        if verb == "status":
+            link = store.get(rest)
+            if link is None:
+                return (f"no ticket {rest} on record — /ticket lists "
+                        "the ones there are.")
+            return relay_surface.render_ticket(link)
+        client = getattr(self, "_ticket_github_client", None)
+        if client is None:
+            client = relay_github.github_client(self.context)
+        if client is None:
+            return relay_github.github_not_connected_reason()
+        engine = RelayEngine(client, send=self._ticket_send_fn())
+        if verb == "open":
+            fields = [p.strip() for p in rest.split("|")]
+            repo = fields[0] if fields else ""
+            title = fields[1] if len(fields) > 1 else ""
+            body = ""
+            ticket_type = None
+            labels: list[str] = []
+            for extra in fields[2:]:
+                low = extra.lower()
+                if low.startswith("type:"):
+                    ticket_type = extra.split(":", 1)[1].strip() or None
+                elif low.startswith("labels:"):
+                    labels = [p.strip()
+                              for p in extra.split(":", 1)[1].split(",")
+                              if p.strip()]
+                elif not body:
+                    body = extra
+                else:
+                    body += "\n" + extra
+            origin = chat_key or ""
+            out = engine.open_ticket(
+                store, repo=repo, title=title, body=body,
+                reporter="", reporter_id="",
+                origin_platform=origin.split(":", 1)[0] or "discord",
+                origin_chat=origin, ticket_type=ticket_type,
+                labels=labels)
+            if not out.get("ok"):
+                return (f"couldn't file that ticket: "
+                        f"{out.get('reason', '')}")
+            link = store.get(out["ref"])
+            if link is None:
+                return (f"filed {out.get('repo')}"
+                        f"#{out.get('issue_number')}")
+            return relay_surface.render_open_result(
+                link, {"url": out.get("issue_url", "")})
+        if verb == "comment":
+            ref, _, text = rest.partition("|")
+            out = engine.post_comment(store, ref.strip(), author="",
+                                      text=text.strip())
+            if not out.get("ok"):
+                return f"couldn't post that: {out.get('reason', '')}"
+            return (f"posted to {out.get('repo')}"
+                    f"#{out.get('issue_number')} as comment "
+                    f"{out.get('comment_id')}.")
+        if verb == "close":
+            out = engine.close_ticket(store, rest, by="")
+            if not out.get("ok"):
+                return f"couldn't close that: {out.get('reason', '')}"
+            return (f"ticket {out.get('ref')} closed — "
+                    f"{out.get('repo')}#{out.get('issue_number')} is "
+                    "closed on GitHub.")
+        if verb == "sync":
+            out = (engine.sync_ticket(store, rest)
+                   if rest else engine.sync_all(store))
+            if not out.get("ok"):
+                return f"sync couldn't run: {out.get('reason', '')}"
+            return (f"synced {out.get('synced', 1)} ticket(s) — "
+                    f"{out.get('posted', 0)} update(s) posted to "
+                    "Discord.")
+        return ("usage: /ticket [list] | open <owner/repo> | <title> "
+                "[| <body>] [| type: X] [| labels: a, b] | status "
+                "<ref> | comment <ref> | <text> | close <ref> | "
+                "sync [ref]")
+
     # ── ideas: /ideas (WS3 P5) ────────────────────────────────────────
     def _idea_tracker(self) -> Any:
         """IdeaTracker over the context db, or None when no db is

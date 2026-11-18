@@ -3719,6 +3719,17 @@ class PartnerRuntime(
                     ensure_dunning_job(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("dunning job not registered: %s", exc)
+                # Ticket relay sync (discord-github-ticket-relay
+                # port): one durable "ticket relay sync" job (hourly)
+                # polling every open ticket's GitHub issue and posting
+                # new comments and state changes back to Discord.
+                # Idempotent by name; a no-op when no ticket is open.
+                try:
+                    from ...relay.jobs import ensure_ticket_relay_job
+                    ensure_ticket_relay_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("ticket relay job not registered: %s",
+                                 exc)
                 # Scheduled backups (gapfix 2): the encrypted offsite
                 # 3-2-1 pipeline — daily generation at 02:00 + monthly
                 # restore drill on the 1st at 03:00. Idempotent by name;
@@ -11496,6 +11507,9 @@ class PartnerRuntime(
         if kind == "recruit":
             return self._control_recruit(command.tail or arg,
                                          chat_key=chat_key)
+        if kind == "ticket":
+            return self._control_ticket(command.tail or arg,
+                                        chat_key=chat_key)
         if kind == "drafts":
             return self._control_drafts(command.tail or arg,
                                         chat_key=chat_key,

@@ -570,6 +570,30 @@ class GitHubConnector(Connector):
                   raw.get("number"))
         return self._summarize_issue(raw if isinstance(raw, dict) else {})
 
+    def list_issue_comments(
+        self, full_name: str, number: int, *, limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Comments on one issue, oldest first (the relay's sync read).
+
+        Returns the raw comment shape (``id``, ``body``, ``user``,
+        ``created_at``) — the relay needs ids to tell new comments
+        from ones it already delivered.
+        """
+        items = self._list_all(
+            f"/repos/{full_name}/issues/{number}/comments",
+            {"per_page": 100}, limit=limit)
+        out = []
+        for raw in items:
+            if not isinstance(raw, dict):
+                continue
+            out.append({
+                "id": raw.get("id"),
+                "body": raw.get("body", ""),
+                "user": raw.get("user") or {},
+                "created_at": raw.get("created_at", ""),
+            })
+        return out
+
     def comment_issue(
         self, full_name: str, number: int, body: str
     ) -> dict[str, Any]:

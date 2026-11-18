@@ -107,6 +107,11 @@ LAYERS: dict[str, int] = {
     # connectors: service adapters (GitHub first; finance/cards/proxies/
     # commerce queued). Peers of integrations; own their auth + vault creds.
     "connectors": 5,
+    # relay/ is the Discord↔GitHub ticket relay (ticket-relay port):
+    # it files tickets as GitHub issues through connectors/github
+    # (L5, same layer) and posts back through social/chat (L4).
+    # L5, peer of agents/connectors.
+    "relay": 5,
     # datasci/ is the data-science workspace (pandas datasets, queries,
     # plots as artifacts): a service organ at L4, reaching only downward.
     "datasci": 4,
@@ -460,6 +465,11 @@ MODULE_PINS: dict[str, int] = {
     # with the modules it composes; the registry loads it dynamically
     # by dotted name, never by static import.
     "nomorals.tools.backup": 5,
+    # tools/ticket_relay is the same shape: a tool *surface* over
+    # the L5 relay organ (the Discord↔GitHub ticket relay) and the
+    # L5 GitHub connector it files issues through. The registry
+    # loads it dynamically by dotted name, never by static import.
+    "nomorals.tools.ticket_relay": 5,
     # The prompt-compiler tool surface composes the L5 organs that own
     # the graded journals (games.npc_learn, characters.learn) into a
     # compile/status surface — it IS the L5 composition layer, not an
