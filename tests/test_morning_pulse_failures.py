@@ -52,6 +52,12 @@ def _sites():
     return [f.site for f in af.recent_failures()]
 
 
+#: the empty catch-up pick (streaming, 2026-11-18): _fresh_news_items
+#: now returns (items, pick) — a failed poll holds nothing.
+_EMPTY_PICK = {"shown": [], "archivable": [], "held_rest": 0,
+               "not_shown": 0, "line": ""}
+
+
 def _ctx(tmp_path, workspace=None):
     ws = str(workspace if workspace is not None else tmp_path / "ws")
     Path(ws).mkdir(parents=True, exist_ok=True)
@@ -511,7 +517,7 @@ def test_converted_fresh_news_poll_records_and_returns_empty(tmp_path, monkeypat
             raise RuntimeError("news down")
 
     monkeypatch.setattr("nomorals.agents.news.NewsAgent", _BoomAgent)
-    assert mp._fresh_news_items(_ctx(tmp_path)) == []
+    assert mp._fresh_news_items(_ctx(tmp_path)) == ([], _EMPTY_PICK)
     assert "morning_pulse._fresh_news_items.poll" in _sites()
 
 

@@ -162,7 +162,7 @@ class SeenMarkingTests(unittest.TestCase):
             mixin._control_news("run")
         # the next briefing slot's fresh set excludes both stories…
         with patch.object(NewsAgent, "poll", lambda self: {"ok": True}):
-            fresh = mp._fresh_news_items(ctx)
+            fresh, _pick = mp._fresh_news_items(ctx)
         self.assertEqual(fresh, [])
         # …and no seen-marker file was created or consulted
         self.assertFalse(os.path.exists(os.path.join(tmp, "pulse_seen.json")))

@@ -281,7 +281,12 @@ class LegacyRowTests(unittest.TestCase):
 class ManyPublisherTests(unittest.TestCase):
 
     def test_many_publishers_group_per_publisher_within_cap(self):
+        # streaming (owner order 2026-11-18): the bound on one list
+        # is explicit now (catchup_max) — the legacy `cap` setting
+        # no longer selects anything.  The test's point stands: 15
+        # stories from 15 publishers group one header per publisher.
         ctx = _make_ctx(self, cap=40)
+        ctx.settings.news.catchup_max = 40
         agent = NewsAgent(ctx)
         report = _run_with_xml(agent, [(GN_FEED, _many_publisher_xml(15))])
         digest = report["digest"]
@@ -289,8 +294,8 @@ class ManyPublisherTests(unittest.TestCase):
         bullets = [ln for ln in digest.splitlines() if ln.startswith("  • ")]
         self.assertEqual(report["items"], 15)
         self.assertEqual(len(bullets), 15)
-        # one header per distinct publisher — bounded by the item cap,
-        # never more blocks than items, and no aggregator header
+        # one header per distinct publisher — bounded by the list
+        # bound, never more blocks than items, and no aggregator header
         self.assertEqual(len(headers), 15)
         self.assertLessEqual(len(headers), len(bullets))
         self.assertNotIn("■ Google News", headers)

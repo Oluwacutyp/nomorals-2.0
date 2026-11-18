@@ -82,11 +82,11 @@ def test_ledger_no_repeats_across_slots():
             "published, created_at, delivery_state) VALUES (?,?,?,?,?,?,?,?)",
             (new_id(), "src", title, url, "", 0, time.time(), "undelivered"))
     with patch.object(NewsAgent, "poll", lambda self: {"ok": True}):
-        fresh = mp._fresh_news_items(ctx)
+        fresh, _pick = mp._fresh_news_items(ctx)
         assert [i["url"] for i in fresh] == ["http://a", "http://b"] or \
             {i["url"] for i in fresh} == {"http://a", "http://b"}
         agent.mark_delivered(["http://a"], channel="pulse-morning")
-        fresh = mp._fresh_news_items(ctx)
+        fresh, _pick = mp._fresh_news_items(ctx)
     assert [i["url"] for i in fresh] == ["http://b"]
 
 

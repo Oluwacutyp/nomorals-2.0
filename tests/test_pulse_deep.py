@@ -20,6 +20,11 @@ from nomorals.agents.morning_pulse import (
 from nomorals.core.events import EventBus
 from nomorals.storage.db import Database
 
+#: the empty catch-up pick (streaming, 2026-11-18): _fetch_news now
+#: returns (items, pick) — a mocked radar with nothing held.
+_EMPTY_PICK = {"shown": [], "archivable": [], "held_rest": 0,
+               "not_shown": 0, "line": ""}
+
 
 def _ctx(**kw):
     db = Database(":memory:")
@@ -160,7 +165,7 @@ class PipelineTests(unittest.TestCase):
 
     def test_voice_failure_degrades_to_text(self):
         ctx = self._quiet_context()
-        with patch.object(pulse_mod, "_fetch_news", return_value=[]), \
+        with patch.object(pulse_mod, "_fetch_news", return_value=([], _EMPTY_PICK)), \
              patch.object(pulse_mod, "_compose_briefing",
                           return_value="tonight's brief"), \
              patch.object(pulse_mod, "_synthesize",
@@ -176,7 +181,7 @@ class PipelineTests(unittest.TestCase):
         from nomorals.agents.autonomy_ledger import AutonomyLedger
 
         ctx = self._quiet_context()
-        with patch.object(pulse_mod, "_fetch_news", return_value=[]), \
+        with patch.object(pulse_mod, "_fetch_news", return_value=([], _EMPTY_PICK)), \
              patch.object(pulse_mod, "_compose_briefing",
                           return_value="brief"), \
              patch.object(pulse_mod, "_synthesize", return_value=""), \
@@ -202,7 +207,7 @@ class PipelineTests(unittest.TestCase):
         events_mod.global_bus = bus
         try:
             ctx = self._quiet_context()
-            with patch.object(pulse_mod, "_fetch_news", return_value=[]), \
+            with patch.object(pulse_mod, "_fetch_news", return_value=([], _EMPTY_PICK)), \
                  patch.object(pulse_mod, "_compose_briefing",
                               return_value="brief"), \
                  patch.object(pulse_mod, "_synthesize", return_value=""), \

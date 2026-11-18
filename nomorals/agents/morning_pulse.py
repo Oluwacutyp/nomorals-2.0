@@ -309,25 +309,34 @@ def _emit_bus(data: dict[str, Any]) -> None:
 
 # ── the pipeline ─────────────────────────────────────────────────────────
 
-def _fetch_news(context: Any) -> list[dict[str, Any]]:
-    """News radar stage.  Returns the FULL undelivered set (may be
-    empty); raises only on unexpected breakage — the stage runner
-    converts that to a graceful degradation.
+def _fetch_news(context: Any) -> tuple[list[dict[str, Any]],
+                                      dict[str, Any]]:
+    """News radar stage.  Returns ``(catch-up items, pick)``; raises
+    only on unexpected breakage — the stage runner converts that to
+    a graceful degradation.
 
-    F6: the radar used to re-read ``agent.recent(limit=12)`` — a pure
-    recency window that discarded everything older than the 12 newest
-    rows.  Now the pulse polls the feeds and reads the news delivery
-    ledger's undelivered set: every story no surface has delivered
-    yet, uncapped.  ``poll()`` (not ``run()``) is the fetch call —
-    ``run()`` digests via ``brief()``, which would mark the whole set
-    delivered before this pulse has delivered anything.
+    Streaming (owner order 2026-11-18): ``poll()`` pushes what clears
+    the interest bar as it finds it, so the pulse no longer carries
+    the full undelivered pile.  What the poll holds (quiet hours /
+    the per-day cap / no score yet) is the catch-up — the pick's top
+    held stories by interest, bounded — and the pick names what the
+    slot archives once the catch-up confirms, so the pile drains
+    every slot instead of rolling into an 82-page digest.  ``poll()``
+    (not ``run()``) is the fetch call — ``run()`` briefs via
+    ``brief()``, which would mark the set delivered before this
+    pulse has delivered anything.
     """
     from .news import NewsAgent
 
     agent = NewsAgent(context)
     _migrate_seen_store(context, agent)
     report = agent.poll()
-    items = agent.undelivered() if report.get("ok") else []
+    pick: dict[str, Any] = {"shown": [], "archivable": [],
+                            "held_rest": 0, "not_shown": 0, "line": ""}
+    if not report.get("ok"):
+        return [], pick
+    pick = agent.pick_catchup()
+    items = pick["shown"]
     # Owner-language delivery (translation organ): rows are localized
     # HERE, at the pulse's composition input, so the headlines, the
     # story segments and the voice script (written from these items)
@@ -336,8 +345,9 @@ def _fetch_news(context: Any) -> list[dict[str, Any]]:
         from ..llm.translate import localize_news_rows
 
         items = localize_news_rows(context, items)
-    _log.info("morning-pulse: news radar got %d items", len(items))
-    return items
+    _log.info("morning-pulse: news radar got %d items (%d held over)",
+              len(items), pick["not_shown"])
+    return items, pick
 
 
 def _compose_briefing(context: Any) -> str:
@@ -384,14 +394,19 @@ def run_pulse(context: Any) -> dict[str, Any]:
     started = time.time()
 
     # ── 1. news radar ────────────────────────────────────────────────
-    ok, news_items, secs, att = _run_stage(
+    ok, news_pack, secs, att = _run_stage(
         "news", lambda: _fetch_news(context))
+    news_items, news_pick = news_pack or ([], {
+        "shown": [], "archivable": [], "held_rest": 0,
+        "not_shown": 0, "line": ""})
     news_items = news_items or []
     _ledger(context, "stage",
             f"news radar: {'ok' if ok else 'FAILED'} "
-            f"({len(news_items)} items, {att} attempt(s))",
+            f"({len(news_items)} items, {news_pick['not_shown']} held "
+            f"over, {att} attempt(s))",
             cost_seconds=secs, ok=ok,
             metadata={"stage": "news", "items": len(news_items),
+                      "held_over": news_pick["not_shown"],
                       "attempts": att})
     if ok:
         stages.append("news")
@@ -448,22 +463,32 @@ def run_pulse(context: Any) -> dict[str, Any]:
             _log.debug("morning-pulse: digest fold marking failed",
                        exc_info=True)
 
-    # ── 6. the full story list ───────────────────────────────────────
-    # Every undelivered story, as its own delivery, in confirmed
-    # segments (F6): a story is marked delivered in the news ledger
-    # only when its segment actually reached the owner, so a failed
-    # segment's stories stay undelivered and resume next pulse —
-    # nothing is silently dropped and nothing repeats.
-    story_keys = _deliver_stories(context, "morning", news_items)
+    # ── 6. the catch-up ──────────────────────────────────────────────
+    # The held stories, as their own delivery, in confirmed segments
+    # (F6): a story is marked delivered in the news ledger only when
+    # its segment actually reached the owner, so a failed segment's
+    # stories stay undelivered and resume next pulse — nothing is
+    # silently dropped and nothing repeats.  Once the catch-up
+    # confirms, the scored stories that missed the cut archive — the
+    # held pile drains this slot instead of rolling forward.
+    story_keys = _deliver_stories(context, "morning", news_items,
+                                  news_pick["line"])
+    archived = 0
+    if story_keys and news_pick["archivable"]:
+        archived = _archive_stories(
+            context, news_pick["archivable"], channel="pulse-catchup")
     if news_items:
         stages.append("stories")
         _ledger(context, "stage",
                 f"news stories: {len(story_keys)}/{len(news_items)} "
-                f"delivered",
+                f"delivered, {archived} archived, "
+                f"{news_pick['not_shown']} held over",
                 ok=bool(story_keys),
                 metadata={"stage": "stories",
                           "delivered": len(story_keys),
-                          "pending": len(news_items) - len(story_keys)})
+                          "pending": len(news_items) - len(story_keys),
+                          "archived": archived,
+                          "held_over": news_pick["not_shown"]})
 
     elapsed = round(time.time() - started, 1)
     delivered = text_ok or audio_ok or bool(story_keys)
@@ -488,7 +513,9 @@ def run_pulse(context: Any) -> dict[str, Any]:
                 "audio_path": audio_path, "delivered_text": text_ok,
                 "delivered_audio": audio_ok, "elapsed_s": elapsed,
                 "stories_delivered": len(story_keys),
-                "stories_pending": len(news_items) - len(story_keys)}
+                "stories_pending": len(news_items) - len(story_keys),
+                "stories_left_out": news_pick["not_shown"],
+                "stories_archived": archived}
     _write_marker(context, result)
     return result
 
@@ -1108,7 +1135,7 @@ STORY_MAX_INLINE_SEGMENTS = 10
 
 #: Title every story-list segment carries (the "(i/n)" continuation
 #: label is appended per segment when there is more than one).
-STORY_LIST_TITLE = "🗞 All new stories"
+STORY_LIST_TITLE = "🗞 Catch-up — held stories"
 
 
 def _story_key(item: dict[str, Any]) -> str:
@@ -1196,6 +1223,25 @@ def _mark_stories_delivered(context: Any, keys: list[str],
         _log.debug("pulse: ledger mark failed", exc_info=True)
 
 
+def _archive_stories(context: Any, rows: list[dict[str, Any]],
+                     channel: str) -> int:
+    """Archive the catch-up's scored leftovers (the drain door).
+
+    Mirrors :func:`_mark_stories_delivered`: a fresh agent over the
+    same context, so the call works from any slot.  Never raises —
+    a failed archive leaves the rows held for the next slot.
+    """
+    if not rows:
+        return 0
+    try:
+        from .news import NewsAgent
+
+        return NewsAgent(context).archive_rows(rows, channel=channel)
+    except Exception:  # noqa: BLE001
+        _log.debug("pulse: catch-up archive failed", exc_info=True)
+        return 0
+
+
 #: How long a delivered story list stays pageable (the pager stash
 #: in the KV store).  A week covers a missed weekend; the list is a
 #: reading surface, not an archive — the news ledger keeps the truth.
@@ -1252,24 +1298,26 @@ def story_page_render(context: Any, batch: str, page: int,
 
 
 def _deliver_stories(context: Any, slot: str,
-                     items: list[dict[str, Any]]) -> list[str]:
-    """Deliver the full story list as ONE paged message; mark on
+                     items: list[dict[str, Any]],
+                     left_out_line: str = "") -> list[str]:
+    """Deliver the catch-up list as ONE paged message; mark on
     confirmed delivery.
 
-    The paging-law shape (2026-11-07) over the F6 contract (full
-    list, uncapped; a story is marked only when its delivery
-    confirms; nothing is ever repeated): the packed segments become
-    the PAGES of one live message.  Page 1 is the publish; the
-    remaining pages are stashed (KV, a week) and served by
-    :func:`story_page_render` through the pager's Next/Prev buttons
-    (``pulse stories <batch> <n>``) — no (i/n)-labelled segment
-    dump ever goes out.  When the publish confirms, the whole list
-    has been delivered — presented in full via the pager, nothing
-    held back — so every story marks.  When it does not confirm,
-    nothing marks and the whole list resumes next pulse, in order.
-    A one-page list publishes exactly as it always did (no stash,
-    no buttons).  Returns the ledger keys marked delivered.
-    Never raises.
+    The paging-law shape (2026-11-07) over the F6 contract (a story
+    is marked only when its delivery confirms; nothing is ever
+    repeated): the packed segments become the PAGES of one live
+    message.  Page 1 is the publish; the remaining pages are stashed
+    (KV, a week) and served by :func:`story_page_render` through the
+    pager's Next/Prev buttons (``pulse stories <batch> <n>``) — no
+    (i/n)-labelled segment dump ever goes out.  When the publish
+    confirms, the whole list has been delivered — presented in full
+    via the pager, nothing held back — so every story marks.  When
+    it does not confirm, nothing marks and the whole list resumes
+    next pulse, in order.  A one-page list publishes exactly as it
+    always did (no stash, no buttons).  ``left_out_line`` — the
+    catch-up's honest count of the stories held over — rides page 1
+    (live and stashed alike).  Returns the ledger keys marked
+    delivered.  Never raises.
     """
     if not items:
         return []
@@ -1281,6 +1329,11 @@ def _deliver_stories(context: Any, slot: str,
         record_failure("morning_pulse._deliver_stories.notifier", exc)
         return []
     segments = _pack_story_segments(items)
+    if left_out_line:
+        # page 1 carries the count, before any packing decision —
+        # the stash below stores exactly what the owner reads.
+        first_text, first_keys = segments[0]
+        segments[0] = (first_text + "\n\n" + left_out_line, first_keys)
     total = len(segments)
     all_keys = [k for _t, ks in segments for k in ks]
     if total == 1:
@@ -1377,31 +1430,37 @@ def _afternoon_markets(context: Any) -> tuple[str, list[str]]:
     return "\n".join(lines), keys
 
 
-def _fresh_news_items(context: Any) -> list[dict[str, Any]]:
-    """The full undelivered set for a later slot.  Never raises.
+def _fresh_news_items(context: Any) -> tuple[list[dict[str, Any]],
+                                             dict[str, Any]]:
+    """The slot's catch-up: (items, pick).  Never raises.
 
-    F6: this used to read ``agent.recent(limit=15)`` — a recency
-    window — and filter it against the pulse seen-marker, so any
-    story that scrolled past position 15 between slots was silently
-    never delivered by any pulse.  Now a slot's "fresh" IS the news
-    ledger's undelivered set (polled fresh first): every story since
-    the last confirmed delivery, with no window and no second ledger.
+    Streaming (owner order 2026-11-18): a slot's "fresh" is no
+    longer the full undelivered set — the poll streams what clears
+    the bar as it finds it, so what is left here is what the poll
+    held (quiet hours / the per-day cap / no score yet): the pick's
+    top held stories by interest, bounded, with the scored rest
+    named for archiving once the catch-up confirms.
     """
+    empty: dict[str, Any] = {"shown": [], "archivable": [],
+                             "held_rest": 0, "not_shown": 0, "line": ""}
     try:
         from .news import NewsAgent
 
         agent = NewsAgent(context)
         _migrate_seen_store(context, agent)
         report = agent.poll()
-        items = agent.undelivered() if report.get("ok") else []
+        if not report.get("ok"):
+            return [], empty
+        pick = agent.pick_catchup()
+        items = pick["shown"]
         if items:
             from ..llm.translate import localize_news_rows
 
             items = localize_news_rows(context, items)
-        return items
+        return items, pick
     except Exception as exc:  # noqa: BLE001
         record_failure("morning_pulse._fresh_news_items.poll", exc)
-        return []
+        return [], empty
 
 
 def _fresh_headlines(items: list[dict[str, Any]]) -> str:
@@ -1468,19 +1527,22 @@ def _realtalk_block(context: Any, slot: str) -> str:
         return ""
 
 
-def _compose_afternoon(context: Any) -> tuple[str, list[dict[str, Any]]]:
-    """Afternoon briefing head text + the full undelivered story set.
+def _compose_afternoon(context: Any) -> tuple[
+        str, list[dict[str, Any]], dict[str, Any]]:
+    """Afternoon briefing head text + the slot's catch-up (items,
+    pick).
 
     The head text carries the headline bullets (the scannable
     summary); every story's full block is delivered by the story
     segments and marked from their confirmations — the returned
-    items are NOT marked by composing them here.
+    items are NOT marked by composing them here.  The pick names
+    what the slot archives once the catch-up confirms.
     """
     parts = ["☀️ *Afternoon briefing* — what's moved since this morning.\n"]
     markets, _mkeys = _afternoon_markets(context)
     if markets:
         parts.append("*Markets*\n" + markets + "\n")
-    items = _fresh_news_items(context)
+    items, pick = _fresh_news_items(context)
     news = _fresh_headlines(items)
     if news:
         parts.append("*Fresh headlines*\n" + news + "\n")
@@ -1492,7 +1554,7 @@ def _compose_afternoon(context: Any) -> tuple[str, list[dict[str, Any]]]:
         parts.append("*Still ahead today*\n" + rest + "\n")
     if len(parts) == 1:
         parts.append("Quiet afternoon — nothing new since the morning pulse.")
-    return "\n".join(parts).strip(), items
+    return "\n".join(parts).strip(), items, pick
 
 
 # ── evening content: day wrap + tomorrow + pending ───────────────────
@@ -1641,10 +1703,11 @@ def _pending_items(context: Any) -> str:
     return "\n".join(lines)
 
 
-def _compose_evening(context: Any) -> tuple[str, list[dict[str, Any]]]:
-    """Evening wrap head text + the full undelivered story set.
+def _compose_evening(context: Any) -> tuple[
+        str, list[dict[str, Any]], dict[str, Any]]:
+    """Evening wrap head text + the slot's catch-up (items, pick).
 
-    F6: the wrap gains the day's still-undelivered stories (headline
+    F6: the wrap gains the day's still-held stories (headline
     bullets here; full blocks in the story segments) — the evening
     slot now sources from the same ledger as every other slot
     instead of leaving late-day stories for midnight to find.
@@ -1653,7 +1716,7 @@ def _compose_evening(context: Any) -> tuple[str, list[dict[str, Any]]]:
     wrap = _day_wrap(context)
     if wrap:
         parts.append("*Today*\n" + wrap + "\n")
-    items = _fresh_news_items(context)
+    items, pick = _fresh_news_items(context)
     news = _fresh_headlines(items)
     if news:
         parts.append("*New since this afternoon*\n" + news + "\n")
@@ -1668,13 +1731,15 @@ def _compose_evening(context: Any) -> tuple[str, list[dict[str, Any]]]:
         parts.append("*Still open*\n" + pend + "\n")
     if len(parts) == 1:
         parts.append("Quiet day — nothing major to report.")
-    return "\n".join(parts).strip(), items
+    return "\n".join(parts).strip(), items, pick
 
 
 # ── midnight content: overnight fresh news + still open ─────────────────
 
-def _compose_midnight(context: Any) -> tuple[str, list[dict[str, Any]]]:
-    """Midnight briefing head text + the full undelivered story set.
+def _compose_midnight(context: Any) -> tuple[
+        str, list[dict[str, Any]], dict[str, Any]]:
+    """Midnight briefing head text + the slot's catch-up (items,
+    pick).
 
     Only what's new SINCE the evening wrap — by construction: the
     ledger's undelivered set excludes everything an earlier slot
@@ -1683,7 +1748,7 @@ def _compose_midnight(context: Any) -> tuple[str, list[dict[str, Any]]]:
     Plus anything still open overnight.
     """
     parts = ["🌃 *Midnight briefing* — overnight, since the evening wrap.\n"]
-    items = _fresh_news_items(context)
+    items, pick = _fresh_news_items(context)
     news = _fresh_headlines(items)
     if news:
         parts.append("*Fresh headlines*\n" + news + "\n")
@@ -1695,7 +1760,7 @@ def _compose_midnight(context: Any) -> tuple[str, list[dict[str, Any]]]:
         parts.append("*Still open*\n" + pend + "\n")
     if len(parts) == 1:
         parts.append("Quiet night — nothing new since the evening wrap.")
-    return "\n".join(parts).strip(), items
+    return "\n".join(parts).strip(), items, pick
 
 
 # ── generalized slot runner ──────────────────────────────────────────
@@ -1778,7 +1843,9 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
 
     Morning keeps the full pipeline (news → briefing → voice →
     deliver).  Afternoon/evening are shorter text-first briefings
-    built from fresh, not-yet-delivered items.
+    built from the slot's catch-up — the held stories, top by
+    interest, bounded — while the poll streams the rest as it comes
+    in.
     """
     slot = (slot or "morning").strip().lower()
     if slot not in BRIEFING_SLOTS:
@@ -1792,11 +1859,11 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
     started = time.time()
     stages: list[str] = []
     if slot == "afternoon":
-        text, story_items = _compose_afternoon(context)
+        text, story_items, story_pick = _compose_afternoon(context)
     elif slot == "midnight":
-        text, story_items = _compose_midnight(context)
+        text, story_items, story_pick = _compose_midnight(context)
     else:
-        text, story_items = _compose_evening(context)
+        text, story_items, story_pick = _compose_evening(context)
     stages.append("compose")
 
     # Evening only: fold the alert digest into the wrap (AA-44 — the
@@ -1829,11 +1896,19 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
         _mark_evening_digest_folded(context, digest_ids)
         stages.append("digest")
 
-    # The full story list, in confirmed segments (F6): marking rides
-    # each segment's own delivery confirmation — never the head
-    # text's — so a story is recorded delivered only when the owner
-    # actually received it, and a failed segment resumes next slot.
-    story_keys = _deliver_stories(context, slot, story_items)
+    # The catch-up, in confirmed segments (F6): marking rides each
+    # segment's own delivery confirmation — never the head text's —
+    # so a story is recorded delivered only when the owner actually
+    # received it, and a failed segment resumes next slot.  Once the
+    # catch-up confirms, the scored stories that missed the cut
+    # archive — the held pile drains this slot.
+    story_keys = _deliver_stories(context, slot, story_items,
+                                  story_pick["line"])
+    archived = 0
+    if story_keys and story_pick["archivable"]:
+        archived = _archive_stories(
+            context, story_pick["archivable"],
+            channel=f"pulse-{slot}-catchup")
     if story_items:
         stages.append("stories")
 
@@ -1842,7 +1917,9 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
     _ledger(context, "run",
             f"{slot} briefing: stages={','.join(stages)} "
             f"text={'delivered' if text_ok else 'FAILED'} "
-            f"stories={len(story_keys)}/{len(story_items)}",
+            f"stories={len(story_keys)}/{len(story_items)} "
+            f"archived={archived} "
+            f"held_over={story_pick['not_shown']}",
             cost_seconds=elapsed, ok=delivered)
     _emit_bus({"slot": slot, "stages": stages,
                "delivered_text": text_ok,
@@ -1853,7 +1930,9 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
               "delivered_audio": audio_ok, "elapsed_s": elapsed,
               "pending_proposals": pending_ids,
               "stories_delivered": len(story_keys),
-              "stories_pending": len(story_items) - len(story_keys)}
+              "stories_pending": len(story_items) - len(story_keys),
+              "stories_left_out": story_pick["not_shown"],
+              "stories_archived": archived}
     _write_slot_marker(context, slot, result)
     _log.info("pulse/%s done in %ss: text=%s audio=%s", slot, elapsed,
               text_ok, audio_ok)

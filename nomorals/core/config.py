@@ -951,6 +951,13 @@ class NewsSettings:
     sources: list = field(default_factory=list)
     translation_enabled: bool = False
     translation_target: str = ""
+    # Streaming delivery (owner order 2026-11-18 — the scheduled
+    # digest is gone; stories arrive as they clear the interest bar):
+    # the bound on one delivered list — a slot's catch-up and the
+    # on-demand /news brief.  The live pushes are bounded separately
+    # by the per-day push cap (PUSH_CAP_DEFAULT in agents/news.py).
+    # Env: NM_NEWS_CATCHUP_MAX.
+    catchup_max: int = 10
 
 @dataclass
 class NetSettings:
@@ -1399,6 +1406,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_API_CORS_ORIGINS": "api.cors_origins",
     "NM_NEWS_TRANSLATION_ENABLED": "news.translation_enabled",
     "NM_NEWS_TRANSLATION_TARGET": "news.translation_target",
+    "NM_NEWS_CATCHUP_MAX": "news.catchup_max",
     "NM_TRANSLATE_OWNER_LANGUAGE": "translate.owner_language",
     "NM_TRANSLATE_MODEL": "translate.local_model",
     "NM_TRANSLATE_PROVIDERS": "translate.providers",

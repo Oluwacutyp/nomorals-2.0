@@ -549,6 +549,9 @@ INTEREST_HIGH_DEFAULT = 0.75
 INTEREST_LOW_DEFAULT = 0.35
 #: Anytime-push budget per day (settings.news.push_cap_per_day wins).
 PUSH_CAP_DEFAULT = 6
+#: Bound on one delivered list — a slot's catch-up and the on-demand
+#: /news brief (settings.news.catchup_max wins).
+CATCHUP_MAX_DEFAULT = 10
 #: Bounds on per-poll work: stories scored / backlog rows tiered.
 _SCORE_BATCH = 20
 _SCORE_MAX_PER_POLL = 80
@@ -557,8 +560,9 @@ _TIER_BACKLOG_MAX = 200
 #: dedupe contracts live inside the window (14-day title window, feed
 #: horizon of days), and undelivered rows are live work that the prune
 #: never touches — so pruning a delivered/pushed/digested/archived row
-#: past 90 days removes only seen-memory, never a story still owed.
-NEWS_RETENTION_DAYS = 90.0
+#: past 60 days removes only seen-memory, never a story still owed.
+#: Owner's call 2026-11-18: 60 days (was 90).
+NEWS_RETENTION_DAYS = 60.0
 #: At most one opportunistic prune per poll per hour (mirrors the
 #: trajectories store's ``_PRUNE_INTERVAL_S``).
 _NEWS_PRUNE_INTERVAL_S = 3600.0
@@ -721,7 +725,12 @@ def publisher_of(item: dict[str, Any]) -> str:
 
 
 class NewsAgent:
-    """Fetches feeds, dedupes, summarizes, and delivers a digest."""
+    """Fetches feeds, dedupes, scores, and streams stories as they
+    clear the interest bar — the anytime push is the delivery, not a
+    scheduled digest (owner order 2026-11-18: the 82-page digest is
+    gone).  What quiet hours / the per-day cap hold stays undelivered
+    for the next slot's catch-up; /news brief is the bounded
+    on-demand peek at the latest stories."""
 
     def __init__(self, context: Any, notifier: Any = None, *,
                  registry: Any = None) -> None:
@@ -932,8 +941,11 @@ class NewsAgent:
         """Fetch every feed, store EVERY fresh story as undelivered,
         score with the brain, and apply the interest tiers.
 
-        The digest is brief()'s separate act; poll() itself only
-        delivers the high-interest tier (the anytime push path).
+        Streaming (owner order 2026-11-18): every story that clears
+        the interest bar is pushed as the poll finds it — the anytime
+        push is the delivery, not a scheduled digest.  What quiet
+        hours / the per-day cap hold stays undelivered for the next
+        slot's catch-up; what scores below the bar is archived.
         Report keys: the fetch breadth (sources_tried / sources_ok /
         per_source / stood_down / errors) plus the tier outcome
         (polled / scored / pushed / archived / held, the interest
@@ -1489,9 +1501,13 @@ class NewsAgent:
 
         Candidates = the fresh rows + stored undelivered rows (a story
         held by quiet hours or a dead brain is re-tiered by the next
-        poll).  High → anytime push (quiet hours / per-day cap hold
-        it, still undelivered); low → archived; mid → stays for the
-        digest.  Unscored rows are never tiered by a guess.
+        poll).  The send bar is the LOW threshold: every scored story
+        at or above it pushes as the poll finds it (quiet hours /
+        per-day cap hold it, still undelivered, for the slot
+        catch-up); below it → archived.  Unscored rows are never
+        tiered by a guess.  The HIGH threshold no longer gates
+        delivery — it survives in settings for compatibility only
+        (owner order 2026-11-18: stream, don't batch).
         """
         out: dict[str, Any] = {
             "scored": 0, "pushed": 0, "archived": 0,
@@ -1544,7 +1560,8 @@ class NewsAgent:
                         (val, rid))
                 except Exception as exc:  # noqa: BLE001
                     record_failure("news.score_tier_update", exc)
-        high, low = self._thresholds()
+        _, low = self._thresholds()
+        out["send_bar"] = low
         push_candidates: list[dict[str, Any]] = []
         for row in rows:
             score = row.get("interest")
@@ -1554,7 +1571,9 @@ class NewsAgent:
                 if row.get("delivery_state") == STATE_UNDELIVERED:
                     self._set_state(row, STATE_ARCHIVED, channel="interest")
                     out["archived"] += 1
-            elif float(score) >= high:
+            else:
+                # at or above the bar: stream it now (the push below
+                # still honours quiet hours and the per-day cap)
                 push_candidates.append(row)
         if push_candidates:
             push_candidates.sort(
@@ -1596,7 +1615,112 @@ class NewsAgent:
                             out["pushed"] += 1
         return out
 
-    # ── brief: the digest of everything undelivered ──────────────────────
+    def catchup_max(self) -> int:
+        """Bound on one delivered list (settings.news.catchup_max)."""
+        try:
+            return max(1, int(self._news_setting(
+                "catchup_max", CATCHUP_MAX_DEFAULT)))
+        except (TypeError, ValueError):
+            return CATCHUP_MAX_DEFAULT
+
+    def pick_catchup(self) -> dict[str, Any]:
+        """The slot catch-up: the held stories, top by interest.
+
+        The poll streams what clears the bar; what it holds (quiet
+        hours, the per-day cap, or no score yet) sits undelivered
+        here.  The catch-up shows the top ``catchup_max`` of them —
+        scored first by interest desc (newest breaks ties), unscored
+        after, newest first — and names the rest: scored rows the
+        slot archives once the catch-up confirms (``archivable``),
+        unscored rows that stay held (``held_rest``).  The backlog
+        drains every slot instead of rolling into a digest pile.
+        """
+        bound = self.catchup_max()
+        rows = self.undelivered()
+        scored = sorted(
+            (r for r in rows if r.get("interest") is not None),
+            key=lambda r: (float(r.get("interest") or 0),
+                           float(r.get("published")
+                                 or r.get("created_at") or 0)),
+            reverse=True)
+        unscored = [r for r in rows if r.get("interest") is None]
+        ranked = scored + unscored
+        shown = ranked[:bound]
+        rest = ranked[bound:]
+        archivable = [r for r in rest if r.get("interest") is not None]
+        held_rest = len(rest) - len(archivable)
+        not_shown = len(archivable) + held_rest
+        line = ""
+        if not_shown:
+            line = (f"…and {not_shown} more stories were held for "
+                    f"this slot")
+            if archivable:
+                line += (f" ({len(archivable)} archived after this "
+                         f"catch-up)")
+            line += "."
+        return {"shown": shown, "archivable": archivable,
+                "held_rest": held_rest, "not_shown": not_shown,
+                "line": line}
+
+    def archive_rows(self, rows: list[dict[str, Any]], *,
+                     channel: str = "catchup") -> int:
+        """Archive undelivered rows — the catch-up's drain door.
+
+        Called by a slot only after its catch-up list confirmed
+        delivery: the shown stories are marked by the delivery
+        itself, and the scored stories that missed the cut archive
+        here so the held pile drains every slot instead of rolling
+        forward.  Only rows still undelivered archive — a story the
+        stream pushed between the pick and this call keeps its push.
+        Returns how many rows transitioned.
+        """
+        if not rows:
+            return 0
+        now = time.time()
+        if self.db is None:
+            n = 0
+            for r in rows:
+                if r.get("delivery_state") == STATE_UNDELIVERED:
+                    r["delivery_state"] = STATE_ARCHIVED
+                    r["delivered_at"] = now
+                    r["delivery_channel"] = channel
+                    n += 1
+            return n
+        ids = [r.get("id") for r in rows if r.get("id") is not None]
+        if not ids:
+            return 0
+        items = self._items()
+        try:
+            if items is not None:
+                live = {str(r.get("id")) for r in items.all()
+                        if r.get("delivery_state") == STATE_UNDELIVERED}
+            else:
+                placeholders = ",".join("?" * len(ids))
+                q = ("SELECT id FROM news_items WHERE delivery_state = ? "
+                     f"AND id IN ({placeholders})")
+                live = {str(r.get("id")) for r in (
+                    self.db.query(q, (STATE_UNDELIVERED, *ids)) or [])}
+        except Exception as exc:  # noqa: BLE001
+            record_failure("news.archive_rows_select", exc)
+            return 0
+        n = 0
+        for rid in ids:
+            if str(rid) not in live:
+                continue
+            try:
+                self._upd_item(
+                    rid,
+                    {"delivery_state": STATE_ARCHIVED,
+                     "delivered_at": now, "delivery_channel": channel},
+                    "UPDATE news_items SET delivery_state = ?, "
+                    "delivered_at = ?, delivery_channel = ? WHERE id = ?",
+                    (STATE_ARCHIVED, now, channel, rid))
+                n += 1
+            except Exception as exc:  # noqa: BLE001
+                record_failure("news.archive_rows_update", exc)
+        return n
+
+    # ── brief: the on-demand latest-news view ────────────────────────
 
     @staticmethod
     def _normalize_row(row: Any) -> Any:
@@ -1927,7 +2051,7 @@ class NewsAgent:
         return badge
 
     def _compose_digest(
-            self, rows: list[dict[str, Any]]) -> str:
+            self, rows: list[dict[str, Any]], tail: str = "") -> str:
         # Docs 19+21 (N1): with news translation ON, items are
         # translated FIRST (into news_translations records) and the
         # summarizer reads the translated text; OFF, this method is
@@ -1962,8 +2086,9 @@ class NewsAgent:
             by_source.setdefault(publisher_of(it), []).append(it)
         for source, items in by_source.items():
             lines.append(f"■ {source}")
-            # every item is shown — no per-source slice; the digest
-            # carries everything undelivered (pass #85).
+            # every row the caller passed is shown — no per-source
+            # slice; the caller bounds the rows (brief()'s latest
+            # view), so this renders what it is given, nothing more.
             for it in items:
                 rec = records.get(self._item_ref(it))
                 if rec is not None and rec["translated"]:
@@ -2003,6 +2128,9 @@ class NewsAgent:
                     if disp.summary else ""))
                 if disp.translated and disp.original_title:
                     lines.append(f"    ◦ original: {disp.original_title}")
+        if tail:
+            lines.append("")
+            lines.append(tail)
         return "\n".join(lines)
 
     def _localized_item(self, title: str, summary: str) -> Any:
@@ -2022,15 +2150,20 @@ class NewsAgent:
             return ItemTranslation(title=str(title or ""),
                                    summary=str(summary or ""))
 
-    def brief(self, rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
-        """Compose and deliver the digest of ALL undelivered stories.
+    def brief(self, rows: list[dict[str, Any]] | None = None,
+              limit: int | None = None) -> dict[str, Any]:
+        """The on-demand latest-news view (the /news command's reply).
 
-        No cap: what poll() stored and no push took, the digest
-        carries.  The briefed rows are marked ``digested`` — when a
-        notifier is attached the digest is published through it; with
-        no notifier the caller's own surface IS the delivery (the
-        /news command reply, the pulse's briefing), the convention
-        those callers already document.
+        Streaming killed the scheduled digest (owner order 2026-11-18:
+        the 82-page pile is gone — stories arrive as they clear the
+        bar, and the slots carry the held ones as a catch-up).  This
+        is the peek: the newest ``limit`` undelivered stories (the
+        catch-up bound by default; an explicit ``limit`` wins),
+        grouped by source as before, with one honest line naming how
+        many more are held.  Shown rows are marked ``digested`` —
+        the owner read them, so the stream must not re-push them;
+        the rest stays undelivered for the stream and the next slot's
+        catch-up.  Never the whole pile.
         """
         if rows is None:
             rows = self.undelivered()
@@ -2039,16 +2172,33 @@ class NewsAgent:
                     if r.get("delivery_state") == STATE_UNDELIVERED]
         if not rows:
             return {"ok": False, "items": 0, "digest": "",
-                    "delivered_urls": []}
-        digest = self._compose_digest(rows)
+                    "delivered_urls": [], "left_out": 0}
+        if limit is None:
+            bound = self.catchup_max()
+        else:
+            try:
+                bound = max(0, int(limit))
+            except (TypeError, ValueError):
+                bound = self.catchup_max()
+        shown = rows[:bound]
+        if not shown:
+            return {"ok": False, "items": 0, "digest": "",
+                    "delivered_urls": [], "left_out": len(rows)}
+        left_out = len(rows) - len(shown)
+        tail = ""
+        if left_out:
+            tail = (f"…and {left_out} more stories are held — they "
+                    f"arrive as they clear the bar, or in the next "
+                    f"slot's catch-up.")
+        digest = self._compose_digest(shown, tail=tail)
         if self.notifier is not None:
-            # full digest — the gateway chunks it; no [:3500] cut.
             self.notifier.publish(
-                "news", f"news digest — {len(rows)} new items", digest)
-        for r in rows:
-            self._set_state(r, STATE_DIGESTED, channel="digest")
-        return {"ok": True, "items": len(rows), "digest": digest,
-                "delivered_urls": [str(r.get("url") or "") for r in rows]}
+                "news", f"news — latest {len(shown)} stories", digest)
+        for r in shown:
+            self._set_state(r, STATE_DIGESTED, channel="brief")
+        return {"ok": True, "items": len(shown), "digest": digest,
+                "delivered_urls": [str(r.get("url") or "") for r in shown],
+                "left_out": left_out}
 
     def mark_delivered(self, keys: list[str], *,
                        channel: str = "digest") -> int:
@@ -2137,6 +2287,10 @@ class NewsAgent:
             "archived": counts.get(STATE_ARCHIVED, 0),
             "pushed_today": self._pushes_today(),
             "push_cap_per_day": self._push_cap(),
+            # streaming discipline: the bar a story must clear to be
+            # pushed as it comes in, and the bound on one list
+            "send_bar": self._thresholds()[1],
+            "catchup_max": self.catchup_max(),
             "interest": interest,
             "quiet_now": self._quiet_now(),
             "beats": [b["topic"] for b in profile["beats"]],
@@ -2158,22 +2312,22 @@ class NewsAgent:
 
     # ── one digest cycle (compatibility composition) ─────────────────────
     def run(self, cap: int | None = None) -> dict[str, Any]:
-        """poll() + brief(): fetch, tier, and digest what remains.
+        """poll() + brief(): fetch, tier, push what clears the bar,
+        and show the latest stories on demand.
 
         The historical single-call contract for /news, the pulse
-        slots, and the agency adapter.  ``cap`` is accepted for
-        signature compatibility and no longer selects what gets
-        delivered — the digest carries every undelivered story
-        (pass #85); it survives only as the settings default the
-        callers pass through.
+        slots, and the agency adapter.  ``cap`` is the explicit bound
+        for this call (the /news run <n> number); None takes the
+        catch-up bound.
         """
         report = self.poll()
-        brief = self.brief()
+        brief = self.brief(limit=cap)
         report.update({
             "ok": bool(brief["items"] or report.get("pushed")),
             "items": brief["items"],
             "digest": brief["digest"],
             "delivered_urls": brief["delivered_urls"],
+            "left_out": brief.get("left_out", 0),
         })
         return report
 

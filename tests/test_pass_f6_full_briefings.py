@@ -134,56 +134,99 @@ def undelivered_urls(ctx):
 
 
 class FullDeliveryTests(unittest.TestCase):
-    """40 undelivered stories ALL deliver in one pulse, uncapped."""
+    """The catch-up bound delivers in one pulse, every story exactly
+    once across the pager — and a bigger held pile drains over the
+    next slots, nothing lost, nothing repeated.
+
+    Streaming (owner order 2026-11-18): one slot carries the
+    catch-up bound (10), never the whole pile — the old "all 40 in
+    one pulse" pin is the 82-page digest, gone.
+    """
 
     def test_afternoon_delivers_all_40(self):
         gw = FakeGateway()
         ctx, _ = make_ctx(self, gw)
-        urls = seed_stories(ctx, 40, summary_words=2)
+        urls = seed_stories(ctx, 40, summary_words=6)
         with patch.object(NewsAgent, "poll", lambda self: {"ok": True}), \
              patch.object(mp, "_afternoon_markets", return_value=("", [])):
             r = mp.run_slot(ctx, "afternoon")
         self.assertTrue(r["ok"])
-        self.assertEqual(r["stories_delivered"], 40)
+        # one slot carries the catch-up bound; the other 30 stay held
+        # (unscored — never archived), named by the honest line
+        self.assertEqual(r["stories_delivered"], 10)
         self.assertEqual(r["stories_pending"], 0)
+        self.assertEqual(r["stories_left_out"], 30)
+        self.assertEqual(r["stories_archived"], 0)
         # ONE paged story-list message went out — not a (i/n) dump
         text = sent_text(gw)
         self.assertIn(mp.STORY_LIST_TITLE, text)
         self.assertNotIn("(1/", text)
         self.assertIn("— page 1 of", text)
+        self.assertIn("30 more stories were held", text)
         story_sends = [t for _, _, t in gw.sent
                        if mp.STORY_LIST_TITLE in t]
         self.assertEqual(len(story_sends), 1)
-        # every story's FULL block (headline + URL) is reachable
-        # exactly once across the pager's pages
+        # every SHOWN story's FULL block (headline + URL) is reachable
+        # exactly once across the pager's pages; the held 30 are not
+        # in this list at all
         pages = pager_texts(ctx)
         self.assertGreater(len(pages), 1)
-        for i in range(40):
+        for i in range(30, 40):
             hits = [p for p in pages if f"Story {i} headline" in p]
             self.assertEqual(len(hits), 1,
                              f"story {i} not paged exactly once")
             self.assertIn(f"https://news.test/s{i}/full", hits[0])
-        # everything marked in the ledger; nothing left undelivered
-        self.assertEqual(undelivered_urls(ctx), set())
+        for i in range(30):
+            self.assertNotIn(f"Story {i} headline", text)
+        # the shown ten are marked in the ledger; the held thirty
+        # stay undelivered for the next slots
+        self.assertEqual(len(undelivered_urls(ctx)), 30)
 
     def test_morning_pulse_delivers_all_40(self):
         gw = FakeGateway()
         ctx, _ = make_ctx(self, gw)
-        seed_stories(ctx, 40)
+        seed_stories(ctx, 10)
         with patch.object(NewsAgent, "poll", lambda self: {"ok": True}), \
              patch.object(mp, "_compose_briefing",
                           return_value="composed briefing"), \
              patch.object(mp, "_synthesize", return_value=""):
             r = mp.run_pulse(ctx)
-        self.assertEqual(r["stories_delivered"], 40)
+        self.assertEqual(r["stories_delivered"], 10)
+        self.assertEqual(r["stories_left_out"], 0)
+        self.assertEqual(r["stories_archived"], 0)
         # no summaries → the whole list packs into ONE page, so it
         # publishes as a single message exactly as it always did
         # (no stash, no buttons) — every headline in the sent text,
         # and still no (i/n) labelling anywhere
         text = sent_text(gw)
         self.assertNotIn("(1/", text)
-        for i in range(40):
+        for i in range(10):
             self.assertIn(f"Story {i} headline", text)
+        self.assertEqual(undelivered_urls(ctx), set())
+
+    def test_forty_held_stories_drain_across_slots_without_repeats(self):
+        # the pile drains over the next slots: ten per catch-up,
+        # each story delivered exactly once, unscored rows never
+        # archived.
+        gw = FakeGateway()
+        ctx, _ = make_ctx(self, gw)
+        urls = seed_stories(ctx, 40, summary_words=2)
+        delivered: set[str] = set()
+        for _ in range(4):
+            with patch.object(NewsAgent, "poll",
+                              lambda self: {"ok": True}), \
+                 patch.object(mp, "_afternoon_markets",
+                              return_value=("", [])):
+                r = mp.run_slot(ctx, "afternoon")
+            self.assertEqual(r["stories_delivered"], 10)
+            self.assertEqual(r["stories_archived"], 0)
+            now = {str(row["url"]) for row in ctx.db.query(
+                "SELECT url FROM news_items "
+                "WHERE delivery_state = 'digested'")}
+            new = now - delivered
+            self.assertEqual(len(new), 10)
+            delivered |= new
+        self.assertEqual(delivered, set(urls))
         self.assertEqual(undelivered_urls(ctx), set())
 
     def test_story_block_format(self):
@@ -268,7 +311,10 @@ class FailedPublishTests(unittest.TestCase):
 
     def test_failed_publish_stays_undelivered_and_resumes_whole(self):
         # every gateway call fails on the first run — head text AND
-        # the story-list publish
+        # the story-list publish.  Streaming (owner order 2026-11-18):
+        # the run carries the catch-up bound (10), and a failed
+        # publish archives nothing — the held stories resume through
+        # the next catch-ups, ten per slot, each exactly once.
         gw = FakeGateway(fail_on=set(range(1, 13)))
         ctx, _ = make_ctx(self, gw)
         urls = seed_stories(ctx, 24, summary_words=6)
@@ -276,21 +322,30 @@ class FailedPublishTests(unittest.TestCase):
              patch.object(mp, "_afternoon_markets", return_value=("", [])):
             r = mp.run_slot(ctx, "afternoon")
         self.assertEqual(r["stories_delivered"], 0)
-        self.assertEqual(r["stories_pending"], 24)
+        self.assertEqual(r["stories_pending"], 10)
+        self.assertEqual(r["stories_left_out"], 14)
+        self.assertEqual(r["stories_archived"], 0)
         self.assertEqual(undelivered_urls(ctx), set(urls))
-        # next pulse with a healthy gateway: the whole list arrives
-        # through the pager, every story exactly once
+        # next pulses with a healthy gateway: the held stories resume
+        # through the catch-ups — ten per slot, each exactly once
         gw2 = FakeGateway()
         ctx.gateway = gw2
-        with patch.object(NewsAgent, "poll", lambda self: {"ok": True}), \
-             patch.object(mp, "_afternoon_markets", return_value=("", [])):
-            r2 = mp.run_slot(ctx, "afternoon")
-        self.assertEqual(r2["stories_delivered"], 24)
-        pages = pager_texts(ctx)
-        for u in urls:
-            hits = [p for p in pages if u in p]
-            self.assertEqual(len(hits), 1,
-                             "story missing or repeated after resume")
+        delivered: set[str] = set()
+        for expect in (10, 10, 4):
+            with patch.object(NewsAgent, "poll",
+                              lambda self: {"ok": True}), \
+                 patch.object(mp, "_afternoon_markets",
+                              return_value=("", [])):
+                r2 = mp.run_slot(ctx, "afternoon")
+            self.assertEqual(r2["stories_delivered"], expect)
+            self.assertEqual(r2["stories_archived"], 0)
+            now = {str(row["url"]) for row in ctx.db.query(
+                "SELECT url FROM news_items "
+                "WHERE delivery_state = 'digested'")}
+            new = now - delivered
+            self.assertEqual(len(new), expect)
+            delivered |= new
+        self.assertEqual(delivered, set(urls))
         self.assertEqual(undelivered_urls(ctx), set())
 
     def test_total_delivery_failure_marks_nothing(self):
@@ -343,7 +398,7 @@ class CutoverMigrationTests(unittest.TestCase):
         p.write_text(json.dumps({"2026-10-22": {urls[0]: "morning"}}),
                      encoding="utf-8")
         with patch.object(NewsAgent, "poll", lambda self: {"ok": True}):
-            items = mp._fresh_news_items(ctx)
+            items, _pick = mp._fresh_news_items(ctx)
         self.assertEqual(items, [])  # cutover folded it into the ledger
         # a NEW marker file appears (stale writer, restored backup…):
         # the pipeline must ignore it — the ledger is the only truth.
@@ -352,7 +407,7 @@ class CutoverMigrationTests(unittest.TestCase):
             {"2026-10-22": {new_urls[0]: "morning"}}),
             encoding="utf-8")
         with patch.object(NewsAgent, "poll", lambda self: {"ok": True}):
-            items = mp._fresh_news_items(ctx)
+            items, _pick = mp._fresh_news_items(ctx)
         self.assertEqual([str(i.get("url")) for i in items], new_urls)
 
     def test_no_marker_file_written_by_slots(self):

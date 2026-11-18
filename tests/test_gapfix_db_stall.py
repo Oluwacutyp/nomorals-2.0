@@ -117,7 +117,7 @@ class TestMigrationV89(unittest.TestCase):
     def test_v89_applies_and_indexes_news_delivery(self) -> None:
         db = _mem_db()
         try:
-            self.assertEqual(latest_version(), 89)
+            self.assertEqual(latest_version(), 90)  # v90 (notifications dedupe) is now latest
             idx = {r["name"] for r in db.query("PRAGMA index_list(news_items)")}
             self.assertIn("idx_news_items_delivery", idx)
             cols = {r["name"] for r in db.query("PRAGMA table_info(news_items)")}
@@ -296,7 +296,9 @@ class TestNewsPrune(unittest.TestCase):
             db.close()
 
     def test_prune_retention_constant(self) -> None:
-        self.assertEqual(NEWS_RETENTION_DAYS, DEFAULT_RETENTION_DAYS)
+        # Owner's call 2026-11-18: news clears settled rows after 60
+        # days; trajectories keep their 90-day window.
+        self.assertEqual(NEWS_RETENTION_DAYS, 60.0)
 
 
 class TestCheckpointTupleAndMaintenance(unittest.TestCase):

@@ -2175,9 +2175,9 @@ class RuntimeLiveMixin:
         if verb == "poll":
             # No notifier on this surface (see the run path's note):
             # a public command must not push to owner channels.  The
-            # poll still fetches/stores/scores; high-tier stories are
-            # reported held, and the scheduled news-poll job (which
-            # owns a notifier) is what pushes them.
+            # poll still fetches/stores/scores; stories that clear
+            # the bar are reported held, and the scheduled news-poll
+            # job (which owns a notifier) is what pushes them.
             report = agent.poll()
             return (f"news poll — {report['polled']} new stories stored "
                     f"({report['held']} undelivered, "
@@ -2188,8 +2188,8 @@ class RuntimeLiveMixin:
         if verb == "brief":
             report = agent.brief()
             if not report["ok"]:
-                return "nothing undelivered — the digest is empty."
-            return (f"news digest — {report['items']} items\n\n"
+                return "nothing new — no stories held right now."
+            return (f"news — latest {report['items']} stories\n\n"
                     f"{report['digest']}")
         if verb in ("pin", "unpin"):
             topic = tail.split(None, 1)[1].strip() if len(parts) > 1 else ""

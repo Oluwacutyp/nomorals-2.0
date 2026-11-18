@@ -1,6 +1,14 @@
 """PASS #85: news never drops a story — continuous poll, interest-gated
 pushes, complete digests.
 
+STREAMING UPDATE 2026-11-18 (owner order, after his 82-page-digest
+report): the digest in pins (b)/(d)/(e) is GONE.  The poll now
+streams every story at or above the interest bar through the anytime
+push in the same poll run; what quiet hours / the per-day cap hold
+surfaces in the next slot's short catch-up; ``brief()`` is the
+bounded on-demand latest view.  Pins (b)/(d)/(e) below are rewritten
+to the streaming contract; the rest stand.
+
 The defect (owner spec 2026-10-21): ``NewsAgent.run()`` coupled fetch
 and digest — it stored and delivered only ``fresh[:cap]`` (default 12,
 max 40).  Stories beyond the cap were silently dropped, there was no
@@ -11,19 +19,23 @@ fact and neither could be audited.
 Pins:
 (a) poll() stores EVERY fresh story (no cap), each row carrying an
     honest delivery_state starting at "undelivered".
-(b) run()'s digest carries ALL undelivered stories — a 15-story poll
-    under the legacy cap of 5 still digests 15 — and marks exactly
-    those rows delivered; a second run redelivers nothing.
+(b) SUPERSEDED 2026-11-18 (owner order — stream, don't batch): the
+    scheduled digest is gone.  run() streams what clears the bar
+    and brief() is the bounded on-demand latest view (the catch-up
+    bound; an explicit limit wins), marking exactly the shown rows
+    delivered; a second brief shows the next bound, never a re-show.
 (c) with NO brain (no router — the module's own convention), scoring
     degrades honestly: nothing is pushed, scores stay NULL, and
     status() reports interest "unavailable" instead of inventing one.
-(d) with a brain, stories tier by score: high → anytime push through
-    the notifier (marked "pushed"), mid → held for the digest,
-    low → "archived" (stored, queryable, never delivered).
+(d) SUPERSEDED 2026-11-18 (owner order): with a brain, stories tier
+    by score — at or above the bar (interest_low) → anytime push
+    through the notifier (marked "pushed") in the same poll run;
+    below the bar → "archived" (stored, queryable, never delivered).
+    There is no held-for-digest tier any more.
 (e) pushes obey delivery discipline: quiet hours hold them (the story
     waits, undelivered, and a later poll outside quiet hours pushes
-    it), and a per-day cap stops further pushes (overflow waits for
-    the digest).
+    it), and a per-day cap stops further pushes (the overflow waits
+    for the next slot's catch-up).
 (f) the interest profile persists: owner seed beats ship as data,
     pin()/unpin() round-trip across agent instances, and briefing
     topics the owner already configured count as stated interests.
@@ -157,26 +169,39 @@ class PollAndDigestTests(unittest.TestCase):
             all(r["delivery_state"] == "undelivered" for r in rows),
             [r["delivery_state"] for r in rows])
 
-    def test_digest_carries_every_undelivered_story(self):
+    def test_brief_is_the_bounded_latest_view(self):
+        # (b) SUPERSEDED 2026-11-18 (owner order — the 82-page
+        # digest): no scheduled digest carries everything any more.
+        # run() streams what clears the bar; brief() is the bounded
+        # on-demand latest view — the newest catch-up bound, an
+        # honest count of the rest, and a second brief shows the
+        # next bound, never a re-show.
         ctx = _make_ctx(self, cap=5)
+        ctx.settings.news.catchup_max = 10
         _, report = _run(ctx, _xml(_items(15)))
         self.assertTrue(report["ok"])
-        self.assertEqual(report["items"], 15)
-        for i in range(15):
-            self.assertIn(f"Story {i}", report["digest"])
+        self.assertEqual(report["items"], 10)
+        self.assertEqual(report["left_out"], 5)
+        self.assertIn("5 more stories are held", report["digest"])
         rows = _rows(ctx)
-        self.assertTrue(
-            all(r["delivery_state"] == "digested" for r in rows))
-        # a second run over the same feed redelivers nothing
-        _, report2 = _run(ctx, _xml(_items(15)))
-        self.assertEqual(report2["items"], 0)
-        self.assertEqual(report2["digest"], "")
+        self.assertEqual(
+            sum(1 for r in rows if r["delivery_state"] == "digested"),
+            10)
+        self.assertEqual(
+            sum(1 for r in rows if r["delivery_state"] == "undelivered"),
+            5)
+        # a second brief shows the next five — never a re-show
+        brief2 = NewsAgent(ctx).brief()
+        self.assertEqual(brief2["items"], 5)
+        self.assertEqual(brief2["left_out"], 0)
+        self.assertFalse(NewsAgent(ctx).brief()["ok"])
 
     def test_brief_alone_delivers_the_backlog(self):
         ctx = _make_ctx(self)
         agent, _ = _poll(ctx, _xml(_items(4)))
         brief = agent.brief()
         self.assertEqual(brief["items"], 4)
+        self.assertEqual(brief["left_out"], 0)
         for i in range(4):
             self.assertIn(f"Story {i}", brief["digest"])
         self.assertEqual(len(brief["delivered_urls"]), 4)
@@ -212,7 +237,10 @@ class BrainTierTests(unittest.TestCase):
         return ctx, mock.patch(
             "nomorals.agents.news.brain_for", return_value=brain)
 
-    def test_tiers_push_hold_archive(self):
+    def test_tiers_push_archive(self):
+        # (d) SUPERSEDED 2026-11-18 (owner order — stream, don't
+        # batch): the mid tier no longer waits for a digest — every
+        # story at or above the bar pushes in the same poll run.
         ctx, patcher = self._brain_ctx(
             {"Gold surges": 0.95, "Council meets": 0.5,
              "Celebrity gossip": 0.1})
@@ -226,10 +254,12 @@ class BrainTierTests(unittest.TestCase):
         with patcher:
             _, report = _poll(ctx, _xml(items), notifier=notifier)
         self.assertEqual(report["interest"], "ok")
-        self.assertEqual(report["pushed"], 1)
+        self.assertEqual(report["pushed"], 2)
         self.assertEqual(report["archived"], 1)
-        self.assertEqual(len(notifier.published), 1)
-        self.assertIn("Gold surges", notifier.published[0]["title"])
+        self.assertEqual(len(notifier.published), 2)
+        titles = [p["title"] for p in notifier.published]
+        self.assertTrue(any("Gold surges" in t for t in titles))
+        self.assertTrue(any("Council meets" in t for t in titles))
         by_title = {r["title"]: r for r in _rows(ctx)}
         self.assertEqual(
             by_title["Gold surges to record"]["delivery_state"], "pushed")
@@ -237,16 +267,15 @@ class BrainTierTests(unittest.TestCase):
             by_title["Gold surges to record"]["interest"], 0.95)
         self.assertEqual(
             by_title["Council meets on roads"]["delivery_state"],
-            "undelivered")
+            "pushed")
         self.assertEqual(
             by_title["Celebrity gossip roundup"]["delivery_state"],
             "archived")
-        # the digest then carries ONLY the held story
+        # nothing held: the brief finds nothing left to show
         with patcher:
             brief = NewsAgent(ctx).brief()
-        self.assertIn("Council meets", brief["digest"])
-        self.assertNotIn("Gold surges", brief["digest"])
-        self.assertNotIn("Celebrity gossip", brief["digest"])
+        self.assertFalse(brief["ok"])
+        self.assertEqual(brief["items"], 0)
 
     def test_quiet_hours_hold_then_later_poll_pushes(self):
         ctx, patcher = self._brain_ctx({"Gold surges": 0.95})

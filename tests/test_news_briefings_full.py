@@ -28,6 +28,12 @@ from nomorals.agents.notifier import Notifier
 from nomorals.storage.db import Database
 
 
+#: the empty catch-up pick (streaming, 2026-11-18): _fresh_news_items
+#: now returns (items, pick) — a mocked slot with nothing held.
+_EMPTY_PICK = {"shown": [], "archivable": [], "held_rest": 0,
+               "not_shown": 0, "line": ""}
+
+
 # ── shared fakes (same shape as test_delivery_fallback) ──────────────
 
 class _SendResult:
@@ -195,7 +201,7 @@ class FourSlotsTests(unittest.TestCase):
         agent.mark_delivered(["https://x/evening-story"],
                              channel="pulse-evening")
         with patch.object(NewsAgent, "poll", lambda self: {"ok": True}):
-            text, items = mp._compose_midnight(ctx)
+            text, items, _pick = mp._compose_midnight(ctx)
         self.assertEqual([i["url"] for i in items], ["https://x/fresh"])
         self.assertIn("Fresh story", text)
         self.assertNotIn("Evening story", text)
@@ -220,7 +226,7 @@ class FourSlotsTests(unittest.TestCase):
         with patch.object(NewsAgent, "poll", lambda self: {"ok": True}), \
              patch.object(mp, "_afternoon_markets", return_value=("", [])):
             r1 = mp.run_slot(ctx, "afternoon")
-            text2, items2 = mp._compose_afternoon(ctx)
+            text2, items2, _pick2 = mp._compose_afternoon(ctx)
         self.assertEqual(r1["stories_delivered"], 4)
         self.assertEqual(items2, [])
         for i in range(4):
@@ -297,7 +303,7 @@ class PulseCommandTests(unittest.TestCase):
         # quiet news: no fresh items, so the briefing is the quiet text —
         # the point is the run path works and reports delivery honestly.
         with patch("nomorals.agents.morning_pulse._fresh_news_items",
-                   return_value=[]):
+                   return_value=([], _EMPTY_PICK)):
             out = mixin._control_pulse("run midnight")
         self.assertIn("midnight", out.lower())
         self.assertIn("deliver", out.lower())
