@@ -640,6 +640,7 @@ class ToolRegistry:
             "datatools",  # text-transformation family — parse, validate, transform with located errors (CodeBeautify core)
             "fetch_media",  # paste-link media fetch — video/audio/image/gif over the per-service resolvers (Cobalt core)
             "watchtower",  # outward outage watch — baseline deviation over probes + feeds (Downdetector core)
+            "watch_offers",  # streaming availability — title → offers, reconciled (JustWatch core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",

@@ -831,6 +831,30 @@ def register(registry: Any) -> None:
                     "error": f"watchtower tick failed: {exc}"}
 
     @registry.register(
+        "__offer_reconcile_tick__",
+        description="Run one offer-reconcile tick (JustWatch "
+        "build-new): re-check every watchlisted film/show against "
+        "the streaming catalogues and publish one Notifier note per "
+        "unseen change (a new service picking the title up, or one "
+        "dropping it) — one alert per event, never twice. "
+        "Scheduler-internal; runs daily at 06:00. Routine and "
+        "silent when nothing changed; a quiet tick (empty watchlist) "
+        "makes no network call at all.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _offer_reconcile_tick_tool() -> dict[str, Any]:
+        from ..agents.notifier import Notifier
+        from ..media.film_sources import run_offer_reconcile_tick_once
+
+        try:
+            return run_offer_reconcile_tick_once(
+                context=_context, notifier=Notifier(_context))
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"offer reconcile tick failed: {exc}"}
+
+    @registry.register(
         "__burn_note_tick__",
         description="Run one burn-note sweep (Privnote build-new): "
         "delete expired unread burn notes from the durable store "

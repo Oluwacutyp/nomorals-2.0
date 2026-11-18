@@ -475,6 +475,20 @@ class WolframSettings:
 
 
 @dataclass
+class TMDBSettings:
+    """The TMDB API key for the streaming-availability organ.
+
+    Empty by default: without a key the TMDB rung is unavailable
+    and says so, and the keyless archive.org rung answers what it
+    can. The key is free (themoviedb.org) — it lives in the
+    environment (``NM_TMDB_API_KEY``) or the vault, never in a
+    committed file. See ``nomorals/media/film_sources.py``.
+    """
+
+    api_key: str = ""
+
+
+@dataclass
 class GuardrailSettings:
     """LLM I/O guardrails (input / output / dialogue rails on the
     brain's call path — see ``nomorals/llm/guardrails.py``).
@@ -1100,6 +1114,7 @@ class Settings:
     mcp: MCPSettings = field(default_factory=MCPSettings)
     a2a: A2ASettings = field(default_factory=A2ASettings)
     wolfram: WolframSettings = field(default_factory=WolframSettings)
+    tmdb: TMDBSettings = field(default_factory=TMDBSettings)
     guardrails: GuardrailSettings = field(default_factory=GuardrailSettings)
     prompt_compiler: PromptCompilerSettings = field(
         default_factory=PromptCompilerSettings)
@@ -1500,6 +1515,7 @@ _ENV_MAP: dict[str, str] = {
     "NM_CHAT_WHATSAPP_ENABLED": "chat.whatsapp_enabled",
     "NM_GITHUB_TOKEN": "api.github_token",
     "NM_WOLFRAM_APPID": "wolfram.appid",
+    "NM_TMDB_API_KEY": "tmdb.api_key",
     "NM_LLM_ALLOW_MOCK_FALLBACK": "llm.allow_mock_fallback",
     "NM_LLM_LOCAL_LORA": "llm.local_lora",
     "NM_MASTODON_TOKEN": "social.mastodon_token",

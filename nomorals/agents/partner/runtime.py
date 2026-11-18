@@ -3564,6 +3564,18 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("watchtower job not registered: %s",
                                  exc)
+                # Media: the offer-reconcile tick (daily 06:00 —
+                # watchlisted films/shows re-checked against the
+                # streaming catalogues; one alert per new/leaving
+                # offer, silent otherwise). Idempotent by name; a
+                # stale spec is replaced.
+                try:
+                    from ...media.film_sources import ensure_offer_reconcile_job
+
+                    ensure_offer_reconcile_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("offer reconcile job not registered: %s",
+                                 exc)
                 # Memory: the burn-note sweep (hourly — expired
                 # unread notes are deleted; a live note is never
                 # touched). Idempotent by name; a stale spec is
