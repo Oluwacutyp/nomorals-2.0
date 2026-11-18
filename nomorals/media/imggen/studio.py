@@ -716,6 +716,36 @@ class Studio:
         return ImageDocument(image_path).remove_background(
             tier=tier, model=model, margin=margin, feather=feather)
 
+    def optimize(self, image_path: str, *, target: str = "whatsapp",
+                 max_bytes: int = 0, save_to: str | None = None,
+                 timeout_s: float = 90.0) -> list[str]:
+        """Codec-ladder optimisation → the best trial under the
+        target's constraint, saved in the winning codec.
+
+        The Studio document flow: builds the ImageDocument holding
+        the resize (when the target resizes) + optimize op and
+        renders it — the saved file carries the chosen encoding,
+        and the document beside it lets Studio work continue from
+        the optimised image. The sidecar records the trial table.
+        """
+        doc = self.optimize_document(
+            image_path, target=target, max_bytes=max_bytes,
+            timeout_s=timeout_s)
+        return self.render_document(
+            doc, save_to=save_to, prompt=f"optimize for {target}")
+
+    def optimize_document(self, image_path: str, *,
+                          target: str = "whatsapp", max_bytes: int = 0,
+                          timeout_s: float = 90.0):
+        """An unrendered document holding the ladder's winning
+        encoding as an ``optimize`` op (plus a ``resize`` op when
+        the target resized) — chain more ops, undo, branch, save
+        the project, render later."""
+        from .optimize import optimize_document as _build
+
+        return _build(image_path, target=target, max_bytes=max_bytes,
+                      timeout_s=timeout_s)
+
     def render_document(self, doc, save_to: str | None = None,
                         prompt: str = "", box_predictor=None
                         ) -> list[str]:
@@ -762,8 +792,32 @@ class Studio:
                               box_predictor=box_predictor)
         sidecar_prompt = (prompt or doc.source_prompt or doc.title
                           or "image document")
+        # An optimize op decides the encoding of the saved file:
+        # its codec becomes the format (and the file extension)
+        # and its quality the save quality. An explicit save_to
+        # path keeps its stem but takes the codec's extension, so
+        # the file never claims a format it is not.
+        opt = next((o.params for o in reversed(doc.ops)
+                    if o.op == "optimize"), None)
+        fmt = None
+        quality = None
+        lossless = False
+        if opt is not None:
+            from .optimize import CODEC_EXT, CODEC_FORMAT
+
+            fmt = CODEC_FORMAT[opt["codec"]]
+            quality = opt.get("quality")
+            lossless = bool(quality is None
+                            and opt["codec"] in ("webp", "png"))
+            if save_to and not (os.path.isdir(save_to)
+                                or save_to.endswith(("/", os.sep))):
+                stem, ext = os.path.splitext(save_to)
+                want = CODEC_EXT[opt["codec"]]
+                if ext.lower() != want:
+                    save_to = stem + want
         paths = self._finalize([rendered.image], sidecar_prompt,
-                               save_to)
+                               save_to, fmt=fmt, quality=quality,
+                               lossless=lossless)
         lines = [f"rung: {p['op']}: {p['rung']}"
                  + (f" — {p['note']}" if p["note"] else "")
                  for p in rendered.provenance]
@@ -775,14 +829,14 @@ class Studio:
         return paths
 
     @staticmethod
-    def _default_name(i: int) -> str:
+    def _default_name(i: int, ext: str = ".png") -> str:
         # Nanosecond stamp: the old 1-second name made back-to-back
         # generations (batch loops, character sheets) overwrite each
         # other's file AND sidecar prompt.
-        return f"imggen_{time.time_ns()}_{i}.png"
+        return f"imggen_{time.time_ns()}_{i}{ext}"
 
     def _target_name(self, save_to: str | None, i: int, count: int,
-                     out_dir: str) -> str:
+                     out_dir: str, fmt: str | None = None) -> str:
         """Resolve where image ``i`` of ``count`` lands.
 
         ``save_to`` conventions across callers:
@@ -794,29 +848,54 @@ class Studio:
           overwrites another;
         - a file path, single image → exactly that path;
         - None → a unique generated name under the default out dir.
+        ``fmt`` (an optimize op's encoding) gives generated names
+        the codec's extension instead of ".png".
         """
+        ext = {None: ".png", "JPEG": ".jpg", "WEBP": ".webp",
+               "PNG": ".png", "AVIF": ".avif"}.get(fmt, ".png")
         if save_to and (os.path.isdir(save_to)
                         or save_to.endswith(("/", os.sep))):
             os.makedirs(save_to, exist_ok=True)
-            return os.path.join(save_to, self._default_name(i))
+            return os.path.join(save_to, self._default_name(i, ext))
         if save_to:
             if count > 1:
-                stem, ext = os.path.splitext(save_to)
-                return f"{stem}_{i + 1}{ext or '.png'}"
+                stem, old = os.path.splitext(save_to)
+                return f"{stem}_{i + 1}{old or '.png'}"
             return save_to
-        return os.path.join(out_dir, self._default_name(i))
+        return os.path.join(out_dir, self._default_name(i, ext))
 
     def _finalize(self, images, prompt: str,
-                  save_to: str | None) -> list[str]:
+                  save_to: str | None, *, fmt: str | None = None,
+                  quality: int | None = None,
+                  lossless: bool = False) -> list[str]:
+        """Save rendered images. Without ``fmt`` this is the old
+        behaviour (PIL saves by extension, PNG by default). With
+        ``fmt`` — an optimize op's encoding — the save goes through
+        the media-edit save path (metadata stripped, JPEG alpha
+        flattened) or the AVIF rung (ffmpeg, since Pillow cannot
+        write AVIF on this box)."""
         out_dir = os.path.expanduser(
             "~/.nomorals/imggen/output")
         os.makedirs(out_dir, exist_ok=True)
         paths = []
         for i, img in enumerate(images):
-            name = self._target_name(save_to, i, len(images), out_dir)
+            name = self._target_name(save_to, i, len(images), out_dir,
+                                     fmt=fmt)
             if not os.path.isabs(name):
                 name = os.path.join(out_dir, name)
-            img.save(name)
+            if fmt is None:
+                img.save(name)
+            elif fmt == "AVIF":
+                from .optimize import save_optimized
+
+                save_optimized(img, name, codec="avif",
+                               quality=quality)
+            else:
+                from ...media_edit.images import save_image
+
+                save_image(img, name, fmt=fmt,
+                           quality=quality if quality is not None
+                           else 90, lossless=lossless)
             # Sidecar prompt for reproducibility — plus any standing
             # disclosures from the pipeline (e.g. tokenizer fallback),
             # so a saved image never hides how it was made. Local

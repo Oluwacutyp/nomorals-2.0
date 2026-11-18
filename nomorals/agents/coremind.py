@@ -853,6 +853,24 @@ _RE_BG_REMOVE = re.compile(
     r"(?:image|photo|pic(?:ture)?))?\s*$", re.I)
 _RE_UPSCALE_SR = re.compile(
     r"^upscale(?:\s+(?:this\s*)?(?:image|photo|pic(?:ture)?)?)?\s*$", re.I)
+# image optimisation (Squoosh): "compress this for WhatsApp" /
+# "optimise this image" / "make this smaller" / "shrink this photo
+# for telegram" / "make this as small as possible". Narrow whole-
+# message shapes; the destination is the target, default WhatsApp.
+# Each optional word carries its own leading whitespace — a
+# trailing space inside the "this" group starved the "for <target>"
+# group ("compress this for WhatsApp" then never matched).
+_RE_OPTIMIZE = re.compile(
+    r"^(?:compress|optimis|optimiz)(?:e|ing)?(?:\s+this)?"
+    r"(?:\s+(?:image|photo|pic(?:ture)?))?"
+    r"(?:\s+for\s+(whatsapp|telegram|the\s+web|web|archive))?"
+    r"\s*$"
+    r"|^make(?:\s+this)?(?:\s+(?:image|photo|pic(?:ture)?))?\s+smaller"
+    r"(?:\s+for\s+(whatsapp|telegram|the\s+web|web|archive))?\s*$"
+    r"|^shrink(?:\s+this)?(?:\s+(?:image|photo|pic(?:ture)?))?"
+    r"(?:\s+for\s+(whatsapp|telegram|the\s+web|web|archive))?\s*$"
+    r"|^make(?:\s+this)?(?:\s+(?:image|photo|pic(?:ture)?))?\s+as\s+small"
+    r"\s+as\s+possible\s*$", re.I)
 _RE_FACESWAP = re.compile(
     r"^swap\s+faces?(?:\s+with\s+(?:this|the|my)\s+"
     r"(?:other\s+)?(?:image|photo|face))?\s*$", re.I)
@@ -956,6 +974,18 @@ def _image_intent(text: str) -> Intent | None:
         return Intent("vision_upscale", 0.9, target=stripped[:200],
                       action="upscale_sr", route="media",
                       why="super-resolution upscale request")
+    m = _RE_OPTIMIZE.match(stripped)
+    if m:
+        if "as small as possible" in stripped.lower():
+            target = "smallest"
+        else:
+            raw = (m.group(1) or m.group(2) or m.group(3)
+                   or "").strip().lower()
+            target = {"the web": "web"}.get(raw, raw or "whatsapp")
+        return Intent("vision_optimize", 0.9, target=stripped[:200],
+                      action="optimize", route="media",
+                      meta={"target": target},
+                      why="image optimisation request")
     m = _RE_FACESWAP.match(stripped)
     if m:
         return Intent("vision_faceswap", 0.88, target=stripped[:200],
@@ -2145,6 +2175,7 @@ class CoreMind:
             "image_gen": self._dispatch_image,
             "image_edit": self._dispatch_image,
             "vision_bgremove": self._dispatch_vision,
+            "vision_optimize": self._dispatch_vision,
             "vision_upscale": self._dispatch_vision,
             "vision_faceswap": self._dispatch_vision,
             "vision_edittext": self._dispatch_vision,
@@ -3258,8 +3289,10 @@ class CoreMind:
     def _dispatch_vision(self, intent: Intent, job_id: str, chat_key: str,
                          message: Any) -> str:
         """NL vision utilities (#23/#24) + caption pipeline (#25) +
-        transcript-first video editing (#28): bg removal, SR upscale,
-        face swap, text replacement, video captions, cut-by-transcript.
+        transcript-first video editing (#28) + image optimisation
+        (Squoosh): bg removal, SR upscale, face swap, text
+        replacement, video captions, cut-by-transcript, codec-ladder
+        optimisation.
 
         Runs on a background thread (heavy models), delivers via
         send_media. Needs an attached image (captions / transcript_edit:
@@ -3268,8 +3301,8 @@ class CoreMind:
         """
         from ..social.chat.base import MediaRef
 
-        action = intent.action  # "bgremove" | "upscale_sr" | "faceswap" |
-        # "edittext" | "captions" | "transcript_edit"
+        action = intent.action  # "bgremove" | "optimize" | "upscale_sr" |
+        # "faceswap" | "edittext" | "captions" | "transcript_edit"
         media = list(getattr(message, "media", None) or [])
         want_kind = ("video" if action in ("captions", "transcript_edit")
                      else "image")
@@ -3281,6 +3314,8 @@ class CoreMind:
             hints = {
                 "bgremove": ("🖼️ attach the image, then say:\n"
                              "`remove the background`"),
+                "optimize": ("🖼️ attach the image, then say:\n"
+                             "`compress this for WhatsApp`"),
                 "upscale_sr": ("🖼️ attach the image, then say:\n"
                                 "`upscale this image`"),
                 "faceswap": ("🖼️ attach TWO images (target first, face "
@@ -3296,6 +3331,7 @@ class CoreMind:
             return hints[action]
         src_paths = [m.path for m in files[:need]]
         labels = {"bgremove": "✂️ removing background",
+                  "optimize": "🗜️ optimising",
                   "upscale_sr": "🔍 upscaling",
                   "faceswap": "🔄 swapping faces",
                   "edittext": "✏️ replacing text",
@@ -3381,6 +3417,63 @@ class CoreMind:
                     return (f"❌ edit done but couldn't send: "
                             f"{result.error}")
                 return f"🎬 done — {labels[action].split(' ', 1)[1]}"
+            if action == "optimize":
+                # Squoosh: codec ladder over the Studio document
+                # flow. The target comes from the message ("for
+                # whatsapp" / "for telegram" / "for the web" /
+                # "for archive" / "as small as possible"); the
+                # ladder runs once, the document renders the
+                # winning encoding, and the file is sent in that
+                # codec — never re-saved as PNG. Returns early:
+                # the shared tail below saves a PIL image as PNG,
+                # which would throw the ladder's work away.
+                from ..media.imggen.optimize import document_from_report, optimize_image
+                from ..media.imggen.studio import Studio
+                target = str((intent.meta or {}).get(
+                    "target", "whatsapp"))
+                report = optimize_image(src_paths[0], target=target)
+                if report.recommended is None:
+                    near = (report.trials[report.closest]
+                            if report.closest is not None else None)
+                    detail = ""
+                    if near is not None:
+                        detail = (f" — closest is {near.codec} "
+                                  f"{'q' + str(near.quality) if near.quality is not None else 'lossless'} "
+                                  f"at {near.size_bytes} bytes")
+                    return (f"❌ no trial fits {target} "
+                            f"(budget {report.target_note}){detail}")
+                studio = Studio()
+                doc = document_from_report(report)
+                paths = studio.render_document(
+                    doc, save_to=str(out_dir / f"optimized-{stamp}"),
+                    prompt=f"optimize for {target}")
+                out_path = Path(paths[0])
+                best = report.trials[report.recommended]
+                mime = {"jpeg": "image/jpeg", "webp": "image/webp",
+                        "png": "image/png",
+                        "avif": "image/avif"}.get(best.codec,
+                                                  "image/png")
+                doc.save(out_dir / f"optimized-{stamp}.json")
+                table = report.format_table()
+                if self.runtime is None:
+                    return (f"🖼️ optimised for {target}:\n{table}\n"
+                            f"saved to {out_path}")
+                ref = self.runtime._ref_from_key(chat_key)
+                adapter = self.runtime.gateway._adapter_for(ref.platform)
+                if adapter is None:
+                    return f"❌ done but no adapter for {ref.platform}"
+                result = adapter.send_media(
+                    ref, MediaRef(path=str(out_path), kind="image",
+                                  mime=mime, name=out_path.name),
+                    caption=(f"🖼️ optimised for {target}: "
+                             f"{best.codec} "
+                             f"{'q' + str(best.quality) if best.quality is not None else 'lossless'} "
+                             f"({best.size_bytes} bytes, "
+                             f"{report.source_bytes} before)"))
+                if not result.ok:
+                    return (f"❌ optimised but couldn't send: "
+                            f"{result.error}")
+                return (f"🖼️ done — optimised for {target}\n{table}")
             if action == "bgremove":
                 # Through the Studio document flow, not the bare
                 # organ call: the cutout lands as an

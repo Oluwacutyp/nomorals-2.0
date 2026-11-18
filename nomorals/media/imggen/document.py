@@ -353,6 +353,54 @@ def _run_remove_background(img, params: dict, ctx: _RenderContext):
     return res.image, f"bgremove ({res.rung})", note
 
 
+def _run_optimize(img, params: dict, ctx: _RenderContext):
+    # An encoding decision, not a pixel transform: the op records
+    # which codec/quality the ladder chose (and its measured size
+    # and PSNR); render_to / Studio.render_document apply it at
+    # save time. Replaying the document without saving re-records
+    # the decision in the provenance — the pixels pass through
+    # untouched.
+    from .optimize import CODECS, TARGETS
+
+    p = dict(params)
+    codec = str(p.pop("codec", "webp"))
+    quality = p.pop("quality", 80)
+    target = str(p.pop("target", ""))
+    max_bytes = int(p.pop("max_bytes", 0))
+    size_bytes = int(p.pop("size_bytes", 0))
+    psnr = p.pop("psnr_db", None)
+    trials = int(p.pop("trials", 0))
+    if p:
+        raise ImgGenError(
+            f"optimize op got unknown params {sorted(p)}")
+    if codec not in CODECS:
+        raise ImgGenError(
+            f"optimize op got unknown codec {codec!r}; "
+            f"want one of {list(CODECS)}")
+    if quality is not None and not (1 <= int(quality) <= 100):
+        raise ImgGenError(
+            f"optimize op quality {quality!r} out of range 1..100")
+    if target and target not in TARGETS:
+        raise ImgGenError(
+            f"optimize op got unknown target {target!r}; "
+            f"want one of {sorted(TARGETS)}")
+    q = "lossless" if quality is None else f"q{quality}"
+    detail = f"{codec} {q}"
+    if size_bytes:
+        detail += f" · {size_bytes:,} bytes"
+    if max_bytes:
+        detail += f" · budget {max_bytes:,} bytes"
+    if psnr is None and size_bytes:
+        detail += " · identical pixels"
+    elif psnr is not None:
+        detail += f" · psnr {psnr:.1f} dB"
+    if target:
+        detail += f" · target {target}"
+    if trials:
+        detail += f" ({trials} trials)"
+    return img, "optimize (encoding decision)", detail
+
+
 def _run_upscale(img, params: dict, ctx: _RenderContext):
     from .upscale import upscale_classical, upscale_diffusion
 
@@ -421,6 +469,12 @@ IMAGE_OPS: dict = {
         "the cutout is a transparent PNG and the rung is "
         "recorded in the provenance",
         _run_remove_background),
+    "optimize": _OpSpec(
+        "image optimisation: the codec-ladder decision (codec + "
+        "quality + target + measured size/PSNR) recorded as data; "
+        "the pixels pass through untouched and render_to / "
+        "Studio.render_document apply the encoding at save time",
+        _run_optimize),
 }
 
 
@@ -624,6 +678,37 @@ class ImageDocument:
         in the render provenance."""
         return self.push("remove_background", tier=tier, model=model,
                          margin=margin, feather=feather)
+
+    def optimize(self, *, codec: str = "webp",
+                 quality: int | None = 80, target: str = "",
+                 max_bytes: int = 0, size_bytes: int = 0,
+                 psnr_db: float | None = None,
+                 trials: int = 0) -> ImageDocument:
+        """An optimisation decision as an op (Squoosh): the codec
+        ladder's winning encoding, recorded as data. ``codec`` is
+        one of jpeg|webp|png|avif; ``quality`` None means lossless;
+        ``size_bytes``/``psnr_db``/``trials`` are the ladder's
+        measured values for the winning trial. Validated here so a
+        bad codec or quality fails at build, not render. The op
+        changes no pixels — render_to / Studio.render_document
+        apply the encoding when the document is saved."""
+        from .optimize import CODECS, TARGETS
+
+        if codec not in CODECS:
+            raise ImgGenError(
+                f"unknown optimize codec {codec!r}; "
+                f"want one of {list(CODECS)}")
+        if quality is not None and not (1 <= int(quality) <= 100):
+            raise ImgGenError(
+                f"optimize quality {quality!r} out of range 1..100")
+        if target and target not in TARGETS:
+            raise ImgGenError(
+                f"unknown optimize target {target!r}; "
+                f"want one of {sorted(TARGETS)}")
+        return self.push("optimize", codec=codec, quality=quality,
+                         target=target, max_bytes=max_bytes,
+                         size_bytes=size_bytes, psnr_db=psnr_db,
+                         trials=trials)
 
     # -- serialization --------------------------------------------------
     def to_dict(self) -> dict:
@@ -835,28 +920,62 @@ class ImageDocument:
                   pipeline: Any = None, *,
                   box_predictor: Any = None,
                   fmt: str | None = None,
-                  quality: int = 90) -> dict:
+                  quality: int | None = None) -> dict:
         """Render and save. The output path can never equal the
         source (the EditStudio guarantee, kept). Returns the
         EditStudio-shaped render record plus the rung provenance.
+
+        An ``optimize`` op in the document decides the encoding
+        when the caller does not: its codec becomes the output
+        format (and the default file extension) and its quality
+        the save quality — a lossless op saves lossless. An
+        explicit ``fmt``/``quality`` still wins over the op. An
+        explicit output path keeps its stem but takes the
+        encoding's extension, so the file never claims a format
+        it is not.
         """
         if not self.source:
             raise ImgGenError(
                 "image document has no source — nothing to replay from")
         from ...media_edit.images import save_image
 
+        opt = next((o.params for o in reversed(self.ops)
+                    if o.op == "optimize"), None)
+        if fmt is None and opt is not None:
+            from .optimize import CODEC_FORMAT
+
+            fmt = CODEC_FORMAT[opt["codec"]]
+        lossless = bool(opt is not None
+                        and opt.get("quality") is None
+                        and opt["codec"] in ("webp", "png"))
+        if quality is None:
+            quality = (opt["quality"] if opt is not None
+                       and opt.get("quality") is not None else 90)
         rendered = self.render(pipeline=pipeline,
                                box_predictor=box_predictor)
         src = Path(self.source)
         if path is not None:
             target = Path(path)
+            if fmt is not None:
+                # A .png path must not end up holding WebP bytes:
+                # the extension follows the encoding that won.
+                want = {"JPEG": ".jpg", "WEBP": ".webp",
+                        "PNG": ".png", "AVIF": ".avif"}.get(fmt)
+                if want is not None and target.suffix.lower() != want:
+                    target = target.with_suffix(want)
             if target.resolve() == src.resolve():
+                # checked AFTER the extension rewrite: the rewrite
+                # itself could redirect the target onto the source
                 raise ImgGenError(
                     "render output must not overwrite the source")
         else:
             out_dir = src.parent / "edited"
             out_dir.mkdir(parents=True, exist_ok=True)
             ext = src.suffix.lower()
+            if opt is not None:
+                from .optimize import CODEC_EXT
+
+                ext = CODEC_EXT[opt["codec"]]
             target = out_dir / f"{src.stem}-imgdoc{ext}"
             n = 1
             while target.exists():
@@ -868,7 +987,14 @@ class ImageDocument:
                         f"too many renders beside {src}; "
                         "pass an explicit output path")
         target.parent.mkdir(parents=True, exist_ok=True)
-        save_image(rendered.image, target, fmt=fmt, quality=quality)
+        if fmt == "AVIF":
+            from .optimize import save_optimized
+
+            save_optimized(rendered.image, target, codec="avif",
+                           quality=quality)
+        else:
+            save_image(rendered.image, target, fmt=fmt,
+                       quality=quality, lossless=lossless)
         return {
             "input": str(src),
             "output": str(target),

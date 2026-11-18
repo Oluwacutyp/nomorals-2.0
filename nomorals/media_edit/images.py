@@ -71,8 +71,14 @@ def save_image(
     fmt: str | None = None,
     quality: int = 90,
     strip_metadata: bool = True,
+    lossless: bool = False,
 ) -> Path:
-    """Save ``img`` to ``path``. Metadata is stripped by default (privacy)."""
+    """Save ``img`` to ``path``. Metadata is stripped by default (privacy).
+
+    ``lossless`` saves WebP without loss (a lossy ``quality`` is
+    ignored for WebP then); PNG is lossless already, JPEG/AVIF
+    ignore the flag.
+    """
     Image = _require_pillow()
     out = Path(path)
     ext = out.suffix.lower()
@@ -97,7 +103,10 @@ def save_image(
         save_img = save_img.convert("RGB")
     kwargs: dict[str, Any] = {}
     if fmt in ("JPEG", "WEBP", "AVIF"):
-        kwargs["quality"] = quality
+        if fmt == "WEBP" and lossless:
+            kwargs["lossless"] = True
+        else:
+            kwargs["quality"] = quality
     # strip_metadata: simply do not pass exif= — Pillow drops it by default.
     if not strip_metadata:
         exif = img.getexif()

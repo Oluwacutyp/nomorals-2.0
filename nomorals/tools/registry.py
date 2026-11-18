@@ -644,6 +644,7 @@ class ToolRegistry:
             "watch_offers",  # streaming availability — title → offers, reconciled (JustWatch core)
             "pagewise",  # page surgery over PDFs — merge/select/rotate/stamp/compress/repair/protect/unlock/archive/scan/sign (Smallpdf + ILovePDF core)
             "learning",  # free-learning collection — vetted courses/textbooks/audiobooks/ebooks/movies/lessons, live search second (OpenCulture core)
+            "optimize",  # image optimisation — codec ladder with measured trials + recommendation (Squoosh core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",
