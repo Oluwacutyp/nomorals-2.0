@@ -1582,18 +1582,52 @@ def _tomorrow_preview(context: Any) -> str:
     return out
 
 
+def _pending_proposal_rows(context: Any) -> list[dict[str, Any]]:
+    """Pending proposals as rows (id + what is being decided).  Never raises."""
+    try:
+        rows = context.db.query(
+            "SELECT id, kind, platform, chat_id, content FROM proactive_log "
+            "WHERE status = 'pending' LIMIT 5")
+        out: list[dict[str, Any]] = []
+        for r in rows or []:
+            out.append(dict(r))
+        return out
+    except Exception as exc:  # noqa: BLE001
+        record_failure("morning_pulse._pending_items.proposals", exc)
+        return []
+
+
+def _pending_proposal_ids(context: Any) -> list[str]:
+    """Ids of the proposals awaiting decision (the pulse buttons' payload)."""
+    return [str(r.get("id") or "") for r in _pending_proposal_rows(context)
+            if str(r.get("id") or "").strip()]
+
+
 def _pending_items(context: Any) -> str:
     """Open proposals, fired alerts, running missions.  Never raises."""
     lines: list[str] = []
-    # proposals awaiting decision
-    try:
-        rows = context.db.query(
-            "SELECT id FROM proactive_log WHERE status = 'pending' LIMIT 5")
-        for r in rows or []:
-            lines.append(f"• proposal {r['id']} awaiting decision")
-    except Exception as exc:  # noqa: BLE001
-        record_failure("morning_pulse._pending_items.proposals", exc)
-        pass
+    # proposals awaiting decision — the line names WHAT is being
+    # decided (kind → platform:chat + content snippet), because a
+    # decision button is only meaningful when the owner can see the
+    # proposal it would decide.
+    for r in _pending_proposal_rows(context):
+        pid = str(r.get("id") or "").strip()
+        if not pid:
+            continue
+        kind = str(r.get("kind") or "").strip()
+        platform = str(r.get("platform") or "").strip()
+        chat_id = str(r.get("chat_id") or "").strip()
+        snippet = " ".join(str(r.get("content") or "").split())
+        if len(snippet) > 70:
+            snippet = snippet[:69] + "…"
+        where = ""
+        if kind or platform or chat_id:
+            where = f" [{kind}→{platform}:{chat_id}]"
+        line = f"• proposal {pid}{where}"
+        if snippet:
+            line += f" — {snippet}"
+        line += " awaiting decision"
+        lines.append(line)
     # finance alerts armed
     try:
         from ..finance.alerts import AlertStore
@@ -1666,17 +1700,24 @@ def _compose_midnight(context: Any) -> tuple[str, list[dict[str, Any]]]:
 
 # ── generalized slot runner ──────────────────────────────────────────
 
-def _deliver_slot_text(context: Any, slot: str, text: str) -> bool:
+def _deliver_slot_text(context: Any, slot: str, text: str,
+                       proposals: list[str] | None = None) -> bool:
     """Deliver a slot's text via Notifier.  Never raises.
 
     No length cut: the gateway chunks long messages losslessly, so the
     full briefing text goes out (paginated), never sliced mid-sentence.
+    The pending-proposal ids ride as the ``"pulse"`` output kind's
+    payload, so the direct delivery carries the decision buttons for
+    the proposals the wrap lists — the scheduled alert never does
+    (its payload holds only the job name).
     """
     spec = BRIEFING_SLOTS.get(slot, BRIEFING_SLOTS["morning"])
     from .notifier import Notifier
     try:
         notifier = Notifier(context)
         res = notifier.publish("pulse", spec["title"], text,
+                               output_kind="pulse",
+                               output_meta={"proposals": list(proposals or [])},
                                force=True)
         delivered = bool(res.get("delivered"))
         if not delivered:
@@ -1777,7 +1818,9 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
         if audio_path:
             stages.append("voice")
 
-    text_ok = _deliver_slot_text(context, slot, text)
+    pending_ids = _pending_proposal_ids(context)
+    text_ok = _deliver_slot_text(context, slot, text,
+                                 proposals=pending_ids)
     audio_ok = _deliver_audio(context, audio_path) if audio_path else False
     stages.append("deliver")
 
@@ -1808,6 +1851,7 @@ def run_slot(context: Any, slot: str = "morning") -> dict[str, Any]:
     result = {"ok": True, "slot": slot, "stages": stages, "text": text,
               "audio_path": audio_path, "delivered_text": text_ok,
               "delivered_audio": audio_ok, "elapsed_s": elapsed,
+              "pending_proposals": pending_ids,
               "stories_delivered": len(story_keys),
               "stories_pending": len(story_items) - len(story_keys)}
     _write_slot_marker(context, slot, result)

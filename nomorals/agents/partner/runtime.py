@@ -2487,6 +2487,8 @@ class PartnerRuntime(
                 ask_reply = self._draft_ask_answer(message)
                 if ask_reply is None:
                     ask_reply = self._proposal_ask_answer(message)
+                if ask_reply is None:
+                    ask_reply = self._trendops_ask_answer(message)
             except Exception:  # noqa: BLE001 - an ask never eats chat
                 _log.exception("ask answer failed")
                 ask_reply = None
@@ -10504,7 +10506,8 @@ class PartnerRuntime(
         if kind == "shorts":
             return self._control_shorts(command.tail or arg)
         if kind == "trendops":
-            return self._control_trendops(command.tail or arg)
+            return self._control_trendops(command.tail or arg,
+                                          chat_key=chat_key)
         if kind == "lens":
             return self._control_lens(command.tail or arg)
 

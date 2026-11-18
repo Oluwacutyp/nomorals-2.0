@@ -66,12 +66,23 @@ class TestAdaptiveButtons(unittest.TestCase):
     def test_scheduled_other_job(self):
         from nomorals.social.chat.adaptive_buttons import adaptive_buttons_for
 
+        # A FAILED run keeps the job strip: Re-run is the content's
+        # action on a job that just failed (lane 25 — the strip is
+        # no longer a default footer on success content).
         kb = adaptive_buttons_for(
-            output_kind="scheduled", payload={"job": "nightly-backup"})
+            output_kind="scheduled",
+            payload={"job": "nightly-backup", "ok": False})
         flat = {label: data for row in kb for label, data in row}
         self.assertEqual(flat["🔁 Re-run"], "schedule run nightly-backup")
         self.assertEqual(flat["📋 Jobs"], "schedule list")
         self._all_callbacks_valid(kb)
+
+    def test_scheduled_success_content_gets_no_strip(self):
+        from nomorals.social.chat.adaptive_buttons import adaptive_buttons_for
+
+        self.assertIsNone(adaptive_buttons_for(
+            output_kind="scheduled",
+            payload={"job": "nightly-backup", "ok": True}))
 
     def test_search_buttons_use_the_query(self):
         from nomorals.social.chat.adaptive_buttons import adaptive_buttons_for

@@ -189,6 +189,15 @@ def noop_reason(tool: str, value: Any) -> str | None:
                 return "quiet shift — nothing ran, nothing fired" \
                     if quiet else None
             # unparseable shift → the generic rule below
+        if value.get("delivered_text") is True:
+            # A tool run that delivered its own message (the pulse
+            # slots publish their briefing directly) has nothing
+            # left to report — the scheduled alert would re-send the
+            # same text with a filler strip.  False means the
+            # delivery itself failed, so the alert stays as the
+            # fallback.  This sits before the generic content rule
+            # because the delivered briefing's text IS content.
+            return "already delivered by the tool run"
         content = [k for k, v in value.items()
                    if k not in _NOISE_KEYS and not _value_is_empty(v)]
         if not content:
@@ -660,8 +669,17 @@ def _trendops_doc(tool: str, value: Mapping[str, Any], *,
         shown = shown + [f"… (+{len(lines) - _PROSE_LINE_LIMIT} more)"]
     sections = (Section("Proposals", quote=tuple(shown),
                         expandable=True),) if shown else ()
+    # The proposals ARE the actions: one Apply button per proposal,
+    # capped at three, packed two per row.  The callback carries the
+    # format only — the footage is asked for when the owner taps
+    # (see _control_trendops), never retyped from the text.
+    pairs = [("🎬 Apply " + slug, "trendops apply " + slug)
+             for p in proposals[:3]
+             for slug in [_plain(p.get("slug"))]
+             if slug]
+    actions = [pairs[i:i + 2] for i in range(0, len(pairs), 2)]
     return Doc(title=title, icon="✅", tone="ok", summary=summary,
-               sections=sections)
+               sections=sections, actions=actions)
 
 
 _BUILDERS = {

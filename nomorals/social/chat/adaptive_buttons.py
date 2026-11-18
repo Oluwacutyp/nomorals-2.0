@@ -37,7 +37,7 @@ __all__ = ["adaptive_buttons_for", "OUTPUT_KINDS"]
 #: (Living Chat P1): a new kind handled here without a manifest
 #: update fails by name.
 OUTPUT_KINDS = frozenset({
-    "pulse_stories", "scheduled", "search", "game", "memory",
+    "pulse", "pulse_stories", "scheduled", "search", "game", "memory",
     "music-ask", "command", "tool",
 })
 
@@ -66,10 +66,23 @@ def _row(*pairs: tuple[str, str]) -> list[Button]:
 
 
 def _scheduled_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
-    """Buttons for a scheduled-job push: actions about THAT job."""
+    """Buttons for a scheduled-job push: actions about THAT job's content.
+
+    The generic Jobs / Status / Re-run strip is the content's action
+    ONLY on a failed run (Re-run re-runs the job that just failed).
+    A successful run whose content carries no action ships NO buttons
+    — a strip under a day-derivation "nothing was told" message is
+    filler, not a buttons system (owner law, 2026-11-11).  Jobs whose
+    content has its own actions keep them: memory-consolidation's
+    Recall / Memories.  Jobs whose report Doc carries actions
+    (trendops Apply) never reach here — the Notifier renders Doc
+    actions instead of adaptive buttons.
+    """
     job = ""
+    ok = None
     if isinstance(payload, dict):
         job = str(payload.get("job") or "").strip()
+        ok = payload.get("ok")
     if job == "memory-consolidation":
         rows = [
             _row((button_label("recall", "Recall"), "recall"), (button_label("memories", "Memories"), "memories")),
@@ -77,14 +90,41 @@ def _scheduled_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
                  (button_label("rerun", "Re-run"), "schedule run memory-consolidation")),
         ]
         return grid_layout([r for r in rows if r])
-    if job:
-        rows = [
-            _row((button_label("jobs", "Jobs"), "schedule list"), (button_label("status", "Status"), "schedule status")),
-            _row((button_label("rerun", "Re-run"), f"schedule run {job}")),
-        ]
-        return grid_layout([r for r in rows if r])
-    row = _row((button_label("jobs", "Jobs"), "schedule list"), (button_label("status", "Status"), "schedule status"))
-    return grid_layout([row] if row else None)
+    if not job or ok is not False:
+        return None
+    rows = [
+        _row((button_label("jobs", "Jobs"), "schedule list"), (button_label("status", "Status"), "schedule status")),
+        _row((button_label("rerun", "Re-run"), f"schedule run {job}")),
+    ]
+    return grid_layout([r for r in rows if r])
+
+
+def _pulse_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
+    """Decision buttons for a pulse briefing's pending proposals.
+
+    One authored row per proposal — [Show, Approve, Deny] — routed
+    through the real proposal-decision verbs (the same shape
+    ``/proposals`` lists).  The rows are returned as authored and
+    are NOT reflowed by :func:`grid_layout`: the triple is one
+    proposal's three verbs, and reflow would pair one proposal's
+    Deny with the next proposal's Show, misattributing the decision.
+    A proposal whose id would push any callback over the 47-byte
+    budget loses that button, never a truncated one.
+    """
+    if not isinstance(payload, dict):
+        return None
+    proposals = payload.get("proposals") or []
+    rows: Keyboard = []
+    for pid in proposals:
+        pid = str(pid or "").strip()
+        if not pid:
+            continue
+        row = _row((f"🔍 {pid}", f"proposals show {pid}"),
+                   ("✅ Approve", f"approve {pid}"),
+                   ("⛔ Deny", f"deny {pid}"))
+        if row:
+            rows.append(row)
+    return rows or None
 
 
 def _pulse_stories_buttons(payload: dict[str, Any] | None) -> Keyboard | None:
@@ -176,9 +216,9 @@ def adaptive_buttons_for(
 ) -> Keyboard | None:
     """Inline keyboard for an output, or None when nothing is relevant.
 
-    ``output_kind`` is the output's kind (``"scheduled"`` / ``"search"``
-    / ``"game"`` / ``"memory"`` / ``"music-ask"`` / ``"command"`` /
-    ``"tool"``) with ``payload`` its structured content. The
+    ``output_kind`` is the output's kind (``"pulse"`` / ``"scheduled"``
+    / ``"search"`` / ``"game"`` / ``"memory"`` / ``"music-ask"`` /
+    ``"command"`` / ``"tool"``) with ``payload`` its structured content. The
     ``"command"`` / ``"tool"`` kinds are recognised — they short-circuit
     the content patterns — but earn NO keyboard: a bare command/tool
     result has no generic action worth a button, and the old retry-only
@@ -195,6 +235,8 @@ def adaptive_buttons_for(
     text happens to mention a game gets job buttons, not game buttons.
     """
     kind = (output_kind or "").strip().lower()
+    if kind == "pulse":
+        return _pulse_buttons(payload)
     if kind == "pulse_stories":
         return _pulse_stories_buttons(payload)
     if kind == "scheduled":

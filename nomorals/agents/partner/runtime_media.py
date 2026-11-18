@@ -7660,12 +7660,146 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 - chat never raises
             return f"shorts failed: {exc}"
 
-    def _control_trendops(self, tail: str) -> Any:
+    # ── trendops footage ask ──────────────────────────────────────────
+    # An Apply tap on a trendops proposal (or a bare
+    # ``/trendops apply <format>``) carries no footage — the format
+    # alone cannot cut.  The command arms a one-shot ask in this chat
+    # and the owner's next message IS the footage: a sent video/file,
+    # or a path/URL in text.  The ask is answered in _process_inner
+    # (runtime.py), after the proposal reason ask, and expires after
+    # the same 15-minute TTL.  "cancel" drops it.
+    def _trendops_ask_store(self) -> dict[str, dict[str, Any]]:
+        store = getattr(self, "_trendops_ask_store_v", None)
+        if store is None:
+            store = {}
+            self._trendops_ask_store_v = store
+        return store
+
+    def _note_trendops_ask(self, chat_key: str, fmt_name: str) -> None:
+        import time
+
+        self._trendops_ask_store()[chat_key] = {
+            "action": "apply", "format": fmt_name, "at": time.time()}
+
+    def _trendops_ask_for_footage(self, chat_key: str,
+                                  fmt_name: str) -> str | None:
+        """Arm the footage ask; the prompt, or None when there is no
+        chat to arm it on (then the caller falls back to usage)."""
+        if not chat_key:
+            return None
+        self._note_trendops_ask(chat_key, fmt_name)
+        return (f"🎬 applying the {fmt_name} format — send the footage "
+                "(a video file, or its path/URL) and I'll cut it. "
+                "('cancel' drops it.)")
+
+    def _trendops_ask_answer(self, message) -> str | None:  # type: ignore[no-untyped-def]
+        """Answer an armed footage ask with the owner's next message.
+
+        Returns the apply result's text, the drop line for "cancel",
+        or None when no ask is armed, it expired, or the message
+        carries no footage (the message then flows on untouched).
+        """
+        import time
+
+        store = self._trendops_ask_store()
+        chat_key = getattr(getattr(message, "chat", None), "key", "") or ""
+        ask = store.get(chat_key)
+        if not ask:
+            return None
+        if time.time() - float(ask.get("at") or 0) > self._PROPOSAL_ASK_TTL_S:
+            store.pop(chat_key, None)
+            return None
+        text = (getattr(message, "text", "") or "").strip()
+        media = list(getattr(message, "media", None) or [])
+        if text.lower() == "cancel" and not media:
+            store.pop(chat_key, None)
+            return "trendops apply dropped — no footage, nothing cut."
+        footage = ""
+        for item in media:
+            path = getattr(item, "path", "") or ""
+            if path:
+                footage = path
+                break
+        if not footage:
+            footage = text
+        if not footage:
+            return None
+        store.pop(chat_key, None)
+        result = self._trendops_apply(ask.get("format") or "", [footage])
+        return result.text if hasattr(result, "text") else str(result)
+
+    def _trendops_apply(self, fmt_name: str, footage: list[str], *,
+                        music: str = "", caption: str = "",
+                        beats: list[float] | None = None) -> Any:
+        """Cut footage to a trend format and queue the post draft.
+
+        The shared execution behind the ``apply`` command branch and
+        the footage-ask answer: the render itself, then the drafts
+        organ (the #43 rule) — the owner is asked "post directly or
+        send for review?" through the draft, never handed a bare path.
+        A draft failure never loses the render; the plain reply is
+        the fallback and the miss is named.
+        """
+        from ...media.trendops import TrendOps
+
+        ops = TrendOps(context=self.context)
+        result = ops.apply_format(
+            footage[0] if len(footage) == 1 else footage,
+            fmt_name, music=music or None,
+            caption=caption or None, beats=beats or None)
+        review = result.get("review", {})
+        problems = review.get("problems") or []
+        note = ((" (review flags: " + "; ".join(problems) + ")")
+                if problems else "")
+        render_line = (f"🎬 cut to {result['format_name']} → "
+                       f"{result['output']}\n"
+                       f"{result['duration']:.1f}s · "
+                       f"{result['width']}x{result['height']} · "
+                       f"{result['segments']} segments · "
+                       f"{result['beats_used']} beats{note}")
+        # The temporal QA verdict rides with the reply so the owner
+        # sees whether the cut actually landed — pass and fail both
+        # speak; an unmeasurable render stays silent, as before.
+        qa = review.get("qa") or {}
+        if qa.get("status") in ("pass", "fail"):
+            render_line += (f"\n🎞️ temporal QA "
+                            f"{qa['status']}: {qa.get('notes', '')}")
+        try:
+            from ...media.trendops.editor import draft_for_render, stamp_render_draft
+            from ...social.drafts import propose_post
+
+            content, metadata = draft_for_render(
+                result, footage=footage, music=music or None,
+                caption=caption or None)
+            queue = self._draft_queue()
+            try:
+                draft = queue.create_draft(
+                    content, platforms=None, metadata=metadata)
+                queue.propose(draft.id)
+            finally:
+                queue.close()
+            # The cut's Museum card now names the draft that
+            # carries it — a stamp failure never loses the
+            # draft (stamp_render_draft never raises).
+            stamp_render_draft(result["output"], draft.id)
+            text, buttons = propose_post(draft)
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+
+            return actionable(f"{render_line}\n\n{text}",
+                              grid_layout([buttons]))
+        except Exception as exc:  # noqa: BLE001 - draft is delivery, not the render
+            _log.warning("trendops: draft failed for %s: %s",
+                         result.get("output"), exc)
+            return (f"{render_line}\n"
+                    f"(couldn't queue the draft: {exc})")
+
+    def _control_trendops(self, tail: str, chat_key: str = "") -> Any:
         """Trend-driven video editing in chat.
 
         /trendops formats                                  — live trend formats
         /trendops apply <format> <footage> [--music <audio>] [--caption "text"]
                                                            — cut footage to a format
+        /trendops apply <format>                           — arms a footage ask
         /trendops capture <url> [--name <slug>] [--niche X] — catch a trending clip
         /trendops propose                                  — peaking formats, ranked
         /trendops remove <slug>                            — drop a format
@@ -7708,10 +7842,19 @@ class RuntimeMediaMixin:
                         f"{r['description'][:60]}")
                 return "\n".join(lines)
             if action == "apply":
-                if len(rest) < 2:
+                if len(rest) < 1:
                     return ("usage: /trendops apply <format> <footage> "
                             "[--music <audio>] [--caption \"text\"]")
                 fmt_name = rest[0]
+                if len(rest) < 2:
+                    # No footage on the line — the Apply button's
+                    # shape.  Ask for it instead of usage text.
+                    prompt = self._trendops_ask_for_footage(chat_key,
+                                                            fmt_name)
+                    if prompt is not None:
+                        return prompt
+                    return ("usage: /trendops apply <format> <footage> "
+                            "[--music <audio>] [--caption \"text\"]")
                 music = ""
                 caption = ""
                 beats: list[float] = []
@@ -7740,63 +7883,14 @@ class RuntimeMediaMixin:
                         footage.append(a)
                         i += 1
                 if not footage:
+                    prompt = self._trendops_ask_for_footage(chat_key,
+                                                            fmt_name)
+                    if prompt is not None:
+                        return prompt
                     return "usage: /trendops apply <format> <footage> [...]"
-                result = ops.apply_format(
-                    footage[0] if len(footage) == 1 else footage,
-                    fmt_name, music=music or None,
-                    caption=caption or None, beats=beats or None)
-                review = result.get("review", {})
-                problems = review.get("problems") or []
-                note = (" (review flags: " + "; ".join(problems) + ")"
-                        if problems else "")
-                render_line = (f"🎬 cut to {result['format_name']} → "
-                               f"{result['output']}\n"
-                               f"{result['duration']:.1f}s · "
-                               f"{result['width']}x{result['height']} · "
-                               f"{result['segments']} segments · "
-                               f"{result['beats_used']} beats{note}")
-                # The temporal QA verdict rides with the reply so the
-                # owner sees whether the cut actually landed — pass
-                # and fail both speak; an unmeasurable render stays
-                # silent, as before.
-                qa = review.get("qa") or {}
-                if qa.get("status") in ("pass", "fail"):
-                    render_line += (f"\n🎞️ temporal QA "
-                                    f"{qa['status']}: {qa.get('notes', '')}")
-                # The cut becomes a post draft: the owner is asked
-                # "post directly or send for review?" through the
-                # drafts organ (the #43 rule), not handed a bare
-                # path. A draft failure never loses the render —
-                # the file exists, so the plain reply is the
-                # fallback and the miss is named.
-                try:
-                    from ...media.trendops.editor import draft_for_render, stamp_render_draft
-                    from ...social.drafts import propose_post
-
-                    content, metadata = draft_for_render(
-                        result, footage=footage, music=music or None,
-                        caption=caption or None)
-                    queue = self._draft_queue()
-                    try:
-                        draft = queue.create_draft(
-                            content, platforms=None, metadata=metadata)
-                        queue.propose(draft.id)
-                    finally:
-                        queue.close()
-                    # The cut's Museum card now names the draft that
-                    # carries it — a stamp failure never loses the
-                    # draft (stamp_render_draft never raises).
-                    stamp_render_draft(result["output"], draft.id)
-                    text, buttons = propose_post(draft)
-                    from ...social.chat.tgbot_buttons import actionable, grid_layout
-
-                    return actionable(f"{render_line}\n\n{text}",
-                                      grid_layout([buttons]))
-                except Exception as exc:  # noqa: BLE001 - draft is delivery, not the render
-                    _log.warning("trendops: draft failed for %s: %s",
-                                 result.get("output"), exc)
-                    return (f"{render_line}\n"
-                            f"(couldn't queue the draft: {exc})")
+                return self._trendops_apply(fmt_name, footage, music=music,
+                                            caption=caption,
+                                            beats=beats or None)
             if action == "capture":
                 if not rest:
                     return ("usage: /trendops capture <url> "

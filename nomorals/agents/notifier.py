@@ -1028,10 +1028,13 @@ class Notifier:
             if _okind is None and kind == "schedule":
                 # Redelivery path: the stored row carries no
                 # output_meta, but the title names the job
-                # ("✅ scheduled: <job>"). Derive it.
+                # ("✅ scheduled: <job>") and its outcome prefix.
+                # Derive both — a redelivered success must not
+                # regain the failure strip.
                 _okind = "scheduled"
                 _ometa = {"job": title.split("scheduled:", 1)[-1].strip()
-                          .lstrip("✅❌ ").strip()}
+                          .lstrip("✅❌ ").strip(),
+                          "ok": not title.lstrip().startswith("❌")}
             if _okind is not None:
                 _kb = adaptive_buttons_for(output_kind=_okind,
                                            payload=_ometa,
