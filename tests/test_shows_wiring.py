@@ -212,12 +212,69 @@ def test_show_publish_clean_goes_public(tmp_path):
         f"episode {show_id} Pilot | good evening Lagos")
     episode_id = out.split(":")[1].strip().split()[0]
     out = host._control_show(f"publish {episode_id}")
-    assert out.startswith("published: Pilot — /p/show-"), out
-    assert "No route serves that path yet" in out
+    assert out.startswith("published: Pilot — live at /p/show-"), out
     stored = host._show_store().get_episode(episode_id)
     assert stored["published"] is True
     assert stored["publish_link"] == f"/p/show-{episode_id}"
     assert "[published]" in host._control_show(f"episodes {show_id}")
+    # The published page reaches the publicface store the /p/ route
+    # reads — otherwise /p/show-<id> would still 404.
+    from nomorals.publicface.publish import PublicPageStore
+
+    pf = PublicPageStore(str(Path(tmp_path) / "data" / "publicface.json"))
+    page = pf.get_by_slug(f"show-{episode_id}")
+    assert page is not None and page.status == "public"
+    assert page.content == "good evening Lagos"
+
+
+def test_show_publish_twice_keeps_one_public_page(tmp_path):
+    host = _reach_host(tmp_path)
+    show_id = _make_show(host)
+    out = host._control_show(
+        f"episode {show_id} Pilot | good evening Lagos")
+    episode_id = out.split(":")[1].strip().split()[0]
+    host._control_show(f"publish {episode_id}")
+    host._control_show(f"publish {episode_id}")
+    from nomorals.publicface.publish import PublicPageStore
+
+    pf = PublicPageStore(str(Path(tmp_path) / "data" / "publicface.json"))
+    rows = [p for p in pf.pages.values()
+            if p.slug == f"show-{episode_id}"]
+    assert len(rows) == 1 and rows[0].status == "public"
+
+
+def test_show_remove_episode_drops_public_page(tmp_path):
+    host = _reach_host(tmp_path)
+    show_id = _make_show(host)
+    out = host._control_show(
+        f"episode {show_id} Pilot | good evening Lagos")
+    episode_id = out.split(":")[1].strip().split()[0]
+    host._control_show(f"publish {episode_id}")
+    from nomorals.publicface.publish import PublicPageStore
+
+    pf = PublicPageStore(str(Path(tmp_path) / "data" / "publicface.json"))
+    assert pf.get_by_slug(f"show-{episode_id}") is not None
+    out = host._control_show(f"remove {episode_id}")
+    assert out.startswith("removed episode: "), out
+    pf = PublicPageStore(str(Path(tmp_path) / "data" / "publicface.json"))
+    assert pf.get_by_slug(f"show-{episode_id}") is None
+
+
+def test_show_delete_show_drops_public_pages(tmp_path):
+    host = _reach_host(tmp_path)
+    show_id = _make_show(host)
+    out = host._control_show(
+        f"episode {show_id} Pilot | good evening Lagos")
+    episode_id = out.split(":")[1].strip().split()[0]
+    host._control_show(f"publish {episode_id}")
+    from nomorals.publicface.publish import PublicPageStore
+
+    pf = PublicPageStore(str(Path(tmp_path) / "data" / "publicface.json"))
+    assert pf.get_by_slug(f"show-{episode_id}") is not None
+    out = host._control_show(f"delete {show_id}")
+    assert out.startswith("deleted show: "), out
+    pf = PublicPageStore(str(Path(tmp_path) / "data" / "publicface.json"))
+    assert pf.get_by_slug(f"show-{episode_id}") is None
 
 
 def test_show_publish_private_markers_stay_draft(tmp_path):

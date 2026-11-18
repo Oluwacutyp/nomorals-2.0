@@ -2471,9 +2471,9 @@ class RuntimeReachMixin:
         publishing delegates to the composer's publicface gate, so an
         episode stays a draft unless the owner publishes it AND it
         carries no private-data markers. The link a published episode
-        gets (/p/show-<id>) is the descriptor the gate returns; no
-        route serves that path yet, and the reply says so instead of
-        pretending the episode is live.
+        gets (/p/show-<id>) is live: publishing also records the page
+        in the publicface store, which the API server's /p/ route
+        serves.
         """
         from ...shows.composer import Episode, Show, compose_episode, publish_episode
 
@@ -2646,15 +2646,21 @@ class RuntimeReachMixin:
                 if not result.published:
                     return (f"left as draft: {episode['title']} — "
                             f"{result.reason}")
-                return (f"published: {episode['title']} — "
-                        f"{result.link.url_path}. No route serves that "
-                        "path yet — the link is the descriptor the gate "
-                        "returns, not a live page.")
+                # The gate's page lives only in memory unless it is
+                # recorded: the /p/ route reads the publicface store,
+                # so a published episode lands there too (one row per
+                # slug — a re-publish replaces the previous page).
+                self._record_publicface_page(result.page)
+                return (f"published: {episode['title']} — live at "
+                        f"{result.link.url_path}.")
             if verb == "delete":
                 show = self._resolve_show(store, rest)
                 if show is None:
                     return (f"no show matching {rest.strip()!r} — "
                             "/show list shows ids.")
+                for episode in store.list_episodes(str(show["id"])):
+                    self._discard_publicface_slug(
+                        f"show-{episode['id']}")
                 store.delete_show(str(show["id"]))
                 return f"deleted show: {show['title']}"
             if verb == "remove":
@@ -2662,6 +2668,7 @@ class RuntimeReachMixin:
                 if episode is None:
                     return (f"no episode matching {rest.strip()!r} — "
                             "/show episodes <show_id> lists them.")
+                self._discard_publicface_slug(f"show-{episode['id']}")
                 store.delete_episode(str(episode["id"]))
                 return f"removed episode: {episode['title']}"
             return usage
@@ -3303,6 +3310,30 @@ class RuntimeReachMixin:
         path = self.context.settings.home_path / "data" / "publicface.json"
         return PublicPageStore(str(path))
 
+    def _record_publicface_page(self, page: Any) -> None:
+        """Persist a published page so the /p/ route serves it.
+
+        One row per slug: a re-publish replaces the previous page
+        instead of stacking a second row under the same slug.
+        """
+        store = self._publicface_store()
+        existing = store.get_by_slug(page.slug)
+        if existing is not None and existing.id != page.id:
+            store.remove(existing.id)
+        store.put(page)
+
+    def _discard_publicface_slug(self, slug: str) -> None:
+        """Drop the stored page for a slug, if one is there.
+
+        A removed show/episode must stop serving immediately — the
+        /p/ route reads this same store, so dropping the row is the
+        unpublish. No page under the slug is a no-op.
+        """
+        store = self._publicface_store()
+        existing = store.get_by_slug(slug)
+        if existing is not None:
+            store.remove(existing.id)
+
     def _resolve_publicface(self, store: Any, ref: str) -> Any:
         """Exact id, else unique id-prefix, else None."""
         ref = (ref or "").strip()
@@ -3323,9 +3354,8 @@ class RuntimeReachMixin:
         so caller_may_run denies non-owners before this runs.
         Approving IS the approval — drafting never publishes, and the
         gate still refuses content carrying private-data markers. The
-        link a published page gets (/p/<slug>) is the descriptor the
-        gate returns; no route serves that path yet, and the reply says
-        so instead of pretending the page is live.
+        link a published page gets (/p/<slug>) is live: the API
+        server's /p/ route serves it from this same store.
         """
         from ...publicface.publish import PublicPage, publish, unpublish
 
@@ -3390,9 +3420,7 @@ class RuntimeReachMixin:
             store.put(page)
             if not result.published:
                 return (f"left as draft: {page.title} — {result.reason}")
-            return (f"published: {page.title} — /p/{page.slug}. "
-                    "No route serves that path yet — the link is the "
-                    "descriptor the gate returns, not a live page.")
+            return (f"published: {page.title} — live at /p/{page.slug}.")
         if verb == "unpublish":
             page = self._resolve_publicface(store, rest)
             if page is None:

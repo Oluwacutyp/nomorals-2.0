@@ -156,7 +156,7 @@ def test_publicface_approve_clean_publishes(tmp_path):
     page_id = _page_id(host)
     out = host._control_publicface(f"approve {page_id}")
     assert "published" in out and "/p/jamb-physics-101" in out
-    assert "No route serves" in out
+    assert "live at /p/jamb-physics-101" in out
     listed = host._control_publicface("list")
     assert "public" in listed
     fresh = PublicPageStore(str(

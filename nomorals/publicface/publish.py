@@ -14,9 +14,10 @@ Rules:
   the page a draft and is returned to the caller. The scanner looks
   for vault/secret/token/password/private-key patterns and credential
   shapes — it is a safety net, not a guarantee; the owner still reviews.
-* SHAREABLE LINK DESCRIPTOR, not hosting. :class:`LinkDescriptor`
-  describes where the page WOULD live (``/p/<slug>``) — this module
-  makes no hosting claim and serves nothing.
+* SHAREABLE LINK, served by the API server. :class:`LinkDescriptor`
+  names where the page lives (``/p/<slug>``) — the API server's /p/
+  route serves it from this store; this module still serves nothing
+  itself and makes no hosting claim beyond that route.
 
 Universal: packs are plain strings. ``KNOWN_PACKS`` names the three
 launch packs (JAMB tutor, Yoruba singing, oral corpus); any other pack
@@ -288,6 +289,19 @@ class PublicPageStore:
     def get(self, page_id: str) -> PublicPage | None:
         """Exact id lookup, else None."""
         return self.pages.get(page_id)
+
+    def get_by_slug(self, slug: str) -> PublicPage | None:
+        """First page with this slug, else None.
+
+        Slugs are not unique in the store (two drafts may share a
+        title); the /p/ route resolves only public pages, so callers
+        that need the served page use
+        :func:`nomorals.publicface.serve.resolve_public_page` instead.
+        """
+        for page in self.pages.values():
+            if page.slug == slug:
+                return page
+        return None
 
     def remove(self, page_id: str) -> bool:
         """Delete a page; False when the id is not in the store."""

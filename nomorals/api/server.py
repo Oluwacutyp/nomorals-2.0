@@ -1343,6 +1343,10 @@ class APIServer:
             "Index of the claimed groups' public season standings "
             "(/standings/<slug>)"
         )
+        self._route_docs[("GET", "/p/<slug>")] = (
+            "Owner-approved public-face pages (/p/<slug>), served as "
+            "plain HTML — drafts never serve"
+        )
 
 
 def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
@@ -1556,6 +1560,52 @@ def _make_handler(server: APIServer) -> type[BaseHTTPRequestHandler]:
                     self._send_error(404, "no such page")
                     return
                 raw = page.encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type",
+                                 "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(raw)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("Content-Security-Policy", CSP)
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.send_header("Referrer-Policy", "no-referrer")
+                self.send_header("X-Frame-Options", "DENY")
+                request_id = getattr(self, "_request_id", "")
+                if request_id:
+                    self.send_header("X-Request-ID", request_id)
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            if method == "GET" and parsed.path.startswith("/p/"):
+                # Public-face pages (lane 68): the /p/<slug> link the
+                # gate returns is now a live page. Public like the site
+                # pages above — the content is owner-approved by design,
+                # so these paths skip bearer <redacted> entirely and never
+                # enter the JSON dispatch (HTML cannot ride it — the
+                # /pair precedent). Drafts, unpublished, unknown and
+                # removed slugs all answer 404, identically — no oracle
+                # for guessing slugs. A broken store is a 503, not a 500.
+                from ..publicface.publish import PublicPageStore
+                from ..publicface.serve import serve_public_page
+
+                settings = getattr(server.context, "settings", None)
+                home = getattr(settings, "home", "") or ""
+                home = home or str(getattr(settings, "home_path", "") or "")
+                try:
+                    store = (
+                        PublicPageStore(
+                            os.path.join(home, "data", "publicface.json"))
+                        if home else PublicPageStore()
+                    )
+                    status, payload = serve_public_page(
+                        store, parsed.path[len("/p/"):])
+                except Exception:  # noqa: BLE001 - a broken store is a 503, not a 500
+                    _log.exception("public page serve failed")
+                    self._send_error(503, "public page unavailable")
+                    return
+                if status != "ok":
+                    self._send_error(404, "no such page")
+                    return
+                raw = payload["html"].encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type",
                                  "text/html; charset=utf-8")
