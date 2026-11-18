@@ -2624,6 +2624,20 @@ class PartnerRuntime(
                     _log.warning("price watch reply send failed: %s", exc)
                 return
             try:
+                snapshot_reply = self._snapshot_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("snapshot hook failed")
+                snapshot_reply = None
+            if snapshot_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, snapshot_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      snapshot_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("snapshot reply send failed: %s", exc)
+                return
+            try:
                 track_reply = self._track_hook(message)
             except Exception:  # noqa: BLE001 - the hook must never eat chat
                 _log.exception("track hook failed")
@@ -3580,6 +3594,17 @@ class PartnerRuntime(
                     ensure_price_history_job(self._scheduler)
                 except Exception as exc:  # noqa: BLE001 - optional
                     _log.warning("price history job not registered: %s",
+                                 exc)
+                # Browser: the snapshot prune tick (daily 03:00 —
+                # page snapshots older than the owner's retention
+                # setting are deleted, files and record together).
+                # Idempotent by name; a stale spec is replaced.
+                try:
+                    from ...browser.snapshot import ensure_snapshot_prune_job
+
+                    ensure_snapshot_prune_job(self._scheduler)
+                except Exception as exc:  # noqa: BLE001 - optional
+                    _log.warning("snapshot prune job not registered: %s",
                                  exc)
                 # Sources: the watchtower tick (every 4 minutes —
                 # watched external services probed from this host;
@@ -6775,6 +6800,42 @@ class PartnerRuntime(
         if result.get("error"):
             return f"couldn't send: {result['error']}"
         return None
+
+    def _snapshot_hook(self, message: ChatMessage) -> str | None:
+        """Archive.ph (#27): "snapshot this page <url>" → her own
+        receipt for the page as it rendered, with its hashes.
+
+        Returns a reply string when a snapshot intent fired, else
+        None. Runs before the flight track hook. Never raises.
+        """
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        from ...browser.snapshot import (
+            SnapshotStore,
+            capture,
+            format_snapshot_reply,
+            parse_snapshot_request,
+        )
+        parsed = parse_snapshot_request(text)
+        if parsed is None:
+            return None
+        try:
+            settings = getattr(self.context, "settings", None)
+            home = getattr(settings, "home", None) if settings else None
+            store = getattr(self, "_snapshots", None)
+            if store is None:
+                store = (SnapshotStore(str(home)) if home
+                         else SnapshotStore())
+                self._snapshots = store
+            try:
+                snap = capture(parsed["url"], store=store)
+            except ValueError as exc:
+                return f"couldn't snapshot that page: {exc}"
+            return format_snapshot_reply(snap)
+        except Exception as exc:  # noqa: BLE001 - the hook must never eat chat
+            record_failure("runtime.PartnerRuntime._snapshot_hook", exc)
+            return "the snapshot failed — try the link again?"
 
     def _price_watch_hook(self, message: ChatMessage) -> str | None:
         """CamelCamelCamel (#22): "watch this on Amazon, tell me

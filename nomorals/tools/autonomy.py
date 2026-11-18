@@ -839,6 +839,29 @@ def register(registry: Any) -> None:
                     "error": f"price history tick failed: {exc}"}
 
     @registry.register(
+        "__snapshot_prune_tick__",
+        description="Run one snapshot prune tick (Archive.ph "
+        "extend): delete page snapshots older than the owner's "
+        "retention setting — files and record together — and report "
+        "what went. Scheduler-internal; runs daily at 03:00. "
+        "Routine and silent when nothing is due; a tick with no "
+        "snapshots makes no network call at all.",
+        capability="owner",
+        result_protocol="dict_ok",
+    )
+    def _snapshot_prune_tick_tool() -> dict[str, Any]:
+        from ..browser.snapshot import SnapshotStore, prune
+
+        try:
+            settings = getattr(_context, "settings", None)
+            home = getattr(settings, "home", None) if settings else None
+            store = SnapshotStore(home) if home else SnapshotStore()
+            return prune(store)
+        except Exception as exc:  # noqa: BLE001 - one bad tick never kills the job
+            return {"ok": False,
+                    "error": f"snapshot prune tick failed: {exc}"}
+
+    @registry.register(
         "__watchtower_tick__",
         description="Run one watchtower tick (Downdetector "
         "build-new): probe every watched external service and "
