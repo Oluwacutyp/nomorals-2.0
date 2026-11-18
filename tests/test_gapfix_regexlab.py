@@ -712,4 +712,4 @@ class TestChatAndCli:
         assert "regex" in PUBLIC_COMMANDS
         assert CONTROL_COMMANDS["regex"] == (1, None)
         assert "regex" in COMMAND_DETAILS
-        assert len(PUBLIC_COMMANDS) == 278
+        assert len(PUBLIC_COMMANDS) == 279

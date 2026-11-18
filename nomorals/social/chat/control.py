@@ -206,7 +206,7 @@ PUBLIC_GAME_COMMANDS: tuple[str, ...] = (
 #: pins the two together — a wave that adds a kind here must add its
 #: menu line in the same change.
 PUBLIC_COMMANDS: frozenset[str] = frozenset([
-    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "explain", "regex", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
+    "help", "ping", "search", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "explain", "regex", "fmt", "news", "translate", "tl", "book", "music", "play", "video", "podcast",
     "map-route", "headline", "teardown",
     "tts", "stt", "look", "image", "lens", "decode", "dns", "whois",
     "cipher", "wisdom", "think",
@@ -436,6 +436,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "devask": (1, None),  # /devask <question or pasted stack trace> | list | show <id> — developer answers with cited sources and executed code (Phind core)
     "explain": (1, None),  # /explain <shell command> | list | show <id> | ingest | status — explain a shell command fragment by fragment from local man pages (ExplainShell core)
     "regex": (1, None),  # /regex <pattern> [:: <text>] | gen <description> | debug <pattern> :: <text> | sub <pattern> :: <replacement> :: <text> | code <id> <lang> | list | show <id> — the regex workbench (Regex101 core)
+    "fmt": (1, None),  # /fmt <text> | <format> <text> | validate <format> <text> | minify <format> <text> | convert <from> <to> <text> | fix <text> | detect <text> — beautify, validate and convert text with located errors (CodeBeautify core)
     "searchdeep": (1, None), # /searchdeep <query>  (power mode)
     "searchleads": (0, 0),   # legit paid-task platform report
     "money": (0, None),      # money opportunities hunter: scan|list|new|profile
@@ -2491,6 +2492,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
     "regex": {"what": "Regex workbench: paste a pattern and sample text and get matches with groups, named groups and positions, a plain-English explanation of every token from a real pattern parser, a step-budget debugger that catches catastrophic backtracking, substitution testing, unit tests run as a suite, and code in your language that is EXECUTED to prove it reproduces the matches. Or describe what the pattern should match and she generates one — then proves it against positive and negative cases before answering. A pattern a flavour does not support is refused by name; a flavour with no engine here is labelled not verifiable, never simulated.",
                 "usage": "/regex <pattern> [:: <text>] | gen <description> | debug <pattern> :: <text> | sub <pattern> :: <replacement> :: <text> | code <id> <lang> | list | show <id>",
                 "example": "/regex \\d{3}-\\d{4} :: call 555-1234 now",
+                "related": "/devask · /compute"},
+    "fmt": {"what": "Text-transformation family: paste text and get it beautified, minified, validated or converted — JSON, JSONL, YAML, TOML, XML, CSV, SQL, CSS, HTML (and JS via prettier when installed). The input is parsed by a real parser first, so a malformed input returns a located error with line, column and a machine-readable kind, never a guess; convert∘convert-back returns equal data; damaged JSON is repaired and the repair is proved with a real parse. A format she cannot detect is refused by name.",
+                "usage": "/fmt <text> | <format> <text> | validate <format> <text> | minify <format> <text> | convert <from> <to> <text> | fix <text> | detect <text>",
+                "example": "/fmt {\"a\": 1}",
                 "related": "/devask · /compute"},
     "searchdeep": {"what": "deep multi-query research with synthesis (power mode).",
                    "usage": "/searchdeep <query>", "example": "/searchdeep eBPF rootkit detection",
@@ -4893,7 +4898,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "money",
                            "searchhist", "research", "news", "osint",
                            "dns", "scan", "audit", "whois", "ports",
-                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "explain", "regex"]),
+                           "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "explain", "regex", "fmt"]),
     ("wisdom keeper — corpus · history · practice", ["wisdom", "wis"]),
     ("building for real", ["code", "py", "devon", "swarm", "task", "gen",
                            "data", "evolve", "upgrade", "arena", "trial",
@@ -5178,7 +5183,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
-      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "explain", "regex"]),
+      "brief", "competitor", "aeo", "alternatives", "compute", "soundtrack", "soundscape", "evidence", "consensus", "papergraph", "scholar", "readpaper", "devask", "explain", "regex", "fmt"]),
     ("wisdom keeper — corpus · history · practice",
      ["wisdom", "wis"]),
     ("building for real — code & missions",
@@ -5381,6 +5386,7 @@ LIST_ONELINERS: dict[str, str] = {
     "devask": "developer answers with cited sources — explanation plus code, every code block executed before it is presented",
     "explain": "shell-command explainer — each fragment annotated with the exact help text for it, grounded in local man pages",
     "regex": "regex workbench — test, explain and debug patterns, generate code that is executed to prove it, or generate a pattern and prove it",
+    "fmt": "beautify, minify, validate and convert text — JSON, YAML, TOML, XML, SQL, CSS, HTML — with errors located by line and column",
     "readpaper": "read a paper and explain it in plain language — findings quoted verbatim, equations and tables unpacked, questions answered from the paper itself",
     "structure": "turn an objective into a structured mission brief",
     "book": "BookForge: write a real book → PDF → send",

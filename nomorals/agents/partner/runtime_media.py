@@ -6062,6 +6062,71 @@ class RuntimeMediaMixin:
         except Exception as exc:  # noqa: BLE001 — never raise in chat
             return f"regex failed: {exc}"
 
+    def _control_fmt(self, tail: str) -> str:
+        """Text-transformation family (CodeBeautify core).
+
+        Public. /fmt beautifies, minifies, validates or converts
+        text — JSON, JSONL, YAML, TOML, XML, CSV, SQL, CSS, HTML (and
+        JS via prettier when installed). The input is parsed by a
+        real parser first, so a malformed input returns a located
+        error (line, column, machine-readable kind), never a guess.
+        /fmt <text> auto-detects the format; /fmt <format> <text>
+        names it; /fmt validate|minify <format> <text> checks or
+        compacts; /fmt convert <from> <to> <text> converts through
+        the shared data model; /fmt fix <text> repairs damaged JSON
+        and proves the repair with a real parse. Never raises: bad
+        input returns usage.
+        """
+        from ...codews.textfmt import format_transform_reply, transform
+
+        tail = (tail or "").strip()
+        usage = ("usage: /fmt <text> | <format> <text> | validate "
+                 "<format> <text> | minify <format> <text> | convert "
+                 "<from> <to> <text> | fix <text> | detect <text>")
+        if not tail:
+            return usage
+        try:
+            parts = tail.split(None, 1)
+            verb = parts[0].lower()
+            rest = parts[1].strip() if len(parts) > 1 else ""
+            if verb in {"help", "--help"}:
+                return usage
+            if verb == "detect":
+                if not rest:
+                    return usage
+                return format_transform_reply(transform(
+                    rest, operation="detect"))
+            if verb == "fix":
+                if not rest:
+                    return usage
+                return format_transform_reply(transform(
+                    rest, operation="fix"))
+            if verb in {"validate", "minify"}:
+                fields = rest.split(None, 1)
+                if len(fields) < 2:
+                    return usage
+                return format_transform_reply(transform(
+                    fields[1], operation=verb,
+                    format_in=fields[0].lower()))
+            if verb == "convert":
+                fields = rest.split(None, 2)
+                if len(fields) < 3:
+                    return usage
+                return format_transform_reply(transform(
+                    fields[2], operation="convert",
+                    format_in=fields[0].lower(),
+                    format_out=fields[1].lower()))
+            fields = tail.split(None, 1)
+            if len(fields) == 2 and fields[0].lower() in (
+                    "json", "jsonl", "yaml", "toml", "xml", "csv", "sql",
+                    "css", "html", "js"):
+                return format_transform_reply(transform(
+                    fields[1], operation="beautify",
+                    format_in=fields[0].lower()))
+            return format_transform_reply(transform(
+                tail, operation="beautify", format_in="auto"))
+        except Exception as exc:  # noqa: BLE001 — never raise in chat
+            return f"fmt failed: {exc}"
 
     def _control_consensus(self, tail: str) -> str:
         """What the literature agrees on (Consensus meter).

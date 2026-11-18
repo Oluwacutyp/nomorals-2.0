@@ -527,7 +527,7 @@ class TestChatRegistration:
         assert "evidence" in CONTROL_COMMANDS
         assert CONTROL_COMMANDS["evidence"] == (1, None)
         assert "evidence" in PUBLIC_COMMANDS
-        assert len(PUBLIC_COMMANDS) == 278
+        assert len(PUBLIC_COMMANDS) == 279
         assert "evidence" in COMMAND_DETAILS
         assert "/evidence" in COMMAND_DETAILS["evidence"]["usage"]
         assert "evidence" in LIST_ONELINERS

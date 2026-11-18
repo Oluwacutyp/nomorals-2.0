@@ -274,7 +274,7 @@ class TestChatRegistration:
         assert "compute" in CONTROL_COMMANDS
         assert CONTROL_COMMANDS["compute"] == (1, None)
         assert "compute" in PUBLIC_COMMANDS
-        assert len(PUBLIC_COMMANDS) == 278
+        assert len(PUBLIC_COMMANDS) == 279
         assert "compute" in COMMAND_DETAILS
         assert "compute" in LIST_ONELINERS
         assert "compute" in [c for _, kinds in LIST_GROUPS

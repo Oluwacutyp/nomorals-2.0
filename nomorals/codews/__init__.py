@@ -29,6 +29,18 @@ from .patch import (
     split_patch,
 )
 from .run import detect_stack, parse_junit_xml, run_build, run_tests
+from .textfmt import (
+    Diagnostic,
+    TransformResult,
+    beautify,
+    convert,
+    detect_format,
+    fix_json,
+    format_transform_reply,
+    minify,
+    transform,
+    validate,
+)
 from .wolfram import WolframClient
 from .workspace import CodeWorkspace, WorkspaceError
 
@@ -60,6 +72,16 @@ __all__ = [
     "split_patch",
     "check_patch",
     "apply_edit_blocks",
+    "Diagnostic",
+    "TransformResult",
+    "beautify",
+    "minify",
+    "validate",
+    "convert",
+    "fix_json",
+    "transform",
+    "detect_format",
+    "format_transform_reply",
     "run_tests",
     "run_build",
     "detect_stack",

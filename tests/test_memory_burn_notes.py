@@ -353,7 +353,7 @@ class ChatRegistrationTests(unittest.TestCase):
         self.assertIn("/burn seal <text>",
                       COMMAND_DETAILS["burn"]["usage"])
         self.assertNotIn("burn", PUBLIC_COMMANDS)
-        self.assertEqual(278, len(PUBLIC_COMMANDS))
+        self.assertEqual(279, len(PUBLIC_COMMANDS))
         self.assertFalse(caller_may_run("burn", False))
         self.assertTrue(caller_may_run("burn", True))
         self.assertIn("/burn", list_catalog())

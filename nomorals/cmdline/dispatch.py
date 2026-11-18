@@ -22,6 +22,7 @@ from .commands.evidence import _cmd_evidence
 from .commands.devask import _cmd_devask
 from .commands.explain import _cmd_explain
 from .commands.regex import _cmd_regex
+from .commands.fmt import _cmd_fmt
 from .commands.consensus import _cmd_consensus
 from .commands.scholar import _cmd_scholar
 from .commands.paper_graph import _cmd_paper_graph
@@ -581,6 +582,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "devask": _CommandSpec(_cmd_devask),
     "explain": _CommandSpec(_cmd_explain),
     "regex": _CommandSpec(_cmd_regex),
+    "fmt": _CommandSpec(_cmd_fmt),
     "consensus": _CommandSpec(_cmd_consensus),
     "scholar": _CommandSpec(_cmd_scholar),
     "papergraph": _CommandSpec(_cmd_paper_graph),

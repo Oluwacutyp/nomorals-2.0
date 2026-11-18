@@ -637,6 +637,7 @@ class ToolRegistry:
             "regex_lab",  # regex workbench — parser/explainer, debugger, codegen, generate-then-prove (Regex101 core)
             "requirements",  # requirements extraction, analysis, graph (dynavio REA core)
             "speedtest",  # throughput measurement — down/up + loaded latency, journaled baseline (Fast.com core)
+            "datatools",  # text-transformation family — parse, validate, transform with located errors (CodeBeautify core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",

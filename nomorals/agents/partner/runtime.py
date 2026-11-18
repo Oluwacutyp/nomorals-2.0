@@ -9834,6 +9834,8 @@ class PartnerRuntime(
             return self._control_explain(command.tail or arg)
         if kind == "regex":
             return self._control_regex(command.tail or arg)
+        if kind == "fmt":
+            return self._control_fmt(command.tail or arg)
         if kind == "director":
             return self._control_director(command.tail or arg)
         if kind == "caption":

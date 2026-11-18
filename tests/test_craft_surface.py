@@ -419,7 +419,7 @@ class GatingTests(unittest.TestCase):
         # update it with the arithmetic whenever a public command
         # is added.)
         self.assertNotIn("craft", PUBLIC_COMMANDS)
-        self.assertEqual(len(PUBLIC_COMMANDS), 278)
+        self.assertEqual(len(PUBLIC_COMMANDS), 279)
         self.assertFalse(caller_may_run("craft", False))
         self.assertTrue(caller_may_run("craft", True))
         cmd = parse_control("/craft coverage")

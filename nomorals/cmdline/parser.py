@@ -58,6 +58,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "devask": [],
     "explain": [],
     "regex": [],
+    "fmt": [],
     "consensus": [],
     "papergraph": [],
     "scholar": [],
@@ -3787,6 +3788,38 @@ def _parser() -> argparse.ArgumentParser:
                          help="replacement for the sub verb")
     regex_p.add_argument("--json", action="store_true",
                          help="Output as JSON")
+
+    fmt_p = sub.add_parser(
+        "fmt", aliases=CLI_ALIASES["fmt"],
+        help="beautify, minify, validate and convert text — JSON, YAML, TOML, XML, SQL, CSS, HTML",
+        description=("nm fmt '<text>' [--json]\\\\n"
+                     "nm fmt json '<text>' [--json]\\\\n"
+                     "nm fmt validate json '<text>' [--json]\\\\n"
+                     "nm fmt minify css 'a { color: red; }' [--json]\\\\n"
+                     "nm fmt convert json yaml '<text>' [--json]\\\\n"
+                     "nm fmt fix \"{'a': 1,}\" [--json]\\\\n"
+                     "nm fmt detect '<text>' [--json]\\\\n"
+                     "The textfmt organ: the input is parsed by a real "
+                     "parser first, so a malformed input returns a "
+                     "located error (line, column, machine-readable "
+                     "kind), never a guess; convert∘convert-back "
+                     "returns equal data; damaged JSON is repaired and "
+                     "the repair is proved with a real parse. A format "
+                     "she cannot detect is refused by name. Text comes "
+                     "from the argument, or from stdin when no text is "
+                     "given."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    fmt_p.add_argument("fmt_query", nargs="*", default=[],
+                       help="text, or validate|minify|convert|fix|detect …")
+    fmt_p.add_argument("--format", dest="fmt_format", default=None,
+                       help="format of the input (json, yaml, toml, xml, "
+                            "csv, sql, css, html, js); auto-detected when "
+                            "omitted")
+    fmt_p.add_argument("--to-format", dest="to_format", default=None,
+                       help="target format for convert")
+    fmt_p.add_argument("--json", action="store_true",
+                       help="Output as JSON")
 
     consensus_p = sub.add_parser(
         "consensus", aliases=CLI_ALIASES["consensus"],
