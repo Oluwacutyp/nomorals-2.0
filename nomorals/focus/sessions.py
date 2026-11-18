@@ -161,6 +161,11 @@ class FocusSession:
     status: str = "active"  # active | paused | done
     interruptions: int = 0
     notes: list[str] = field(default_factory=list)
+    # The focus mix playing through this session, when one is: the
+    # ledger entry links session ↔ mix (MusicForProgramming #31).
+    # Empty when the session runs silent.
+    mix_id: str = ""
+    mix_title: str = ""
 
     def elapsed(self, now: float | None = None) -> float:
         """Focused seconds: wall span minus paused spans."""
@@ -182,7 +187,8 @@ class FocusSession:
                 "pauses": [list(p) for p in self.pauses],
                 "status": self.status,
                 "interruptions": self.interruptions,
-                "notes": list(self.notes)}
+                "notes": list(self.notes),
+                "mix_id": self.mix_id, "mix_title": self.mix_title}
 
     @classmethod
     def from_dict(cls, row: dict[str, Any]) -> FocusSession:
@@ -194,7 +200,9 @@ class FocusSession:
             pauses=[list(p) for p in (row.get("pauses") or [])],
             status=str(row.get("status", "active")),
             interruptions=int(row.get("interruptions") or 0),
-            notes=list(row.get("notes") or []))
+            notes=list(row.get("notes") or []),
+            mix_id=str(row.get("mix_id") or ""),
+            mix_title=str(row.get("mix_title") or ""))
 
 
 class FocusTimer:
@@ -243,17 +251,35 @@ class FocusTimer:
                 return session
         return None
 
-    def start(self, label: str = "", ts: float | None = None) -> FocusSession:
+    def start(self, label: str = "", ts: float | None = None,
+              mix_id: str = "", mix_title: str = "") -> FocusSession:
         """Start a session. Fail fast if one is already running — two
-        "active" sessions would double-count the same minutes."""
+        "active" sessions would double-count the same minutes.
+
+        ``mix_id`` / ``mix_title`` attach a focus mix to the session
+        (MusicForProgramming #31): the ledger entry links
+        session ↔ mix. Empty when the session runs silent.
+        """
         if self.active() is not None:
             raise ValueError("a focus session is already running — "
                              "stop or pause it first")
         now = float(ts if ts is not None else time.time())
         sid = "fc-" + hashlib.sha1(
             f"{label}|{now}".encode("utf-8")).hexdigest()[:12]
-        session = FocusSession(id=sid, label=label, started_at=now)
+        session = FocusSession(id=sid, label=label, started_at=now,
+                               mix_id=mix_id, mix_title=mix_title)
         self.sessions[sid] = session
+        self._save()
+        return session
+
+    def attach_mix(self, session_id: str | None, mix_id: str,
+                   mix_title: str = "") -> FocusSession:
+        """Attach a focus mix to a running session (or the active one)."""
+        session = self._resolve(session_id)
+        if session.status == "done":
+            raise ValueError(f"session {session.id} is done")
+        session.mix_id = mix_id
+        session.mix_title = mix_title
         self._save()
         return session
 

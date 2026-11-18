@@ -11,6 +11,19 @@ on every result.
 from .chat import MUSIC_SOURCES_USAGE, control_music_sources
 from .downloader import DownloadPlan, DownloadResult, download, plan_download
 from .enrichment import EnrichmentChain, EnrichmentResult
+from .focus_mixes import (
+    FocusMix,
+    FocusMixStore,
+    FocusTrack,
+    assemble_mix,
+    find_mix,
+    format_mix_reply,
+    parse_focus_mix_request,
+    parse_rss,
+    refresh_from_series,
+    render_mix,
+    start_focus_session_with_mix,
+)
 from .health import HealthProber, HealthStatus
 from .placements import (
     COMMUNITY_VERIFY_MARGIN,
@@ -136,4 +149,15 @@ __all__ = [
     "globe_dots",
     "format_radio_reply",
     "parse_radio_request",
+    "FocusMix",
+    "FocusMixStore",
+    "FocusTrack",
+    "assemble_mix",
+    "find_mix",
+    "format_mix_reply",
+    "parse_focus_mix_request",
+    "parse_rss",
+    "refresh_from_series",
+    "render_mix",
+    "start_focus_session_with_mix",
 ]

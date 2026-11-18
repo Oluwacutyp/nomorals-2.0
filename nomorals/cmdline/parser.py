@@ -4014,11 +4014,13 @@ def _parser() -> argparse.ArgumentParser:
                         help="Output as JSON")
 
     focus_p = sub.add_parser("focus", aliases=CLI_ALIASES["focus"],
-        help="focus sessions: start, pause, resume, stop, status, today, week, month",
+        help="focus sessions: start, pause, resume, stop, status, today, week, month, mix",
         description=("nm focus [status]\\n"
-                     "nm focus start [label]\\n"
+                     "nm focus start [label] [--mix <id>]\\n"
                      "nm focus pause · resume · stop [note]\\n"
                      "nm focus today · week · month\\n"
+                     "nm focus mix [list] · show <id> · play <id> · "
+                     "assemble [mood] · refresh\\n"
                      "The same sessions as chat /focus, over the same "
                      "timer; week/month render the same weekly/monthly "
                      "review chat does."),

@@ -650,6 +650,7 @@ class ToolRegistry:
             "price_history",  # retail price history — watches, journalled points, drop/stock alerts, chart (CamelCamelCamel core)
             "snapshot",  # page snapshots — rendered DOM + assets + screenshot, hashes as provenance (Archive.ph core)
             "radio",  # live radio stations by place — seeded index, health-checked streams, bounded live samples (Radio.Garden core)
+            "focus_mix",  # focus mixes for deep work — MusicForProgramming series + library assembly + focus sessions
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",

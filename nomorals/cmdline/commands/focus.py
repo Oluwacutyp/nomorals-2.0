@@ -8,7 +8,11 @@ FocusTimer at ``<home>/data/focus.json``. Week/month render through
 same composer chat uses, never a second copy. Only the command names
 in usage strings differ (``nm focus`` for ``/focus``); the Telegram
 button wrappers have no console equivalent, so the text lines print
-bare.
+bare. ``mix`` mirrors chat /focus mix (MusicForProgramming #31):
+list/show/play/assemble/refresh over the same FocusMixStore; play
+starts the session with the mix attached — audio itself goes
+through the chat play spine, so on the console the mix is planned
+and the session runs.
 """
 
 from __future__ import annotations
@@ -84,8 +88,41 @@ def _cmd_focus(args: argparse.Namespace, context: Any) -> int:
         return _usage_error(f"focus unavailable: {exc}")
 
     if action == "start":
+        # nm focus start <label> --mix <id|title|episode N>: start the
+        # session with a mix attached (MusicForProgramming #31).
+        joined = " ".join(rest).strip()
+        label, _, mix_ref = joined.partition("--mix")
+        label = label.strip()
+        mix_ref = mix_ref.strip()
+        if mix_ref:
+            from ...music_sources.focus_mixes import (
+                FocusMixStore,
+                find_mix,
+                format_mix_reply,
+                start_focus_session_with_mix,
+            )
+
+            home = _home_path(context)
+            if home is None:
+                return _usage_error("focus unavailable: no home path")
+            store = FocusMixStore(home)
+            mix = find_mix(store, mix_ref)
+            if mix is None:
+                return _usage_error(
+                    f"no focus mix matches {mix_ref!r} — nm focus mix "
+                    "list to see them")
+            result = start_focus_session_with_mix(
+                timer, store, mix, label=label)
+            if as_json:
+                print(json.dumps({
+                    "session": result["session"].to_dict(),
+                    "mix": mix.to_dict(), "play": result["play"]},
+                    indent=2))
+                return 0
+            print(format_mix_reply(mix, result["session"], result["play"]))
+            return 0
         try:
-            s = timer.start(label=" ".join(rest).strip())
+            s = timer.start(label=label)
         except ValueError as exc:
             return _usage_error(str(exc))
         label = f" ({s.label})" if s.label else ""
@@ -183,6 +220,112 @@ def _cmd_focus(args: argparse.Namespace, context: Any) -> int:
         print(review.render_markdown())
         return 0
 
+    if action == "mix":
+        # MusicForProgramming (#31): the store half of chat /focus mix
+        # — list/show/play/assemble/refresh over the same store. Play
+        # starts the session with the mix attached; audio itself goes
+        # through the chat play spine, so on the console the mix is
+        # planned and the session runs.
+        from ...music_sources.focus_mixes import (
+            MOOD_TAGS,
+            FocusMixStore,
+            assemble_mix,
+            find_mix,
+            format_mix_reply,
+            refresh_from_series,
+            render_mix,
+            start_focus_session_with_mix,
+        )
+        from ...tools.focus_mix import dj_planner, read_owner_taste
+
+        home = _home_path(context)
+        if home is None:
+            return _usage_error("focus unavailable: no home path")
+        store = FocusMixStore(home)
+        subverb = (rest[0].lower() if rest else "list")
+        subrest = " ".join(rest[1:]).strip()
+        if subverb in ("list", ""):
+            mixes = store.list()
+            if as_json:
+                print(json.dumps({"mixes": [m.to_dict() for m in mixes]},
+                                 indent=2))
+                return 0
+            if not mixes:
+                print("no focus mixes yet — nm focus mix assemble builds "
+                      "one from your library, nm focus mix refresh pulls "
+                      "the Music For Programming series.")
+                return 0
+            print("focus mixes:")
+            for mix in mixes:
+                print(f"  {mix.id} — {mix.title} "
+                      f"({len(mix.tracks)} tracks, "
+                      f"{format_duration(mix.duration_s)}, played in "
+                      f"{mix.sessions_played} session(s))")
+            return 0
+        if subverb == "show":
+            mix = find_mix(store, subrest)
+            if mix is None:
+                return _usage_error("no focus mix matches that id or title")
+            if as_json:
+                print(json.dumps({"mix": mix.to_dict()}, indent=2))
+                return 0
+            print(render_mix(mix))
+            return 0
+        if subverb == "play":
+            mix = find_mix(store, subrest)
+            if mix is None:
+                return _usage_error("no focus mix matches that id or title")
+            result = start_focus_session_with_mix(timer, store, mix)
+            if as_json:
+                print(json.dumps({
+                    "session": result["session"].to_dict(),
+                    "mix": mix.to_dict(), "play": result["play"]},
+                    indent=2))
+                return 0
+            print(format_mix_reply(mix, result["session"], result["play"]))
+            return 0
+        if subverb == "assemble":
+            mood = subrest.strip().lower()
+            tags = dict(MOOD_TAGS[mood]) if mood in MOOD_TAGS else {}
+            if mood and mood not in MOOD_TAGS:
+                return _usage_error(
+                    f"unknown mood {mood!r} — darker | lighter | deep | "
+                    "driving | calm | ambient")
+            library = None
+            if getattr(context, "db", None) is not None:
+                try:
+                    from ...media.library import MusicLibrary
+
+                    library = MusicLibrary(context)
+                except Exception:  # noqa: BLE001 - no library, honest
+                    library = None
+            try:
+                mix = assemble_mix(
+                    store, library=library,
+                    feedback_rows=read_owner_taste(), tags=tags,
+                    planner=dj_planner)
+            except ValueError as exc:
+                return _usage_error(str(exc))
+            if as_json:
+                print(json.dumps({"mix": mix.to_dict()}, indent=2))
+                return 0
+            print(render_mix(mix))
+            return 0
+        if subverb == "refresh":
+            result = refresh_from_series(store)
+            if result.get("error"):
+                return _usage_error(
+                    f"series refresh failed: {result['error']}")
+            if as_json:
+                print(json.dumps(result, indent=2))
+                return 0
+            print(f"series refreshed: {result['added']} new episode(s) "
+                  f"of {result['total']} in the feed.")
+            return 0
+        return _usage_error(
+            "usage: nm focus mix [list] · show <id> · play <id> · "
+            "assemble [mood] · refresh")
+
     if action == "status":
         active = timer.active()
         start, now = _today_bounds()
@@ -205,5 +348,5 @@ def _cmd_focus(args: argparse.Namespace, context: Any) -> int:
         return 0
 
     return _usage_error(
-        "usage: nm focus start [label] · pause · resume · stop [note]\n"
-        "       nm focus status · today · week · month")
+        "usage: nm focus start [label] [--mix <id>] · pause · resume · stop [note]\n"
+        "       nm focus status · today · week · month · mix [list|show|play|assemble|refresh]")

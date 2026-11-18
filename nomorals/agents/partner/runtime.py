@@ -2654,6 +2654,23 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("snapshot reply send failed: %s", exc)
                 return
+            # MusicForProgramming (#31): "put on a coding mix" /
+            # "focus music, darker" → focus session + mix, first
+            # track playing. Owner only, non-slash, never eats chat.
+            try:
+                focus_reply = self._focus_mix_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("focus mix hook failed")
+                focus_reply = None
+            if focus_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, focus_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      focus_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("focus mix reply send failed: %s", exc)
+                return
             try:
                 radio_reply = self._radio_hook(message)
             except Exception:  # noqa: BLE001 - the hook must never eat chat
@@ -6943,6 +6960,130 @@ class PartnerRuntime(
         except Exception as exc:  # noqa: BLE001 - the hook must never eat chat
             record_failure("runtime.PartnerRuntime._radio_hook", exc)
             return "the radio lookup failed — try the place again?"
+
+    def _focus_mix_player(self, chat_key: str) -> Any | None:
+        """Play-path for a focus mix's first track, via the play spine.
+
+        Returns a ``player(track)`` callable for
+        :func:`start_focus_session_with_mix`, or None when this
+        runtime has no play control (the mix is then planned and the
+        session runs, and the reply says so honestly).
+        """
+        play_fn = getattr(self, "_control_play", None)
+        if not callable(play_fn) or not chat_key:
+            return None
+
+        def _play(track: Any) -> dict[str, Any]:
+            query = (str(getattr(track, "url", "") or "").strip()
+                     or f"{track.title} — {track.artist}".strip(" —"))
+            ack = play_fn("play " + query, chat_key=chat_key)
+            return {"status": "queued", "detail": str(ack or "")}
+
+        return _play
+
+    def _focus_mix_hook(self, message: ChatMessage) -> str | None:
+        """MusicForProgramming (#31): "put on a coding mix" /
+        "focus music, darker" / "put on episode 79" → a focus session
+        with a mix attached, first track playing via the play spine.
+
+        The mix comes from the owner's library first (assembled from
+        listening history, sequenced by the DJ engine); with no
+        library to assemble from, the Music For Programming series
+        itself is the fallback, named as such. Returns a reply string
+        when a focus-mix intent fired, else None. Never raises.
+        """
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        from ...music_sources.focus_mixes import (
+            MOOD_TAGS,
+            FocusMixStore,
+            assemble_mix,
+            find_mix,
+            format_mix_reply,
+            parse_focus_mix_request,
+            refresh_from_series,
+            start_focus_session_with_mix,
+        )
+        from ...tools.focus_mix import dj_planner, read_owner_taste
+
+        parsed = parse_focus_mix_request(text)
+        if parsed is None:
+            return None
+        try:
+            settings = getattr(self.context, "settings", None)
+            home = getattr(settings, "home", None) if settings else None
+            store = getattr(self, "_focus_mixes", None)
+            if store is None:
+                store = (FocusMixStore(str(home)) if home
+                         else FocusMixStore())
+                self._focus_mixes = store
+            timer = self._focus_timer()
+            chat_key = getattr(getattr(message, "chat", None), "key", "")
+            maker = getattr(self, "_focus_mix_player", None)
+            player = maker(chat_key) if callable(maker) else None
+            if parsed["kind"] == "episode":
+                number = int(parsed["episode"])
+                mix = find_mix(store, f"episode {number}")
+                if mix is None:
+                    refreshed = refresh_from_series(store)
+                    if refreshed.get("error"):
+                        return ("couldn't pull the series to find "
+                                f"episode {number}: {refreshed['error']}")
+                    mix = find_mix(store, f"episode {number}")
+                if mix is None:
+                    total = 0
+                    for candidate in store.list():
+                        if candidate.id.startswith("mfp-"):
+                            total += 1
+                    return (f"episode {number} isn't in the Music For "
+                            "Programming series I know "
+                            f"({total} episodes) — try an episode "
+                            "number the series actually has.")
+            else:
+                mood = parsed.get("mood")
+                tags = dict(MOOD_TAGS[mood]) if mood in MOOD_TAGS else {}
+                library = None
+                db = getattr(self.context, "db", None)
+                if db is not None:
+                    try:
+                        from ...media.library import MusicLibrary
+
+                        library = MusicLibrary(self.context)
+                    except Exception:  # noqa: BLE001 - no library, fallback
+                        library = None
+                try:
+                    mix = assemble_mix(
+                        store, library=library,
+                        feedback_rows=read_owner_taste(), tags=tags,
+                        planner=dj_planner)
+                except ValueError:
+                    refreshed = refresh_from_series(store)
+                    if refreshed.get("error"):
+                        return ("no tracks in your library to assemble "
+                                "a mix from, and the series feed "
+                                f"didn't answer: {refreshed['error']}")
+                    series = [m for m in store.list()
+                              if m.id.startswith("mfp-")]
+                    if not series:
+                        return ("no tracks in your library to assemble "
+                                "a mix from, and the series came back "
+                                "with no episodes.")
+                    series.sort(key=lambda m: m.id)
+                    mix = series[-1]
+                    note = ("no library tracks to assemble from — "
+                            "playing the latest Music For Programming "
+                            "episode instead")
+                    if not any(note in n for n in mix.notes):
+                        mix.notes.append(note)
+            result = start_focus_session_with_mix(
+                timer, store, mix, player=player,
+                label=mix.title if parsed["kind"] == "episode" else "")
+            return format_mix_reply(mix, result["session"],
+                                    result["play"])
+        except Exception as exc:  # noqa: BLE001 - the hook must never eat chat
+            record_failure("runtime.PartnerRuntime._focus_mix_hook", exc)
+            return "the focus mix failed — try it again?"
 
     def _price_watch_hook(self, message: ChatMessage) -> str | None:
         """CamelCamelCamel (#22): "watch this on Amazon, tell me

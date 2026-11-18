@@ -412,6 +412,11 @@ MODULE_PINS: dict[str, int] = {
     # foundation tool. The registry loads it dynamically by dotted
     # name, never by static import.
     "nomorals.tools.radio": 5,
+    # tools/focus_mix is the same shape: a tool *surface* over the
+    # L0 music_sources organ (the focus mixes) plus the L4 DJ engine
+    # for sequencing — not an L4 foundation tool. The registry loads
+    # it dynamically by dotted name, never by static import.
+    "nomorals.tools.focus_mix": 5,
     # tools/flight_track is the same shape: a tool *surface* over the
     # L5 travel organ (the live flight-tracking organ), not an L4
     # foundation tool. The registry loads it dynamically by dotted

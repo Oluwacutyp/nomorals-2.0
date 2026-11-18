@@ -1438,16 +1438,120 @@ class RuntimeReachMixin:
         return FocusTimer(str(path))
 
     def _control_focus(self, tail: str, *, chat_key: str = "") -> str:
-        """Focus sessions + week review: /focus start|pause|resume|stop|status|today|week|month."""
+        """Focus sessions + week review: /focus start|pause|resume|stop|status|today|week|month|mix."""
         from ...focus.sessions import format_duration
 
         parts = (tail or "").strip().split(None, 1)
         verb = parts[0].lower() if parts else "status"
         rest = parts[1] if len(parts) > 1 else ""
         timer = self._focus_timer()
+        if verb == "mix":
+            # MusicForProgramming (#31): /focus mix list|show|play|
+            # assemble|refresh over the focus-mix store.
+            from ...music_sources.focus_mixes import (
+                MOOD_TAGS,
+                FocusMixStore,
+                assemble_mix,
+                find_mix,
+                format_mix_reply,
+                refresh_from_series,
+                render_mix,
+                start_focus_session_with_mix,
+            )
+            from ...tools.focus_mix import dj_planner, read_owner_taste
+
+            store = FocusMixStore(self.context.settings.home_path)
+            sub = (rest or "").strip().split(None, 1)
+            subverb = sub[0].lower() if sub else "list"
+            subrest = sub[1] if len(sub) > 1 else ""
+            if subverb in ("list", ""):
+                mixes = store.list()
+                if not mixes:
+                    return ("no focus mixes yet — /focus mix assemble "
+                            "builds one from your library, /focus mix "
+                            "refresh pulls the Music For Programming "
+                            "series.")
+                lines = ["focus mixes:"]
+                for mix in mixes:
+                    lines.append(
+                        f"  {mix.id} — {mix.title} "
+                        f"({len(mix.tracks)} tracks, "
+                        f"{format_duration(mix.duration_s)}, "
+                        f"played in {mix.sessions_played} session(s))")
+                return "\n".join(lines)
+            if subverb == "show":
+                mix = find_mix(store, subrest)
+                if mix is None:
+                    return ("no focus mix matches that id or title — "
+                            "/focus mix list to see them.")
+                return render_mix(mix)
+            if subverb == "play":
+                mix = find_mix(store, subrest)
+                if mix is None:
+                    return ("no focus mix matches that id or title — "
+                            "/focus mix list to see them.")
+                result = start_focus_session_with_mix(
+                    timer, store, mix,
+                    player=self._focus_mix_player(chat_key))
+                return format_mix_reply(mix, result["session"],
+                                        result["play"])
+            if subverb == "assemble":
+                mood = subrest.strip().lower()
+                tags = dict(MOOD_TAGS[mood]) if mood in MOOD_TAGS else {}
+                if mood and mood not in MOOD_TAGS:
+                    return (f"unknown mood {mood!r} — darker | lighter | "
+                            "deep | driving | calm | ambient")
+                library = None
+                db = getattr(self.context, "db", None)
+                if db is not None:
+                    try:
+                        from ...media.library import MusicLibrary
+
+                        library = MusicLibrary(self.context)
+                    except Exception:  # noqa: BLE001 - no library, honest
+                        library = None
+                try:
+                    mix = assemble_mix(
+                        store, library=library,
+                        feedback_rows=read_owner_taste(), tags=tags,
+                        planner=dj_planner)
+                except ValueError as exc:
+                    return str(exc)
+                return render_mix(mix)
+            if subverb == "refresh":
+                result = refresh_from_series(store)
+                if result.get("error"):
+                    return f"series refresh failed: {result['error']}"
+                return (f"series refreshed: {result['added']} new "
+                        f"episode(s) of {result['total']} in the feed.")
+            return ("usage: /focus mix [list] · show <id> · play <id> · "
+                    "assemble [mood] · refresh")
         if verb == "start":
+            # /focus start <label> --mix <id|title|episode N>: start
+            # the session with a mix attached, first track playing.
+            label, _, mix_ref = rest.partition("--mix")
+            label = label.strip()
+            mix_ref = mix_ref.strip()
+            if mix_ref:
+                from ...music_sources.focus_mixes import (
+                    FocusMixStore,
+                    find_mix,
+                    format_mix_reply,
+                    start_focus_session_with_mix,
+                )
+
+                store = FocusMixStore(self.context.settings.home_path)
+                mix = find_mix(store, mix_ref)
+                if mix is None:
+                    return (f"no focus mix matches {mix_ref!r} — "
+                            "/focus mix list to see them.")
+                result = start_focus_session_with_mix(
+                    timer, store, mix,
+                    player=self._focus_mix_player(chat_key), label=label)
+                return format_mix_reply(mix, result["session"],
+                                        result["play"])
             try:
-                s = timer.start(label=rest.strip())
+                s = timer.start(label=label)
             except ValueError as exc:
                 return str(exc)
             label = f" ({s.label})" if s.label else ""
@@ -1550,8 +1654,8 @@ class RuntimeReachMixin:
             label = f" ({active.label})" if active.label else ""
             return (f"focus {state}{label} — {format_duration(active.elapsed())} so far.\n"
                     f"{today_line}")
-        return ("usage: /focus start [label] · pause · resume · stop [note]\n"
-                "       /focus status · today · week · month")
+        return ("usage: /focus start [label] [--mix <id>] · pause · resume · stop [note]\n"
+                "       /focus status · today · week · month · mix [list|show|play|assemble|refresh]")
 
     # ── decision journal: /decisions ──────────────────────────────────
     def _decisions_journal(self) -> Any:

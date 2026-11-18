@@ -400,6 +400,18 @@ MUSIC_REGISTRY: List[MusicSource] = [
        bulk=False, api=False, bot_wall=False, etiquette=OPEN_POLITE,
        notes="Public-domain classical recordings and sheet music.",
        pack={"tradition": "classical"}),
+    _M(id="musicforprogramming", name="Music For Programming",
+       source_class="open", auth="none", formats=["MP3"],
+       quality_ceiling="MP3", licence="free streaming/download",
+       volatility="indie", bulk=False, api=False, bot_wall=False,
+       etiquette=OPEN_POLITE,
+       notes="Datassette's numbered series of ~1-hour ambient/"
+             "electronic/instrumental mixes for programming "
+             "(79 episodes at last check, 2026-11-18). Keyless RSS "
+             "feed at /rss.xml carries every episode with a direct "
+             "MP3 enclosure and duration — the feed is the seed for "
+             "Devon's focus mixes (music_sources/focus_mixes.py); "
+             "each episode is one long mix, not a track list."),
     _M(id="freesound", name="Freesound", source_class="open", auth="account",
        formats=["WAV", "MP3", "FLAC"], quality_ceiling="varies by file",
        licence="CC per-file (CC0 / CC-BY / CC-BY-NC)",
