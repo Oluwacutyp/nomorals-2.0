@@ -2686,6 +2686,20 @@ class PartnerRuntime(
                     _log.warning("radio reply send failed: %s", exc)
                 return
             try:
+                union_reply = self._union_catalog_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("union catalogue hook failed")
+                union_reply = None
+            if union_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, union_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      union_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("union catalogue reply send failed: %s", exc)
+                return
+            try:
                 track_reply = self._track_hook(message)
             except Exception:  # noqa: BLE001 - the hook must never eat chat
                 _log.exception("track hook failed")
@@ -7304,6 +7318,44 @@ class PartnerRuntime(
             return render_guide(guide)
         except Exception as exc:  # noqa: BLE001 - the hook must never eat chat
             record_failure("runtime.PartnerRuntime._delete_guide_hook", exc)
+            return None
+
+    def _union_catalog_hook(self, message: ChatMessage) -> str | None:
+        """Anna's Archive (#33): "find me <title>, any format" /
+        "find the book <title>" / "where can I read <title>" → the
+        union catalogue, answering which sources hold it and which are
+        alive right now.
+
+        Returns a reply string when a catalogue intent fired, else
+        None. Owner only, non-slash, never eats chat. Never raises.
+        """
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        from ...books.union_catalog import (
+            UnionCatalog,
+            format_catalog_reply,
+            parse_catalog_request,
+        )
+        parsed = parse_catalog_request(text)
+        if parsed is None:
+            return None
+        try:
+            settings = getattr(self.context, "settings", None)
+            home = getattr(settings, "home", None) if settings else None
+            library = None
+            try:
+                from ...books.library import Library
+
+                library = Library(self.context)
+            except Exception:  # noqa: BLE001 — a broken library leg degrades
+                library = None
+            catalog = UnionCatalog(
+                str(home) if home else None, library=library)
+            works = catalog.find(parsed["query"], live=True, limit=8)
+            return format_catalog_reply(parsed["query"], works)
+        except Exception as exc:  # noqa: BLE001 - the hook must never eat chat
+            record_failure("runtime.PartnerRuntime._union_catalog_hook", exc)
             return None
 
     def _track_hook(self, message: ChatMessage) -> str | None:
