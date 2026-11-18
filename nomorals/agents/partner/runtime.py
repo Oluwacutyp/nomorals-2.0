@@ -11453,6 +11453,9 @@ class PartnerRuntime(
         if kind == "careers":
             return self._control_careers(command.tail or arg,
                                          chat_key=chat_key)
+        if kind == "recruit":
+            return self._control_recruit(command.tail or arg,
+                                         chat_key=chat_key)
         if kind == "drafts":
             return self._control_drafts(command.tail or arg,
                                         chat_key=chat_key,

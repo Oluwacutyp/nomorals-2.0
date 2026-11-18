@@ -152,6 +152,11 @@ LAYERS: dict[str, int] = {
     # class measures. Imports core only; imported by goals providers
     # (L4, same layer) and agents (L5). L4, peer of finance/learn.
     "careers": 4,
+    # recruitment/ is the recruiter's organ (B42): per-vacancy
+    # independent jobs (own queue/scraper/stats/CV flow), tiering
+    # rules, /status board. Imports core only; imported by tools
+    # (L4, same layer) and agents (L5). L4, peer of careers.
+    "recruitment": 4,
     # legal/ is the legal-aid service organ: imports documents (L4),
     # imported by agents (L5). L4.
     "legal": 4,

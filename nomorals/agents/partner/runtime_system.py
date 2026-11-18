@@ -2316,6 +2316,243 @@ class RuntimeSystemMixin:
                 "note <app> | <text> | attach <app> <artifact> | "
                 "remove <app> | stages")
 
+    # ── recruit: /recruit (B42) ───────────────────────────────────────
+    def _recruitment_store(self) -> Any:
+        """The recruitment store (nomorals/recruitment), resolved via
+        the process settings — the same resolution the recruit brain
+        tool uses, so surface and tool read one file."""
+        from ...core.config import get_settings
+        from ...recruitment.store import RecruitmentStore, recruitment_path
+
+        return RecruitmentStore(recruitment_path(get_settings()))
+
+    def _control_recruit(self, tail: str, chat_key: str = "") -> Any:
+        """ /recruit — the recruitment module board and its verbs.
+
+        /recruit                          — the /status board: every
+                                            vacancy with queue depth,
+                                            tier counts, scrape state
+        /recruit status [<vac>]           — the board, or one vacancy
+                                            whole (requirements, stats,
+                                            candidates by tier)
+        /recruit add <title> | <employer> [| <source_url>]
+               [| skills: a, b] [| min: N]
+               [| deadline: YYYY-MM-DD] [| location: X]
+                                          — open a vacancy (its own job)
+        /recruit list                     — vacancies, one line each
+        /recruit scrape <vac>             — run the vacancy's scrape now
+        /recruit source <vac> | <url> [| json|html|auto]
+                                          — point it at its applicants
+        /recruit candidate <vac> | <name> | <email> [| <phone>]
+               [| years: N] [| skills: a, b] [| location: X]
+               [| cv: <text>]             — intake one candidate
+        /recruit tier <cand>              — one candidate's tier, score,
+                                            reasons
+        /recruit close|open <vac>         — stop / resume intakes
+        /recruit remove <vac>             — delete the vacancy + queue
+
+        <vac> is a vacancy id (or unique prefix), #n from the board,
+        or a unique part of "title employer"; <cand> is a candidate
+        id (or unique prefix) or a unique part of "name email".
+        Owner-only.  /status itself stays her live-state command —
+        this board is /recruit status, not a hijack of it.
+        """
+        from datetime import UTC, datetime
+
+        from ...recruitment import surface as recruit_surface
+        from ...recruitment.scraper import scrape_vacancy
+        from ...recruitment.store import RecruitmentError
+
+        store = self._recruitment_store()
+        parts = (tail or "").split(None, 1)
+        verb = parts[0].lower() if parts else "status"
+        rest = parts[1].strip() if len(parts) > 1 else ""
+
+        def _resolve_vac(ref: str) -> Any:
+            vac, cands = recruit_surface.resolve_vacancy(store, ref)
+            if vac is None:
+                return None, recruit_surface.unknown_vacancy_text(
+                    ref, cands)
+            return vac, None
+
+        def _deadline(text: str) -> float | None:
+            try:
+                return datetime.strptime(text.strip(), "%Y-%m-%d").replace(
+                    hour=12, tzinfo=UTC).timestamp()
+            except ValueError:
+                return None
+
+        if verb in ("status", "board", "list", ""):
+            if verb == "status" and rest:
+                vac, error = _resolve_vac(rest)
+                if vac is None:
+                    return error
+                return recruit_surface.render_vacancy(store, vac)
+            if verb == "list":
+                vacs = store.list_vacancies()
+                if not vacs:
+                    return ("no vacancies yet — /recruit add "
+                            "<title> | <employer> opens the first one.")
+                return "\n".join(
+                    f"#{i} {v.employer} — {v.title} ({v.status}) · "
+                    f"queue {store.stats(v.id)['queue_depth']} "
+                    f"· `{v.id}`"
+                    for i, v in enumerate(vacs, 1))
+            text = recruit_surface.render_status_board(store)
+            from ...social.chat.tgbot_buttons import actionable, grid_layout
+            buttons: list[tuple[str, str]] = []
+            for i, vac in enumerate(store.list_vacancies()[:15], 1):
+                buttons.append(
+                    (f"🔍 #{i} scrape", f"recruit scrape {vac.id}"))
+                buttons.append(
+                    (f"📋 #{i} view", f"recruit status {vac.id}"))
+            if buttons:
+                return actionable(text, grid_layout([buttons]))
+            return text
+        if verb == "add":
+            fields = [f.strip() for f in rest.split("|")]
+            if len(fields) < 2 or not fields[0] or not fields[1]:
+                return ("usage: /recruit add <title> | <employer> "
+                        "[| <source_url>] [| skills: a, b] [| min: N] "
+                        "[| deadline: YYYY-MM-DD] [| location: X]")
+            source_url, skills, location = "", "", ""
+            min_years, deadline = 0.0, None
+            for extra in fields[2:]:
+                if extra.startswith(("http://", "https://")):
+                    source_url = extra
+                elif extra.lower().startswith("skills:"):
+                    skills = extra.split(":", 1)[1].strip()
+                elif extra.lower().startswith("min:"):
+                    try:
+                        min_years = float(
+                            extra.split(":", 1)[1].strip())
+                    except (TypeError, ValueError):
+                        return f"min: needs a number, got {extra!r}"
+                elif extra.lower().startswith("deadline:"):
+                    deadline = _deadline(extra.split(":", 1)[1])
+                    if deadline is None:
+                        return (f"deadline: needs YYYY-MM-DD, "
+                                f"got {extra!r}")
+                elif extra.lower().startswith("location:"):
+                    location = extra.split(":", 1)[1].strip()
+                elif extra:
+                    return (f"don't know what {extra!r} is — "
+                            "add takes a source URL, skills:, min:, "
+                            "deadline: or location:")
+            try:
+                vac = store.add_vacancy(
+                    fields[0], fields[1], source_url=source_url,
+                    required_skills=skills, min_years=min_years,
+                    deadline=deadline, location=location)
+            except RecruitmentError as exc:
+                return str(exc)
+            return (f"opened **{vac.employer} — {vac.title}** "
+                    f"· `{vac.id}`\n  board: /recruit status")
+        if verb == "scrape":
+            vac, error = _resolve_vac(rest)
+            if vac is None:
+                return error
+            client = getattr(self, "_recruitment_http_client", None)
+            out = scrape_vacancy(store, vac, client=client)
+            if out["ok"]:
+                return (f"scraped **{vac.employer} — {vac.title}**: "
+                        f"{out['new']} new, {out['seen']} seen")
+            return (f"scrape failed for **{vac.employer} — "
+                    f"{vac.title}**: {out['error']}")
+        if verb == "source":
+            fields = [f.strip() for f in rest.split("|")]
+            if len(fields) < 2 or not fields[0] or not fields[1]:
+                return ("usage: /recruit source <vac> | <url> "
+                        "[| json|html|auto]")
+            vac, error = _resolve_vac(fields[0])
+            if vac is None:
+                return error
+            kind = (fields[2].strip().lower()
+                    if len(fields) > 2 else "auto")
+            try:
+                updated = store.set_source(vac.id, fields[1],
+                                           source_kind=kind)
+            except RecruitmentError as exc:
+                return str(exc)
+            return (f"**{updated.employer} — {updated.title}** now "
+                    f"scrapes {updated.source_url} ({kind})")
+        if verb == "candidate":
+            fields = [f.strip() for f in rest.split("|")]
+            if len(fields) < 3 or not fields[0] \
+                    or not fields[1] or not fields[2]:
+                return ("usage: /recruit candidate <vac> | <name> | "
+                        "<email> [| <phone>] [| years: N] "
+                        "[| skills: a, b] [| location: X] "
+                        "[| cv: <text>]")
+            vac, error = _resolve_vac(fields[0])
+            if vac is None:
+                return error
+            phone, location, cv_text, skills = "", "", "", ""
+            years = 0.0
+            for extra in fields[3:]:
+                if not extra:
+                    continue
+                low = extra.lower()
+                if low.startswith("years:"):
+                    try:
+                        years = float(extra.split(":", 1)[1].strip())
+                    except (TypeError, ValueError):
+                        return f"years: needs a number, got {extra!r}"
+                elif low.startswith("skills:"):
+                    skills = extra.split(":", 1)[1].strip()
+                elif low.startswith("location:"):
+                    location = extra.split(":", 1)[1].strip()
+                elif low.startswith("cv:"):
+                    cv_text = extra.split(":", 1)[1].strip()
+                elif ":" not in extra and not phone:
+                    phone = extra
+                else:
+                    return (f"don't know what {extra!r} is — "
+                            "candidate takes a phone, years:, skills:, "
+                            "location: or cv:")
+            try:
+                cand, is_new = store.add_candidate(
+                    vac.id, name=fields[1], email=fields[2],
+                    phone=phone, location=location, years=years,
+                    skills=skills, cv_text=cv_text)
+            except RecruitmentError as exc:
+                return str(exc)
+            seen = "intook" if is_new else "already had"
+            return (f"{seen} **{cand.name}** for "
+                    f"**{vac.employer} — {vac.title}** — tier "
+                    f"{cand.tier} (score {cand.score:g})\n  "
+                    + "; ".join(cand.tier_reasons))
+        if verb == "tier":
+            cand, cands = recruit_surface.resolve_candidate(store, rest)
+            if cand is None:
+                return recruit_surface.unknown_candidate_text(
+                    rest, cands)
+            return (f"**{cand.name}** — tier {cand.tier} "
+                    f"(score {cand.score:g})\n  "
+                    + "; ".join(cand.tier_reasons))
+        if verb in ("close", "open"):
+            vac, error = _resolve_vac(rest)
+            if vac is None:
+                return error
+            status = "closed" if verb == "close" else "open"
+            try:
+                updated = store.set_vacancy_status(vac.id, status)
+            except RecruitmentError as exc:
+                return str(exc)
+            return (f"**{updated.employer} — {updated.title}** is "
+                    f"now {status}.")
+        if verb == "remove":
+            vac, error = _resolve_vac(rest)
+            if vac is None:
+                return error
+            store.remove_vacancy(vac.id)
+            return (f"removed **{vac.employer} — {vac.title}** "
+                    f"({vac.id}) and its queue.")
+        return ("usage: /recruit [status [<vac>]] | add <title> | "
+                "<employer> | list | scrape <vac> | source <vac> | "
+                "<url> | candidate <vac> | <name> | <email> | "
+                "tier <cand> | close|open <vac> | remove <vac>")
+
     # ── ideas: /ideas (WS3 P5) ────────────────────────────────────────
     def _idea_tracker(self) -> Any:
         """IdeaTracker over the context db, or None when no db is

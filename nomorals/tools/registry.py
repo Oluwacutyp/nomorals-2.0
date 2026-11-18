@@ -657,6 +657,7 @@ class ToolRegistry:
             "representation",  # "what did you tell X for me?" over the representation ledger
             "group_health",  # churn / growth / topic clusters for WhatsApp group health
             "photo_editor",  # Studio photo editor — PSD documents, ladder edits, Studio page (PhotoCraft port)
+            "recruitment",  # per-vacancy recruitment jobs + tiering + /status board (B42)
             "workspace",
             "trading",
             "characters",

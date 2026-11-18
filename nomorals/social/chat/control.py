@@ -953,6 +953,7 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "goal": (0, None),        # /goal add|list|done|snooze|remove
     "goals": (0, None),       # /goals [list [class]] | briefing | review | focus | progress <goal> | add <title> [in <class>] | class <goal> <class> | classes — goal classes board (owner-only)
     "careers": (0, None),     # /careers [list] | add <company> | <role> | move <app> <stage> | next <app> | <action> [by <date>] | note <app> | <text> | attach <app> <artifact> | remove <app> | stages — career pipeline (owner-only)
+    "recruit": (0, None),     # /recruit [status [<vac>]] | add <title> | <employer> | scrape <vac> | source <vac> | <url> | candidate <vac> | <name> | <email> | tier <cand> | close|open <vac> | remove <vac> | list — recruitment module, per-vacancy jobs + tiering + /status board (owner-only)
     "drafts": (0, None),      # /drafts [list] | show <n> | post <n> | discard <n> — post-draft review board (owner-only)
     "ideas": (0, None),       # /ideas [list] | add <title> [| <detail>] | show <n> | develop <n> [as goal|draft|mission|park] [in <class>] [when <trigger>] — raw ideas + the development cell (owner-only)
     "day": (0, None),         # /day [show] | tell <text> | yesterday | make | skip | unskip | export — the day record + derivation (owner-only)
@@ -3774,6 +3775,10 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
               "usage": "/careers [list] | add <company> | <role> [| <source or link>] | move <app> <stage> [note] | next <app> | <action> [by YYYY-MM-DD | in Nd] | note <app> | <text> | attach <app> <artifact> | remove <app> | stages",
               "example": "/careers add Acme | Senior Developer | linkedin",
               "related": "/goals /artifact"},
+    "recruit": {"what": "recruitment: vacancies Devon recruits for — each vacancy an independent job with its own candidate queue, scraper, stats and CV flow. Candidates are tiered by rules in code (CV, skills overlap, experience, contact, location) with the deciding reasons on every tier; the /recruit status board shows every vacancy with queue depth, tier counts and scrape state, failed scrapes called out with the reason. The recruiter's side — the complement of /careers, which is your own job hunt. A vacancy's source is a URL listing its applicants (JSON feed or applicant page); a scrape that cannot fetch says so, never invents a candidate.",
+              "usage": "/recruit [status [<vac>]] | add <title> | <employer> [| <source_url>] [| skills: a, b] [| min: N] [| deadline: YYYY-MM-DD] [| location: X] | list | scrape <vac> | source <vac> | <url> | candidate <vac> | <name> | <email> [| <phone>] [| years: N] [| skills: a, b] [| location: X] [| cv: <text>] | tier <cand> | close|open <vac> | remove <vac>",
+              "example": "/recruit add Senior Developer | Acme | skills: python, postgres | min: 3",
+              "related": "/careers /goals"},
     "drafts": {"what": "the post-draft review board: every draft Devon has queued for you — the weekly content batch, scheduled drafts, anything awaiting a decision — with its virality score, hook type and pillar on a styled card. Reviewing is per-draft: you see the exact draft, then post or discard THAT one (a tap or /drafts post <n> posts the draft you named, never a blind oldest-first pick). Nothing here posts on its own: a draft goes out only on your tap, your /drafts post, or your explicit 'post this' (build-map #43, unchanged). Draft numbers (#n) are the handles from the board — internal ids never print.",
               "usage": "/drafts [list] | show <n> | post <n> | discard <n>",
               "example": "/drafts show 2",
@@ -4982,7 +4987,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
                            "benchmark", "redteam", "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board", "photo", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
-                          "balances", "goal", "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
+                          "balances", "goal", "goals", "careers", "recruit", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -5253,7 +5258,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
       "proposals", "approve", "deny", "start", "stop", "quit",
       "mode", "agent", "chatmode", "style", "stylepin", "doctor", "museum", "analytics", "airports", "flight", "burn", "share", "arena-research", "profile", "mind",
       "spend", "budget", "spending", "mandate", "balances", "goal",
-      "goals", "careers", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert", "cost", "heal", "tour", "pulse"]),
+      "goals", "careers", "recruit", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert", "cost", "heal", "tour", "pulse"]),
     ("search & research",
      ["search", "searchdeep", "searchleads", "money", "searchhist", "research",
       "news", "osint", "dns", "scan", "audit", "whois", "ports",
@@ -5735,6 +5740,7 @@ LIST_ONELINERS: dict[str, str] = {
     "artifact": "saved artifacts: list, info, search bodies, send (or convert) one, export bundles",
     "goals": "goal classes board: goals by domain class, measured vs self-reported progress, briefing/review/focus",
     "careers": "career pipeline: applications by stage, next actions with due dates, stale/overdue called out",
+    "recruit": "recruitment: per-vacancy jobs with their own queue, scraper, stats and CV flow — tiered candidates on the /recruit status board",
     "drafts": "post drafts awaiting your review: the batch board, per-draft cards, post/discard the one you name",
     "ideas": "raw ideas, grown: capture verbatim, develop into a goal, a draft, a mission, or park with a trigger",
     "day": "your day record: tell it what you did, see the day whole, and make draft posts from it",
