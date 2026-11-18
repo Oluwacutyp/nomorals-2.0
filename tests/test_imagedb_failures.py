@@ -80,7 +80,10 @@ def test_direct_import_surface_and_all_unchanged():
 
     # AA-58 (assembly audit) extended the surface with the
     # reverse-image candidate channel — the four new names are the
-    # fix, appended in __all__ order.
+    # fix, appended in __all__ order.  52-websites #46 (TinEye)
+    # extends it the same way: the fingerprint ladder, the uniform
+    # reverse-match shape, the verification rung and index growth
+    # by discovery — appended in __all__ order.
     assert m.__all__ == ["register", "sniff_format", "image_dimensions", "dhash",
                          "hamming", "image_exif", "image_colors", "find_dupes",
                          "image_stats", "REVERSE_IMAGE_ENGINES",
@@ -88,7 +91,12 @@ def test_direct_import_surface_and_all_unchanged():
                          "image_registry_for_context", "ordered_image_engines",
                          "REVERSE_IMAGE_CATALOG", "grown_image_engines",
                          "note_reverse_image_candidate",
-                         "discover_reverse_image_engines"]
+                         "discover_reverse_image_engines",
+                         "ReverseMatch", "block_descriptor", "block_distance",
+                         "block_match", "BLOCK_MATCH_THRESHOLD", "fingerprint",
+                         "fingerprint_distance", "fingerprints_match",
+                         "fingerprint_benchmark", "fingerprint_robustness",
+                         "note_image_file", "verify_reverse_matches"]
 
 
 # ── helpers ─────────────────────────────────────────────────────────────

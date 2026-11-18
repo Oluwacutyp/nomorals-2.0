@@ -68,14 +68,45 @@ real reverse-search outcomes); promoted engines join
 result-page shape (image URLs harvested from the page, the
 engine's own host excluded).  Google Lens / TinEye stay link-only:
 they remain pages Devon hands the user, never scraped engines.
+
+52-websites #46 (TinEye, 2026-11-17): the fingerprint LADDER.
+dHash is the fast rung and stays; beside it a block-mean/gradient
+descriptor rung (:func:`block_descriptor`) — 8x8 normalized block
+means over the central 60% of the frame (crop-tolerant by
+construction) plus horizontal/vertical gradient-sign bits, so a
+copy that survives a crop, a resize, a recolor or a watermark
+still matches.  Each rung's robustness is MEASURED against a
+mutation corpus (:func:`fingerprint_benchmark` — 6 bases x 12
+mutations: resize 50%/200%, center crop 80%/60%, hue swap,
+grayscale, brightness ±30%, contrast, watermark bar/corner,
+JPEG 60) and recorded in :func:`fingerprint_robustness`, never
+asserted in a comment: block rung 69/72 overall (crop80 5/6,
+crop60 4/6 — the two misses are the periodic checkerboard, whose
+phase flips under a crop, and the noise base), dHash 61/72
+(crop80 2/6, crop60 0/6 — the crop fragility the report names);
+distinct pairs stay separate (block distance min 0.349 over the
+corpus, dHash hamming min 24).  The web half now returns a
+uniform :class:`ReverseMatch` per engine (``engine, page_url,
+image_url, score, verified``) — scraped results are unverified
+unless :func:`verify_reverse_matches` downloads the candidate
+and fingerprints it against the query.  And the local index
+grows by discovery: :func:`note_image_file` fingerprints any
+landed image into ``image_index`` — the downloader calls it on
+every landed image file, so her private TinEye gets bigger with
+use.  The honest claim stays MatchEngine-shaped (her library,
+robust matching), never TinEye-shaped (the whole web).
 """
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
+import math
 import os
 import re
+import shutil
 import struct
+import tempfile
 import time
 import urllib.parse
 from pathlib import Path
@@ -94,7 +125,15 @@ __all__ = ["register", "sniff_format", "image_dimensions", "dhash", "hamming",
            "IMAGE_LINK_ONLY_DOMAINS", "image_registry_for_context",
            "ordered_image_engines", "REVERSE_IMAGE_CATALOG",
            "grown_image_engines", "note_reverse_image_candidate",
-           "discover_reverse_image_engines"]
+           "discover_reverse_image_engines",
+           # 52-websites #46 (TinEye): the fingerprint ladder, the
+           # uniform reverse-match shape, the verification rung and
+           # index growth by discovery — appended in __all__ order.
+           "ReverseMatch", "block_descriptor", "block_distance",
+           "block_match", "BLOCK_MATCH_THRESHOLD", "fingerprint",
+           "fingerprint_distance", "fingerprints_match",
+           "fingerprint_benchmark", "fingerprint_robustness",
+           "note_image_file", "verify_reverse_matches"]
 
 
 def _pil_image():
@@ -209,6 +248,408 @@ def hamming(a: str, b: str) -> int | None:
         return bin(int(a, 16) ^ int(b, 16)).count("1")
     except ValueError:
         return None
+
+
+# ── fingerprint ladder, second rung: block-mean/gradient descriptor ─────────
+# 52-websites #46 (TinEye). dHash is the fast rung and stays; this is the
+# robust rung.  A descriptor is 8x8 normalized block-mean luminance over
+# the CENTRAL 60% of the frame — a crop that trims the edges leaves the
+# center content in place, which is exactly where dHash falls over —
+# plus horizontal/vertical gradient-sign bits, so the descriptor still
+# separates two different pictures that happen to share a mean tone.
+# Normalization (mean-subtract, divide by std) makes it invariant to
+# linear brightness/contrast shifts; grayscale makes it invariant to
+# hue.  Encoded "bm1:<64 nibbles>:<16 hex h-bits>:<16 hex v-bits>".
+# BLOCK_MATCH_THRESHOLD (0.25) is the measured cut: on the mutation
+# corpus (see fingerprint_benchmark) mutated copies sit at <= 0.25
+# except the periodic checkerboard under a crop, and distinct pairs
+# sit at >= 0.349.
+
+BLOCK_DESCRIPTOR_VERSION = "bm1"
+
+#: Measured match threshold for the block rung (see
+#: :func:`fingerprint_benchmark`): a mutated copy of the same image
+#: lands at or under this distance; distinct images land above it.
+BLOCK_MATCH_THRESHOLD = 0.25
+
+#: dHash match threshold — the pre-existing near-duplicate bar
+#: (find_dupes default 6, lookup near-dupes 10).  Named here so the
+#: benchmark and the ladder read the same number.
+DHASH_MATCH_THRESHOLD = 10
+
+
+def _block_grid(img: Any) -> list[float] | None:
+    """8x8 normalized block-mean luminance over the central 60%."""
+    Image = _pil_image()
+    if Image is None:
+        return None
+    try:
+        w, h = img.size
+        crop = img.convert("L").crop(
+            (int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8)))
+        small = crop.resize((8, 8), Image.LANCZOS)
+        vals = [float(v) for v in small.getdata()]
+        mean = sum(vals) / len(vals)
+        var = sum((v - mean) ** 2 for v in vals) / len(vals)
+        std = math.sqrt(var)
+        if std < 1e-6:
+            return [0.0] * 64
+        return [max(-2.0, min(2.0, (v - mean) / std)) for v in vals]
+    except Exception as exc:  # noqa: BLE001 - descriptor is best-effort
+        assert isinstance(exc, Exception)
+        return None
+
+
+def _gradient_bits(img: Any) -> tuple[int, int] | None:
+    """Horizontal + vertical gradient-sign bits over the same 8x8
+    central grid (64 bits each)."""
+    Image = _pil_image()
+    if Image is None:
+        return None
+    try:
+        w, h = img.size
+        crop = img.convert("L").crop(
+            (int(w * 0.2), int(h * 0.2), int(w * 0.8), int(h * 0.8)))
+        grid = list(crop.resize((8, 8), Image.LANCZOS).getdata())
+        hbits = 0
+        for r in range(8):
+            for c in range(8):
+                nxt = grid[r * 8 + (c + 1) % 8]
+                hbits = (hbits << 1) | (1 if nxt > grid[r * 8 + c] else 0)
+        vbits = 0
+        for r in range(8):
+            for c in range(8):
+                nxt = grid[((r + 1) % 8) * 8 + c]
+                vbits = (vbits << 1) | (1 if nxt > grid[r * 8 + c] else 0)
+        return hbits, vbits
+    except Exception as exc:  # noqa: BLE001 - descriptor is best-effort
+        assert isinstance(exc, Exception)
+        return None
+
+
+def block_descriptor(path: str | Path) -> str | None:
+    """Robust perceptual descriptor for one image file.
+
+    Returns None when Pillow is unavailable or the file cannot be
+    read — the content hash still works, robust matching just
+    degrades to the dHash rung."""
+    Image = _pil_image()
+    if Image is None:
+        return None
+    try:
+        with Image.open(path) as img:
+            img = img.convert("RGB")
+            norm = _block_grid(img)
+            grads = _gradient_bits(img)
+        if norm is None or grads is None:
+            return None
+        nibbles = "".join(
+            f"{max(0, min(15, int((v + 2.0) / 4.0 * 15 + 0.5))):x}"
+            for v in norm)
+        hbits, vbits = grads
+        return (f"{BLOCK_DESCRIPTOR_VERSION}:{nibbles}:"
+                f"{hbits:016x}:{vbits:016x}")
+    except Exception as exc:  # noqa: BLE001 - descriptor is best-effort
+        assert isinstance(exc, Exception)
+        return None
+
+
+def _parse_block_descriptor(desc: str) -> tuple[list[int], int, int] | None:
+    """"bm1:<64 nibbles>:<16 hex>:<16 hex>" -> (nibbles, hbits, vbits)."""
+    try:
+        if not desc or not isinstance(desc, str):
+            return None
+        parts = desc.split(":")
+        if len(parts) != 4 or parts[0] != BLOCK_DESCRIPTOR_VERSION:
+            return None
+        nibbles, hbits, vbits = parts[1], parts[2], parts[3]
+        if len(nibbles) != 64 or len(hbits) != 16 or len(vbits) != 16:
+            return None
+        return [int(c, 16) for c in nibbles], int(hbits, 16), int(vbits, 16)
+    except (ValueError, AttributeError):
+        return None
+
+
+def block_distance(a: str | None, b: str | None) -> float | None:
+    """Normalized distance in [0, 1] between two block descriptors:
+    0.6 * mean nibble difference (/15) + 0.2 * horizontal-gradient
+    hamming (/64) + 0.2 * vertical-gradient hamming (/64).
+    None when either descriptor is missing or malformed."""
+    pa = _parse_block_descriptor(a) if a else None
+    pb = _parse_block_descriptor(b) if b else None
+    if pa is None or pb is None:
+        return None
+    na, ha, va = pa
+    nb, hb, vb = pb
+    mean_diff = sum(abs(x - y) for x, y in zip(na, nb, strict=True)) / 64.0 / 15.0
+    hdist = bin(ha ^ hb).count("1") / 64.0
+    vdist = bin(va ^ vb).count("1") / 64.0
+    return 0.6 * mean_diff + 0.2 * hdist + 0.2 * vdist
+
+
+def block_match(a: str | None, b: str | None,
+                threshold: float = BLOCK_MATCH_THRESHOLD) -> bool | None:
+    """True when two block descriptors are within ``threshold``.
+    None when either descriptor is missing or malformed (the rung
+    cannot speak — never a silent match)."""
+    dist = block_distance(a, b)
+    if dist is None:
+        return None
+    return dist <= threshold
+
+
+def fingerprint(path: str | Path) -> dict[str, str | None] | None:
+    """Both rungs for one image: {"dhash": ..., "block": ...}.
+    Returns None when Pillow is unavailable (neither rung can run);
+    a rung that cannot be computed for a given file is None inside
+    the dict, never an invented value."""
+    if _pil_image() is None:
+        return None
+    return {"dhash": dhash(path), "block": block_descriptor(path)}
+
+
+def fingerprint_distance(a: dict[str, Any] | None,
+                         b: dict[str, Any] | None) -> dict[str, Any]:
+    """Per-rung distances between two :func:`fingerprint` dicts:
+    {"dhash": int|None, "block": float|None}.  A rung that cannot
+    be computed on either side is None, never zero."""
+    if not a or not b:
+        return {"dhash": None, "block": None}
+    return {
+        "dhash": hamming(a.get("dhash") or "", b.get("dhash") or ""),
+        "block": block_distance(a.get("block"), b.get("block")),
+    }
+
+
+def fingerprints_match(a: dict[str, Any] | None,
+                       b: dict[str, Any] | None, *,
+                       dhash_threshold: int = DHASH_MATCH_THRESHOLD,
+                       block_threshold: float = BLOCK_MATCH_THRESHOLD
+                       ) -> dict[str, bool]:
+    """Per-rung match verdicts between two :func:`fingerprint`
+    dicts.  A rung that cannot be computed does NOT match (False)
+    — an uncomputed rung is never evidence of sameness.
+    "either" is the near-duplicate bar (one rung carrying the
+    pair is enough); "both" is the strict bar."""
+    dists = fingerprint_distance(a, b)
+    d_match = dists["dhash"] is not None and dists["dhash"] <= dhash_threshold
+    b_match = dists["block"] is not None and dists["block"] <= block_threshold
+    return {"dhash": bool(d_match), "block": bool(b_match),
+            "either": bool(d_match or b_match),
+            "both": bool(d_match and b_match)}
+
+
+# ── the mutation corpus: measured robustness, never asserted ───────────────
+# 52-websites #46 (TinEye).  The corpus below is deliberately the same
+# shape as the one in tests/test_gapfix_tineye.py — the test measures
+# INDEPENDENTLY with its own builders and pins floors on this
+# function's output, so the two measurements check each other.
+# Six textured bases x twelve TinEye-style mutations (resize 50%/200%,
+# center crop 80%/60%, hue swap, grayscale, brightness ±30%, contrast,
+# watermark bar/corner, JPEG 60).  Measured on this box (2026-11-17):
+# block rung 69/72 overall (crop80 5/6, crop60 4/6 — the misses are
+# the periodic checkerboard, whose phase flips under a crop, and the
+# noise base), dHash 61/72 (crop80 2/6, crop60 0/6); distinct pairs
+# stay separate (block distance min 0.349, dHash hamming min 24).
+
+_BENCHMARK_MUTATIONS: tuple[str, ...] = (
+    "resize50", "resize200", "crop80", "crop60", "hue", "grayscale",
+    "bright+30", "bright-30", "contrast", "watermark_bar",
+    "watermark_corner", "jpeg60")
+
+
+def _benchmark_base(name: str, path: Path) -> Path:
+    """One textured base image.  Pillow is required — the caller
+    checks and returns None without it."""
+    import random
+
+    from PIL import Image, ImageDraw
+
+    if name == "grad":
+        img = Image.new("RGB", (256, 256))
+        px = img.load()
+        for y in range(256):
+            for x in range(256):
+                px[x, y] = ((x * 3) % 256, (y * 2) % 256, ((x + y) % 256))
+    elif name == "stripes":
+        img = Image.new("RGB", (256, 256))
+        px = img.load()
+        for y in range(256):
+            for x in range(256):
+                on = (x // 16) % 2 == 0
+                px[x, y] = (220, 30, 30) if on else (20, 20, 220)
+    elif name == "rings":
+        img = Image.new("RGB", (256, 256), (10, 10, 40))
+        dr = ImageDraw.Draw(img)
+        for r in range(120, 0, -20):
+            dr.ellipse([128 - r, 128 - r, 128 + r, 128 + r],
+                       fill=((r * 2) % 256, 120, 200 - r))
+    elif name == "noise":
+        rnd = random.Random(42)
+        img = Image.new("RGB", (256, 256))
+        px = img.load()
+        for y in range(256):
+            for x in range(256):
+                px[x, y] = (rnd.randrange(256), rnd.randrange(256),
+                            rnd.randrange(256))
+        img = img.resize((32, 32), Image.LANCZOS).resize(
+            (256, 256), Image.NEAREST)
+    elif name == "scene":
+        img = Image.new("RGB", (256, 256), (90, 160, 220))
+        dr = ImageDraw.Draw(img)
+        dr.rectangle([0, 170, 256, 256], fill=(40, 120, 50))
+        dr.ellipse([180, 30, 230, 80], fill=(250, 220, 80))
+        dr.rectangle([20, 120, 90, 170], fill=(120, 70, 40))
+    elif name == "check":
+        img = Image.new("RGB", (256, 256))
+        px = img.load()
+        for y in range(256):
+            for x in range(256):
+                on = ((x // 32) + (y // 32)) % 2 == 0
+                px[x, y] = (240, 240, 240) if on else (15, 15, 15)
+    else:
+        raise ValueError(f"unknown benchmark base {name!r}")
+    img.save(path, "PNG")
+    return path
+
+
+def _benchmark_mutate(img: Any, kind: str, out_path: Path) -> None:
+    """Apply one TinEye-style mutation to an open Pillow image."""
+    from PIL import Image, ImageDraw, ImageEnhance
+
+    if kind == "resize50":
+        img.resize((128, 128), Image.LANCZOS).save(out_path)
+    elif kind == "resize200":
+        img.resize((512, 512), Image.LANCZOS).save(out_path)
+    elif kind == "crop80":
+        w, h = img.size
+        img.crop((int(w * 0.1), int(h * 0.1),
+                  int(w * 0.9), int(h * 0.9))).save(out_path)
+    elif kind == "crop60":
+        w, h = img.size
+        img.crop((int(w * 0.2), int(h * 0.2),
+                  int(w * 0.8), int(h * 0.8))).save(out_path)
+    elif kind == "hue":
+        r, g, b = img.split()
+        Image.merge("RGB", (b, r, g)).save(out_path)
+    elif kind == "grayscale":
+        img.convert("L").convert("RGB").save(out_path)
+    elif kind == "bright+30":
+        ImageEnhance.Brightness(img).enhance(1.3).save(out_path)
+    elif kind == "bright-30":
+        ImageEnhance.Brightness(img).enhance(0.7).save(out_path)
+    elif kind == "contrast":
+        ImageEnhance.Contrast(img).enhance(1.6).save(out_path)
+    elif kind == "watermark_bar":
+        m = img.copy()
+        dr = ImageDraw.Draw(m, "RGBA")
+        dr.rectangle([0, 220, 256, 256], fill=(255, 255, 255, 140))
+        m.convert("RGB").save(out_path)
+    elif kind == "watermark_corner":
+        m = img.copy()
+        dr = ImageDraw.Draw(m, "RGBA")
+        dr.rectangle([180, 180, 256, 256], fill=(255, 255, 255, 160))
+        m.convert("RGB").save(out_path)
+    elif kind == "jpeg60":
+        img.convert("RGB").save(out_path, "JPEG", quality=60)
+    else:
+        raise ValueError(f"unknown benchmark mutation {kind!r}")
+
+
+def fingerprint_benchmark() -> dict[str, Any]:
+    """Measure both fingerprint rungs against the mutation corpus.
+
+    Returns {"corpus": {"bases", "mutations", "pairs"}, "thresholds":
+    {"dhash", "block"}, "rungs": {"dhash": {overall + per-mutation
+    match rates}, "block": {...}}, "separation": {"block_min",
+    "dhash_min"}} — rates are fractions of mutated copies that
+    still match their original; separation is the closest distinct
+    pair.  Runs in ~1s (small synthetic images).  When Pillow is
+    unavailable the rungs cannot be measured: the report says so
+    with empty rates rather than inventing them."""
+    Image = _pil_image()
+    report: dict[str, Any] = {
+        "corpus": {"bases": 6, "mutations": len(_BENCHMARK_MUTATIONS),
+                   "pairs": 6 * len(_BENCHMARK_MUTATIONS)},
+        "thresholds": {"dhash": DHASH_MATCH_THRESHOLD,
+                       "block": BLOCK_MATCH_THRESHOLD},
+        "rungs": {"dhash": {}, "block": {}},
+        "separation": {"block_min": None, "dhash_min": None},
+    }
+    if Image is None:
+        report["error"] = "Pillow unavailable — rungs cannot be measured"
+        return report
+    bases = ("grad", "stripes", "rings", "noise", "scene", "check")
+    root = Path(tempfile.mkdtemp(prefix="tineye_bench_"))
+    try:
+        base_paths = {name: _benchmark_base(name, root / f"{name}.png")
+                      for name in bases}
+        dh = {n: dhash(p) for n, p in base_paths.items()}
+        bd = {n: block_descriptor(p) for n, p in base_paths.items()}
+        # distinct-pair separation first: the closest two different
+        # bases on each rung.
+        block_mins: list[float] = []
+        dhash_mins: list[int] = []
+        for i in range(len(bases)):
+            for j in range(i + 1, len(bases)):
+                dist = block_distance(bd[bases[i]], bd[bases[j]])
+                if dist is not None:
+                    block_mins.append(dist)
+                ham = hamming(dh[bases[i]], dh[bases[j]])
+                if ham is not None:
+                    dhash_mins.append(ham)
+        report["separation"] = {
+            "block_min": round(min(block_mins), 3) if block_mins else None,
+            "dhash_min": min(dhash_mins) if dhash_mins else None,
+        }
+        for kind in _BENCHMARK_MUTATIONS:
+            d_ok = b_ok = 0
+            for name, path in base_paths.items():
+                mutated = root / f"{name}_{kind}.png"
+                with Image.open(path) as im:
+                    _benchmark_mutate(im, kind, mutated)
+                ham = hamming(dh[name], dhash(mutated))
+                if ham is not None and ham <= DHASH_MATCH_THRESHOLD:
+                    d_ok += 1
+                dist = block_distance(bd[name], block_descriptor(mutated))
+                if dist is not None and dist <= BLOCK_MATCH_THRESHOLD:
+                    b_ok += 1
+            report["rungs"]["dhash"][kind] = round(d_ok / len(bases), 3)
+            report["rungs"]["block"][kind] = round(b_ok / len(bases), 3)
+        for rung in ("dhash", "block"):
+            rates = report["rungs"][rung].values()
+            report["rungs"][rung]["overall"] = round(
+                sum(rates) / len(rates), 3) if rates else 0.0
+        return report
+    except Exception as e:  # noqa: BLE001 - measurement never raises
+        record_failure("fingerprint_benchmark", e)
+        report["error"] = f"{type(e).__name__}: {e}"[:200]
+        return report
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+_ROBUSTNESS_CACHE: dict[str, Any] | None = None
+
+
+def fingerprint_robustness() -> dict[str, Any]:
+    """The measured robustness table, computed once per process
+    (the benchmark builds its corpus each run; the status surface
+    calls this, not the benchmark directly).  Never raises."""
+    global _ROBUSTNESS_CACHE
+    if _ROBUSTNESS_CACHE is None:
+        try:
+            _ROBUSTNESS_CACHE = fingerprint_benchmark()
+        except Exception as e:  # noqa: BLE001
+            record_failure("fingerprint_robustness", e)
+            _ROBUSTNESS_CACHE = {
+                "error": f"{type(e).__name__}: {e}"[:200],
+                "rungs": {"dhash": {}, "block": {}},
+                "thresholds": {"dhash": DHASH_MATCH_THRESHOLD,
+                               "block": BLOCK_MATCH_THRESHOLD},
+                "separation": {"block_min": None, "dhash_min": None},
+            }
+    return _ROBUSTNESS_CACHE
 
 
 # ── EXIF + visual analysis (Pillow, graceful degradation) ──────────────────
@@ -425,6 +866,39 @@ def _index_row(context: Any, digest: str, path: Path, size: int, fmt: str,
         return None
 
 
+def note_image_file(context: Any, path: str | Path,
+                    seen_in: str = "download") -> dict[str, Any]:
+    """Fingerprint one image file into the local index (52-websites
+    #46, index growth by discovery): content digest + both
+    fingerprint rungs, upserted into ``image_index`` with
+    ``seen_in`` naming where it came from.  Only the first 16
+    bytes are read to sniff the format — a non-image (or a
+    multi-gigabyte video) is refused without reading the file.
+    Returns {"ok": True, "digest", "dhash", "block",
+    "seen_before", "path"} or {"ok": False, "reason": ...}.
+    Never raises: indexing must never break the caller."""
+    try:
+        if context is None or getattr(context, "db", None) is None:
+            return {"ok": False, "reason": "no database in reach"}
+        p = Path(path)
+        if not p.exists() or not p.is_file():
+            return {"ok": False, "reason": f"not a file: {path}"}
+        with p.open("rb") as fh:
+            head = fh.read(16)
+        if sniff_format(head) == "unknown":
+            return {"ok": False, "reason": "not an image file"}
+        data = p.read_bytes()
+        fmt = sniff_format(data)
+        digest = hashlib.blake2b(data, digest_size=16).hexdigest()
+        previous = _index_row(context, digest, p, len(data), fmt, seen_in)
+        return {"ok": True, "digest": digest,
+                "dhash": dhash(p), "block": block_descriptor(p),
+                "seen_before": previous is not None, "path": str(p)}
+    except Exception as e:  # noqa: BLE001
+        record_failure("note_image_file", e)
+        return {"ok": False, "reason": f"{type(e).__name__}: {e}"[:200]}
+
+
 def _lookup_impl(context: Any, ref: str, seen_in: str) -> dict[str, Any]:
     tools = getattr(getattr(context, "settings", None), "tools", None)
     client = HttpClient(timeout=getattr(tools, "http_timeout", 30.0),
@@ -445,9 +919,11 @@ def _lookup_impl(context: Any, ref: str, seen_in: str) -> dict[str, Any]:
         age = time.time() - float(previous.get("first_seen", 0) or 0)
         if age > 86400:
             seen_days = f" first seen {int(age // 86400)} day(s) ago"
-    phash = dhash(local)
+    query_fp = fingerprint(local)
+    phash = query_fp["dhash"] if query_fp else None
+    query_block = query_fp["block"] if query_fp else None
     near: list[str] = []
-    if phash:
+    if phash or query_block:
         db = getattr(context, "db", None)
         if db is not None:
             try:
@@ -456,11 +932,32 @@ def _lookup_impl(context: Any, ref: str, seen_in: str) -> dict[str, Any]:
                     db.query("SELECT hash, path FROM image_index")
                 # compare perceptual hashes (not content digests — dhash is
                 # 16 hex chars, blake2b digests are 32, so they can never match)
+                # 52-websites #46: both rungs speak — a row matches when
+                # EITHER rung matches, and the entry names the rung(s)
+                # that carried it.
                 for row in index_rows:
-                    other = dhash(row.get("path", "")) if row.get("path") else None
-                    distance = hamming(phash, other or "")
-                    if distance is not None and 0 < distance <= 10:
+                    row_path = row.get("path", "")
+                    if not row_path:
+                        continue
+                    other_fp = fingerprint(row_path)
+                    if not other_fp:
+                        continue
+                    distance = hamming(phash or "", other_fp["dhash"] or "")
+                    d_hit = distance is not None and 0 < distance <= 10
+                    block_dist = block_distance(
+                        query_block, other_fp["block"])
+                    b_hit = block_dist is not None and \
+                        block_dist <= BLOCK_MATCH_THRESHOLD and \
+                        block_dist > 0.0
+                    if d_hit and b_hit:
+                        near.append(
+                            f"{row['path']} (distance {distance}, "
+                            f"block {block_dist:.2f})")
+                    elif d_hit:
                         near.append(f"{row['path']} (distance {distance})")
+                    elif b_hit:
+                        near.append(
+                            f"{row['path']} (block {block_dist:.2f})")
             except Exception as e:  # noqa: BLE001
                 record_failure("_lookup_impl:near_dupes", e)
     return {
@@ -498,12 +995,20 @@ def _library_rows(context: Any) -> list[dict[str, Any]]:
 
 
 def find_dupes(context: Any, threshold: int = 6) -> dict[str, Any]:
-    """Cluster every indexed image by dHash hamming distance.
+    """Cluster every indexed image by perceptual-hash distance.
 
     Files that no longer exist on disk (or can't be hashed — e.g. Pillow
     missing) are excluded. Returns groups of near-duplicates, each with
     paths, content digests, and max pairwise distance.
-    """
+
+    52-websites #46: two images cluster when EITHER rung matches —
+    dHash hamming <= ``threshold`` OR block distance <=
+    :data:`BLOCK_MATCH_THRESHOLD`.  The dHash rung alone misses
+    cropped copies (crop80: dHash distance 16 on the benchmark
+    gradient); the block rung carries those pairs.  ``max_distance``
+    stays the dHash figure (it can exceed ``threshold`` when the
+    block rung carried the pair); ``max_block_distance`` is the
+    block figure beside it."""
     rows = _library_rows(context)
     if not rows:
         return {"ok": True, "threshold": threshold, "scanned": 0, "groups": []}
@@ -511,10 +1016,12 @@ def find_dupes(context: Any, threshold: int = 6) -> dict[str, Any]:
     items: list[dict[str, Any]] = []
     for row in rows:
         path = row.get("path") or ""
-        ph = dhash(path) if path and Path(path).exists() else None
-        items.append({"path": path, "digest": row.get("hash", ""), "dhash": ph})
+        fp = fingerprint(path) if path and Path(path).exists() else None
+        items.append({"path": path, "digest": row.get("hash", ""),
+                      "dhash": fp["dhash"] if fp else None,
+                      "block": fp["block"] if fp else None})
 
-    hashable = [i for i in items if i["dhash"]]
+    hashable = [i for i in items if i["dhash"] or i["block"]]
     parent = list(range(len(hashable)))
 
     def find(x: int) -> int:
@@ -528,10 +1035,15 @@ def find_dupes(context: Any, threshold: int = 6) -> dict[str, Any]:
         if ra != rb:
             parent[ra] = rb
 
+    def _pair_matches(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        dist = hamming(a["dhash"] or "", b["dhash"] or "")
+        if dist is not None and dist <= threshold:
+            return True
+        return block_match(a["block"], b["block"]) is True
+
     for i in range(len(hashable)):
         for j in range(i + 1, len(hashable)):
-            dist = hamming(hashable[i]["dhash"], hashable[j]["dhash"])
-            if dist is not None and dist <= threshold:
+            if _pair_matches(hashable[i], hashable[j]):
                 union(i, j)
 
     clusters: dict[int, list[dict[str, Any]]] = {}
@@ -543,13 +1055,20 @@ def find_dupes(context: Any, threshold: int = 6) -> dict[str, Any]:
         if len(members) < 2:
             continue
         max_dist = 0
+        max_block = 0.0
         for i in range(len(members)):
             for j in range(i + 1, len(members)):
-                dist = hamming(members[i]["dhash"], members[j]["dhash"]) or 0
+                dist = hamming(members[i]["dhash"] or "",
+                               members[j]["dhash"] or "") or 0
                 max_dist = max(max_dist, dist)
+                bdist = block_distance(members[i]["block"],
+                                       members[j]["block"])
+                if bdist is not None:
+                    max_block = max(max_block, bdist)
         groups.append({
             "count": len(members),
             "max_distance": max_dist,
+            "max_block_distance": round(max_block, 3),
             "paths": [m["path"] for m in members],
             "digests": [m["digest"] for m in members],
         })
@@ -881,8 +1400,131 @@ def _image_error_class(exc: BaseException) -> str:
     return "network_failure"
 
 
+# ── uniform reverse-match shape + verification (52-websites #46) ────────────
+
+@dataclasses.dataclass(frozen=True)
+class ReverseMatch:
+    """One reverse-image result in the uniform shape across engines:
+    the engine that served it, the search page it came from, the
+    image URL itself, a rank score (1.0 for the engine's first
+    result, decaying by 0.1 per position, floor 0.1 — a RANK score,
+    never a similarity), and whether Devon VERIFIED it by
+    downloading the candidate and fingerprinting it against the
+    query (:func:`verify_reverse_matches`).  A scraped result is
+    unverified unless that rung ran: a URL harvested from a page
+    is evidence a page shows the picture, not proof it IS the
+    picture."""
+    engine: str
+    page_url: str
+    image_url: str
+    score: float
+    verified: bool = False
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"engine": self.engine, "page_url": self.page_url,
+                "image_url": self.image_url, "score": self.score,
+                "verified": self.verified}
+
+
+def _rank_score(index: int) -> float:
+    """Rank score for the ``index``-th result of one engine."""
+    return round(max(0.1, 1.0 - 0.1 * index), 2)
+
+
+def _engine_page_url(engine: str, image_url: str,
+                     registry: Any = None) -> str:
+    """The reverse-search page URL one engine is fetched from, or
+    "" when the engine has no usable scraper.  Never raises."""
+    try:
+        scraper = _ENGINE_SCRAPERS.get(engine)
+        if scraper is None:
+            scraper = _grown_scraper(registry, engine)
+        if scraper is None:
+            return ""
+        return scraper[0](image_url)
+    except Exception as e:  # noqa: BLE001
+        record_failure("_engine_page_url", e)
+        return ""
+
+
+def _scrape_matches(client: HttpClient, image_url: str, *,
+                    registry: Any = None) -> dict[str, list[ReverseMatch]]:
+    """The scrape, in the uniform :class:`ReverseMatch` shape:
+    one list per engine, each match carrying its engine, the
+    search page it came from, a rank score, and verified=False
+    (scraped results stay unverified until the verification rung
+    runs).  Reuses :func:`_scrape_engines` — one scrape, one
+    outcome recording — and only reshapes its output.  Never
+    raises: a shaping failure yields that engine's list empty."""
+    try:
+        by_engine = _scrape_engines(client, image_url, registry=registry)
+    except Exception as e:  # noqa: BLE001 - shaping never sinks a search
+        record_failure("_scrape_matches", e)
+        return {}
+    out: dict[str, list[ReverseMatch]] = {}
+    for engine, urls in by_engine.items():
+        page_url = _engine_page_url(engine, image_url, registry)
+        matches: list[ReverseMatch] = []
+        for index, url in enumerate(urls):
+            try:
+                matches.append(ReverseMatch(
+                    engine=engine, page_url=page_url, image_url=url,
+                    score=_rank_score(index), verified=False))
+            except Exception as e:  # noqa: BLE001 - one bad URL is not the engine
+                record_failure("_scrape_matches:match", e)
+                continue
+        out[engine] = matches
+    return out
+
+
+def verify_reverse_matches(context: Any, query_path: str | Path,
+                           matches: list[ReverseMatch], *,
+                           client: HttpClient | None = None,
+                           block_threshold: float = BLOCK_MATCH_THRESHOLD,
+                           dhash_threshold: int = DHASH_MATCH_THRESHOLD
+                           ) -> list[ReverseMatch]:
+    """Verify scraped matches against the query image for real:
+    each candidate is downloaded (size-capped, into media/inbound
+    like any resolved image) and fingerprinted; a match verifies
+    only when the BLOCK rung matches — the dHash rung is the
+    fallback when the block descriptor cannot be computed (no
+    Pillow).  Returns a NEW list (the input is untouched);
+    unreachable/unreadable candidates stay unverified.  Never
+    raises: verification is garnish, exactly like scraping."""
+    try:
+        query_fp = fingerprint(query_path) if Path(query_path).exists() else None
+    except Exception as e:  # noqa: BLE001
+        record_failure("verify_reverse_matches:query", e)
+        query_fp = None
+    if not query_fp:
+        return list(matches)
+    if client is None:
+        tools = getattr(getattr(context, "settings", None), "tools", None)
+        client = HttpClient(timeout=getattr(tools, "http_timeout", 30.0),
+                            user_agent=getattr(tools, "user_agent", "NoMoralsCore/0.1"),
+                            proxy_url=getattr(tools, "proxy_url", ""))
+    out: list[ReverseMatch] = []
+    for match in matches:
+        verified = False
+        try:
+            local, _public = _resolve_image(context, match.image_url, client)
+            if local is not None and local.exists():
+                cand_fp = fingerprint(local)
+                if cand_fp:
+                    dists = fingerprint_distance(query_fp, cand_fp)
+                    if dists["block"] is not None:
+                        verified = dists["block"] <= block_threshold
+                    elif dists["dhash"] is not None:
+                        verified = dists["dhash"] <= dhash_threshold
+        except Exception as e:  # noqa: BLE001 - one bad candidate is not the run
+            record_failure("verify_reverse_matches:candidate", e)
+        out.append(match if verified is match.verified else
+                   dataclasses.replace(match, verified=verified))
+    return out
+
+
 def _reverse_impl(context: Any, ref: str,
-                  registry: Any = None) -> dict[str, Any]:
+                  registry: Any = None, verify: bool = False) -> dict[str, Any]:
     tools = getattr(getattr(context, "settings", None), "tools", None)
     client = HttpClient(timeout=getattr(tools, "http_timeout", 30.0),
                         user_agent=getattr(tools, "user_agent", "NoMoralsCore/0.1"),
@@ -905,9 +1547,28 @@ def _reverse_impl(context: Any, ref: str,
         # and the payload below is unchanged either way).
         reg = registry if registry is not None \
             else image_registry_for_context(context)
-        matches = _scrape_engines(client, public, registry=reg)
-        out["unverified_matches"] = [u for urls in matches.values() for u in urls]
-        out["unverified_by_engine"] = matches
+        # 52-websites #46: the scrape now lands in the uniform
+        # ReverseMatch shape; the old keys are derived from it so
+        # their shape is byte-identical to before.
+        matched = _scrape_matches(client, public, registry=reg)
+        order = ordered_image_engines(reg)
+        flat = [m for engine in order for m in matched.get(engine, [])]
+        flat += [m for engine, ms in matched.items()
+                 if engine not in order for m in ms]
+        if verify:
+            flat = verify_reverse_matches(context, local, flat, client=client)
+            matched = {}
+            for m in flat:
+                matched.setdefault(m.engine, []).append(m)
+        out["matches"] = [m.to_dict() for m in flat]
+        out["matches_by_engine"] = {
+            engine: [m.to_dict() for m in ms]
+            for engine, ms in matched.items()}
+        out["unverified_matches"] = [m.image_url for m in flat
+                                     if not m.verified]
+        out["unverified_by_engine"] = {
+            engine: [m.image_url for m in ms if not m.verified]
+            for engine, ms in matched.items()}
     else:
         out["note"] = ("no public URL for this image — upload it somewhere public "
                        "and re-run, or open these with the file directly: "
@@ -1183,11 +1844,15 @@ def register(registry: Any) -> None:
         "reverse_image_search",
         description="Reverse image search: deep links to Lens/Bing/Yandex/TinEye "
                     "plus best-effort related-image scans (Bing + Yandex, "
-                    "engine-isolated) for public URLs.",
+                    "engine-isolated) for public URLs, in the uniform "
+                    "ReverseMatch shape (engine, page_url, image_url, score, "
+                    "verified). Scraped matches are unverified unless "
+                    "verify=true, which downloads each candidate and "
+                    "fingerprints it against the query.",
         capability="net.out",
     )
-    def reverse_image_search(path: str) -> dict[str, Any]:
-        return _reverse_impl(context, path)
+    def reverse_image_search(path: str, *, verify: bool = False) -> dict[str, Any]:
+        return _reverse_impl(context, path, verify=verify)
 
     @registry.register(
         "image_exif",

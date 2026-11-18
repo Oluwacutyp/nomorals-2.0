@@ -2214,9 +2214,44 @@ class SourceRegistry:
             image_candidates = sum(
                 1 for d in self._candidates.values()
                 if "image-search" in d.kinds)
+            # 52-websites #46 (TinEye): the fingerprint ladder's
+            # measured robustness, beside the engine rows — the
+            # numbers are measured in-process by
+            # tools/imagedb.fingerprint_robustness (cached after
+            # the first call), never asserted in a comment.
+            try:
+                from ..tools.imagedb import (
+                    BLOCK_MATCH_THRESHOLD,
+                    DHASH_MATCH_THRESHOLD,
+                    fingerprint_robustness,
+                )
+
+                robustness = fingerprint_robustness()
+                fingerprint_block = {
+                    "rungs": ["dhash", "block"],
+                    "thresholds": {"dhash": DHASH_MATCH_THRESHOLD,
+                                   "block": BLOCK_MATCH_THRESHOLD},
+                    "measured": {
+                        "dhash": robustness.get("rungs", {}).get("dhash", {}),
+                        "block": robustness.get("rungs", {}).get("block", {}),
+                        "separation": robustness.get("separation", {}),
+                        "corpus": robustness.get("corpus", {}),
+                    },
+                    "note": ("MatchEngine-shaped claim: the private "
+                             "index over her library with a measured-"
+                             "robust fingerprint — not TinEye-shaped "
+                             "(the whole web). A rung that cannot be "
+                             "measured (no Pillow) reports empty rates, "
+                             "never invented ones."),
+                }
+            except Exception as e:  # noqa: BLE001
+                record_failure("SourceRegistry.image_status:fingerprint", e)
+                fingerprint_block = {"rungs": ["dhash", "block"],
+                                     "error": f"{type(e).__name__}: {e}"[:200]}
             return {"engines": engines, "link_only": link_only,
                     "grown": grown,
                     "candidates_pending": image_candidates,
+                    "fingerprint": fingerprint_block,
                     "discovery": (
                         "catalog/manual candidate channel (AA-58): "
                         "reverse engines with a URL-template shape "

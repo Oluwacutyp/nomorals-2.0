@@ -1479,6 +1479,20 @@ class MediaDownloader:
         self._learn_from_success(report, format_facts)
         self._intake_exploration(report)
         self._register_download_artifact(report)
+        # TinEye (#46): a landed image is fingerprinted into the
+        # local image index automatically, so her private
+        # reverse-search index grows with use.  Bookkeeping only —
+        # a non-image (or an indexing failure) changes nothing
+        # about the download, which already landed.
+        try:
+            if report.ok and report.path:
+                from ..tools.imagedb import note_image_file
+
+                note_image_file(self.context, report.path,
+                                seen_in="download")
+        except Exception as e:  # noqa: BLE001 — bookkeeping never
+            # turns a real download into a failure
+            record_failure("download._succeed.image_index", e)
         try:
             if report.ok and report.path:
                 digest = _sha256_of(Path(report.path))
