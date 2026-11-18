@@ -950,6 +950,56 @@ class StatusRadarProvider(_Provider):
             source="status_vault", lines=lines)
 
 
+class SpeedBriefingProvider(_Provider):
+    """Network speed (Fast.com core): one line when the baseline degrades.
+
+    The journaled speed history is the baseline; the latest run is
+    compared against it. Healthy or too-thin-to-say produces no
+    section at all (the house rule: never pad). Never raises — a
+    speed hiccup must not sink the morning briefing.
+    """
+    name = "network_speed"
+    title = "Network speed"
+    priority = 86  # beside Health drift (85): the connection's health
+
+    def collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        try:
+            return self._collect(ctx, since)
+        except Exception as exc:  # noqa: BLE001 — speed is optional
+            _log.debug("network speed provider skipped: %s", exc)
+            return None
+
+    def _collect(self, ctx: Any, since: float) -> BriefingSection | None:
+        from ..tools.speedtest import SpeedHistoryStore, is_degraded
+
+        settings = getattr(ctx, "settings", None)
+        home = getattr(settings, "home_path", None) if settings else None
+        home = home or getattr(settings, "home", None) if settings else None
+        if not home:
+            return None
+        store = SpeedHistoryStore(str(home))
+        latest = store.latest()
+        if latest is None or not latest.ok:
+            return None
+        baseline = store.baseline(latest.target)
+        if not is_degraded(latest.down_mbps, baseline):
+            return None
+        assert baseline is not None
+        ratio = 100.0 * latest.down_mbps / baseline
+        lines = [
+            f"Network speed is down: latest {latest.down_mbps:.1f} Mbps "
+            f"to {latest.target}, baseline {baseline:.1f} Mbps "
+            f"({ratio:.0f}% of usual).",
+        ]
+        if latest.latency_loaded_ms is not None:
+            lines.append(
+                f"Loaded latency {latest.latency_loaded_ms:.0f} ms vs "
+                f"{latest.latency_idle_ms:.0f} ms idle.")
+        return BriefingSection(
+            name=self.name, title=self.title, priority=self.priority,
+            source="health", lines=lines)
+
+
 class TriageProvider(_Provider):
     """Smart notification triage (audit gap R1-3): what actually
     needed the owner — the durable triage log's digest since the
@@ -1750,6 +1800,12 @@ class BriefingComposer:
             self.providers.append(DriftBriefingProvider())
         except Exception as exc:  # noqa: BLE001
             record_failure("morning_briefing.BriefingComposer.__init__.drift_import", exc)
+        # Network speed (Fast.com core): local class, no import to fail.
+        # Healthy or too-thin-to-say → provider returns None.
+        try:
+            self.providers.append(SpeedBriefingProvider())
+        except Exception as exc:  # noqa: BLE001
+            record_failure("morning_briefing.BriefingComposer.__init__.speed", exc)
 
     def register(self, provider: _Provider) -> None:
         self.providers.append(provider)
