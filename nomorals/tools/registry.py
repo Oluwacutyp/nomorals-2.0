@@ -635,6 +635,7 @@ class ToolRegistry:
             "dev_answer",  # developer answer engine — cited answers + executed code (Phind core)
             "explain_command",  # shell-command explainer — grounded fragments from local man pages (ExplainShell core)
             "regex_lab",  # regex workbench — parser/explainer, debugger, codegen, generate-then-prove (Regex101 core)
+            "requirements",  # requirements extraction, analysis, graph (dynavio REA core)
             "research",
             "memory",  # spine-native granular memory tools (remember/recall/forget/...)
             "workspace",
