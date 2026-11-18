@@ -3588,15 +3588,18 @@ def _parser() -> argparse.ArgumentParser:
                      "nm av scan <path> [--no-quarantine]\\n"
                      "nm av sweep\\n"
                      "nm av quarantine\\n"
+                     "nm av provision\\n"
                      "The scanner (Windows Defender, ClamAV, or the "
                      "built-in EICAR-only check) as a console command: "
                      "status names the engine and the last daily sweep, "
                      "scan checks one path now, sweep runs the daily "
-                     "sweep tick on demand."),
+                     "sweep tick on demand, provision installs ClamAV "
+                     "and verifies it."),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     av_p.add_argument("av_action", nargs="?", default="status",
-                      choices=["status", "scan", "sweep", "quarantine"],
+                      choices=["status", "scan", "sweep", "quarantine",
+                               "provision"],
                       help="Action to perform")
     av_p.add_argument("av_rest", nargs="*", default=[],
                       help="action arguments (scan path)")

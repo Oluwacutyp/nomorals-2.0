@@ -6,11 +6,15 @@ surfaces the real state: the engine on this box, the last scheduled
 sweep, the quarantine, and a scan on demand.
 
 * ``nm av`` / ``nm av status`` — engine + last sweep + quarantine
+  + per-engine scan timeouts
 * ``nm av scan <path>`` — scan a file or folder now (quarantines
   hits, unless ``--no-quarantine``)
 * ``nm av sweep`` — run one sweep tick now (the daily 03:00 job, on
   demand)
 * ``nm av quarantine`` — list quarantined files from the sidecars
+* ``nm av provision`` — install ClamAV via the platform package
+  manager and verify it (``/models`` backend ``clamav``); the run
+  itself on EC2 stays the owner's hand
 """
 
 from __future__ import annotations
@@ -46,8 +50,13 @@ def _when(epoch: float) -> str:
 
 
 def _status_payload(context: Any) -> dict[str, Any]:
-    """Engine + last sweep + quarantine, as one JSON-plain dict."""
-    from ...core.antivirus import detect_antivirus, quarantine_dir_for
+    """Engine + last sweep + quarantine + timeouts, as one JSON-plain
+    dict."""
+    from ...core.antivirus import (
+        detect_antivirus,
+        engine_timeouts,
+        quarantine_dir_for,
+    )
     from ...security.av_sweep import list_quarantine, read_sweep_state
 
     info = detect_antivirus()
@@ -58,6 +67,7 @@ def _status_payload(context: Any) -> dict[str, Any]:
         "engines": list(info.engines),
         "primary": info.primary,
         "detail": info.detail,
+        "timeouts": engine_timeouts(),
         "last_sweep": state,
         "quarantine_dir": str(qdir) if qdir is not None else "",
         "quarantined": rows,
@@ -65,7 +75,7 @@ def _status_payload(context: Any) -> dict[str, Any]:
 
 
 def _cmd_av(args: argparse.Namespace, context: Any) -> int:
-    """``nm av [status|scan <path>|sweep|quarantine]``."""
+    """``nm av [status|scan <path>|sweep|quarantine|provision]``."""
     action = (getattr(args, "av_action", None) or "status").strip().lower()
     as_json = bool(getattr(args, "json", False))
 
@@ -76,6 +86,11 @@ def _cmd_av(args: argparse.Namespace, context: Any) -> int:
             return 0
         lines = [f"engine: {payload['primary'] or 'none'}"
                  + (f" ({payload['detail']})" if payload["detail"] else "")]
+        timeouts = payload.get("timeouts") or {}
+        lines.append(
+            "timeouts: defender "
+            f"{float(timeouts.get('defender') or 0):g}s, clamav "
+            f"{float(timeouts.get('clamav') or 0):g}s")
         state = payload["last_sweep"]
         if state is None:
             lines.append("last sweep: never run")
@@ -164,5 +179,18 @@ def _cmd_av(args: argparse.Namespace, context: Any) -> int:
                   f"({_when(float(row.get('scanned_at') or 0.0))})")
         return 0
 
+    if action == "provision":
+        from ...tools.models_provision import (
+            models_report_text,
+            provision_models,
+        )
+
+        result = provision_models(["clamav"])
+        if as_json:
+            print(json.dumps(result, indent=1, default=str))
+            return 0 if result.get("ok") else 1
+        print(models_report_text(result))
+        return 0 if result.get("ok") else 1
+
     return _usage_error(
-        "usage: nm av [status|scan <path>|sweep|quarantine]")
+        "usage: nm av [status|scan <path>|sweep|quarantine|provision]")

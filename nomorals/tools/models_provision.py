@@ -42,6 +42,10 @@ Inventory (from the code, not a wishlist):
   ``media.trellis.gpu_gate`` / ``media.unirig.gpu_gate``
 * small ML — sklearn / lightgbm / xgboost / catboost, via
   ``llm.specialists.backend_available``
+* security — clamav (ClamAV antivirus engine: the ``clamscan``
+  binary + virus database, installed via the platform package
+  manager and verified by a real ``clamscan --version`` + an EICAR
+  probe through the antivirus organ itself)
 
 Journal-trained learners (the ladder's data-owned jobs) are STATUS
 ONLY — they train from journal rows, not downloads. ``learner_status``
@@ -60,12 +64,15 @@ downloads happen in tests — the seams are the module-level ``_run``,
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
+import shutil
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -102,6 +109,7 @@ BACKENDS: tuple[str, ...] = (
     "librosa", "whisperx",
     "sd15", "ace-step", "trellis", "unirig",
     "sklearn", "lightgbm", "xgboost", "catboost",
+    "clamav",
 )
 
 #: Per-backend hardware gates: name -> callable(box) -> (ok, reason).
@@ -207,6 +215,12 @@ _BACKEND_INFO: dict[str, dict[str, Any]] = {
     "catboost": {"family": "small-ml",
                  "label": "CatBoost (small-ML gradient boosting)",
                  "size_mb": 100, "disk_gb": 1.0, "ram_gb": 1.0},
+    "clamav": {"family": "security",
+               "label": "ClamAV antivirus engine (clamscan)",
+               # Allowance for the package + virus database (Debian:
+               # the package plus a fresh database fit comfortably
+               # inside 200 MB).
+               "size_mb": 200, "disk_gb": 1.0, "ram_gb": 1.0},
 }
 
 #: pip package + import module + warm-load snippet per engine backend.
@@ -530,6 +544,17 @@ def _detect_xgboost() -> bool:
 def _detect_catboost() -> bool:
     try:
         return bool(backend_available("catboost")[0])
+    except Exception:  # noqa: BLE001 - detection is best-effort
+        return False
+
+
+def _detect_clamav() -> bool:
+    """clamscan on PATH. The detector is the install check: a
+    present binary with a working database is what the provision
+    verifier proves, so presence alone is only "installed", never
+    "working" — the EICAR probe decides that."""
+    try:
+        return bool(shutil.which("clamscan"))
     except Exception:  # noqa: BLE001 - detection is best-effort
         return False
 
@@ -981,6 +1006,114 @@ def _provision_unirig(box: dict[str, Any]) -> dict[str, Any]:
                    f"auto-rigging via /models unirig, FBX out", steps)
 
 
+def _provision_clamav(box: dict[str, Any]) -> dict[str, Any]:
+    """ClamAV: install via the platform package manager, then verify
+    by a real ``clamscan --version`` + an EICAR probe through the
+    antivirus organ itself (``core.antivirus.scan_file`` with
+    engine="clamav").
+
+    Installers, in try order per platform — every manager found on
+    PATH is tried in turn; a failed install records its stderr tail
+    and the report names the exact command to run by hand. Non-root
+    Unix runs the install under ``sudo -n`` (asks nothing, fails fast
+    when it cannot authenticate) so the run never hangs on a password
+    prompt. ``freshclam`` refreshes the virus database after install;
+    a failed refresh is recorded but does not fail the run on its own
+    — the EICAR probe is the arbiter (a stale database that still
+    flags EICAR is a working engine). A box with no package manager
+    at all answers "unavailable" with the manual command.
+    """
+    from ..core import antivirus as _av
+
+    steps: list[str] = []
+    if _detect_clamav():
+        return _report(True, "already-installed",
+                       "clamscan already installed", steps)
+    platform = str(box.get("platform") or sys.platform or "").lower()
+    if platform.startswith("win"):
+        candidates = [
+            ("winget", ["winget", "install", "--id", "ClamAV.ClamAV",
+                        "-e", "--accept-source-agreements",
+                        "--accept-package-agreements"]),
+            ("choco", ["choco", "install", "clamav", "-y"]),
+        ]
+        manual = ("winget install --id ClamAV.ClamAV -e "
+                  "--accept-source-agreements "
+                  "--accept-package-agreements")
+    elif platform == "darwin":
+        candidates = [("brew", ["brew", "install", "clamav"])]
+        manual = "brew install clamav"
+    else:
+        candidates = [
+            ("apt-get", ["apt-get", "install", "-y", "clamav"]),
+            ("dnf", ["dnf", "install", "-y", "clamav"]),
+            ("yum", ["yum", "install", "-y", "clamav"]),
+            ("pkg", ["pkg", "install", "-y", "clamav"]),
+        ]
+        manual = "sudo apt-get install -y clamav"
+    available = [(label, argv) for label, argv in candidates
+                 if shutil.which(argv[0])]
+    if not available:
+        tried = ", ".join(label for label, _ in candidates)
+        return _report(False, "unavailable",
+                       f"no package manager found on this box "
+                       f"(tried: {tried}) — install ClamAV by hand: "
+                       f"{manual}", steps)
+    sudo_prefix: list[str] = []
+    if not platform.startswith("win") and platform != "darwin":
+        try:
+            is_root = os.geteuid() == 0
+        except AttributeError:  # noqa: BLE001 - no geteuid on Windows
+            is_root = True
+        if not is_root and shutil.which("sudo"):
+            sudo_prefix = ["sudo", "-n"]
+    installed = False
+    last_err = ""
+    for label, argv in available:
+        proc = _run([*sudo_prefix, *argv], timeout=1200)
+        steps.append(f"{' '.join(argv)}: rc={proc.returncode}")
+        if proc.returncode == 0:
+            installed = True
+            break
+        last_err = (proc.stderr or "").strip()[-300:]
+        steps.append(f"{label} stderr: {last_err}")
+    if not installed:
+        return _report(False, "failed",
+                       "ClamAV install failed"
+                       + (f" — {last_err}" if last_err else "")
+                       + f" — run it by hand: {manual}", steps)
+    proc = _run([*sudo_prefix, "freshclam"], timeout=600)
+    steps.append(f"freshclam: rc={proc.returncode}")
+    if proc.returncode != 0:
+        steps.append(f"freshclam stderr: {(proc.stderr or '')[-300:]}")
+    proc = _run(["clamscan", "--version"], timeout=60)
+    version_line = ((proc.stdout or "").strip().splitlines() or [""])[0]
+    steps.append(f"clamscan --version: rc={proc.returncode}"
+                 + (f" ({version_line})" if version_line else ""))
+    if proc.returncode != 0 or \
+            "clamav" not in (proc.stdout or "").lower():
+        return _report(False, "failed",
+                       "clamscan installed but --version did not "
+                       "report a ClamAV version", steps)
+    # Re-probe so a stale detection cache (from before the install)
+    # cannot lie about the engine; a failed probe is data — the
+    # EICAR probe below is the arbiter either way.
+    with contextlib.suppress(Exception):
+        _av.detect_antivirus(refresh=True)
+    with tempfile.TemporaryDirectory(prefix="clamav-probe-") as td:
+        probe = Path(td) / "eicar.com"
+        probe.write_bytes(_av.EICAR_STRING.encode("ascii"))
+        verdict = _av.scan_file(probe, engine="clamav")
+    if verdict.verdict != "infected":
+        return _report(False, "failed",
+                       "clamscan runs but did not flag the EICAR "
+                       "test file — the install is broken "
+                       f"({verdict.detail})", steps)
+    return _report(True, "installed",
+                   f"ClamAV installed — {version_line}, EICAR probe "
+                   f"detected ({verdict.threat})", steps)
+
+
 # ── the command ──────────────────────────────────────────────────────
 
 def _floor_refusal(name: str, box: dict[str, Any],
@@ -1065,6 +1198,8 @@ def provision_models(backends: Any = None, *,
                         raw.get("steps") or [])
             elif name == "piper":
                 reports[name] = _provision_piper(box)
+            elif name == "clamav":
+                reports[name] = _provision_clamav(box)
             elif name == "sd15":
                 reports[name] = _provision_sd15(box)
             elif name == "ace-step":

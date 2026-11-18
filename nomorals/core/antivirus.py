@@ -69,10 +69,13 @@ __all__ = [
     "AV_ENGINES",
     "AV_PIN_ENV",
     "AV_QUARANTINE_ENV",
+    "AV_TIMEOUT_CLAMAV_ENV",
+    "AV_TIMEOUT_DEFENDER_ENV",
     "EICAR_THREAT",
     "AntivirusInfo",
     "ScanVerdict",
     "detect_antivirus",
+    "engine_timeouts",
     "quarantine_dir_for",
     "quarantine_file",
     "scan_file",
@@ -89,8 +92,14 @@ VERDICTS: tuple[str, ...] = ("clean", "infected", "unknown")
 #: Env vars: NM_AV pins the engine (auto|defender|clamav|builtin|none);
 #: NM_AV_QUARANTINE overrides the quarantine directory (the tool layer
 #: reads it; the organ takes the dir as an argument).
+#: NM_AV_TIMEOUT_DEFENDER_S / NM_AV_TIMEOUT_CLAMAV_S set the per-engine
+#: scan timeout in seconds (a positive number; anything else — unset,
+#: unparseable, zero or negative — falls back to _DEFAULT_TIMEOUT_S).
+#: An explicit timeout_s argument to scan_file/scan_path still wins.
 AV_PIN_ENV = "NM_AV"
 AV_QUARANTINE_ENV = "NM_AV_QUARANTINE"
+AV_TIMEOUT_DEFENDER_ENV = "NM_AV_TIMEOUT_DEFENDER_S"
+AV_TIMEOUT_CLAMAV_ENV = "NM_AV_TIMEOUT_CLAMAV_S"
 
 #: The EICAR standard antivirus test string, assembled from parts so
 #: this file never contains the contiguous signature (a scanner run
@@ -111,12 +120,44 @@ _KNOWN_BAD: dict[str, str] = {
 _CHUNK = 1024 * 1024
 
 #: Default per-engine-call timeout (Defender custom scans on large
-#: files are slow; clamscan is usually fast).
+#: files are slow; clamscan is usually fast). The per-engine values
+#: below default to this; NM_AV_TIMEOUT_DEFENDER_S /
+#: NM_AV_TIMEOUT_CLAMAV_S override one engine at a time.
 _DEFAULT_TIMEOUT_S = 300.0
 
 #: Default cap on files in one directory scan (a huge tree must not
 #: hang the caller; the verdict says when it stopped early).
 _DEFAULT_MAX_FILES = 1000
+
+
+def _engine_timeout_s(engine: str) -> float:
+    """Timeout for one engine's scan call.
+
+    Env override for that engine (a positive number of seconds);
+    anything else — unset, unparseable, zero or negative — falls
+    back to the shared default. Never raises.
+    """
+    if engine == "defender":
+        env_var = AV_TIMEOUT_DEFENDER_ENV
+    elif engine == "clamav":
+        env_var = AV_TIMEOUT_CLAMAV_ENV
+    else:
+        return _DEFAULT_TIMEOUT_S
+    try:
+        value = float((os.environ.get(env_var) or "").strip())
+    except (TypeError, ValueError):
+        return _DEFAULT_TIMEOUT_S
+    return value if value > 0 else _DEFAULT_TIMEOUT_S
+
+
+def engine_timeouts() -> dict[str, float]:
+    """The live per-engine scan timeouts, in seconds.
+
+    ``{"defender": ..., "clamav": ...}`` — the builtin engine runs
+    in-process and takes no timeout. ``nm av status`` surfaces this.
+    """
+    return {"defender": _engine_timeout_s("defender"),
+            "clamav": _engine_timeout_s("clamav")}
 
 
 def _run(args: list[str], timeout: int | None = None,
@@ -541,9 +582,14 @@ def quarantine_file(path: Path, verdict: ScanVerdict,
 
 def scan_file(path: str | Path, *, engine: str | None = None,
              quarantine_dir: str | Path | None = None,
-             timeout_s: float = _DEFAULT_TIMEOUT_S) -> ScanVerdict:
+             timeout_s: float | None = None) -> ScanVerdict:
     """Scan one file. Never raises for a scan outcome — failures are
-    ``unknown`` verdicts with the reason in ``detail``."""
+    ``unknown`` verdicts with the reason in ``detail``.
+
+    ``timeout_s`` None (the default) means the engine's own timeout
+    (``engine_timeouts()`` — env override per engine, 300s default);
+    an explicit value overrides both engines.
+    """
     target = Path(path)
     now = time.time()
     qdir = Path(quarantine_dir) if quarantine_dir else None
@@ -576,6 +622,8 @@ def scan_file(path: str | Path, *, engine: str | None = None,
                 verdict="unknown", path=str(target),
                 detail="Defender is not installed on this box",
                 scanned_at=now)
+        if timeout_s is None:
+            timeout_s = _engine_timeout_s("defender")
         verdict = _scan_with_defender(target, info.defender_path,
                                       timeout_s)
     elif chosen == "clamav":
@@ -584,6 +632,8 @@ def scan_file(path: str | Path, *, engine: str | None = None,
                 verdict="unknown", path=str(target),
                 detail="ClamAV is not installed on this box",
                 scanned_at=now)
+        if timeout_s is None:
+            timeout_s = _engine_timeout_s("clamav")
         verdict = _scan_with_clamav(target, timeout_s)
     else:
         verdict = _scan_with_builtin(target)
@@ -605,14 +655,16 @@ def scan_file(path: str | Path, *, engine: str | None = None,
 
 def scan_path(target: str | Path, *, engine: str | None = None,
               quarantine_dir: str | Path | None = None,
-              timeout_s: float = _DEFAULT_TIMEOUT_S,
+              timeout_s: float | None = None,
               max_files: int = _DEFAULT_MAX_FILES) -> ScanVerdict:
     """Scan a file or a directory (walked, sorted, aggregate verdict).
 
     Infected if any file is infected; unknown if any file is unknown
     and none is infected; clean otherwise. Files under the quarantine
     dir itself are never re-scanned. Stops after ``max_files`` files
-    and says so in the detail."""
+    and says so in the detail. ``timeout_s`` None means each file
+    takes its engine's own timeout (see ``scan_file``).
+    """
     root = Path(target)
     now = time.time()
     qdir = Path(quarantine_dir) if quarantine_dir else None

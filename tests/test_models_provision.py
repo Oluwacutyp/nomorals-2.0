@@ -57,6 +57,7 @@ EXPECTED_BACKENDS = (
     "librosa", "whisperx",
     "sd15", "ace-step", "trellis", "unirig",
     "sklearn", "lightgbm", "xgboost", "catboost",
+    "clamav",
 )
 
 EXPECTED_LEARNERS = (
@@ -176,6 +177,14 @@ def _mock_all_missing(monkeypatch, mp):
         lambda box: {"ok": True, "status": "installed",
                      "detail": "unirig installed",
                      "steps": ["unirig: ok"]})
+    # ClamAV's package-manager install + EICAR probe are stubbed the
+    # same way — the real provisioner has its own suite
+    # (test_gapfix_av_provision.py).
+    monkeypatch.setattr(
+        mp, "_provision_clamav",
+        lambda box: {"ok": True, "status": "installed",
+                     "detail": "clamav installed",
+                     "steps": ["clamav: ok"]})
     monkeypatch.setattr(
         mp, "_char_provision_backends",
         lambda backends=None: {

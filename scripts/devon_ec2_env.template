@@ -577,6 +577,9 @@
 # NM_AV=
 # Quarantine directory for infected files. Default: the settings home's quarantine/ dir.
 # NM_AV_QUARANTINE=
+# Per-engine scan timeout, seconds. Default: 300 each (a positive number; anything else falls back to 300).
+# NM_AV_TIMEOUT_DEFENDER_S=
+# NM_AV_TIMEOUT_CLAMAV_S=
 # Placeholder-example key used in config.py docs; no setting reads it.
 # NM_FLOAT=
 # Config key read by Devon code.
