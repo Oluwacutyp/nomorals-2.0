@@ -19,6 +19,7 @@ from .commands.av import _cmd_av
 from .commands.airports import _cmd_airports
 from .commands.compute import _cmd_compute
 from .commands.evidence import _cmd_evidence
+from .commands.engage import _cmd_engage
 from .commands.devask import _cmd_devask
 from .commands.explain import _cmd_explain
 from .commands.regex import _cmd_regex
@@ -579,6 +580,7 @@ _COMMANDS: dict[str, _CommandSpec] = {
     "airports": _CommandSpec(_cmd_airports),
     "compute": _CommandSpec(_cmd_compute),
     "evidence": _CommandSpec(_cmd_evidence),
+    "engage": _CommandSpec(_cmd_engage),
     "devask": _CommandSpec(_cmd_devask),
     "explain": _CommandSpec(_cmd_explain),
     "regex": _CommandSpec(_cmd_regex),

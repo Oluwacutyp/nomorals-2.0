@@ -20,12 +20,26 @@ from pathlib import Path
 from typing import Any
 
 from ...security import disclose, evidence, recon, report, seed_sources, subbrute
-from ...security.checkers import Verdict
 from ...core.logging_setup import get_logger
 
 _log = get_logger(__name__)
 
+__all__ = ["_cmd_engage"]
+
 STAGES = ("seed", "recon", "brute", "probe", "evidence", "report")
+
+
+def _home_of(context: Any) -> str:
+    # The CLI context is an AgentContext: it has .settings, never .home
+    # — the old getattr(context, "home", ".") always fell back to ".",
+    # so case dirs landed in the caller's working directory.
+    settings = getattr(context, "settings", None) if context else None
+    if settings is not None:
+        home = (getattr(settings, "home_path", None)
+                or getattr(settings, "home", None))
+        if home:
+            return str(home)
+    return str(getattr(context, "home", None) or ".")
 
 
 def _case_root(context: Any, case: str) -> Path:
@@ -33,7 +47,7 @@ def _case_root(context: Any, case: str) -> Path:
     slug = re.sub(r"[^a-z0-9_\-]+", "-", case.strip().lower()).strip("-")
     if not slug:
         raise ValueError("engage needs a case name")
-    return Path(getattr(context, "home", ".") or ".") / "data" / "evidence" / slug
+    return Path(_home_of(context)) / "data" / "evidence" / slug
 
 
 def _write(case_dir: Path, name: str, data: dict[str, Any]) -> None:
@@ -59,7 +73,14 @@ def run_engage(context: Any, domain: str, *, case: str = "",
                client: str = "", scope: str = "") -> dict[str, Any]:
     case = case or domain.replace(".", "-")
     case_dir = _case_root(context, case)
-    chain = evidence.EvidenceChain(case_dir.parent, case_dir.name)
+    # EvidenceChain(root, case) appends "evidence/<case>" to root — so
+    # root is the DATA dir, not the case dir's parent: the old call
+    # passed case_dir.parent (…/data/evidence) and the chain landed at
+    # …/data/evidence/evidence/<case>, invisible to /chain verify and
+    # to report.build(case_dir), which both read the canonical
+    # …/data/evidence/<case>/chain.jsonl. The report stage therefore
+    # errored on every single run.
+    chain = evidence.EvidenceChain(case_dir.parent.parent, case_dir.name)
     order = STAGES[STAGES.index(start_from):STAGES.index(until) + 1]
     proxy = (proxy_pool.acquire if proxy_pool is not None else None)
     results: dict[str, Any] = {"case": case, "domain": domain,
@@ -123,25 +144,33 @@ def run_engage(context: Any, domain: str, *, case: str = "",
                     results["stages"][stage] = {"skipped": "dry run"}
                 else:
                     from ...security.audit_web import ExposureScanner
-                    scanner = ExposureScanner(context) if context else None
+                    # No argument: ExposureScanner takes a Fetcher, not a
+                    # context — the old call passed the CLI context as the
+                    # fetcher, so every scan() raised AttributeError and
+                    # the probe stage silently probed zero hosts.
+                    scanner = ExposureScanner()
                     probed = 0
-                    if scanner is not None:
-                        for host in dict.fromkeys(hosts)[:60]:
-                            try:
-                                scan = scanner.scan(f"https://{host}")
-                            except Exception as exc:  # noqa: BLE001
-                                _log.info("probe %s failed: %s", host, exc)
-                                continue
-                            probed += 1
-                            for finding in (scan.get("findings") or [])[:10]:
-                                _record(chain, "probe", host,
-                                        str(finding.get("kind") or "info"),
-                                        request=finding.get("evidence", {})
-                                        .get("request") or {},
-                                        response=finding.get("evidence", {})
-                                        .get("response") or {},
-                                        note=str(finding.get("detail") or "")[:200],
-                                        severity=str(finding.get("severity") or ""))
+                    # list() first: dict.fromkeys(hosts)[:60] raises
+                    # (a dict is not subscriptable), so the old probe
+                    # loop errored before scanning a single host.
+                    for host in list(dict.fromkeys(hosts))[:60]:
+                        try:
+                            scan = scanner.scan(f"https://{host}")
+                        except Exception as exc:  # noqa: BLE001
+                            _log.info("probe %s failed: %s", host, exc)
+                            continue
+                        probed += 1
+                        for finding in (scan.get("findings") or [])[:10]:
+                            # evidence is None when a check carries no
+                            # pack — .get() on None killed the whole host.
+                            # Findings carry no severity key at all, so
+                            # none is recorded (never invented).
+                            pack = finding.get("evidence") or {}
+                            _record(chain, "probe", host,
+                                    str(finding.get("kind") or "info"),
+                                    request=pack.get("request") or {},
+                                    response=pack.get("response") or {},
+                                    note=str(finding.get("detail") or "")[:200])
                     results["stages"][stage] = {"hosts_probed": probed}
 
             elif stage == "evidence":
@@ -165,24 +194,12 @@ def run_engage(context: Any, domain: str, *, case: str = "",
     return results
 
 
-def add_parser(sub: Any) -> None:
-    p = sub.add_parser("engage", help="run the full engagement chain on a domain")
-    p.add_argument("domain")
-    p.add_argument("--case", default="")
-    p.add_argument("--from", dest="start_from", choices=STAGES, default="seed")
-    p.add_argument("--until", choices=STAGES, default="report")
-    p.add_argument("--workers", type=int, default=20)
-    p.add_argument("--rounds", type=int, default=2)
-    p.add_argument("--dry-run", action="store_true")
-    p.add_argument("--client", default="")
-    p.add_argument("--scope", default="")
-    p.add_argument("--json", action="store_true")
-
-
-def handle(args: Any, context: Any) -> int:
+def _cmd_engage(args: Any, context: Any) -> int:
     pool = None
     try:
-        from ...tools.proxy_rotate import pool_from_context
+        # proxy_rotation, not proxy_rotate: that module does not exist,
+        # so the old import always failed and the pool was always None.
+        from ...tools.proxy_rotation import pool_from_context
         pool = pool_from_context(context)
         pool.probe_all()
     except Exception:  # noqa: BLE001 - no proxies is a valid state

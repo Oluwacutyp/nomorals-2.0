@@ -17,7 +17,6 @@ import json
 import random
 import re
 import time
-import urllib.parse
 from dataclasses import dataclass, field
 from datetime import date
 from typing import Any, Callable, Iterable, Optional
@@ -214,11 +213,12 @@ def check_gateway(card: Card, publishable_key: str, *, timeout: float = 20.0,
             "card[exp_year]": str(card.year or date.today().year + 1),
             "card[cvc]": card.cvv or ""}
     try:
-        resp = client.post("https://api.stripe.com/v1/tokens",
-                           data=urllib.parse.urlencode(form),
-                           headers={"Authorization": f"Bearer {publishable_key}",
-                                    "Content-Type":
-                                    "application/x-www-form-urlencoded"})
+        # post_form, not post: HttpClient has no plain .post — the old
+        # call raised AttributeError on every gateway check, so the only
+        # path that earns a LIVE verdict always answered "unknown".
+        resp = client.post_form("https://api.stripe.com/v1/tokens", form,
+                                headers={"Authorization":
+                                         f"Bearer {publishable_key}"})
     except Exception as exc:  # noqa: BLE001
         card.verdict, card.reason = "unknown", f"transport: {str(exc)[:60]}"
         return card

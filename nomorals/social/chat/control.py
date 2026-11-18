@@ -889,6 +889,8 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "subbrute": (1, 2),      # /subbrute <domain> [rounds] — DNS subdomain brute, wildcard-suppressed (owner-only)
     "chain": (1, 3),         # /chain <case> verify | export | report <domain> — hash-chained evidence packs (owner-only)
     "disclose": (1, 4),      # /disclose score <kind> ... | contacts <domain> | draft <case> <domain> [contact] — disclosure desk (owner-only)
+    "seed": (1, 2),          # /seed <domain> [only,...] | email <addr> | ip <ip> | words <url>... — keyless seed sources (owner-only)
+    "bin": (1, 5),           # /bin <digits> | gen <prefix> [count] [length] | check <number> [mm yyyy] [cvv] | spam <prefix> [count] — card tooling (owner-only)
     "toolhub": (0, 2),       # /toolhub | /toolhub proxy [run] | /toolhub bin [digits] | /toolhub help — button tool hub (owner-only; NOT /hub, which is the media hub)
     "workspace": (0, 4),     # /workspace [status|scale <n>|up|down|pause|resume|add|remove]
     "gen": (2, None),        # /gen <kind> <name> [json config]
@@ -4293,6 +4295,14 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                  "usage": "/disclose score <kind> [sensitivity] [reach] [scale] | contacts <domain> | draft <case> <domain> [contact]",
                  "example": "/disclose score rce financial unauth bulk",
                  "related": "/chain /audit"},
+    "seed": {"what": "Keyless seed sources for a domain, an email, or an IP: passive DNS (OTX, HackerTarget, RapidDNS), URL history (Wayback, Common Crawl, urlscan), host intel (Shodan InternetDB ports + CVEs), email reputation and Gravatar profiles. Every source answers anonymously; a dead source is named in the reply, never a crash. The keyed providers (HIBP account, DeHashed, Shodan full, Censys, SecurityTrails, IntelX, LeakCheck) are listed, never used. `words` turns harvested URLs into brute words for /subbrute. Owner-only.",
+             "usage": "/seed <domain> [only,...] | email <addr> | ip <ip> | words <url>...",
+             "example": "/seed example.com",
+             "related": "/recon /subbrute /chain"},
+    "bin": {"what": "Card tooling: BIN intel (scheme, brand, bank, country from binlist.net — keyless), Luhn-complete generation from a BIN prefix with brand-correct length, structural checks (Luhn, brand length, expiry), and bulk generate-and-check. A check from chat is structural only — WELL_FORMED proves the number is well-formed and nothing more; a LIVE verdict needs a Stripe publishable key, which chat never carries, so that stays a card_check tool call. Owner-only.",
+            "usage": "/bin <digits> | gen <prefix> [count] [length] | check <number> [mm yyyy] [cvv] | spam <prefix> [count]",
+            "example": "/bin 424242",
+            "related": "/toolhub /chain"},
     "toolhub": {"what": "button tool hub — fresh tested proxies as a file, BIN lookup; per-screen inline buttons with Back navigation (owner-only).",
             "usage": "/toolhub | /toolhub proxy [run] | /toolhub bin <digits> | /toolhub help",
             "example": "/toolhub proxy",
@@ -5307,7 +5317,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
      ["tts", "speak", "stt", "voice", "look", "image", "lens",
       "vision", "voices", "clonevoice", "sing", "translate", "tl"]),
     ("tools & automation",
-     ["schedule", "db", "artifact", "api", "proxy", "tor", "onion", "combo", "enum", "recon", "subbrute", "chain", "disclose", "toolhub", "workspace", "record", "macro", "file",
+     ["schedule", "db", "artifact", "api", "proxy", "tor", "onion", "combo", "enum", "recon", "subbrute", "chain", "disclose", "seed", "bin", "toolhub", "workspace", "record", "macro", "file",
       "publish", "notify", "proactive", "mission", "features", "decode", "cookies", "cookielab", "cipher",
       "monitor", "investigate", "breach", "bet", "desk", "markets", "apk", "re", "pump", "finance", "weather", "tz", "map", "email", "gmail", "mail", "inbox", "routine", "home", "store", "track", "untrack", "trip", "travelclient", "contract", "legal", "contracts", "regwatch", "uprofile", "vnote", "match", "cgroup", "challenge", "room", "scamcheck", "passport", "truecost", "value", "valuepick", "watch", "send", "leads", "panel",
       "connectors", "provision", "models", "mcp", "a2a", "llmguard", "prompt", "pair", "owner", "sudo", "massreact", "pollvote", "chfollow", "obroadcast", "relay", "notion", "gcal", "trello", "exness", "stripe",
@@ -5795,6 +5805,8 @@ LIST_ONELINERS: dict[str, str] = {
     "subbrute": "DNS subdomain brute with wildcard suppression + permutation rounds (owner only)",
     "chain": "hash-chained evidence packs: verify, export, engagement report (owner only)",
     "disclose": "severity rubric, security-contact discovery, disclosure draft (owner only)",
+    "seed": "keyless seed sources: passive DNS, URL history, host intel, email reputation (owner only)",
+    "bin": "BIN intel, Luhn card generation, structural card checks (owner only)",
     "map-route": "code-video: a route draws itself (no model)",
     "headline": "code-video: newspaper headline push-in (no model)",
     "teardown": "code-video: exploded parts diagram (no model)",

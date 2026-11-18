@@ -4,7 +4,7 @@ Every fetcher here answers anonymously. Keyed providers (HIBP account,
 DeHashed, Shodan full) are listed in KEYED with the header they need so
 the gap is named rather than hidden.
 
-Normalised item kinds: host, url, email, port, vuln. `harvest()` runs all
+Normalised item kinds: host, url, email, profile, port, vuln. `harvest()` runs all
 sources concurrently, dedupes, and splits by kind. `wordlist()` turns
 harvested URL paths into brute words — the loop back into subbrute.
 """

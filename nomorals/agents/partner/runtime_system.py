@@ -1013,6 +1013,162 @@ class RuntimeSystemMixin:
                 "[scale] | contacts <domain> | draft <case> <domain> "
                 "[contact]")
 
+    def _control_seed(self, tail: str, chat_key: str = "") -> str:
+        # /seed <domain> [only,...] | email <addr> | ip <ip> |
+        # words <url>... — keyless seed sources (owner's seed_sources):
+        # passive DNS, URL history, scan indexes, host intel, email
+        # reputation. Every source answers anonymously; a dead source
+        # is a row in sources_failed, never a crash. Keyed providers
+        # are listed, never used.
+        parts = (tail or "").split()
+        if not parts:
+            return ("usage: /seed <domain> [only,...] | email <addr> | "
+                    "ip <ip> | words <url>...")
+        if parts[0].lower() == "ip":
+            if len(parts) < 2:
+                return "usage: /seed ip <ip>"
+            outcome = self.context.tools.call("ip_intel", ip=parts[1])
+            if not outcome.ok:
+                return (f"ip intel failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            items = v.get("items") or []
+            ports = [i["value"] for i in items if i.get("kind") == "port"]
+            vulns = [i["value"] for i in items if i.get("kind") == "vuln"]
+            lines = [f"{parts[1]}: {len(ports)} port(s), "
+                     f"{len(vulns)} vuln(s)"]
+            if ports:
+                lines.append("  ports: " + ", ".join(ports))
+            if vulns:
+                lines.append("  vulns: " + ", ".join(vulns))
+            return "\n".join(lines)
+        if parts[0].lower() == "email":
+            if len(parts) < 2:
+                return "usage: /seed email <addr>"
+            outcome = self.context.tools.call(
+                "seed_harvest", email=parts[1])
+            if not outcome.ok:
+                return (f"seed failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            lines = [f"{parts[1]}: {v.get('total', 0)} item(s)"]
+            for item in (v.get("email") or []) + (v.get("profile") or []):
+                extra = item.get("extra") or {}
+                lines.append(f"  {item.get('kind')}: {item.get('value')} "
+                             f"({item.get('source')}) "
+                             f"reputation {extra.get('reputation')}")
+            if v.get("sources_failed"):
+                lines.append("  failed: " + "; ".join(v["sources_failed"]))
+            return "\n".join(lines)
+        if parts[0].lower() == "words":
+            if len(parts) < 2:
+                return "usage: /seed words <url>..."
+            outcome = self.context.tools.call(
+                "seed_wordlist", urls=parts[1:])
+            if not outcome.ok:
+                return (f"seed words failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            words = v.get("words") or []
+            return (f"{v.get('count', 0)} word(s): "
+                    + (", ".join(words[:40]) if words else "none"))
+        outcome = self.context.tools.call(
+            "seed_harvest", domain=parts[0],
+            only=parts[1] if len(parts) > 1 else "")
+        if not outcome.ok:
+            return (f"seed failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        v = outcome.value
+        lines = [f"{parts[0]}: {v.get('total', 0)} item(s) from "
+                 f"{v.get('sources_run', 0)} source(s)"]
+        for kind in ("host", "url", "port", "vuln"):
+            rows = v.get(kind) or []
+            if rows:
+                lines.append(f"  {kind}: "
+                             + ", ".join(r["value"] for r in rows[:12])
+                             + (" …" if len(rows) > 12 else ""))
+        if v.get("sources_failed"):
+            lines.append("  failed: " + "; ".join(v["sources_failed"]))
+        return "\n".join(lines)
+
+    def _control_bin(self, tail: str, chat_key: str = "") -> str:
+        # /bin <digits> | gen <prefix> [count] [length] |
+        # check <number> [mm yyyy] [cvv] | spam <prefix> [count] —
+        # card tooling (owner's cards). Lookup is keyless BIN intel;
+        # generate is Luhn-complete from a prefix; check is structural
+        # only from chat — a LIVE verdict needs a gateway key, which
+        # chat never carries; that stays a brain-tool call.
+        parts = (tail or "").split()
+        if not parts:
+            return ("usage: /bin <digits> | gen <prefix> [count] [length] "
+                    "| check <number> [mm yyyy] [cvv] | spam <prefix> "
+                    "[count]")
+        verb = parts[0].lower()
+        if verb == "gen":
+            if len(parts) < 2:
+                return "usage: /bin gen <prefix> [count] [length]"
+            kw = {"bin": parts[1]}
+            if len(parts) > 2:
+                kw["count"] = parts[2]
+            if len(parts) > 3:
+                kw["length"] = parts[3]
+            outcome = self.context.tools.call("bin_generate", **kw)
+            if not outcome.ok:
+                return (f"bin generate failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            lines = [f"{v.get('count', 0)} card(s) from {parts[1]}:"]
+            for c in v.get("cards") or []:
+                lines.append(f"  {c['number']}|{c['exp']}|{c['cvv']} "
+                             f"[{c['brand']}]")
+            return "\n".join(lines)
+        if verb == "check":
+            if len(parts) < 2:
+                return "usage: /bin check <number> [mm yyyy] [cvv]"
+            kw = {"number": parts[1]}
+            if len(parts) > 3:
+                kw["month"] = parts[2]
+                kw["year"] = parts[3]
+            if len(parts) > 4:
+                kw["cvv"] = parts[4]
+            outcome = self.context.tools.call("card_check", **kw)
+            if not outcome.ok:
+                return (f"card check failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            return (f"{v.get('number')} [{v.get('brand')}] "
+                    f"{v.get('verdict')} — {v.get('reason')} "
+                    f"(structural only; a LIVE verdict needs a gateway "
+                    f"key via the card_check tool)")
+        if verb == "spam":
+            if len(parts) < 2:
+                return "usage: /bin spam <prefix> [count]"
+            kw = {"bin": parts[1]}
+            if len(parts) > 2:
+                kw["count"] = parts[2]
+            outcome = self.context.tools.call("card_spam", **kw)
+            if not outcome.ok:
+                return (f"card spam failed: "
+                        f"{getattr(outcome.error, 'message', outcome.error)}")
+            v = outcome.value
+            counts = v.get("counts") or {}
+            return (f"{parts[1]}: {v.get('count', 0)} card(s) in "
+                    f"{v.get('seconds', 0)}s — "
+                    + ", ".join(f"{k} {n}"
+                                for k, n in sorted(counts.items())))
+        outcome = self.context.tools.call("bin_lookup", bin=parts[0])
+        if not outcome.ok:
+            return (f"bin lookup failed: "
+                    f"{getattr(outcome.error, 'message', outcome.error)}")
+        v = outcome.value
+        if not v.get("ok"):
+            return f"{parts[0]}: {v.get('reason', 'unknown BIN')}"
+        return (f"{v.get('bin')}: {v.get('scheme') or '?'} "
+                f"{v.get('brand') or ''} {v.get('type') or ''} — "
+                f"{v.get('bank') or 'unknown bank'}, "
+                f"{v.get('country') or 'unknown country'}"
+                + (" (prepaid)" if v.get("prepaid") else ""))
+
     def _control_toolhub(self, tail: str, chat_key: str = "") -> Any:
         """Tool hub: /toolhub | /toolhub proxy [run] | /toolhub bin [digits] | /toolhub help.
 

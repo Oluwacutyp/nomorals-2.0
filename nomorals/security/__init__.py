@@ -23,6 +23,11 @@
   contact discovery, disclosure draft (owner's batch).
 - :mod:`nomorals.security.report` — engagement report from a case's
   chain + inventory (owner's batch).
+- :mod:`nomorals.security.seed_sources` — keyless seed sources for
+  data harvesting: passive DNS, URL history, scan indexes, host
+  intel, email reputation (owner's batch).
+- :mod:`nomorals.security.cards` — BIN intel, Luhn generation,
+  structural and gateway card checks (owner's batch).
 """
 
 from . import dnsleak as _dnsleak_mod
@@ -172,6 +177,24 @@ __all__ += [
 # hash-chained evidence, disclosure desk, engagement reports.
 # See security/checkers.py, combo_checker.py, social_enum.py,
 # recon.py, subbrute.py, evidence.py, disclose.py, report.py.
+# The owner's security batch, second wave (2026-11-18): keyless seed
+# sources + card tooling. See security/seed_sources.py, cards.py.
+# No bare name here collides with a submodule: `harvest`, `wordlist`,
+# `bin_check`, `generate` etc. are functions, never module names —
+# the recon lesson (never export a bare function whose name IS a
+# submodule) does not apply to either module.
+from .cards import (  # noqa: E402
+    BRANDS,
+    Card,
+    bin_lookup,
+    brand_of,
+    check_gateway,
+    check_structural,
+    generate,
+    luhn_complete,
+    luhn_ok,
+    spam,
+)
 from .checkers import (  # noqa: E402 - section import, this file's convention
     ADAPTERS,
     EbayAdapter,
@@ -213,6 +236,13 @@ from .report import (  # noqa: E402
 )
 from .report import (  # noqa: E402
     build as build_engagement_report,
+)
+from .seed_sources import (  # noqa: E402
+    KEYED,
+    SOURCES,
+    bin_check,
+    harvest,
+    wordlist,
 )
 from .social_enum import (  # noqa: E402
     SITES,
@@ -262,4 +292,19 @@ __all__ += [
     "BruteHit",
     "SubBrute",
     "permutations",
+    "BRANDS",
+    "Card",
+    "bin_lookup",
+    "brand_of",
+    "check_gateway",
+    "check_structural",
+    "generate",
+    "luhn_complete",
+    "luhn_ok",
+    "spam",
+    "KEYED",
+    "SOURCES",
+    "bin_check",
+    "harvest",
+    "wordlist",
 ]

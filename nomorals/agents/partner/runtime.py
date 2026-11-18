@@ -11122,6 +11122,10 @@ class PartnerRuntime(
             return self._control_chain(command.tail or arg)
         if kind == "disclose":
             return self._control_disclose(command.tail or arg)
+        if kind == "seed":
+            return self._control_seed(command.tail or arg)
+        if kind == "bin":
+            return self._control_bin(command.tail or arg)
         if kind == "toolhub":
             return self._control_toolhub(command.tail or arg, chat_key)
         if kind == "workspace":

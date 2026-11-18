@@ -55,6 +55,7 @@ CLI_ALIASES: dict[str, list[str]] = {
     "airports": [],
     "compute": [],
     "evidence": [],
+    "engage": [],
     "devask": [],
     "explain": [],
     "regex": [],
@@ -172,6 +173,11 @@ CLI_ALIASES: dict[str, list[str]] = {
 
 
 def _parser() -> argparse.ArgumentParser:
+    # Lazy: importing the commands package at module top would cycle
+    # (commands/__init__ -> meta -> ..parser). By call time the
+    # parser module is fully initialised, so this is safe.
+    from .commands.engage import STAGES as _ENGAGE_STAGES
+
     parser = argparse.ArgumentParser(
         prog="nm", description="NoMorals Core — self-hosted multi-agent AI substrate.",
         epilog=("exit codes: 0 ok · 1 command failed · 2 usage error · "
@@ -3990,6 +3996,33 @@ def _parser() -> argparse.ArgumentParser:
                           help="email, domain, 'password <password>', or 'watch …'")
     breach_p.add_argument("--json", action="store_true",
                           help="Output as JSON")
+
+    engage_p = sub.add_parser(
+        "engage", aliases=CLI_ALIASES["engage"],
+        help="run the full engagement chain on a domain",
+        description=("nm engage <domain> [--case <name>] [--from <stage>] "
+                     "[--until <stage>] [--workers N] [--rounds N] "
+                     "[--dry-run] [--client <name>] [--scope <note>] "
+                     "[--json]\n"
+                     "Stages run in order and each writes its artifacts "
+                     "into the case dir: seed -> recon -> brute -> probe "
+                     "-> evidence -> report. A stage that fails is "
+                     "recorded and the run continues; every stage can be "
+                     "skipped (--from/--until) and every network stage "
+                     "has a --dry-run that plans without fetching."),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    engage_p.add_argument("domain")
+    engage_p.add_argument("--case", default="")
+    engage_p.add_argument("--from", dest="start_from", choices=_ENGAGE_STAGES,
+                          default="seed")
+    engage_p.add_argument("--until", choices=_ENGAGE_STAGES, default="report")
+    engage_p.add_argument("--workers", type=int, default=20)
+    engage_p.add_argument("--rounds", type=int, default=2)
+    engage_p.add_argument("--dry-run", action="store_true")
+    engage_p.add_argument("--client", default="")
+    engage_p.add_argument("--scope", default="")
+    engage_p.add_argument("--json", action="store_true")
 
     burn_p = sub.add_parser(
         "burn", aliases=CLI_ALIASES["burn"],

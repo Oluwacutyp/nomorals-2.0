@@ -29,6 +29,11 @@ malware scanning + multi-engine verdicts.
   a verified chain (owner's disclose).
 - report_build: engagement report from a case's chain + inventory;
   refuses an unverifiable chain (owner's report).
+- seed_harvest / seed_wordlist / ip_intel: keyless seed sources —
+  passive DNS, URL history, scan indexes, host intel, email
+  reputation; harvested URLs into brute words (owner's seed_sources).
+- bin_lookup / bin_generate / card_check / card_spam: BIN intel,
+  Luhn generation, structural and gateway card checks (owner's cards).
 """
 
 from __future__ import annotations
@@ -293,3 +298,12 @@ def register(registry: Any) -> None:
     _evidence.register(registry)
     _disclose.register(registry)
     _report.register(registry)
+
+    # The owner's security batch, second wave (2026-11-18): keyless
+    # seed sources + card tooling. Each organ lives in security/ and
+    # registers its own tools here, like the first wave.
+    from ..security import cards as _cards
+    from ..security import seed_sources as _seed_sources
+
+    _seed_sources.register(registry)
+    _cards.register(registry)
