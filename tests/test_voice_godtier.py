@@ -414,6 +414,17 @@ class ControlVoiceDispatchTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tmp = tempfile.TemporaryDirectory()
         os.environ["NOMORALS_VOICES_DIR"] = self.tmp.name
+        # "without voices" means NO voice anywhere: the catalogue is
+        # empty AND piper has no default voice. Piper resolves its
+        # default from PIPER_VOICE / PIPER_VOICES_DIR, so a battery
+        # env that sets PIPER_VOICE (for the narration tests) would
+        # otherwise let this speak through the real default voice —
+        # and on a tree where auto fall-through works that is the
+        # correct outcome, not the failure this test asserts.
+        self._saved_piper_env = {}
+        for key in ("PIPER_VOICE", "PIPER_VOICES_DIR"):
+            if key in os.environ:
+                self._saved_piper_env[key] = os.environ.pop(key)
         self.ref = os.path.join(self.tmp.name, "ref.wav")
         write_wav(self.ref,
                   [math.sin(i / 10) * 0.3 for i in range(1600)], 16000)
@@ -424,6 +435,7 @@ class ControlVoiceDispatchTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         os.environ.pop("NOMORALS_VOICES_DIR", None)
+        os.environ.update(self._saved_piper_env)
         self.tmp.cleanup()
 
     def test_list_empty(self) -> None:

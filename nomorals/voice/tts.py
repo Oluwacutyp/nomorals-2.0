@@ -74,6 +74,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 import wave
 from array import array
 from dataclasses import dataclass, field
@@ -2653,6 +2654,54 @@ _BACKEND_SPECS = {"bark": "bark", "xtts": "TTS", "kokoro": "kokoro",
                   "diffsinger": None}  # in-repo: probed via construction
 
 
+class _DialogueRenderError(Exception):
+    """A dialogue render failed after its own per-turn cascade.
+
+    Raised (wrapping the original) when the multi-speaker branch of
+    :meth:`UniversalTTS._speak_impl` fails: each turn already went
+    through ``speak()`` — i.e. through the auto fall-through — so the
+    outer auto loop must NOT re-render the whole dialogue with the
+    next backend. Distinct from a plain synthesize failure, which the
+    outer loop retries with the next candidate.
+    """
+
+
+#: How long a backend that failed at synthesize time stays demoted in
+#: auto selection. A fresh ``UniversalTTS`` is built per narration
+#: segment, so without this every segment would re-pay a dead cloud
+#: round-trip before falling through to the working backend.
+_SYNTH_FAILURE_TTL_S = 600.0
+
+#: backend name → ``time.monotonic()`` of its last synthesize (or
+#: construction) failure. Read by ``_ordered_backends``; never removes
+#: a backend, only demotes it to the end of the order until the TTL
+#: expires — a transiently dead backend still gets tried last.
+_FAILED_BACKENDS: dict[str, float] = {}
+
+
+def _note_backend_failed(name: str) -> None:
+    """Record that ``name`` could not serve — demote it for a while."""
+    _FAILED_BACKENDS[name] = time.monotonic()
+
+
+def _demote_failed_backends(order: list[str]) -> list[str]:
+    """``order`` with recently-failed backends moved to the end.
+
+    Relative order is preserved within each group; stale memo entries
+    (older than the TTL) are dropped and the backend returns to its
+    scored position.
+    """
+    now = time.monotonic()
+    failed = {n for n, t in _FAILED_BACKENDS.items()
+              if now - t <= _SYNTH_FAILURE_TTL_S}
+    for name in list(_FAILED_BACKENDS):
+        if now - _FAILED_BACKENDS[name] > _SYNTH_FAILURE_TTL_S:
+            del _FAILED_BACKENDS[name]
+    live = [n for n in order if n not in failed]
+    dead = [n for n in order if n in failed]
+    return live + dead
+
+
 # ----------------------------------------------------
 # WAV WRITING (stdlib only — no scipy)
 # ----------------------------------------------------
@@ -2844,7 +2893,10 @@ class UniversalTTS:
         order = select_backends(purpose=purpose, audience=audience)
         if audience == "private" and "xtts" in order:
             order = ["xtts"] + [b for b in order if b != "xtts"]
-        return order
+        # A backend that failed at synthesize time stays usable but
+        # demoted until the memo expires — a fresh engine per narration
+        # segment must not re-pay a dead cloud round-trip every time.
+        return _demote_failed_backends(order)
 
     # -- voice profiles ------------------------------------------------------
     def voice_for(self, audience: str | None = None) -> str:
@@ -2902,6 +2954,7 @@ class UniversalTTS:
             try:
                 self._impl = _BACKENDS[name]()
             except Exception as exc:
+                _note_backend_failed(name)
                 failures.append(f"{name}: {exc}")
                 continue
             self._loaded = True
@@ -3297,8 +3350,88 @@ class UniversalTTS:
                     language: str = "",
                     auto_tags: bool = False,
                     voice_map: dict[str, str] | None = None) -> dict:
+        """Speak via one backend — falling through on synthesize failure.
+
+        An explicitly requested backend is single-shot (it fails loudly,
+        as before). ``backend="auto"`` tries candidates best-first and
+        falls through when a backend constructs fine but cannot
+        synthesize — the hf-endpoint poisoning: ``huggingface_hub``
+        importable makes it "available" and auto scores it above piper,
+        yet its synthesize raises ``StopIteration`` (no provider can
+        serve the model), which used to silence the whole call even
+        though piper was installed and working. The first backend that
+        speaks wins; the result names every dead backend in
+        ``fallbacks``. All candidates failing raises ``RuntimeError``
+        naming each failure — never a bare ``StopIteration``.
+        """
         aud = audience or self.audience
-        backend = self._load_backend(audience=aud)
+        if self._backend_name != "auto":
+            backend = self._load_backend(audience=aud)
+            return self._speak_with_backend(
+                backend, tagged_text, voice_name=voice_name,
+                out_path=out_path, mood=mood, mood_level=mood_level,
+                audience=aud, speed=speed, exaggeration=exaggeration,
+                language=language, auto_tags=auto_tags,
+                voice_map=voice_map)
+        ordered = self._ordered_backends(aud, self.purpose)
+        if self._loaded and self._impl is not None:
+            # A backend proven working by an earlier call on this engine
+            # goes first — its construction already paid off.
+            proven = getattr(self._impl, "name", "")
+            if proven in ordered:
+                ordered = [proven] + [n for n in ordered if n != proven]
+        failures: list[str] = []
+        for name in ordered:
+            try:
+                backend = _BACKENDS[name]()
+            except Exception as exc:
+                _note_backend_failed(name)
+                failures.append(f"{name}: {exc}")
+                continue
+            try:
+                result = self._speak_with_backend(
+                    backend, tagged_text, voice_name=voice_name,
+                    out_path=out_path, mood=mood, mood_level=mood_level,
+                    audience=aud, speed=speed, exaggeration=exaggeration,
+                    language=language, auto_tags=auto_tags,
+                    voice_map=voice_map)
+            except _DialogueRenderError:
+                # Each dialogue turn already went through speak() — the
+                # per-turn cascade is exhausted; re-rendering the whole
+                # dialogue with the next backend cannot help.
+                raise
+            except Exception as exc:
+                _note_backend_failed(name)
+                record_failure("tts.UniversalTTS._speak_impl", exc)
+                failures.append(
+                    f"{name}: {type(exc).__name__}: {exc}")
+                continue
+            self._impl = backend
+            self._loaded = True
+            if failures:
+                result["fallbacks"] = list(failures)
+            return result
+        tried = "; ".join(failures) if failures else "none installed"
+        raise RuntimeError(
+            f"no TTS backend could synthesize (tried: {tried})")
+
+    def _speak_with_backend(self, backend: Any, tagged_text: str,
+                            voice_name: str | None = None,
+                            out_path: str = "", mood: str = "",
+                            mood_level: int = 5,
+                            audience: str | None = None, *,
+                            speed: float = 1.0,
+                            exaggeration: float | None = None,
+                            language: str = "",
+                            auto_tags: bool = False,
+                            voice_map: dict[str, str] | None = None
+                            ) -> dict:
+        """One render + synthesize attempt on an already-built backend.
+
+        Raises on synthesize failure (the caller decides whether to
+        fall through); a dialogue result is returned as-is.
+        """
+        aud = audience or self.audience
         # Dialogue branch: a multi-speaker [S1]/[S2] script renders
         # turn-by-turn through render_dialogue — unless the backend
         # speaks [S1] natively (Dia), in which case the script passes
@@ -3312,9 +3445,16 @@ class UniversalTTS:
         turns = parse_dialogue(tagged_text)
         if len(turns) >= 2 and dialogue_needs_backend_split(
                 getattr(backend, "name", "")):
-            return self._speak_dialogue(
-                tagged_text, backend, out_path=out_path, audience=aud,
-                voice_map=voice_map)
+            try:
+                return self._speak_dialogue(
+                    tagged_text, backend, out_path=out_path, audience=aud,
+                    voice_map=voice_map)
+            except _DialogueRenderError:
+                raise
+            except Exception as exc:
+                raise _DialogueRenderError(
+                    f"dialogue render failed on {backend.name}: {exc}"
+                    ) from exc
         text = mood_to_tagged_text(tagged_text, mood, mood_level) if mood \
             else tagged_text
         voice = self._resolve_voice(voice_name, aud)
@@ -3559,8 +3699,18 @@ class UniversalTTS:
                     "alignment_reason": unavailable}
         synth_opts, _residual = self._split_synth_opts(
             backend, speed=1.0, language=language)
-        audio, words = aligned_fn(final_text, voice,
-                                  instruct=instruct, **synth_opts)
+        try:
+            audio, words = aligned_fn(final_text, voice,
+                                      instruct=instruct, **synth_opts)
+        except Exception as exc:
+            # A backend that claims alignment but throws at synthesis
+            # time speaks normally instead — same invariant as speak():
+            # a dead backend never silences the call.
+            return self._aligned_unusable(
+                tagged_text, voice_name, out_path, mood, mood_level,
+                audience, speed, language, backend,
+                reason=(f"backend {backend.name!r} alignment failed at "
+                        f"synthesis: {type(exc).__name__}: {exc}"))
         sample_rate = getattr(backend, "sample_rate",
                               self.default_sample_rate)
         words = _checked_alignment_words(words)
@@ -3584,7 +3734,8 @@ class UniversalTTS:
                           voice_name: Optional[str], out_path: str,
                           mood: str, mood_level: int,
                           audience: str | None, speed: float,
-                          language: str, backend: Any) -> dict:
+                          language: str, backend: Any,
+                          reason: str | None = None) -> dict:
         """A backend claimed alignment but produced unusable times.
 
         Speak normally and report the claim's failure — never pass
@@ -3596,10 +3747,10 @@ class UniversalTTS:
                          language=language)
         return {**res, "words": [], "timing_source": "unavailable",
                 "alignment": "none",
-                "alignment_reason":
+                "alignment_reason": reason or (
                     f"backend {backend.name!r} declared "
                     f"word_alignment={getattr(backend, 'word_alignment', 'none')!r} "
-                    "but produced no usable word timestamps"}
+                    "but produced no usable word timestamps")}
 
     def _sentence_stream(self, backend: Any, text: str,
                          voice: Optional[VoiceProfile],
