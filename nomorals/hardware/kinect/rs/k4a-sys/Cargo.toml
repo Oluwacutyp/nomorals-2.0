@@ -1,0 +1,14 @@
+[package]
+name = "k4a-sys-temp"
+version = "0.2.3"
+authors = ["fork of Amedee's code"]
+edition = "2018"
+description = "A patched version of k4a-sys that builds on Linux. This will be deprecated when k4a-sys is bumped."
+repository = "https://github.com/storytold/k4a-sys-temp"
+license = "MIT"
+github = {repository = "storytold/k4a-sys-temp", branch = "master" }
+documentation = "https://docs.rs/k4a-sys-temp"
+keywords = ["kinect"]
+
+[build-dependencies]
+bindgen = "0.52.0"

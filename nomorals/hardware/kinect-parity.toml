@@ -1,0 +1,355 @@
+# Kinect parity — machine-checked expectations for the k4a port.
+#
+# Every value here was measured, not asserted: enum values were
+# re-parsed from the vendored k4atypes.h, struct layouts from a
+# gcc sizeof/offset probe, fixture geometry from running the code,
+# and the sdk_* cases compare this port's geometry against the
+# REAL libk4a 1.4.2 binary on this box — same calibration, same
+# points — so the math is checked against the SDK, not itself.
+# Fixtures live in tests/fixtures/kinect/.
+
+[schema]
+version = 1
+
+[[case]]
+id = "enum-depth-mode"
+op = "enum_values"
+[case.expect.values]
+K4A_DEPTH_MODE_OFF = 0
+K4A_DEPTH_MODE_NFOV_2X2BINNED = 1
+K4A_DEPTH_MODE_NFOV_UNBINNED = 2
+K4A_DEPTH_MODE_WFOV_2X2BINNED = 3
+K4A_DEPTH_MODE_WFOV_UNBINNED = 4
+K4A_DEPTH_MODE_PASSIVE_IR = 5
+
+[[case]]
+id = "enum-color-resolution"
+op = "enum_values"
+[case.expect.values]
+K4A_COLOR_RESOLUTION_OFF = 0
+K4A_COLOR_RESOLUTION_720P = 1
+K4A_COLOR_RESOLUTION_1080P = 2
+K4A_COLOR_RESOLUTION_1440P = 3
+K4A_COLOR_RESOLUTION_1536P = 4
+K4A_COLOR_RESOLUTION_2160P = 5
+K4A_COLOR_RESOLUTION_3072P = 6
+
+[[case]]
+id = "enum-image-format"
+op = "enum_values"
+[case.expect.values]
+K4A_IMAGE_FORMAT_COLOR_MJPG = 0
+K4A_IMAGE_FORMAT_COLOR_NV12 = 1
+K4A_IMAGE_FORMAT_COLOR_YUY2 = 2
+K4A_IMAGE_FORMAT_COLOR_BGRA32 = 3
+K4A_IMAGE_FORMAT_DEPTH16 = 4
+K4A_IMAGE_FORMAT_IR16 = 5
+K4A_IMAGE_FORMAT_CUSTOM8 = 6
+K4A_IMAGE_FORMAT_CUSTOM16 = 7
+K4A_IMAGE_FORMAT_CUSTOM = 8
+
+[[case]]
+id = "enum-result-fps-sync"
+op = "enum_values"
+[case.expect.values]
+K4A_RESULT_SUCCEEDED = 0
+K4A_RESULT_FAILED = 1
+K4A_BUFFER_RESULT_SUCCEEDED = 0
+K4A_BUFFER_RESULT_FAILED = 1
+K4A_BUFFER_RESULT_TOO_SMALL = 2
+K4A_WAIT_RESULT_SUCCEEDED = 0
+K4A_WAIT_RESULT_FAILED = 1
+K4A_WAIT_RESULT_TIMEOUT = 2
+K4A_FRAMES_PER_SECOND_5 = 0
+K4A_FRAMES_PER_SECOND_15 = 1
+K4A_FRAMES_PER_SECOND_30 = 2
+K4A_WIRED_SYNC_MODE_STANDALONE = 0
+K4A_WIRED_SYNC_MODE_MASTER = 1
+K4A_WIRED_SYNC_MODE_SUBORDINATE = 2
+
+[[case]]
+id = "enum-calibration"
+op = "enum_values"
+[case.expect.values]
+K4A_CALIBRATION_TYPE_UNKNOWN = -1
+K4A_CALIBRATION_TYPE_DEPTH = 0
+K4A_CALIBRATION_TYPE_COLOR = 1
+K4A_CALIBRATION_TYPE_GYRO = 2
+K4A_CALIBRATION_TYPE_ACCEL = 3
+K4A_CALIBRATION_TYPE_NUM = 4
+K4A_CALIBRATION_LENS_DISTORTION_MODEL_UNKNOWN = 0
+K4A_CALIBRATION_LENS_DISTORTION_MODEL_THETA = 1
+K4A_CALIBRATION_LENS_DISTORTION_MODEL_POLYNOMIAL_3K = 2
+K4A_CALIBRATION_LENS_DISTORTION_MODEL_RATIONAL_6KT = 3
+K4A_CALIBRATION_LENS_DISTORTION_MODEL_BROWN_CONRADY = 4
+K4A_COLOR_CONTROL_EXPOSURE_TIME_ABSOLUTE = 0
+K4A_COLOR_CONTROL_AUTO_EXPOSURE_PRIORITY = 1
+K4A_COLOR_CONTROL_BRIGHTNESS = 2
+K4A_COLOR_CONTROL_CONTRAST = 3
+K4A_COLOR_CONTROL_SATURATION = 4
+K4A_COLOR_CONTROL_SHARPNESS = 5
+K4A_COLOR_CONTROL_WHITEBALANCE = 6
+K4A_COLOR_CONTROL_BACKLIGHT_COMPENSATION = 7
+K4A_COLOR_CONTROL_GAIN = 8
+K4A_COLOR_CONTROL_POWERLINE_FREQUENCY = 9
+K4A_COLOR_CONTROL_MODE_AUTO = 0
+K4A_COLOR_CONTROL_MODE_MANUAL = 1
+
+[[case]]
+id = "enum-firmware-interpolation-log"
+op = "enum_values"
+[case.expect.values]
+K4A_FIRMWARE_BUILD_RELEASE = 0
+K4A_FIRMWARE_BUILD_DEBUG = 1
+K4A_FIRMWARE_SIGNATURE_MSFT = 0
+K4A_FIRMWARE_SIGNATURE_TEST = 1
+K4A_FIRMWARE_SIGNATURE_UNSIGNED = 2
+K4A_TRANSFORMATION_INTERPOLATION_TYPE_NEAREST = 0
+K4A_TRANSFORMATION_INTERPOLATION_TYPE_LINEAR = 1
+K4A_LOG_LEVEL_CRITICAL = 0
+K4A_LOG_LEVEL_ERROR = 1
+K4A_LOG_LEVEL_WARNING = 2
+K4A_LOG_LEVEL_INFO = 3
+K4A_LOG_LEVEL_TRACE = 4
+K4A_LOG_LEVEL_OFF = 5
+
+[[case]]
+id = "resolutions"
+op = "resolutions"
+[case.expect.depth]
+NFOV_2X2BINNED = [320, 288]
+NFOV_UNBINNED = [640, 576]
+WFOV_2X2BINNED = [512, 512]
+WFOV_UNBINNED = [1024, 1024]
+PASSIVE_IR = [1024, 1024]
+[case.expect.color]
+RES_720P = [1280, 720]
+RES_1080P = [1920, 1080]
+RES_1440P = [2560, 1440]
+RES_1536P = [2048, 1536]
+RES_2160P = [3840, 2160]
+RES_3072P = [4096, 3072]
+
+[[case]]
+id = "struct-layout"
+op = "struct_layout"
+[case.expect.sizeof]
+DeviceConfiguration = 36
+Calibration = 1032
+HardwareVersion = 56
+ImuSample = 48
+[case.expect.offsets]
+"DeviceConfiguration.color_format" = 0
+"DeviceConfiguration.color_resolution" = 4
+"DeviceConfiguration.depth_mode" = 8
+"DeviceConfiguration.camera_fps" = 12
+"DeviceConfiguration.synchronized_images_only" = 16
+"DeviceConfiguration.depth_delay_off_color_usec" = 20
+"DeviceConfiguration.wired_sync_mode" = 24
+"DeviceConfiguration.subordinate_delay_off_master_usec" = 28
+"DeviceConfiguration.disable_streaming_indicator" = 32
+"Calibration.depth_camera_calibration" = 0
+"Calibration.color_camera_calibration" = 128
+"Calibration.extrinsics" = 256
+"Calibration.depth_mode" = 1024
+"Calibration.color_resolution" = 1028
+"HardwareVersion.rgb" = 0
+"HardwareVersion.depth" = 12
+"HardwareVersion.audio" = 24
+"HardwareVersion.depth_sensor" = 36
+"HardwareVersion.firmware_build" = 48
+"HardwareVersion.firmware_signature" = 52
+"ImuSample.temperature" = 0
+"ImuSample.acc_sample" = 4
+"ImuSample.acc_timestamp_usec" = 16
+"ImuSample.gyro_sample" = 24
+"ImuSample.gyro_timestamp_usec" = 40
+
+[[case]]
+id = "config-disable-all"
+op = "config_disable_all"
+[case.expect]
+color_format = "COLOR_MJPG"
+color_resolution = "OFF"
+depth_mode = "OFF"
+camera_fps = "FPS_30"
+synchronized_images_only = false
+depth_delay_off_color_usec = 0
+wired_sync_mode = "STANDALONE"
+subordinate_delay_off_master_usec = 0
+disable_streaming_indicator = false
+
+[[case]]
+id = "depth-decode"
+op = "depth_decode"
+fixture = "depth_nfov_640x576.raw"
+[case.expect]
+width = 640
+height = 576
+stride = 1280
+[case.expect.pixels]
+"0,0" = 1000
+"0,99" = 1099
+"0,100" = 1000
+"105,205" = 0
+"99,205" = 1054
+"575,639" = 1064
+
+[[case]]
+id = "depth-stats"
+op = "depth_stats"
+fixture = "depth_nfov_640x576.raw"
+[case.expect]
+width = 640
+height = 576
+stride = 1280
+valid_pixels = 368540
+zero_pixels = 100
+min_mm = 1000
+max_mm = 1148
+mean_mm = 1071.6003147555218
+valid_fraction = 0.9997287326388888
+
+[[case]]
+id = "calibration-parse"
+op = "calibration_parse"
+fixture = "calibration.json"
+[case.expect]
+depth_width = 640
+depth_height = 576
+depth_model = "BROWN_CONRADY"
+depth_metric_radius = 1.737323045730591
+gyro_translation_mm = [0.0, 0.0, 0.0]
+[case.expect.depth_intrinsics]
+cx = 321.73828125
+cy = 333.33843994140625
+fx = 504.6473693847656
+fy = 504.75738525390625
+k1 = 0.5825164318084717
+k2 = 0.006136116571724415
+k3 = -0.0013186802389100194
+k4 = 0.9256134629249573
+k5 = 0.1256897747516632
+k6 = -0.006530247628688812
+codx = 0.0
+cody = 0.0
+p2 = -0.000020833556845900603
+p1 = -0.00012877916742581874
+[case.expect.color_intrinsics]
+cx = 634.7147674560547
+cy = 362.7684326171875
+fx = 615.8015441894531
+fy = 615.6208276748657
+k1 = -1.05756676197052
+k2 = -1.399342656135559
+k3 = 1.7508856058120728
+k4 = -1.1485179662704468
+k5 = -1.1924415826797485
+k6 = 1.6220585107803345
+codx = 0.0
+cody = 0.0
+p2 = -0.000012259531104064081
+p1 = 0.0006910160882398486
+
+[[case]]
+id = "geometry-roundtrip"
+op = "geometry_roundtrip"
+fixture = "calibration.json"
+[case.expect]
+[[case.expect.points]]
+u = 320.0
+v = 288.0
+depth_mm = 1500.0
+point_mm = [-5.1808, -135.1035, 1500.0]
+[[case.expect.points]]
+u = 100.0
+v = 100.0
+depth_mm = 1500.0
+point_mm = [-772.0989, -812.2091, 1500.0]
+[[case.expect.points]]
+u = 500.0
+v = 400.0
+depth_mm = 1500.0
+point_mm = [557.5433, 208.4798, 1500.0]
+[[case.expect.points]]
+u = 639.0
+v = 575.0
+depth_mm = 1500.0
+point_mm = [1229.6033, 936.632, 1500.0]
+[[case.expect.points]]
+u = 320.0
+v = 288.0
+depth_mm = 0.0
+point_mm = [0.0, 0.0, 0.0]
+
+[[case]]
+id = "sdk-geometry"
+op = "sdk_geometry"
+fixture = "calibration.json"
+[case.expect]
+tolerance_mm = 0.05
+[[case.expect.points]]
+u = 320.0
+v = 288.0
+depth_mm = 1500.0
+[[case.expect.points]]
+u = 100.0
+v = 100.0
+depth_mm = 1500.0
+[[case.expect.points]]
+u = 500.0
+v = 400.0
+depth_mm = 1500.0
+[[case.expect.points]]
+u = 0.0
+v = 0.0
+depth_mm = 1500.0
+[[case.expect.points]]
+u = 639.0
+v = 575.0
+depth_mm = 1500.0
+[case.expect.sdk_intrinsics]
+cx = 321.73828125
+cy = 333.33843994140625
+fx = 504.6473693847656
+fy = 504.75738525390625
+
+[[case]]
+id = "sdk-point-cloud"
+op = "sdk_point_cloud"
+fixture = "depth_nfov_640x576.raw"
+[case.expect]
+width = 640
+height = 576
+stride = 1280
+# The SDK writes int16 millimetres, so its points are quantized
+# to whole mm: 1.0 mm covers the rounding, not the geometry.
+tolerance_mm = 1.0
+
+[[case]]
+id = "probe-report"
+op = "probe_report"
+[case.expect]
+sdk_present = true
+
+[[case]]
+id = "jpeg-sniff"
+op = "jpeg_sniff"
+fixture = "color_mjpg.jpg"
+[case.expect]
+width = 64
+height = 48
+
+[[case]]
+id = "pinhole-xyz"
+op = "pinhole_xyz"
+[case.expect]
+[[case.expect.points]]
+depth_mm = 1500.0
+x = 320
+y = 288
+fx = 504.6473693847656
+fy = 504.75738525390625
+cx = 321.73828125
+cy = 333.33843994140625
+xyz_mm = [-5.166819512363267, -134.73336279745513, 1500.0]

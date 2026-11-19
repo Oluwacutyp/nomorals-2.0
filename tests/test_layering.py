@@ -72,6 +72,11 @@ LAYERS: dict[str, int] = {
     # service organ at L4 beside browser/; it reaches only downward
     # (core) and the brain is injected by the layers above it.
     "computer": 4,
+    # hardware/ is the physical-device organ (Azure Kinect sensor
+    # bindings, lane 122): a service organ at L4 beside computer/;
+    # it imports stdlib + itself only, and the brain/tools above
+    # it reach it through probe/device, never the reverse.
+    "hardware": 4,
     # maps/ is Devon Atlas (docs 19+21): pack manifests, receipts,
     # coordinate/GeoJSON schemas and the renderer boundary.  A service
     # organ at L4 beside documents/browser; it reaches only downward

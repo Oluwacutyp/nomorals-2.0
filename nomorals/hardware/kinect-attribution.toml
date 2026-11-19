@@ -1,0 +1,258 @@
+# Kinect attribution — SHA-256 provenance for the k4a port.
+#
+# Upstream: storytold/k4a-sys-temp, commit
+# ffc38156faca14a44fb2c489049c8bf9d4959f5a ("bump version to
+# 0.2.3"), MIT (Copyright 2020 Amédée d'Aboville, LICENSE.md).
+# The clone is a thin fork of k4a-sys: the whole Linux patch is
+# one line in build.rs (link libk4a on Linux). Every file below
+# is hash-pinned against the clone on disk; verify_attribution
+# recomputes them.
+#
+# The calibration fixture is NOT from that clone: it is the
+# Azure Kinect Sensor SDK's own unit-test calibration JSON
+# (microsoft/Azure-Kinect-Sensor-SDK, MIT), extracted from
+# tests/UnitTests/utcommon/inc/ut_calibration_data.h (v1.4.1)
+# and stored as tests/fixtures/kinect/calibration.json. It is
+# pinned under [[sdk]] against the repo file itself.
+
+[meta]
+source = "storytold/k4a-sys-temp"
+commit = "ffc38156faca14a44fb2c489049c8bf9d4959f5a"
+license = "MIT"
+license_holder = "Copyright 2020 Amédée d'Aboville"
+
+[[upstream]]
+id = "gitignore"
+upstream = ".gitignore"
+sha256 = "ac7b1a6d4d910e4a0d4631cc64b0d5270c7d5be7bae6ea48275932f666a84c52"
+
+[[upstream]]
+id = "changelog"
+upstream = "CHANGELOG.md"
+sha256 = "f8283330704b36ce8092bdf45de91d889c6c6faa56614a03b50b53957f20a930"
+
+[[upstream]]
+id = "cargo-toml"
+upstream = "Cargo.toml"
+sha256 = "c5b147e3ee6b32a108ba8b04b5f1f5e5ab3db5f8c185e3e58bb7920483483aa8"
+
+[[upstream]]
+id = "license"
+upstream = "LICENSE.md"
+sha256 = "9dcc1c0e3bed4a89589106dbc7e1894f3208ef8cd392662ca90125ec04a5f1f4"
+
+[[upstream]]
+id = "readme"
+upstream = "README.md"
+sha256 = "03f167dffc265e91c74be596e3c44b16f17a452b31c96f84505963a467aabe97"
+
+[[upstream]]
+id = "build-rs"
+upstream = "build.rs"
+sha256 = "4ac9b7d81988ec459faf9066216960fdec5a84a150b2886b30c9afb0c1046d9c"
+
+[[upstream]]
+id = "example-enumerate"
+upstream = "examples/enumerate.rs"
+sha256 = "87c81fc48974226f5214e721cee827492292017dca12921690615c963cb60bf7"
+
+[[upstream]]
+id = "example-streaming"
+upstream = "examples/streaming.rs"
+sha256 = "8381671bcc803cc0ae7171569f58c97bed34ca5955e589d3c11ef6070a9f3312"
+
+[[upstream]]
+id = "lib-rs"
+upstream = "src/lib.rs"
+sha256 = "8002c11922091615ec6534a47e5bf990564e354cc52fd88d15a8406a871bd1f5"
+
+[[upstream]]
+id = "wrapper-h"
+upstream = "wrapper.h"
+sha256 = "8f2d6c651fa476cbf53d3f02dca82dd935ff3cf6231ab7003f7ae305e2a36bae"
+
+[[upstream]]
+id = "linux-k4a-h"
+upstream = "vendor/include/linux/k4a/k4a.h"
+sha256 = "711aa1d0756dd8145e41ca48e47159e412c6c37c0dbee271fe73f4e94262714e"
+
+[[upstream]]
+id = "linux-k4a-hpp"
+upstream = "vendor/include/linux/k4a/k4a.hpp"
+sha256 = "6211190786dc4942e5059aab9f98ce5de6ffacd8a52a0393f407f79443608a53"
+
+[[upstream]]
+id = "linux-k4a-export-h"
+upstream = "vendor/include/linux/k4a/k4a_export.h"
+sha256 = "81466432d2ee341c815f7d7258bcc7b45989c2c0d59b11a66df46f7710a56434"
+
+[[upstream]]
+id = "linux-k4atypes-h"
+upstream = "vendor/include/linux/k4a/k4atypes.h"
+sha256 = "072193b88b8dee894ccedbccb16ac0dbb11098436ab5d1c51be2a1cd3a0745a8"
+
+[[upstream]]
+id = "linux-k4aversion-h"
+upstream = "vendor/include/linux/k4a/k4aversion.h"
+sha256 = "13bdf300b223d67bfa864674a631ca1575b791d023538265ce62c20bcfacdb10"
+
+[[upstream]]
+id = "linux-k4arecord-export-h"
+upstream = "vendor/include/linux/k4arecord/k4arecord_export.h"
+sha256 = "bb4cc0cd3e95c32824efa044e4f6ddfadd1edcf0c5342138221ed841015898dd"
+
+[[upstream]]
+id = "linux-playback-h"
+upstream = "vendor/include/linux/k4arecord/playback.h"
+sha256 = "387d84aeb9a070fd978128c6c6ff7221013e9e1357af0dd89611642989e4f98a"
+
+[[upstream]]
+id = "linux-playback-hpp"
+upstream = "vendor/include/linux/k4arecord/playback.hpp"
+sha256 = "9fbe658e5fead0fd8a58a07ccbd984d6956ac5a5c5b22fd35f479e11d8b333e9"
+
+[[upstream]]
+id = "linux-record-h"
+upstream = "vendor/include/linux/k4arecord/record.h"
+sha256 = "82a9460e95d76364c423c56ab860de3ad6cd56a81433976cbb922aafa015ee00"
+
+[[upstream]]
+id = "linux-record-types-h"
+upstream = "vendor/include/linux/k4arecord/types.h"
+sha256 = "a82df97161fdd209e58dc8cf2928c0fa9b6de1b80edb7472f31524f38f0c6a25"
+
+[[upstream]]
+id = "windows-k4a-h"
+upstream = "vendor/include/windows/k4a/k4a.h"
+sha256 = "71680919c81e60efe34f7fc05a126116640fd05b2785da3ecc30854518e56896"
+
+[[upstream]]
+id = "windows-k4a-hpp"
+upstream = "vendor/include/windows/k4a/k4a.hpp"
+sha256 = "6211190786dc4942e5059aab9f98ce5de6ffacd8a52a0393f407f79443608a53"
+
+[[upstream]]
+id = "windows-k4a-export-h"
+upstream = "vendor/include/windows/k4a/k4a_export.h"
+sha256 = "88313d9e37ebdcf61f2c0056597dc7215c1d0e27187ca5295ee564bbbb251f10"
+
+[[upstream]]
+id = "windows-k4atypes-h"
+upstream = "vendor/include/windows/k4a/k4atypes.h"
+sha256 = "072193b88b8dee894ccedbccb16ac0dbb11098436ab5d1c51be2a1cd3a0745a8"
+
+[[upstream]]
+id = "windows-k4aversion-h"
+upstream = "vendor/include/windows/k4a/k4aversion.h"
+sha256 = "2dc9c75c368d286323e84f10d3aa34b7eb6d4ffd7334e9201ea892bea8ccd514"
+
+[[upstream]]
+id = "windows-k4arecord-export-h"
+upstream = "vendor/include/windows/k4arecord/k4arecord_export.h"
+sha256 = "02c6b793ec325d6e6379446c5898014687b1b97c7f5236e639f7c47404d43764"
+
+[[upstream]]
+id = "windows-playback-h"
+upstream = "vendor/include/windows/k4arecord/playback.h"
+sha256 = "387d84aeb9a070fd978128c6c6ff7221013e9e1357af0dd89611642989e4f98a"
+
+[[upstream]]
+id = "windows-playback-hpp"
+upstream = "vendor/include/windows/k4arecord/playback.hpp"
+sha256 = "9fbe658e5fead0fd8a58a07ccbd984d6956ac5a5c5b22fd35f479e11d8b333e9"
+
+[[upstream]]
+id = "windows-record-h"
+upstream = "vendor/include/windows/k4arecord/record.h"
+sha256 = "82a9460e95d76364c423c56ab860de3ad6cd56a81433976cbb922aafa015ee00"
+
+[[upstream]]
+id = "windows-record-types-h"
+upstream = "vendor/include/windows/k4arecord/types.h"
+sha256 = "a82df97161fdd209e58dc8cf2928c0fa9b6de1b80edb7472f31524f38f0c6a25"
+
+[[sdk]]
+id = "sdk-test-calibration"
+source = "microsoft/Azure-Kinect-Sensor-SDK v1.4.1 tests/UnitTests/utcommon/inc/ut_calibration_data.h (g_test_json, MIT)"
+path = "tests/fixtures/kinect/calibration.json"
+sha256 = "557bcffd02ed4989e78cf17e42b0df18b2b8aeab74c74ecca8d8c9e4a6df72b1"
+
+[[devon]]
+id = "kinect-init"
+path = "nomorals/hardware/__init__.py"
+derives_from = []
+
+[[devon]]
+id = "kinect-package-init"
+path = "nomorals/hardware/kinect/__init__.py"
+derives_from = []
+
+[[devon]]
+id = "kinect-errors"
+path = "nomorals/hardware/kinect/errors.py"
+derives_from = []
+
+[[devon]]
+id = "kinect-enums"
+path = "nomorals/hardware/kinect/enums.py"
+derives_from = ["linux-k4atypes-h"]
+
+[[devon]]
+id = "kinect-bindings"
+path = "nomorals/hardware/kinect/bindings.py"
+derives_from = ["linux-k4a-h", "linux-k4atypes-h"]
+
+[[devon]]
+id = "kinect-calibration"
+path = "nomorals/hardware/kinect/calibration.py"
+derives_from = ["linux-k4atypes-h"]
+
+[[devon]]
+id = "kinect-frames"
+path = "nomorals/hardware/kinect/frames.py"
+derives_from = ["linux-k4atypes-h"]
+
+[[devon]]
+id = "kinect-device"
+path = "nomorals/hardware/kinect/device.py"
+derives_from = ["linux-k4a-h"]
+
+[[devon]]
+id = "kinect-probe"
+path = "nomorals/hardware/kinect/probe.py"
+derives_from = []
+
+[[devon]]
+id = "kinect-parity"
+path = "nomorals/hardware/kinect/parity.py"
+derives_from = ["linux-k4atypes-h"]
+
+[[devon]]
+id = "kinect-attribution"
+path = "nomorals/hardware/kinect/attribution.py"
+derives_from = []
+
+[[devon]]
+id = "kinect-parity-toml"
+path = "nomorals/hardware/kinect-parity.toml"
+derives_from = ["linux-k4atypes-h"]
+
+[[devon]]
+id = "kinect-attribution-toml"
+path = "nomorals/hardware/kinect-attribution.toml"
+derives_from = []
+
+[[devon]]
+id = "kinect-fixture-depth"
+path = "tests/fixtures/kinect/depth_nfov_640x576.raw"
+derives_from = []
+
+[[devon]]
+id = "kinect-fixture-jpeg"
+path = "tests/fixtures/kinect/color_mjpg.jpg"
+derives_from = []
+
+[[devon]]
+id = "kinect-test"
+path = "tests/test_gapfix_k4a.py"
+derives_from = []
