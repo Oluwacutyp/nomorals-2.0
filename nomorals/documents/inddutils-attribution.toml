@@ -1,0 +1,531 @@
+# Indd-Utils attribution — SHA-256 provenance record.
+# Port of storytold/indd-utils (dual MIT/Apache-2.0) at commit
+# 136f973a9d5f1b3ef34e46e27f4a08af196efde7. `verify_attribution`
+# in nomorals/documents/indd/attribution.py recomputes every
+# [[upstream]] hash against the clone on disk; [[devon]] rows
+# are this lane's files with their upstream lineage.
+
+[meta]
+upstream = "storytold/indd-utils"
+commit = "136f973a9d5f1b3ef34e46e27f4a08af196efde7"
+licence = "MIT OR Apache-2.0"
+
+[[upstream]]
+id = "src/container.rs"
+upstream = "src/container.rs"
+sha256 = "dbcadb7dfef4a83a68fa543b22e6d51b83b7b08a4852efe1d089148600ca0bc0"
+
+[[upstream]]
+id = "src/database.rs"
+upstream = "src/database.rs"
+sha256 = "4ec4b50152db40266c30b775e1900de17dc417450f290f3ef3cf7f9636d636f4"
+
+[[upstream]]
+id = "src/header.rs"
+upstream = "src/header.rs"
+sha256 = "b94f168fbb8390323baa3d94e761c4526ad6d008065439f5b68684241eae2715"
+
+[[upstream]]
+id = "src/lib.rs"
+upstream = "src/lib.rs"
+sha256 = "032fb95ddde7d70d16ba68a101e5b8cae84d037989b1a8f5331c7cb2d4939149"
+
+[[upstream]]
+id = "src/object.rs"
+upstream = "src/object.rs"
+sha256 = "d92a8b55ec12d1bd45ed970c042df4a72936fba5051430359cb9427e7e4b258a"
+
+[[upstream]]
+id = "src/model/animation.rs"
+upstream = "src/model/animation.rs"
+sha256 = "67a14d012e1390cb66c3a6e731ee349aced0aac230aebb575a2ad6ec5e7e5717"
+
+[[upstream]]
+id = "src/model/attrs.rs"
+upstream = "src/model/attrs.rs"
+sha256 = "b376152a7259def0f26cf5b2a2402d2ef37d64d110c1424103a8785410450354"
+
+[[upstream]]
+id = "src/model/behavior.rs"
+upstream = "src/model/behavior.rs"
+sha256 = "3dd56a7bdab982efba4c89370b19b0ae1173999a3a279cb4db073fe0ddd5372c"
+
+[[upstream]]
+id = "src/model/cjk.rs"
+upstream = "src/model/cjk.rs"
+sha256 = "57daab2603743d052ca5c2ecd7b86580e4bc0cedfcdfde6ab5a6cd698ba15721"
+
+[[upstream]]
+id = "src/model/color.rs"
+upstream = "src/model/color.rs"
+sha256 = "8af026cbc3e5d020f4f1411402f060985f32d7d5a9d02554143ce7dcf3367013"
+
+[[upstream]]
+id = "src/model/document.rs"
+upstream = "src/model/document.rs"
+sha256 = "319cb6e7c4f433025e2becd94d59c16c0d05d0c5c0cab4e23855eefa72a53196"
+
+[[upstream]]
+id = "src/model/font.rs"
+upstream = "src/model/font.rs"
+sha256 = "4aacc729c0fa98efd219b244b61f3fd7cf09ed3f53cc988d828b05e85a2cb55c"
+
+[[upstream]]
+id = "src/model/hyperlink.rs"
+upstream = "src/model/hyperlink.rs"
+sha256 = "1ede0d53ff24a726ef390b2877bd8215cd716a027fd5a2d0bf16a625bacf04cf"
+
+[[upstream]]
+id = "src/model/ids.rs"
+upstream = "src/model/ids.rs"
+sha256 = "a5f510421227933b69245f505d372525df974a47b2b0663d08b713db9e3d8068"
+
+[[upstream]]
+id = "src/model/index.rs"
+upstream = "src/model/index.rs"
+sha256 = "2ba6b5720ab091d3fa27d0a532b8896c708e427072dd28a87a4bca66874aceb6"
+
+[[upstream]]
+id = "src/model/item.rs"
+upstream = "src/model/item.rs"
+sha256 = "94d9d7161a9bdc009a61c4ec2540311ab5fe26f1161b082530298842c62473a2"
+
+[[upstream]]
+id = "src/model/media.rs"
+upstream = "src/model/media.rs"
+sha256 = "293348c50e50bf190900a1f9ae3d6505ba4e97c2db8d673fe7390db2a1b9f907"
+
+[[upstream]]
+id = "src/model/mod.rs"
+upstream = "src/model/mod.rs"
+sha256 = "af396a1b7ea8870a334a2c9cb53c5fc50e28f38b7a0457dff9fef99d6de77aca"
+
+[[upstream]]
+id = "src/model/prefs.rs"
+upstream = "src/model/prefs.rs"
+sha256 = "a692b72b56cadb36215bd9a79bb7cc9f7c78303fa41619e085049f0e40de3692"
+
+[[upstream]]
+id = "src/model/reader.rs"
+upstream = "src/model/reader.rs"
+sha256 = "14972d39c3768e7466bfb5ed7d380f35942625629e8544ca3dc2aa660469324e"
+
+[[upstream]]
+id = "src/model/settings.rs"
+upstream = "src/model/settings.rs"
+sha256 = "f9ea2be68d5ee64ea9f93f130d2719581113852fc87cbbdb1f76f9a2baa62255"
+
+[[upstream]]
+id = "src/model/spread.rs"
+upstream = "src/model/spread.rs"
+sha256 = "5c8844eed90a8917dce10872b5891e9ce7907299f4ef42f3af4c177982f5b555"
+
+[[upstream]]
+id = "src/model/story.rs"
+upstream = "src/model/story.rs"
+sha256 = "3d6dbb6d5e3f23d1aca8a932f8d7e83ab452d5e333a4142e5d27091cb2010671"
+
+[[upstream]]
+id = "src/model/story_link.rs"
+upstream = "src/model/story_link.rs"
+sha256 = "1e392aa4a18a0802f9f5bdc74a7d1c0df2864fe3b5dcf52310185e15b6387fe7"
+
+[[upstream]]
+id = "src/model/strings.rs"
+upstream = "src/model/strings.rs"
+sha256 = "8f941d038b7d1629356bec0253a2a8c36b9d24dd3ef236360fa59abccd245702"
+
+[[upstream]]
+id = "src/model/style.rs"
+upstream = "src/model/style.rs"
+sha256 = "913155e15b884594e34f9b2d0e0501831be35b93f24eadce3894880f2e1a49e0"
+
+[[upstream]]
+id = "src/model/table.rs"
+upstream = "src/model/table.rs"
+sha256 = "61fe1fac843666917ff80bfb3355603819dff5c1606b530222da6ebe77654393"
+
+[[upstream]]
+id = "src/model/variable.rs"
+upstream = "src/model/variable.rs"
+sha256 = "93cc56e941a94f048ec168b3fedc76bdc2608343f8e88512fc4cc803b8e2d4ef"
+
+[[upstream]]
+id = "src/model/xml.rs"
+upstream = "src/model/xml.rs"
+sha256 = "1dda05ad8ac8d0064849010f1d3cb32315b8c659cb53ad908a9e75bdf38e268f"
+
+[[upstream]]
+id = "src/model/xmp.rs"
+upstream = "src/model/xmp.rs"
+sha256 = "817af9ef20bd38c97e5830e1bf7e135f5f83574d5200ced0b905527e808080af"
+
+[[upstream]]
+id = "src/model/xref.rs"
+upstream = "src/model/xref.rs"
+sha256 = "28fbec799edfd4035b49beb38d48b3f338e221e220e57eaf371fe6d203062ca7"
+
+[[upstream]]
+id = "src/idml/animation.rs"
+upstream = "src/idml/animation.rs"
+sha256 = "eaecc8a3d526ec2ef91d5e4bff5d1372db22b2105b7d9c089afc4e807228cf05"
+
+[[upstream]]
+id = "src/idml/applied.rs"
+upstream = "src/idml/applied.rs"
+sha256 = "2dd52d4c2cc1987a2d011a8e38fa96b537a1a08200c86f67b72a9ba754bcd6d2"
+
+[[upstream]]
+id = "src/idml/attrs.rs"
+upstream = "src/idml/attrs.rs"
+sha256 = "b2f7ae134873e5d27f7a2aaa8b9c470a063b4d174f2fa7cd0f60b9f70f3df911"
+
+[[upstream]]
+id = "src/idml/designmap.rs"
+upstream = "src/idml/designmap.rs"
+sha256 = "e37ca922b3ad5c6069755648cbb0f1e8bcd77a44b42c33aedcdd2ee6d1a67344"
+
+[[upstream]]
+id = "src/idml/export.rs"
+upstream = "src/idml/export.rs"
+sha256 = "1717f50dd21f8f6e62d38740fdb8a2b083c768be1020fbae61fea88c19279f16"
+
+[[upstream]]
+id = "src/idml/format.rs"
+upstream = "src/idml/format.rs"
+sha256 = "bf1fa81be5f85c5581f337109e5c6f4ca995e9bec5484b58ff19527c4febac36"
+
+[[upstream]]
+id = "src/idml/graphic.rs"
+upstream = "src/idml/graphic.rs"
+sha256 = "929c6ad09c12a845599c5a88d7538dcaa0af4ff4e8206b812527c9d63c75479b"
+
+[[upstream]]
+id = "src/idml/kind.rs"
+upstream = "src/idml/kind.rs"
+sha256 = "dfa2dc50cc7b6d88a5dfb7f5345b88d75b242fc52e1e8a8103f1f5f2426cf17b"
+
+[[upstream]]
+id = "src/idml/media.rs"
+upstream = "src/idml/media.rs"
+sha256 = "b08bd29e7581762173721493f5854634f36d619c99a2287fdeec5930d29dadac"
+
+[[upstream]]
+id = "src/idml/mod.rs"
+upstream = "src/idml/mod.rs"
+sha256 = "567f1ef21599bfee5da7e444c09a2c4f06e3366dc69d686a34e3dd8eeafaf6f6"
+
+[[upstream]]
+id = "src/idml/pages.rs"
+upstream = "src/idml/pages.rs"
+sha256 = "8f7e68c44559318fc6467dc4a3a291673a810fd4dd0eef7a6d5ec9fee6a5e904"
+
+[[upstream]]
+id = "src/idml/resources.rs"
+upstream = "src/idml/resources.rs"
+sha256 = "fa34a4f5d04c70c49d4768529e4baca12f5ec98e9024d3fdd95635f13b270d11"
+
+[[upstream]]
+id = "src/idml/spread.rs"
+upstream = "src/idml/spread.rs"
+sha256 = "004aac7d12a6f0ed79ba4d5b05eee70176098c5e67237739dea1591319161ae6"
+
+[[upstream]]
+id = "src/idml/story.rs"
+upstream = "src/idml/story.rs"
+sha256 = "8ee8d08a1904fd1fcb182e5d64aacb3ab9faa16bd07a8ac473fc8aa94c43fb9d"
+
+[[upstream]]
+id = "src/idml/story_link.rs"
+upstream = "src/idml/story_link.rs"
+sha256 = "66b9da1db8db4aae3ca1911fba11850b4b59122c45b99770b4d67a799781e9af"
+
+[[upstream]]
+id = "src/idml/styles.rs"
+upstream = "src/idml/styles.rs"
+sha256 = "294b3dc3488ec09371b11de5041a61063b09947a68d4e0d69f5bb74f6991a63d"
+
+[[upstream]]
+id = "src/idml/transparency.rs"
+upstream = "src/idml/transparency.rs"
+sha256 = "52ac183074a5a0086956f4556c1e0107bbc7aac24000a8affe716afebefaba61"
+
+[[upstream]]
+id = "src/idml/values.rs"
+upstream = "src/idml/values.rs"
+sha256 = "e0d646ffa30b294e1375594ac51443ae2e68dced05599f9e00969b7f34d845b4"
+
+[[upstream]]
+id = "src/idml/xml.rs"
+upstream = "src/idml/xml.rs"
+sha256 = "44420b90e55caffc6d7b33ec224b57f4ec201bc573be334bec695fc46996a094"
+
+[[upstream]]
+id = "src/idml/zip.rs"
+upstream = "src/idml/zip.rs"
+sha256 = "3f03f2eb0b80386677b77718b5140d9953afbbcf06ebbbe6506a06e47062bae5"
+
+[[upstream]]
+id = "src/idml/element_values.xml"
+upstream = "src/idml/element_values.xml"
+sha256 = "d389fc16f38760873cc1ad962c75531c66fe883e1c302489f1ea765f5933d52b"
+
+[[upstream]]
+id = "src/idml/object_style_values.xml"
+upstream = "src/idml/object_style_values.xml"
+sha256 = "9d9de35064894fe002542d6c518598d71734d5832c4cf11973fc1b8221cc57e3"
+
+[[upstream]]
+id = "src/idml/preference_values.xml"
+upstream = "src/idml/preference_values.xml"
+sha256 = "d5eea64fa65a7a9a015d1605d960a81ca620b43bc5e604cf80266c003f9c99b2"
+
+[[upstream]]
+id = "src/idml/root_values.xml"
+upstream = "src/idml/root_values.xml"
+sha256 = "28c4069414b854a99c75652fd46b9535c7b6463bfac36de3ad3298c2d9d99a2f"
+
+[[upstream]]
+id = "tools/compare.py"
+upstream = "tools/compare.py"
+sha256 = "bb1714c8be2a6d343de7cc9672feb38f88bf5a5ee49f382c29ec518d5ca30977"
+
+[[upstream]]
+id = "docs/measurement.md"
+upstream = "docs/measurement.md"
+sha256 = "c69b43a0e61ec09f8febb35f0b999dc55e74b23ae8dfa8c36efd7e872846acde"
+
+[[upstream]]
+id = "docs/format/attributes.md"
+upstream = "docs/format/attributes.md"
+sha256 = "719161354248f4b6c7bb6b85c6570d8c00efd062abde0983f591aa5b93948269"
+
+[[upstream]]
+id = "docs/format/big-endian.md"
+upstream = "docs/format/big-endian.md"
+sha256 = "114616d737ee7fd5d808b5a94b96915fc71f584490042512e56fc750d2f375b1"
+
+[[upstream]]
+id = "docs/format/container.md"
+upstream = "docs/format/container.md"
+sha256 = "b650af7becf970186976ebfea5d03696f0e5be1eb25f4951657d102ed452d2d9"
+
+[[upstream]]
+id = "docs/format/cross-references.md"
+upstream = "docs/format/cross-references.md"
+sha256 = "e8ab0775115d09653259d65b4bc86f9efe571a2eb5545b825a0d28af66675f2d"
+
+[[upstream]]
+id = "docs/format/database.md"
+upstream = "docs/format/database.md"
+sha256 = "ce02dfb1859d987312988baeed7701e4184082d9442e96e5c94bc4bd48755493"
+
+[[upstream]]
+id = "docs/format/fonts.md"
+upstream = "docs/format/fonts.md"
+sha256 = "15257a12f2ef7d303bbfae3722e293b152e70a516c52e72e6c9482aa3e826596"
+
+[[upstream]]
+id = "docs/format/footnotes.md"
+upstream = "docs/format/footnotes.md"
+sha256 = "2de37d5d0105bbd102fccba7051a6fdcd4bb812bd0a4d256814a8459bb28d0db"
+
+[[upstream]]
+id = "docs/format/header.md"
+upstream = "docs/format/header.md"
+sha256 = "9e8243b0bcaafe728dcba16981505150907662e7021dfe059f1533d036ffec2a"
+
+[[upstream]]
+id = "docs/format/hyperlinks.md"
+upstream = "docs/format/hyperlinks.md"
+sha256 = "950ca105f40c84b9c4afcd0afcaa73577f26ca79f5a824e17622bc439f110fe6"
+
+[[upstream]]
+id = "docs/format/idml-values.md"
+upstream = "docs/format/idml-values.md"
+sha256 = "bc43b33514e623d67c7a102a19b2d23c8d07fa53fbdb237d5a4e5dd91287a34f"
+
+[[upstream]]
+id = "docs/format/index.md"
+upstream = "docs/format/index.md"
+sha256 = "0000ef18ec8b23a26d47847099e5e349f065f8080bb678dab422c0477a2dcd2b"
+
+[[upstream]]
+id = "docs/format/objects.md"
+upstream = "docs/format/objects.md"
+sha256 = "ba5ad9f2b65e113af171693eb3418ac1607626cad8ec2f6b42c9fc66056a5a4b"
+
+[[upstream]]
+id = "docs/format/preferences.md"
+upstream = "docs/format/preferences.md"
+sha256 = "2a1c84d50b4bd5e775876b3ea6ec6881d4abff677ca0900a52343ce880a93ae6"
+
+[[upstream]]
+id = "docs/format/tables.md"
+upstream = "docs/format/tables.md"
+sha256 = "04b2a3fb1d91808bdf7ff287d0c7f370682c86ac7320298b6bb87c16360c721b"
+
+[[upstream]]
+id = "docs/format/text-variables.md"
+upstream = "docs/format/text-variables.md"
+sha256 = "e8a41bf7657d436809efd084a124a2aff12a5efc92015013423426c1e4c099a8"
+
+[[upstream]]
+id = "docs/format/transparency.md"
+upstream = "docs/format/transparency.md"
+sha256 = "6496ac43ef0c8e589d5f52249fc91f1ddb90fdd349b18a7a02d28c1e2539ca41"
+
+[[upstream]]
+id = "docs/format/unknowns.md"
+upstream = "docs/format/unknowns.md"
+sha256 = "52b774af86c89a857538ee5d6fdab556ea8a554d99b8264a546b73bd1a12e876"
+
+[[upstream]]
+id = "docs/format/xml.md"
+upstream = "docs/format/xml.md"
+sha256 = "183d7baeb5f1c12879fad0c218fdfc33b72a8b9600a57f490aa10c5dca82d089"
+
+[[devon]]
+id = "nomorals/documents/indd/errors.py"
+path = "nomorals/documents/indd/errors.py"
+derives_from = ["src/lib.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/header.py"
+path = "nomorals/documents/indd/header.py"
+derives_from = ["src/header.rs", "docs/format/header.md"]
+
+[[devon]]
+id = "nomorals/documents/indd/container.py"
+path = "nomorals/documents/indd/container.py"
+derives_from = ["src/container.rs", "docs/format/container.md"]
+
+[[devon]]
+id = "nomorals/documents/indd/database.py"
+path = "nomorals/documents/indd/database.py"
+derives_from = ["src/database.rs", "docs/format/database.md"]
+
+[[devon]]
+id = "nomorals/documents/indd/object.py"
+path = "nomorals/documents/indd/object.py"
+derives_from = ["src/object.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/ids.py"
+path = "nomorals/documents/indd/ids.py"
+derives_from = ["src/model/ids.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/attrs.py"
+path = "nomorals/documents/indd/attrs.py"
+derives_from = ["src/model/attrs.rs", "docs/format/attributes.md"]
+
+[[devon]]
+id = "nomorals/documents/indd/model.py"
+path = "nomorals/documents/indd/model.py"
+derives_from = ["src/model/document.rs", "src/model/reader.rs", "src/model/story.rs", "src/model/spread.rs", "src/model/item.rs", "src/model/style.rs", "src/model/color.rs", "src/model/font.rs", "src/model/prefs.rs", "src/model/settings.rs", "src/model/table.rs", "src/model/hyperlink.rs", "src/model/variable.rs", "src/model/xml.rs", "src/model/xmp.rs", "src/model/xref.rs", "src/model/index.rs", "src/model/cjk.rs", "src/model/behavior.rs", "src/model/animation.rs", "src/model/media.rs", "src/model/story_link.rs", "src/model/strings.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/convert.py"
+path = "nomorals/documents/indd/convert.py"
+derives_from = ["src/lib.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml.py"
+path = "nomorals/documents/indd/idml.py"
+derives_from = ["src/idml/mod.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_xml.py"
+path = "nomorals/documents/indd/idml_xml.py"
+derives_from = ["src/idml/xml.rs", "src/idml/zip.rs", "src/idml/format.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_values.py"
+path = "nomorals/documents/indd/idml_values.py"
+derives_from = ["src/idml/values.rs", "src/idml/element_values.xml", "src/idml/object_style_values.xml", "src/idml/preference_values.xml", "src/idml/root_values.xml", "docs/format/idml-values.md"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_attrs.py"
+path = "nomorals/documents/indd/idml_attrs.py"
+derives_from = ["src/idml/attrs.rs", "src/idml/kind.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_designmap.py"
+path = "nomorals/documents/indd/idml_designmap.py"
+derives_from = ["src/idml/designmap.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_resources.py"
+path = "nomorals/documents/indd/idml_resources.py"
+derives_from = ["src/idml/resources.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_styles.py"
+path = "nomorals/documents/indd/idml_styles.py"
+derives_from = ["src/idml/styles.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_spread.py"
+path = "nomorals/documents/indd/idml_spread.py"
+derives_from = ["src/idml/spread.rs", "src/idml/pages.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_story.py"
+path = "nomorals/documents/indd/idml_story.py"
+derives_from = ["src/idml/story.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_graphic.py"
+path = "nomorals/documents/indd/idml_graphic.py"
+derives_from = ["src/idml/graphic.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_transparency.py"
+path = "nomorals/documents/indd/idml_transparency.py"
+derives_from = ["src/idml/transparency.rs", "docs/format/transparency.md"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_applied.py"
+path = "nomorals/documents/indd/idml_applied.py"
+derives_from = ["src/idml/applied.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_export.py"
+path = "nomorals/documents/indd/idml_export.py"
+derives_from = ["src/idml/export.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_media.py"
+path = "nomorals/documents/indd/idml_media.py"
+derives_from = ["src/idml/media.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_animation.py"
+path = "nomorals/documents/indd/idml_animation.py"
+derives_from = ["src/idml/animation.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/idml_storylink.py"
+path = "nomorals/documents/indd/idml_storylink.py"
+derives_from = ["src/idml/story_link.rs"]
+
+[[devon]]
+id = "nomorals/documents/indd/fidelity.py"
+path = "nomorals/documents/indd/fidelity.py"
+derives_from = ["tools/compare.py", "docs/measurement.md"]
+
+[[devon]]
+id = "nomorals/documents/indd/parity.py"
+path = "nomorals/documents/indd/parity.py"
+derives_from = ["tools/compare.py"]
+
+[[devon]]
+id = "nomorals/documents/indd/attribution.py"
+path = "nomorals/documents/indd/attribution.py"
+derives_from = ["tools/compare.py"]
+
+[[devon]]
+id = "nomorals/tools/inddutils.py"
+path = "nomorals/tools/inddutils.py"
+derives_from = ["src/lib.rs", "src/main.rs"]

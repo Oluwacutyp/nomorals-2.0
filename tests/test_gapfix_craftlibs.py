@@ -1800,14 +1800,15 @@ class UnificationTest(unittest.TestCase):
 
 
 class ToolCountTest(unittest.TestCase):
-    def test_tool_count_is_734_after_craftlibs(self):
+    def test_tool_count_is_735_after_craftlibs(self):
         # 732 after the craft-libs port (lane 113) at its base, 733
         # after the craft-launcher port (lane 112) landed between that
         # base and this rebase, 734 after the craft-fonts port
-        # (lane 114) added the craftfonts tool.
+        # (lane 114) added the craftfonts tool, 735 after the
+        # indd-utils port (lane 117) added the inddutils tool.
         registry = ToolRegistry(SimpleNamespace())
         registry.register_builtins()
-        self.assertEqual(len(registry._tools), 734)
+        self.assertEqual(len(registry._tools), 735)
         self.assertIn("craftlibs", registry._tools)
 
 

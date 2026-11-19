@@ -1,0 +1,131 @@
+# Indd-Utils parity — machine-checked, measured on real fixture .indd files.
+# Port of storytold/indd-utils: each [[case]] names a fixture
+# (tests/fixtures/inddutils/), the ops applied, and the expected
+# outcomes. `run_parity` in nomorals/documents/indd/parity.py executes
+# every case against the real engine; a wrong expectation fails, a
+# missing fixture fails (never a silent skip). The conversion counts
+# below are the values the compiled upstream converter produces on the
+# same fixtures (see ~/workspace/inddutils-verify/rust/); the Python
+# port reproduces its IDML packages byte for byte.
+#
+# Ops: inspect, convert, fidelity, refuse, refuse_truncated.
+# Expect keys: version, spreads, master_spreads, pages, stories,
+# colors, fonts, languages, styles, sections, warnings, parts,
+# story_parts, text_contains, coverage, total, error_kind.
+
+[schema]
+version = 1
+
+[[case]]
+id = "bluesquare-inspect"
+fixture = "BlueSquare.indd"
+ops = ["inspect"]
+[case.expect]
+version = "4.0"
+spreads = 1
+master_spreads = 1
+pages = 3
+stories = 0
+colors = 15
+fonts = 4
+languages = 36
+styles = 3
+sections = 1
+warnings = 5
+
+[[case]]
+id = "bluesquare-convert"
+fixture = "BlueSquare.indd"
+ops = ["convert"]
+[case.expect]
+parts = 11
+story_parts = 0
+warnings = 5
+
+[[case]]
+id = "bluesquare-fidelity"
+fixture = "BlueSquare.indd"
+ops = ["fidelity"]
+[case.expect]
+coverage = 1.0
+
+[[case]]
+id = "neddy-inspect"
+fixture = "Neddy.indd"
+ops = ["inspect"]
+[case.expect]
+version = "3.0"
+spreads = 1
+master_spreads = 1
+pages = 3
+stories = 32
+colors = 14
+fonts = 18
+languages = 21
+styles = 2
+sections = 1
+warnings = 8
+
+[[case]]
+id = "neddy-convert"
+fixture = "Neddy.indd"
+ops = ["convert"]
+[case.expect]
+parts = 43
+story_parts = 32
+warnings = 8
+text_contains = ["CaLliope sisters puppet theatre"]
+
+[[case]]
+id = "neddy-fidelity"
+fixture = "Neddy.indd"
+ops = ["fidelity"]
+[case.expect]
+coverage = 1.0
+
+[[case]]
+id = "minizine-inspect"
+fixture = "minizine.indd"
+ops = ["inspect"]
+[case.expect]
+version = "20.3"
+spreads = 1
+master_spreads = 1
+pages = 3
+stories = 3
+colors = 14
+fonts = 3
+languages = 1
+styles = 3
+sections = 1
+warnings = 0
+
+[[case]]
+id = "minizine-convert"
+fixture = "minizine.indd"
+ops = ["convert"]
+[case.expect]
+parts = 14
+story_parts = 3
+warnings = 0
+
+[[case]]
+id = "minizine-fidelity"
+fixture = "minizine.indd"
+ops = ["fidelity"]
+[case.expect]
+coverage = 1.0
+
+[[case]]
+id = "refuse-not-indd"
+fixture = "BlueSquare.indd"
+ops = ["refuse"]
+[case.expect]
+error_kind = "not_indd"
+
+[[case]]
+id = "refuse-truncated"
+fixture = "BlueSquare.indd"
+ops = ["refuse_truncated"]
+[case.expect]
+error_kind = "truncated"

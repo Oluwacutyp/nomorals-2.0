@@ -703,6 +703,7 @@ class ToolRegistry:
             "craftlauncher",  # verify-then-install updates through a trusted catalog — catalog trust rules, atomic swap, health-gated rollback, journal (Craft-Launcher port)
             "craftlibs",  # the shared libraries — ZIP package codec, both noise engines, ai-core data model, PDF primitives, i18n formatting rung, parity + attribution runners (Craft-Libs port)
             "craftfonts",  # reusable OFL fonts for the Crafting Apps — craft-fonts catalog (default / Latin / Simplified Chinese tables), checkout loading, install into the font store, embed bundles (Craft-Fonts port)
+            "inddutils",  # InDesign (.indd) to IDML conversion with measured fidelity — binary container, database, object cursor, document model, IDML writer, paired-file differ with value coverage % as headline (Indd-Utils port)
             "workspace",
             "trading",
             "characters",

@@ -682,4 +682,5 @@ def test_registry_tool_count(self=None):
     # craftlauncher port (lane 112) added the craftlauncher tool,
     # 733 after the craft-libs port (lane 113) added the craftlibs tool,
     # 734 after the craft-fonts port (lane 114) added the craftfonts tool.
-    assert len(registry._tools) == 734
+    # 735 after the indd-utils port (lane 117) added the inddutils tool.
+    assert len(registry._tools) == 735
