@@ -1,0 +1,1166 @@
+# BugHunter attribution — SHA-256 provenance (version 1).
+# Upstream: elementalsouls/Claude-BugHunter, commit 0e70a02,
+# v2.1.0. Code (*.py, *.sh) is MIT (Copyright (c) 2026 Sachin
+# Sharma); skill/docs content is CC BY 4.0. Both permit reuse
+# including commercial use with credit + link back.
+# The 8 foundation skills + 12 commands (see
+# THIRD_PARTY_NOTICES.md) come from shuvonsec/claude-bug-bounty
+# (MIT) — a second attribution hop this port names.
+# Every vendored file is pinned twice: ``file`` is the path in
+# the upstream clone, ``vendored`` the path in Devon's tree;
+# verify_attribution checks BOTH against the same SHA-256.
+# ADAPTED entries (reformatting only, e.g. ruff --fix) carry an
+# extra ``upstream_sha256``: the clone file is checked against
+# ``upstream_sha256`` (the byte-identical upstream bytes) and the
+# vendored file against ``sha256`` (the reformatted bytes).
+# On-disk count, corrected at port time: 36 pattern files
+# (hunt-*.md) plus a README.md = 37 files in
+# docs/disclosed-reports/. The bundled skill_index.json
+# lists exactly those 36 names — no discrepancy.
+
+[schema]
+version = 1
+upstream_repo = "elementalsouls/Claude-BugHunter"
+upstream_commit = "0e70a02"
+licence = "MIT (code) / CC BY 4.0 (skill and docs content)"
+
+[[upstream]]
+id = "LICENSE"
+file = "LICENSE"
+vendored = "nomorals/skills/library/bughunter/LICENSE"
+sha256 = "177adb7c8613539a985a98b4c6d51ba09a2d3f435eb396d25cc45f4e0bf8cb45"
+licence = "MIT"
+
+[[upstream]]
+id = "LICENSE-CONTENT"
+file = "LICENSE-CONTENT"
+vendored = "nomorals/skills/library/bughunter/LICENSE-CONTENT"
+sha256 = "9ba9550ad48438d0836ddab3da480b3b69ffa0aac7b7878b5a0039e7ab429411"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "NOTICE"
+file = "NOTICE"
+vendored = "nomorals/skills/library/bughunter/NOTICE"
+sha256 = "547ed8bfa070693c2014bd66329dba258e0010add743fc5830e3b473b70e4eee"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-autopilot-md"
+file = "commands/autopilot.md"
+vendored = "nomorals/skills/library/bughunter/commands/autopilot.md"
+sha256 = "6d8feb7212faea8610f7b2d24f7a7312346afdcfcee95fe1481972e39ebf0541"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-chain-md"
+file = "commands/chain.md"
+vendored = "nomorals/skills/library/bughunter/commands/chain.md"
+sha256 = "6aa77846410ed19944540ebd8a826db49bcbe557e76f14d3f1bb1d663ada1505"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-hunt-md"
+file = "commands/hunt.md"
+vendored = "nomorals/skills/library/bughunter/commands/hunt.md"
+sha256 = "178620f715055b7278e30c3aaa27b3d483ed04cc59809aa1b0476d314c3d22c9"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-intel-md"
+file = "commands/intel.md"
+vendored = "nomorals/skills/library/bughunter/commands/intel.md"
+sha256 = "8cf1db188d9ff74f715d589f941cbd6ef3b59fcb073cdb34444d46886299cb3b"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-memory-gc-md"
+file = "commands/memory-gc.md"
+vendored = "nomorals/skills/library/bughunter/commands/memory-gc.md"
+sha256 = "f59f63e4fb51abc387863aec400319d0ab7241e3e70a41a09321d30d2bf6b851"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-pickup-md"
+file = "commands/pickup.md"
+vendored = "nomorals/skills/library/bughunter/commands/pickup.md"
+sha256 = "524c1a28a9690164e46922b5db795684aafb9dfb0af6d356cd2250e76a3d0d32"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-recon-md"
+file = "commands/recon.md"
+vendored = "nomorals/skills/library/bughunter/commands/recon.md"
+sha256 = "c4cae083ce4d8eef0585420a60e3f251ee760315e3da13be4f2e02525dc16965"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-remember-md"
+file = "commands/remember.md"
+vendored = "nomorals/skills/library/bughunter/commands/remember.md"
+sha256 = "86e95a5566441a56decd029b4e31d307d13fc0c90a03d0ee04ecea85edda9a1b"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-report-md"
+file = "commands/report.md"
+vendored = "nomorals/skills/library/bughunter/commands/report.md"
+sha256 = "9425bcea095beec176b58d8047bb16fdc4cb2968f0a457bf9e06ff46b9365898"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-scope-md"
+file = "commands/scope.md"
+vendored = "nomorals/skills/library/bughunter/commands/scope.md"
+sha256 = "cb9201ec01422a2be47a4ab26b742b21869c90e57badb4ae5c383f9b3f82c997"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-surface-md"
+file = "commands/surface.md"
+vendored = "nomorals/skills/library/bughunter/commands/surface.md"
+sha256 = "2cfc5ed6de7017a95d5c8a3d2a879d7b17c902f597f758d687b1c3d7b4dccca7"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-token-scan-md"
+file = "commands/token-scan.md"
+vendored = "nomorals/skills/library/bughunter/commands/token-scan.md"
+sha256 = "4a5f39d39f1848b18c2cb64ada184cb5f3463e144685ac7dfe8fb5427e941854"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-triage-md"
+file = "commands/triage.md"
+vendored = "nomorals/skills/library/bughunter/commands/triage.md"
+sha256 = "56374baf137980c4df34c2d0daf9ddb291deb0148b4843ce209ca6b3cb175414"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-validate-md"
+file = "commands/validate.md"
+vendored = "nomorals/skills/library/bughunter/commands/validate.md"
+sha256 = "e32c35d328cecf68852ce2c04f7c6a8bfcc8d6c532f0280f95c8de5f7ecf73c7"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "commands-web3-audit-md"
+file = "commands/web3-audit.md"
+vendored = "nomorals/skills/library/bughunter/commands/web3-audit.md"
+sha256 = "e78a72621625a1dd4eb39eac27dae826c0731c32038ca4b6679ba8cc4608ff1d"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-README-md"
+file = "docs/disclosed-reports/README.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/README.md"
+sha256 = "5be48b20da6a74e64af5332829d5664734efd86ea89bb537771a86915cbefb20"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-ato-md"
+file = "docs/disclosed-reports/hunt-ato.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-ato.md"
+sha256 = "99e3a1b7c625f3d7d0f3b37df2cca66c5b991b1591676a4ccfb78c4d0e58b077"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-auth-bypass-md"
+file = "docs/disclosed-reports/hunt-auth-bypass.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-auth-bypass.md"
+sha256 = "0412e4e42e9679d70f7044c2fd5be78c2eb86a8408aaf4d3f3a3c5cdb749cc3e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-brute-force-md"
+file = "docs/disclosed-reports/hunt-brute-force.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-brute-force.md"
+sha256 = "2dd9512bfbeb4e1bc8bfce1d1023f4f2b468501c856bc3b63f500bdb52651559"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-business-logic-md"
+file = "docs/disclosed-reports/hunt-business-logic.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-business-logic.md"
+sha256 = "06810573316cd11816750f3861a37bb5b45a66cf973dad6f84bcbdf814e9f660"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-cache-poison-md"
+file = "docs/disclosed-reports/hunt-cache-poison.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-cache-poison.md"
+sha256 = "c15d431521eda8c0dd6c2c4a4d5602825a2c95a66f3fb0d72aeb0c71e9a32095"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-captcha-bypass-md"
+file = "docs/disclosed-reports/hunt-captcha-bypass.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-captcha-bypass.md"
+sha256 = "d03e37462c5097e10553982ee585fd9244af2968633e6c0106b08c5027701d9c"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-clickjacking-md"
+file = "docs/disclosed-reports/hunt-clickjacking.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-clickjacking.md"
+sha256 = "4a92bc8e80a1035f730f8498f3a1144989d767d8e11abb3fb0d794e0f54995bc"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-cloud-misconfig-md"
+file = "docs/disclosed-reports/hunt-cloud-misconfig.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-cloud-misconfig.md"
+sha256 = "0362010a1ec9f66c79705998ef9049204d7f5ee4da6ccaf5f62da7d7b19e06d6"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-cors-md"
+file = "docs/disclosed-reports/hunt-cors.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-cors.md"
+sha256 = "d0685ee14b28256ad0df0a3a45c4a900edb9b809fc6f3001d3c998eab375375a"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-csrf-md"
+file = "docs/disclosed-reports/hunt-csrf.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-csrf.md"
+sha256 = "39ce3857f45ff2495de9088ce2d6572df8651ef954fbb53d84d9369def40e2bc"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-deserialization-md"
+file = "docs/disclosed-reports/hunt-deserialization.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-deserialization.md"
+sha256 = "4625ff93312a38f5788768b9bcd8c4e2fa0ab6b5990fe35b599d2213b6fddbf9"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-dom-md"
+file = "docs/disclosed-reports/hunt-dom.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-dom.md"
+sha256 = "001c3522ab4eafbad96d06e23d43772694e19bf49a030f2e7bd80656832127e9"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-file-upload-md"
+file = "docs/disclosed-reports/hunt-file-upload.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-file-upload.md"
+sha256 = "e988ab09eda41e8c8a35d02baa1854cab4502f67110d0f8ac08504ce2978cb49"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-forgot-password-md"
+file = "docs/disclosed-reports/hunt-forgot-password.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-forgot-password.md"
+sha256 = "e978e75908da639c4fc8033fa899e64841dc09867afdbd3a98ffd16db7516431"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-graphql-md"
+file = "docs/disclosed-reports/hunt-graphql.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-graphql.md"
+sha256 = "aa871e7e01281741754daf99244f585d570c3cf030518866fd7487906bbde914"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-host-header-md"
+file = "docs/disclosed-reports/hunt-host-header.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-host-header.md"
+sha256 = "f887b2ed7debce7c18e793adfed8c64cdd322d8ed40a98c741357c3531bb3353"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-html-injection-md"
+file = "docs/disclosed-reports/hunt-html-injection.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-html-injection.md"
+sha256 = "43247fc4f9cd86b0f2d781bde42b77ce0cfb083aebd8e5e0f644aca74c3f9f97"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-http-smuggling-md"
+file = "docs/disclosed-reports/hunt-http-smuggling.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-http-smuggling.md"
+sha256 = "ba827b697460747eb65ca58ca061d9834134e85089006d9f8621c577c464b82e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-idor-md"
+file = "docs/disclosed-reports/hunt-idor.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-idor.md"
+sha256 = "9bc9b9dfcde831d4f7e6acf0e41ff2a5198e57475801a3eb0e5ea99ae1cc741d"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-jwt-crypto-md"
+file = "docs/disclosed-reports/hunt-jwt-crypto.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-jwt-crypto.md"
+sha256 = "4e9661d75e01a2e99c6675c2e064cce306116a6b582053646dad3a4103247743"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-ldap-md"
+file = "docs/disclosed-reports/hunt-ldap.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-ldap.md"
+sha256 = "c33859228c8febac527d3ec1c1fff18832959b5866ec585c471d7676c00bbb90"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-lfi-md"
+file = "docs/disclosed-reports/hunt-lfi.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-lfi.md"
+sha256 = "47d5021f6f8e1e1b10efbe654bcb1dc556a41f3a221d59dcc654ca68e6ce6056"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-mfa-bypass-md"
+file = "docs/disclosed-reports/hunt-mfa-bypass.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-mfa-bypass.md"
+sha256 = "5127398087ffdf131d6bdc5086e98784b66d22c094e302512473272f434f7427"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-nosqli-md"
+file = "docs/disclosed-reports/hunt-nosqli.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-nosqli.md"
+sha256 = "9287328e3c43f1e75bceea2a0122268bc6afc2ed3fb678d51ae6860bd22c87ce"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-oauth-md"
+file = "docs/disclosed-reports/hunt-oauth.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-oauth.md"
+sha256 = "3b4961b05cfa55720bab114e3a8da23f5346ca804258cd13f0d32bc74fb1a44e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-open-redirect-md"
+file = "docs/disclosed-reports/hunt-open-redirect.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-open-redirect.md"
+sha256 = "85d4146f6759d641206b800713bda6494b4cc20ad548df054775d9173713bd96"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-race-condition-md"
+file = "docs/disclosed-reports/hunt-race-condition.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-race-condition.md"
+sha256 = "b609b51064f96307817ace8908868906c482349da1cb021b5a051a4b9dbaec67"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-rce-md"
+file = "docs/disclosed-reports/hunt-rce.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-rce.md"
+sha256 = "cc2aeb52d6545dfc21ffc9a94012055f1b43790a14554a206b0da955255641ae"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-saml-md"
+file = "docs/disclosed-reports/hunt-saml.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-saml.md"
+sha256 = "29247c5d9597bfe001da35c5faa3c5a7fc40d274d285611962c98e6cb4b034fa"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-session-md"
+file = "docs/disclosed-reports/hunt-session.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-session.md"
+sha256 = "93ec6e4a2a069ee5889fa1487921cc4e88eb3a4efb1d09e1ddc0ad329a74d207"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-source-leak-md"
+file = "docs/disclosed-reports/hunt-source-leak.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-source-leak.md"
+sha256 = "93f19e203198ce9f8105bcee28cd523a613a261a27615559c05751862004b00e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-sqli-md"
+file = "docs/disclosed-reports/hunt-sqli.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-sqli.md"
+sha256 = "aee1f9588b8aa2b1b337db8e4c216e46ab5cdc6bbf23be3495ca3b91eaa4d8ad"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-ssrf-md"
+file = "docs/disclosed-reports/hunt-ssrf.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-ssrf.md"
+sha256 = "c06ee64b54b710178e1addf3c53b96196b7382c39c127d93dead2426386eac07"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-ssti-md"
+file = "docs/disclosed-reports/hunt-ssti.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-ssti.md"
+sha256 = "02ee6daab0579ddd430ff4fdd13f71e9eb412f4e6c04f1d1bc22c131b73baff3"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-tls-network-md"
+file = "docs/disclosed-reports/hunt-tls-network.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-tls-network.md"
+sha256 = "b1d226d0869d637fa25b34ac4f61ae2f86b827acc3179f09b8d4180979fc861c"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "disclosed-reports-hunt-xss-md"
+file = "docs/disclosed-reports/hunt-xss.md"
+vendored = "nomorals/skills/library/bughunter/disclosed-reports/hunt-xss.md"
+sha256 = "1920352c909986a522cea443cd79297b7f10701b320355c8eee295c92b252d36"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skill_index-json"
+file = "cbh/data/skill_index.json"
+vendored = "nomorals/skills/library/bughunter/skill_index.json"
+sha256 = "127258d103f513016ef0ed791197693e19583f5006de46cc78cfaf70e98540e5"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-apk-redteam-pipeline-SKILL-md"
+file = "skills/apk-redteam-pipeline/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/apk-redteam-pipeline/SKILL.md"
+sha256 = "402c191f641f4ba06cdc05201ee9df49d329b259e547b038a25ce3bbeafc862b"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-bb-local-toolkit-SKILL-md"
+file = "skills/bb-local-toolkit/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/bb-local-toolkit/SKILL.md"
+sha256 = "aca24c6f20b0646d2eb09fb3a9fb047a874783b56bbf1052c27a358c450e796f"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-bb-methodology-SKILL-md"
+file = "skills/bb-methodology/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/bb-methodology/SKILL.md"
+sha256 = "687af8873d8300652b7563320f45f7337138b5359eb77318f2031a0cbcce138c"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-bug-bounty-SKILL-md"
+file = "skills/bug-bounty/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/bug-bounty/SKILL.md"
+sha256 = "af193e75fe9204a3536ea5bda9cb1942cc5858240b94e70ab892b685cf1e5b44"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-bugcrowd-reporting-SKILL-md"
+file = "skills/bugcrowd-reporting/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/bugcrowd-reporting/SKILL.md"
+sha256 = "4db20c5b8a67d97849207627c3f01919c74574121fec5be4edf205ed78e165a3"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-cloud-iam-deep-SKILL-md"
+file = "skills/cloud-iam-deep/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/cloud-iam-deep/SKILL.md"
+sha256 = "d495d06f40392ac410fadd40e35b0a3acbe921aba99a0a9946ed5b26abc64ea9"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-enterprise-vpn-attack-SKILL-md"
+file = "skills/enterprise-vpn-attack/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/enterprise-vpn-attack/SKILL.md"
+sha256 = "3efcc1022cf260a396dc3eba60808a6035ff5756fa2628a4dbfbe939eec5ead5"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-evidence-hygiene-SKILL-md"
+file = "skills/evidence-hygiene/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/evidence-hygiene/SKILL.md"
+sha256 = "1200f715875c0d773e4d2e00691b92f06deb676e8ca7dafac0b8be19c168380c"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-api-misconfig-SKILL-md"
+file = "skills/hunt-api-misconfig/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-api-misconfig/SKILL.md"
+sha256 = "d27a00337ac1c708ddd7540e8425d6131c61af27cc964f4de3bf845372b6a8cd"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-aspnet-SKILL-md"
+file = "skills/hunt-aspnet/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-aspnet/SKILL.md"
+sha256 = "1606594f88ee4e178ab61ece133e83c53db64733da838aa7bc016c9daa5f9755"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-ato-SKILL-md"
+file = "skills/hunt-ato/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-ato/SKILL.md"
+sha256 = "f2afcab5682c117c77259b1ead3eb746aeefaa70c07c019b581b79ede09c7596"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-auth-bypass-SKILL-md"
+file = "skills/hunt-auth-bypass/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-auth-bypass/SKILL.md"
+sha256 = "bfd90637ddc4299c41c5fc4edc628c0fcc13e06ac9b0e3b0245e4d4fbf17e1cf"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-brute-force-SKILL-md"
+file = "skills/hunt-brute-force/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-brute-force/SKILL.md"
+sha256 = "cca90153a3154dc7b188addb2ec3da804cea91f0d619fb9e17e289dcd3c4b1ce"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-business-logic-SKILL-md"
+file = "skills/hunt-business-logic/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-business-logic/SKILL.md"
+sha256 = "c498fee1e663deeebed2332ba9248cadee782b7f65e2b61089623b02fca1ce89"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-cache-poison-SKILL-md"
+file = "skills/hunt-cache-poison/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-cache-poison/SKILL.md"
+sha256 = "a64dea2f7b69bcfbc6d03c21ca8fa0ddf78bc481ecc6531c9f6064737879f25d"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-captcha-bypass-SKILL-md"
+file = "skills/hunt-captcha-bypass/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-captcha-bypass/SKILL.md"
+sha256 = "41faee06c8c8db7f2f509d7f5d169b82b7bb32588064aa192f7369c88a2c0bde"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-cicd-SKILL-md"
+file = "skills/hunt-cicd/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-cicd/SKILL.md"
+sha256 = "4645e37a7695a36610ae3e86d8fc3f57b45fb8a56832aac7006cece481931bc2"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-clickjacking-SKILL-md"
+file = "skills/hunt-clickjacking/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-clickjacking/SKILL.md"
+sha256 = "4d47fdcec28fcce2e01ec9c3097cd7d1d2eda21d212ad13a2ceff770370cd939"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-cloud-misconfig-SKILL-md"
+file = "skills/hunt-cloud-misconfig/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-cloud-misconfig/SKILL.md"
+sha256 = "dff86dce91a6b5fa95b404cd025a16a5f5d94a1c992bfc275122530cb3b1b54e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-cors-SKILL-md"
+file = "skills/hunt-cors/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-cors/SKILL.md"
+sha256 = "00e0e9e866db6729eaf67361d3194be684b2712ea6f74b9701042beff4677f57"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-csrf-SKILL-md"
+file = "skills/hunt-csrf/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-csrf/SKILL.md"
+sha256 = "d311dce06a0715587abb25f7a28d946111b55d8439697d75e047f8a5a3cd3e79"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-deserialization-SKILL-md"
+file = "skills/hunt-deserialization/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-deserialization/SKILL.md"
+sha256 = "4c30e08e46bc5721b12a7d92e237060c0ea440581f3295bc0912b28230ff168b"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-dispatch-SKILL-md"
+file = "skills/hunt-dispatch/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-dispatch/SKILL.md"
+sha256 = "b582c50d9f36d78d97a5d7eda3d70134e8c03ebfa968afd7119eb4ea476ae5c1"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-dom-SKILL-md"
+file = "skills/hunt-dom/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-dom/SKILL.md"
+sha256 = "c3f6bdc38bdfc1304d0b2d5ecd3456f6e4a391941d0dad1346d875600cdc9f49"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-exceptional-conditions-SKILL-md"
+file = "skills/hunt-exceptional-conditions/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-exceptional-conditions/SKILL.md"
+sha256 = "dceb38f2a35b862989cf737068835e08da7b847a11989a7cf2998fb78e70bfd9"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-file-upload-SKILL-md"
+file = "skills/hunt-file-upload/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-file-upload/SKILL.md"
+sha256 = "2ce6b6bd65376b22d9145997c4639edcc8b8033f646957e3e2c4b915e42eb52c"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-fintech-graphql-SKILL-md"
+file = "skills/hunt-fintech-graphql/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-fintech-graphql/SKILL.md"
+sha256 = "9e3bb181f1cd9f772a9c8595c3e00b98c46c1401011add3338de9b6a0667e24c"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-forgot-password-SKILL-md"
+file = "skills/hunt-forgot-password/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-forgot-password/SKILL.md"
+sha256 = "b484286559f091f3dc8cab21a43e47f4d7fbe00382f5bade799fb40c7101fb1e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-graphql-SKILL-md"
+file = "skills/hunt-graphql/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-graphql/SKILL.md"
+sha256 = "5a2d5080566449b85f3e4e7d5a73d9a7465f126ae688ed7dafe9186cb30cb5ca"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-grpc-SKILL-md"
+file = "skills/hunt-grpc/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-grpc/SKILL.md"
+sha256 = "e14cb7a2824064bf8292a271c5fb0a2e7866d3b4caa2562a0a4da30135bf032c"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-host-header-SKILL-md"
+file = "skills/hunt-host-header/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-host-header/SKILL.md"
+sha256 = "ef6054768ad32a55d094884acaaa02b4bbe7d2efd811f64076bf38ff6defb8d1"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-html-injection-SKILL-md"
+file = "skills/hunt-html-injection/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-html-injection/SKILL.md"
+sha256 = "5fe67c0256124d39821d1d63eb45b8a6c0ca20ca2018c5aba7ead72b343ea51e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-http-smuggling-SKILL-md"
+file = "skills/hunt-http-smuggling/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-http-smuggling/SKILL.md"
+sha256 = "9ebd33dbdd534d08df689a4b7fd8a8dcef770d6d0358c0cf22252d2a8cf2da45"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-idor-SKILL-md"
+file = "skills/hunt-idor/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-idor/SKILL.md"
+sha256 = "c264f8d251a21c88b127bfa831acd819e7363ec1b138bcecbf226dc98b74ed3e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-jwt-crypto-SKILL-md"
+file = "skills/hunt-jwt-crypto/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-jwt-crypto/SKILL.md"
+sha256 = "8ecbc4b840be4e814e600bd0d6b22aac179d5085a6ac8dc38aba238972deee51"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-k8s-SKILL-md"
+file = "skills/hunt-k8s/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-k8s/SKILL.md"
+sha256 = "4598198a99ed4443603282d8ce2c1dabb382573ac23ac64aab029edbe921148f"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-laravel-SKILL-md"
+file = "skills/hunt-laravel/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-laravel/SKILL.md"
+sha256 = "176725dc473a60e33d2d3b7614f634ee58544b6e5e96ec3b47cf1334a824bf3e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-ldap-SKILL-md"
+file = "skills/hunt-ldap/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-ldap/SKILL.md"
+sha256 = "ae7a9fbd3a12ced888f36efc83b3b5cc16a219825a664a84b60c429bc4487a93"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-lfi-SKILL-md"
+file = "skills/hunt-lfi/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-lfi/SKILL.md"
+sha256 = "ccc93c6c750c37d941af16556ec3fa6d29ee5e71fa9ccf96aa29ab9f8be1251c"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-llm-ai-SKILL-md"
+file = "skills/hunt-llm-ai/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-llm-ai/SKILL.md"
+sha256 = "44968fc1b2ff3210e481aafbdf7f160d9a1fcbcce995df1edf0329cbff9b7658"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-mfa-bypass-SKILL-md"
+file = "skills/hunt-mfa-bypass/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-mfa-bypass/SKILL.md"
+sha256 = "453126b12df075d941f5a39552d4b17b623aaa692fe3d87442dae104384aafed"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-misc-SKILL-md"
+file = "skills/hunt-misc/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-misc/SKILL.md"
+sha256 = "1da165c46da0cb8c2ef9d4e110cb6b876081619b7d96acad43ff96850d2a029e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-nextjs-SKILL-md"
+file = "skills/hunt-nextjs/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-nextjs/SKILL.md"
+sha256 = "b2090dbf732788d6eefa0556c99fb2ad3dc0b86b13f3cd7b8a88c55285bd8179"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-nodejs-SKILL-md"
+file = "skills/hunt-nodejs/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-nodejs/SKILL.md"
+sha256 = "5a10ab815e5c5949e59d0f997c358a8a4f3c6e2ca6b3145942ab701f8c98608c"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-nosqli-SKILL-md"
+file = "skills/hunt-nosqli/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-nosqli/SKILL.md"
+sha256 = "6df5885eb5095adcaab95f54b88a919a0d7300e81d244b284a10a3d76a2c578f"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-ntlm-info-SKILL-md"
+file = "skills/hunt-ntlm-info/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-ntlm-info/SKILL.md"
+sha256 = "2ebe0e8acfc301a4986ac508cc5e032727e01f0246dff1df8b2073dcae2ea86f"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-oauth-SKILL-md"
+file = "skills/hunt-oauth/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-oauth/SKILL.md"
+sha256 = "05ef8cb632293ab8e0ae0399a7e5b08587e2645e778eb51377573cb4023de685"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-open-redirect-SKILL-md"
+file = "skills/hunt-open-redirect/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-open-redirect/SKILL.md"
+sha256 = "eda49dc99c2775bf034a5f7d3b4b187061bc8a38d76e92ca3a598592fe1ad5ad"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-race-condition-SKILL-md"
+file = "skills/hunt-race-condition/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-race-condition/SKILL.md"
+sha256 = "783248a920928a4aaa981c268be436af91a7d6251a29730d729a4f678f83c768"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-rag-vector-SKILL-md"
+file = "skills/hunt-rag-vector/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-rag-vector/SKILL.md"
+sha256 = "979b5530e0b7f99820a45d09e270ab02a0b373c5edad44981a5d7c9d1ec4ff07"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-rce-SKILL-md"
+file = "skills/hunt-rce/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-rce/SKILL.md"
+sha256 = "86246654cdbafbadf622e3d3a387f587512412df6e83f13a16db443223601140"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-saml-SKILL-md"
+file = "skills/hunt-saml/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-saml/SKILL.md"
+sha256 = "37070e08eb1d451408420c76a35cec184b4e9387a404dd512a8a0b7557641f32"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-session-SKILL-md"
+file = "skills/hunt-session/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-session/SKILL.md"
+sha256 = "d7e1a5c418d8f86180d9e242c9e5e2fd186efe61b3633c68f914160586968ecc"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-shadow-api-SKILL-md"
+file = "skills/hunt-shadow-api/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-shadow-api/SKILL.md"
+sha256 = "05567a1fe7b58e95d28e0b5c5a2ca74372d4a1e7e1710ec872c51f30214bdcbc"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-sharepoint-SKILL-md"
+file = "skills/hunt-sharepoint/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-sharepoint/SKILL.md"
+sha256 = "6c9a1741da8b328176c42c5673dc54e7dd2ae61dc414dbb40eb7ebad7b253a98"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-source-leak-SKILL-md"
+file = "skills/hunt-source-leak/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-source-leak/SKILL.md"
+sha256 = "ab5146c6af333082fec036b3085838cd5beaa4d45dbd3b6e15791e0a85ea0e03"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-spa-api-SKILL-md"
+file = "skills/hunt-spa-api/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-spa-api/SKILL.md"
+sha256 = "6b37e5dde646cb603738915b39768e88685b8dd1aa53a4b7c5e04dfa491713f4"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-springboot-SKILL-md"
+file = "skills/hunt-springboot/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-springboot/SKILL.md"
+sha256 = "4602c5718f7a452f064b934d7f227b060e3767e9b6039f36aa10460291b61eeb"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-sqli-SKILL-md"
+file = "skills/hunt-sqli/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-sqli/SKILL.md"
+sha256 = "fc5627c37b1028172413285c322c76d1105ebffbbb5af4e0ca0eaa81811fd7c0"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-ssrf-SKILL-md"
+file = "skills/hunt-ssrf/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-ssrf/SKILL.md"
+sha256 = "e9723e4a78a3a2113efd88b0d49df02f9dded113569964d5b1b6aa2f592df058"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-ssti-SKILL-md"
+file = "skills/hunt-ssti/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-ssti/SKILL.md"
+sha256 = "edab65afe43abcd2d0d19f7dde29c91f54fbd8720f66e9161a58a4552f1092af"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-subdomain-SKILL-md"
+file = "skills/hunt-subdomain/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-subdomain/SKILL.md"
+sha256 = "aac68521ad4a90fa5a21777f2c1c3ac05a1dfc080e066e88b0ce42571f174ca3"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-tls-network-SKILL-md"
+file = "skills/hunt-tls-network/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-tls-network/SKILL.md"
+sha256 = "0c27faca993c6e83dcaad9a38cc8d95055c5599c7d6e19e642587cf4627f11f0"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-websocket-SKILL-md"
+file = "skills/hunt-websocket/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-websocket/SKILL.md"
+sha256 = "11f68926ffab55ecf91f1027280cb6e16864432b62ba079973e11bca0d3dffc1"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-xss-SKILL-md"
+file = "skills/hunt-xss/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-xss/SKILL.md"
+sha256 = "fad790ac05164299eff8f2206160d23b79d2508ac930721e3d8835d746443714"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-hunt-xxe-SKILL-md"
+file = "skills/hunt-xxe/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/hunt-xxe/SKILL.md"
+sha256 = "a74b466dfb2220787cd61c65860fa50c914b77c30151f04e63284a565c269069"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-ios-redteam-pipeline-SKILL-md"
+file = "skills/ios-redteam-pipeline/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/ios-redteam-pipeline/SKILL.md"
+sha256 = "714000c0b2891922fbbd6126a3110defe4fd9e1c405b5ebe0fe1685ecea169fe"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-m365-entra-attack-SKILL-md"
+file = "skills/m365-entra-attack/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/m365-entra-attack/SKILL.md"
+sha256 = "8b76a543adc6972925639cda19699f7c5b0c2f1d5d03411aaf81115df6d759ce"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-meme-coin-audit-SKILL-md"
+file = "skills/meme-coin-audit/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/meme-coin-audit/SKILL.md"
+sha256 = "e73eeb86751ac4578456e2058373cd02e812adcbbaec745c6733c78c2e147055"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-mid-engagement-ir-detection-SKILL-md"
+file = "skills/mid-engagement-ir-detection/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/mid-engagement-ir-detection/SKILL.md"
+sha256 = "50179c536601c05b98979e19c9b84132f85930820f77bc600991889f0db9b9f4"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-README-md"
+file = "skills/offensive-osint/README.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/README.md"
+sha256 = "467d1d3e6b762b22e67e7b72a24654c9a47603c70f563abe3377f6b49ecce5ed"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-SKILL-md"
+file = "skills/offensive-osint/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/SKILL.md"
+sha256 = "2e0c2e55b604b3d51f79d135d9878c45dee0ca810abde53964ad8337d0a92a5b"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-breach-and-credentials-md"
+file = "skills/offensive-osint/references/breach-and-credentials.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/breach-and-credentials.md"
+sha256 = "bd848970020303eb1fe9f0f8bfc183b10c72bed91c5335623f32fa147e37a644"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-dork-corpus-md"
+file = "skills/offensive-osint/references/dork-corpus.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/dork-corpus.md"
+sha256 = "27a0ea33aae4a41f52414dc9fb416bc4ce9b9060ef9ce83ecd28c2e31358ff5a"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-helpers-and-automation-md"
+file = "skills/offensive-osint/references/helpers-and-automation.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/helpers-and-automation.md"
+sha256 = "18222d4f89ec8226f49bab3e2acdc178ca867730183030a63c8c943a1f0e8da3"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-identity-fabric-md"
+file = "skills/offensive-osint/references/identity-fabric.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/identity-fabric.md"
+sha256 = "e095650ee3363d749d06897f16fc6b18805f8b0eb9e6d38112ada00dfd7ebbf5"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-people-osint-md"
+file = "skills/offensive-osint/references/people-osint.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/people-osint.md"
+sha256 = "8224826d039efafb46404c139c7e9ab8f0d7ca2d9a3a84260c728067ce87dfb8"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-probes-and-wordlists-md"
+file = "skills/offensive-osint/references/probes-and-wordlists.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/probes-and-wordlists.md"
+sha256 = "0c8e3f606fc9cb5f98ac1359be8d7ca43d003e92df740c10980a1addb72b9dff"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-recon-stack-md"
+file = "skills/offensive-osint/references/recon-stack.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/recon-stack.md"
+sha256 = "02c4a55a4608a81e300e0b1d9e07c8c5efcd2f0ed3de0ce68287df9b954c9824"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-recon-techniques-md"
+file = "skills/offensive-osint/references/recon-techniques.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/recon-techniques.md"
+sha256 = "f0c26ac632a3d77c7958041370b68908c2b038dcb7500c84eb96a4045f1171e2"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-saas-public-surfaces-md"
+file = "skills/offensive-osint/references/saas-public-surfaces.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/saas-public-surfaces.md"
+sha256 = "8dd69304c0024f57923035b9e5b3c17f2c6e9d8aa07b534667b09c0c4f3ec916"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-secret-patterns-md"
+file = "skills/offensive-osint/references/secret-patterns.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/secret-patterns.md"
+sha256 = "e3dd03875a4c1f94a4e0877fdff1142c14ba17d95743f990ae5cb920e2b043d4"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-secret-validators-md"
+file = "skills/offensive-osint/references/secret-validators.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/secret-validators.md"
+sha256 = "cc5ca501bdcaf7563bc107e53e54b6fca1d17be34c5cd9cb8ab79cf6c02c3f98"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-sector-notes-md"
+file = "skills/offensive-osint/references/sector-notes.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/sector-notes.md"
+sha256 = "2610b772afd853d042bd01c3f8f4e70b3fb04ac48b75263ae46726ab08ac992f"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-severity-matrix-md"
+file = "skills/offensive-osint/references/severity-matrix.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/severity-matrix.md"
+sha256 = "9674805dd38d80191adb06811321304f04d4748cfee72327908985acfe56ea65"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-specialized-osint-md"
+file = "skills/offensive-osint/references/specialized-osint.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/specialized-osint.md"
+sha256 = "e42f9fbf55090951a759e5bdf6b2d2007f0fe236ff543d96bd36edc4b64013f4"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-references-tooling-install-md"
+file = "skills/offensive-osint/references/tooling-install.md"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/references/tooling-install.md"
+sha256 = "55832c19d864329443ad99c5ff44066a358ab65a776503623ed4462bb7d8af18"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-scripts-assets-FONT-LICENSE-txt"
+file = "skills/offensive-osint/scripts/assets/FONT-LICENSE.txt"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/scripts/assets/FONT-LICENSE.txt"
+sha256 = "f79142caf52f977164a13ec09ec82ffd993d8a3851c0afb15ac468c386ad9eff"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-scripts-assets-archivo-black-woff2"
+file = "skills/offensive-osint/scripts/assets/archivo-black.woff2"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/scripts/assets/archivo-black.woff2"
+sha256 = "a69dfe4ff8ea7fd225bc3c1fe703866e9ec308024bbac1b27cd76cc63f5e3e54"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-offensive-osint-scripts-dashboard-py"
+file = "skills/offensive-osint/scripts/dashboard.py"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/scripts/dashboard.py"
+sha256 = "1263b26a4b2a577581ca41d27808c79a7c00426b33bf39a5c490cd88112116d8"
+licence = "MIT"
+
+[[upstream]]
+id = "skills-offensive-osint-scripts-h1_reference-py"
+file = "skills/offensive-osint/scripts/h1_reference.py"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/scripts/h1_reference.py"
+# ADAPTED (lane 121 fix-up): ruff --fix only — import sort, Optional[X]
+# -> X | None, no behaviour change. ``sha256`` is the vendored file;
+# ``upstream_sha256`` is the byte-identical upstream file in the clone.
+sha256 = "2acaf3c0325594e7343d21f7d0cf39e8f4af5d0b5437414d486e3f6b30ba76c0"
+upstream_sha256 = "47016d16e9d4c53d3b6d71a085a53378eb46966d2d6d3198dd4ca5cc4ced82b4"
+licence = "MIT"
+
+[[upstream]]
+id = "skills-offensive-osint-scripts-secret_scan-py"
+file = "skills/offensive-osint/scripts/secret_scan.py"
+vendored = "nomorals/skills/library/bughunter/skills/offensive-osint/scripts/secret_scan.py"
+# ADAPTED (lane 121 fix-up): ruff --fix only — dropped redundant
+# open() mode, (OSError, IOError) -> OSError (IOError is OSError's
+# alias since 3.3), no behaviour change. ``sha256`` is the vendored
+# file; ``upstream_sha256`` is the byte-identical upstream file.
+sha256 = "2548054108902c19168cd0e771aacd8f07e7bfd197af995d6b9b5def2626f19f"
+upstream_sha256 = "a919c77b06c581edf8f3c9530dd80b78b15df79d8ae6431f0188537d7462c5c7"
+licence = "MIT"
+
+[[upstream]]
+id = "skills-okta-attack-SKILL-md"
+file = "skills/okta-attack/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/okta-attack/SKILL.md"
+sha256 = "f52a55aca18604292d588fe5144bf1c5fed31e3c084c07cf9c15d90be3d3e589"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-osint-methodology-README-md"
+file = "skills/osint-methodology/README.md"
+vendored = "nomorals/skills/library/bughunter/skills/osint-methodology/README.md"
+sha256 = "b2d5e48b65339f4cc2a38a715a3a8b4298d67c8000efc695a553171693239cfe"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-osint-methodology-SKILL-md"
+file = "skills/osint-methodology/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/osint-methodology/SKILL.md"
+sha256 = "05f857a9b014fc24dee9aacc3d4abcc5ca24ed66708fc652e933091d79b204a9"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-recon-scope-triage-SKILL-md"
+file = "skills/recon-scope-triage/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/recon-scope-triage/SKILL.md"
+sha256 = "83bd4e07fb5797e60d309ed694e5a5aaf94052ff49261252b3f2aec952dbaa2e"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-redteam-mindset-SKILL-md"
+file = "skills/redteam-mindset/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/redteam-mindset/SKILL.md"
+sha256 = "bbf42293aedfa03b65cb87d27ec16b811f7acf3d251191db0911e49a2f78dd45"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-redteam-report-template-SKILL-md"
+file = "skills/redteam-report-template/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/redteam-report-template/SKILL.md"
+sha256 = "ebd19b28a6fb970afec9e5ca5e40de33c1f5a3fa314faf8b0c354f15d00883a0"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-report-writing-SKILL-md"
+file = "skills/report-writing/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/report-writing/SKILL.md"
+sha256 = "c464af95a0eee58ac68d804b4a5db796f77af35bf7acdb031667824655ed3813"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-security-arsenal-SKILL-md"
+file = "skills/security-arsenal/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/security-arsenal/SKILL.md"
+sha256 = "c33ecb1a5653501f532b714424aadb1cf8edc5759250b55a58a574b73cb9a0f0"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-supply-chain-attack-recon-SKILL-md"
+file = "skills/supply-chain-attack-recon/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/supply-chain-attack-recon/SKILL.md"
+sha256 = "4a63831cf5f775710682c38b7571ae806cd2ca8cd1cae2665359a180f2d8a73d"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-triage-validation-SKILL-md"
+file = "skills/triage-validation/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/triage-validation/SKILL.md"
+sha256 = "7dd455768e31aedefbce6d416952cb0fbb276a584889f21c8c8d0407e8745741"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-vmware-vcenter-attack-SKILL-md"
+file = "skills/vmware-vcenter-attack/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/vmware-vcenter-attack/SKILL.md"
+sha256 = "20a51bb02ad3ccf88fb565b367bd52059d2bc3837d2069432657b0aef1228042"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-web2-recon-SKILL-md"
+file = "skills/web2-recon/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/web2-recon/SKILL.md"
+sha256 = "929166c7eb3e8d6bc24e496e3c739151f32637a3946173cb864e5c9da19f0037"
+licence = "CC BY 4.0"
+
+[[upstream]]
+id = "skills-web3-audit-SKILL-md"
+file = "skills/web3-audit/SKILL.md"
+vendored = "nomorals/skills/library/bughunter/skills/web3-audit/SKILL.md"
+sha256 = "6f29b97b4fc944b8a8b258f73890ab17d5672d85ceedae2a955a825c98c8a06b"
+licence = "CC BY 4.0"
+
+[[devon]]
+id = "devon-bughunter-organ"
+file = "nomorals/security/bughunter/"
+derives_from = ["engine/engine.py", "engine/scope.py", "engine/state.py", "engine/closure.py", "engine/memory.py", "engine/agent.py", "engine/skill_map.py", "engine/recon.py", "engine/triage.py", "engine/report.py", "cbh/cli.py", "mcp/hackerone/server.py", "skills/offensive-osint/scripts/h1_reference.py"]

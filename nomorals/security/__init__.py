@@ -17,6 +17,10 @@
   DNS over HTTPS, AXFR, takeover leads (owner's batch).
 - :mod:`nomorals.security.subbrute` — DNS subdomain brute with
   wildcard suppression + permutation rounds (owner's batch).
+- :mod:`nomorals.security.bughunter` — authorized bug-bounty
+  hunting (Claude-BugHunter port): scope rules, skill map, the
+  7-Question Gate, coverage-closure ledger, engagement engine over
+  Devon's HttpClient / brain / audit book / evidence chain.
 - :mod:`nomorals.security.evidence` — hash-chained evidence packs,
   secrets masked at rest (owner's batch).
 - :mod:`nomorals.security.disclose` — severity rubric, RFC 9116
@@ -183,6 +187,18 @@ __all__ += [
 # `bin_check`, `generate` etc. are functions, never module names —
 # the recon lesson (never export a bare function whose name IS a
 # submodule) does not apply to either module.
+from . import bughunter as _bughunter  # noqa: E402 - section import, this file's convention
+
+BugHunterEngine = _bughunter.Engine
+BugHunterScope = _bughunter.Scope
+bughunter_classify_url = _bughunter.classify_url
+bughunter_gate_finding = _bughunter.gate_finding
+bughunter_render_report = _bughunter.render_report
+bughunter_run_engagement = _bughunter.run_engagement
+bughunter_run_parity = _bughunter.run_parity
+bughunter_verify_attribution = _bughunter.verify_attribution
+bughunter_worklist_from_audit = _bughunter.worklist_from_audit
+
 from .cards import (  # noqa: E402
     BRANDS,
     Card,
@@ -255,6 +271,18 @@ from .subbrute import (  # noqa: E402
     SubBrute,
     permutations,
 )
+
+__all__ += [
+    "BugHunterEngine",
+    "BugHunterScope",
+    "bughunter_classify_url",
+    "bughunter_gate_finding",
+    "bughunter_render_report",
+    "bughunter_run_engagement",
+    "bughunter_run_parity",
+    "bughunter_verify_attribution",
+    "bughunter_worklist_from_audit",
+]
 
 __all__ += [
     "ADAPTERS",

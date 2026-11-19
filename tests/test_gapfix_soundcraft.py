@@ -503,7 +503,8 @@ class ToolTests(unittest.TestCase):
         # craft-libs port (lane 113) added the craftlibs tool, 734
         # after the craft-fonts port (lane 114) added the craftfonts tool.
         # 735 after the indd-utils port (lane 117) added the inddutils tool.
-        self.assertEqual(len(registry._tools), 735)
+        # 743 after the bughunter port (lane 121) added 8 bughunter tools.
+        self.assertEqual(len(registry._tools), 743)
 
     def test_tool_inspect_and_render(self) -> None:
         import tempfile

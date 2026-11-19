@@ -6,7 +6,8 @@ bucket math (including the three upstream bugs this port fixes),
 the precomputed store and both tensor codecs, the condition specs,
 the precompute orchestration end to end, the frame decode/preprocess
 path on the real hiker clips, the parity TOML, the attribution TOML,
-and the registry tool count (735 — this lane adds no tool).
+and the registry tool count (743 — the bughunter port (lane 121)
+added 8 tools; this lane adds no tool).
 """
 
 from __future__ import annotations
@@ -654,14 +655,15 @@ def test_attribution():
     assert result["verified"] == 39
 
 
-def test_tool_count_still_735():
+def test_tool_count_still_743():
     from types import SimpleNamespace
 
     from nomorals.tools.registry import ToolRegistry
 
     registry = ToolRegistry(SimpleNamespace())
     registry.register_builtins()
-    assert len(registry._tools) == 735, (
-        "lane 119 adds no tool — if this changed, a tool was added and "
+    assert len(registry._tools) == 743, (
+        "lane 119 adds no tool (743 after the bughunter port, lane 121, "
+        "added 8 tools) — if this changed, a tool was added and "
         "every pin test needs updating with the reason named"
     )

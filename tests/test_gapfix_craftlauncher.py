@@ -574,7 +574,8 @@ def test_tool_registered_and_counts_733() -> None:
     # craft-libs port (lane 113) added the craftlibs tool, 734 after
     # the craft-fonts port (lane 114) added the craftfonts tool.
     # 735 after the indd-utils port (lane 117) added the inddutils tool.
-    assert len(registry._tools) == 735
+    # 743 after the bughunter port (lane 121) added 8 bughunter tools.
+    assert len(registry._tools) == 743
 
 
 def _call(registry, **kwargs):

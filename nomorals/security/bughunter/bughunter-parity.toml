@@ -1,0 +1,128 @@
+# BugHunter parity — machine-checked upstream semantics (version 1).
+# Upstream: elementalsouls/Claude-BugHunter, commit 0e70a02.
+# Verify: nomorals.security.bughunter.parity.run_parity().
+
+[schema]
+version = 1
+
+[[case]]
+id = "scope-allow"
+op = "scope_allow"
+scope = { name = "parity", in_scope = ["*.example.com", "api.test.dev"], out_of_scope = ["evil.example.com"], seeds = [] }
+urls = ["https://app.example.com/x", "https://evil.example.com/x", "https://other.org/", "https://api.test.dev/y"]
+[case.expect]
+allowed = ["https://app.example.com/x", "https://api.test.dev/y"]
+
+[[case]]
+id = "scope-reject-deny-wins"
+op = "scope_reject"
+scope = { name = "parity", in_scope = ["*.example.com"], out_of_scope = ["evil.example.com"], seeds = [] }
+url = "https://evil.example.com/x"
+[case.expect]
+reason = "evil.example.com matches an out-of-scope rule"
+
+[[case]]
+id = "scope-reject-default-deny"
+op = "scope_reject"
+scope = { name = "parity", in_scope = ["*.example.com"], out_of_scope = [], seeds = [] }
+url = "https://other.org/"
+[case.expect]
+reason = "other.org matches no in-scope rule (default deny)"
+
+[[case]]
+id = "classify-idor"
+op = "classify_url"
+url = "https://app.example.com/api/account?id=5"
+[case.expect]
+contains = ["hunt-idor", "hunt-api-misconfig"]
+
+[[case]]
+id = "classify-boost"
+op = "classify_url"
+url = "https://app.example.com/search?q=x"
+audit_boost = ["sqli"]
+[case.expect]
+contains = ["hunt-sqli", "hunt-xss"]
+
+[[case]]
+id = "rank-secret"
+op = "rank_priority"
+item = { url = "https://app.example.com/.env", param = "x", vuln_class = "secret", source = "secret" }
+[case.expect]
+priority = 95
+
+[[case]]
+id = "rank-rce"
+op = "rank_priority"
+item = { url = "https://app.example.com/run", param = "cmd", vuln_class = "rce" }
+[case.expect]
+priority = 105
+
+[[case]]
+id = "gate-pass"
+op = "gate"
+finding = { url = "https://app.example.com/api/account?id=6", param = "id", vuln_class = "idor", severity = "high", asset = "https://app.example.com", evidence = "curl https://app.example.com/api/account?id=6 HTTP/1.1 — unauthenticated, previously unknown, leaked PII for other users" }
+[case.expect]
+verdict = "PASS"
+
+[[case]]
+id = "gate-kill"
+op = "gate"
+finding = { url = "https://app.example.com/search?q=x", param = "q", vuln_class = "xss", evidence = "" }
+[case.expect]
+verdict = "KILL"
+
+[[case]]
+id = "closure-clean"
+op = "closure"
+state = { surface = [{ url = "https://app.example.com/api/account?id=5", param = "id", vuln_class = "idor" }, { url = "https://app.example.com/search?q=x", param = "q", vuln_class = "xss" }], tested = ["https://app.example.com/api/account?id=5|id|idor", "https://app.example.com/search?q=x|q|xss"], coverage_by_item = { "https://app.example.com/api/account?id=5|id|idor" = { verdict = "finding" }, "https://app.example.com/search?q=x|q|xss" = { verdict = "clean" } } }
+[case.expect]
+clean = true
+gaps = 0
+
+[[case]]
+id = "closure-gap"
+op = "closure"
+state = { surface = [{ url = "https://app.example.com/api/account?id=5", param = "id", vuln_class = "idor" }, { url = "https://app.example.com/search?q=x", param = "q", vuln_class = "xss" }], tested = ["https://app.example.com/api/account?id=5|id|idor"], coverage_by_item = { "https://app.example.com/api/account?id=5|id|idor" = { verdict = "finding" } } }
+[case.expect]
+clean = false
+gaps = 1
+
+[[case]]
+id = "render-h1"
+op = "render_report"
+platform = "hackerone"
+finding = { title = "IDOR in account API", severity = "High", summary = "Any user id returns another user's PII.", asset = "https://app.example.com/api/account" }
+[case.expect]
+contains = ["# IDOR in account API", "**Severity:** High", "## Summary"]
+
+[[case]]
+id = "hackerone-escape"
+op = "hackerone_escape"
+text = "a\"b\\c"
+[case.expect]
+escaped = "a\\\"b\\\\c"
+
+[[case]]
+id = "audit-worklist"
+op = "audit_worklist"
+findings = [{ location = "https://app.example.com/api/account?id=5", kind = "idor", source = "audit_web", title = "unauthenticated endpoint" }, { location = "https://app.example.com/.env", kind = "secret_leak", source = "audit_repo", title = "exposed secret" }]
+[case.expect]
+units = 2
+first_class = "idor"
+
+[[case]]
+id = "engine-mock"
+op = "engine_mock"
+scope = { name = "mock-engagement", in_scope = ["localhost"], out_of_scope = [], seeds = ["http://localhost:3002"] }
+[case.expect]
+surface = 3
+tested = 3
+candidates = 2
+confirmed = 1
+
+[[case]]
+id = "skill-map-selftest"
+op = "skill_map_selftest"
+[case.expect]
+errors = 0

@@ -34,6 +34,12 @@ malware scanning + multi-engine verdicts.
   reputation; harvested URLs into brute words (owner's seed_sources).
 - bin_lookup / bin_generate / card_check / card_spam: BIN intel,
   Luhn generation, structural and gateway card checks (owner's cards).
+- bughunter_scope_check / bughunter_classify / bughunter_recon /
+  bughunter_surface / bughunter_triage / bughunter_report /
+  bughunter_engage / bughunter_hackerone: authorized bug-bounty
+  hunting (Claude-BugHunter port) — scope rules, skill map,
+  7-Question Gate, closure ledger, engagement engine over the
+  security organ's own audit/evidence/disclosure rungs.
 """
 
 from __future__ import annotations
@@ -307,3 +313,12 @@ def register(registry: Any) -> None:
 
     _seed_sources.register(registry)
     _cards.register(registry)
+
+    # BugHunter (Claude-BugHunter port, 2026-11-19): authorized
+    # bug-bounty hunting — scope rules, skill map, 7-Question Gate,
+    # closure ledger, engagement engine. The organ lives in
+    # security/bughunter/ and registers its own tools here, like
+    # the other security organs.
+    from ..security.bughunter import surface as _bughunter
+
+    _bughunter.register(registry)
