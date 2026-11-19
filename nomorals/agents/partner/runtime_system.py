@@ -2758,6 +2758,8 @@ class RuntimeSystemMixin:
         /triage decisions [owner/repo]  — open decisions
         /triage answer <id> <option>    — answer a decision
         /triage apply <id>              — apply an answered decision
+        /triage urgent [owner/repo]     — open issues by the urgency
+                                           points table (repo attention)
 
         Owner-only. Without a GitHub credential every verb that needs
         GitHub answers honestly as not connected, never a fabricated
@@ -2790,6 +2792,15 @@ class RuntimeSystemMixin:
                                   suggest=self._triage_suggest())
             return triage_surface.render_decisions(
                 engine.decisions(rest or None))
+        if verb == "urgent":
+            repo = rest or (store.tracked()[0] if store.tracked()
+                            else "")
+            if not repo:
+                return ("no repos tracked — /triage track <owner/repo> "
+                        "to start.")
+            engine = TriageEngine(None, store,
+                                  suggest=self._triage_suggest())
+            return triage_surface.render_urgent(engine.urgent(repo))
         client = getattr(self, "_triage_github_client", None)
         if client is None:
             client = triage_github.github_client(self.context)

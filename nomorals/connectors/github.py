@@ -522,6 +522,9 @@ class GitHubConnector(Connector):
             "labels": [l.get("name", "") for l in raw.get("labels", [])
                        if isinstance(l, dict)],
             "author": (raw.get("user") or {}).get("login", ""),
+            "author_association": raw.get("author_association", ""),
+            "reactions": (raw.get("reactions") or {}).get(
+                "total_count", 0),
             "comments": raw.get("comments", 0),
             "created_at": raw.get("created_at", ""),
             "updated_at": raw.get("updated_at", ""),

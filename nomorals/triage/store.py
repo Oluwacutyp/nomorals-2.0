@@ -115,7 +115,8 @@ class TriageStore:
             self.save()
             return "updated"
         merged = dict(old)
-        for field in ("state", "labels", "comments", "updated_at"):
+        for field in ("state", "labels", "comments", "reactions",
+                      "author_association", "updated_at"):
             if field in row:
                 merged[field] = row[field]
         self.data["items"][key] = merged

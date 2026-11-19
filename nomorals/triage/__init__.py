@@ -11,5 +11,12 @@ has her own code-fix machinery.
 Submodules: ``store`` (durable mirror + decisions + write audit),
 ``similarity`` (duplicate candidates), ``classify`` (types, flags,
 priority, work rank), ``engine`` (the pipeline), ``surface`` (chat
-renders), ``github`` (vault-backed client), ``jobs`` (hourly tick).
+renders), ``github`` (vault-backed client), ``jobs`` (hourly tick),
+``urgency`` (the repo-attention points table — the
+craft-repo-status-app pattern: crash/data-loss words, labels,
+triage levels, user reports, engagement, latest build, freshness),
+``prassess`` (the PR landability truth table — the
+craft-pr-review-tool pattern: nine first-match rows over draft /
+problem / conflicted / inspected / running / CI / approved /
+quality, with quality, ease and focus scores around it).
 """

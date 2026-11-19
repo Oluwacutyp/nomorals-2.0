@@ -6,7 +6,7 @@ from typing import Any
 from .store import TriageStore
 
 __all__ = ["render_board", "render_queue", "render_decisions",
-           "render_item"]
+           "render_item", "render_urgent", "render_pr_assessment"]
 
 
 def _type_tag(item: dict[str, Any]) -> str:
@@ -94,4 +94,54 @@ def render_item(item: dict[str, Any],
         lines.append(body[:1000])
     for dec in decisions or []:
         lines.append(f"decision {dec.get('id')}: {dec.get('question', '')}")
+    return "\n".join(lines)
+
+
+def render_urgent(out: dict[str, Any]) -> str:
+    """The urgency ranking: top issues by points, repo urgency and
+    the critical count, each with its reasons."""
+    ranked = out.get("ranked") or []
+    repo = out.get("repo", "")
+    if not ranked:
+        return (f"nothing urgent in {repo} — no open issue scores "
+                "above zero.")
+    lines = [f"Most urgent in {repo} "
+             f"(repo urgency {out.get('urgency', 0):.0f}, "
+             f"{out.get('critical', 0)} critical):"]
+    for row in ranked:
+        flag = " 🔥" if row.get("critical") else ""
+        reasons = ", ".join(row.get("reasons") or [])
+        lines.append(f"#{row.get('number')} [{row.get('score')}]"
+                     f"{flag} {row.get('title', '')}"
+                     + (f" — {reasons}" if reasons else ""))
+    return "\n".join(lines)
+
+
+_PR_STATE_LABELS = {
+    "draft": "Draft",
+    "needs_work": "Needs work",
+    "conflicted": "Conflicted",
+    "not_inspected": "Not inspected",
+    "checking": "Checking",
+    "ci_not_run": "CI not run",
+    "landable": "Landable",
+    "promising": "Promising",
+    "reviewable": "Reviewable",
+}
+
+
+def render_pr_assessment(out: dict[str, Any]) -> str:
+    """One PR's verdict: headline state, why, quality and ease."""
+    state = _PR_STATE_LABELS.get(out.get("state", ""),
+                                 str(out.get("state", "")))
+    lines = [f"PR #{out.get('number', '')}: {state}"]
+    for reason in out.get("state_reasons") or []:
+        lines.append(f"• {reason}")
+    lines.append(f"quality {out.get('quality', 0)}/100 "
+                 f"({'high' if out.get('high_quality') else 'not high'}) "
+                 f"— ease {out.get('ease', '')} "
+                 f"({out.get('ease_score', 0)} pts) — "
+                 f"focus {out.get('focus', 0)}")
+    if out.get("security_flags"):
+        lines.append(f"security flags: {out.get('security_flags')}")
     return "\n".join(lines)

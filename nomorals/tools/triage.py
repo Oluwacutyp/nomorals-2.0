@@ -16,6 +16,19 @@ items in work-rank order; ``action=item`` shows one item
 ``action=answer`` answers one (``id=``, ``option=``, ``note=``);
 ``action=apply`` applies an answered decision (``id=``).
 
+Repo attention (craft-repo-status-app pattern) and PR landability
+(craft-pr-review-tool pattern) ride the same tool:
+``action=urgent`` ranks a repo's mirrored open issues by the
+urgency points table (``repo=``, ``latest_tag=``, ``keep=``);
+``action=urgency`` scores one issue ad hoc (``title=``,
+``labels=`` comma-separated, ``comments=``, ``reactions=``,
+``author_association=``, ``created_at=``, ``updated_at=``,
+``latest_tag=``); ``action=prstate`` runs the nine-row landability
+truth table over eight flags (``draft=``, ``problem=``,
+``conflicted=``, ``inspected=``, ``running=``, ``ci_passed=``,
+``approved=``, ``high_quality=``); ``action=pr`` grades a PR from
+its facts as JSON (``pr=``, ``author=``, ``config=``).
+
 Without a GitHub credential every action that needs GitHub answers
 honestly as not connected — run ``nm connectors connect --name
 github`` first — never a fabricated link. With no model the code
@@ -24,9 +37,12 @@ invented.
 """
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from ..triage import github as _github_mod
+from ..triage import prassess as _prassess
+from ..triage import urgency as _urgency
 from ..triage.engine import TriageEngine
 from ..triage.jobs import TRIAGE_SYNC_TOOL
 from ..triage.store import TriageStore, triage_path
@@ -86,6 +102,17 @@ def _read_engine(context: Any) -> TriageEngine:
     return TriageEngine(None, _store(context), suggest=_suggest(context))
 
 
+def _tool_int(raw: str) -> int:
+    """A tool-kwarg integer: blank is 0, anything else must parse."""
+    text = (raw or "").strip()
+    if not text:
+        return 0
+    try:
+        return int(text)
+    except ValueError:
+        raise ValueError(f"expected a number, got {raw!r}") from None
+
+
 def register(registry: Any) -> None:
     """Attach the ``triage`` tool and the sync tick tool."""
     context = registry.context
@@ -106,7 +133,16 @@ def register(registry: Any) -> None:
             "groups (repo=); action=decisions lists open decisions "
             "(repo=); action=answer answers one (id=, option=, "
             "note=); action=apply applies an answered decision "
-            "(id=). Without a GitHub credential every action that "
+            "(id=); action=urgent ranks a repo's open issues by the "
+            "urgency points table (repo=, latest_tag=, keep=); "
+            "action=urgency scores one issue ad hoc (title=, "
+            "labels=, comments=, reactions=, author_association=, "
+            "created_at=, updated_at=, latest_tag=); action=prstate "
+            "runs the landability truth table over eight flags "
+            "(draft=, problem=, conflicted=, inspected=, running=, "
+            "ci_passed=, approved=, high_quality=); action=pr "
+            "grades a PR from its facts as JSON (pr=, author=, "
+            "config=). Without a GitHub credential every action that "
             "needs GitHub answers honestly as not connected, never a "
             "fabricated link."
         ),
@@ -119,9 +155,99 @@ def register(registry: Any) -> None:
         id: str = "",
         option: str = "",
         note: str = "",
+        latest_tag: str = "",
+        keep: str = "",
+        title: str = "",
+        labels: str = "",
+        comments: str = "",
+        reactions: str = "",
+        author_association: str = "",
+        created_at: str = "",
+        updated_at: str = "",
+        draft: str = "",
+        problem: str = "",
+        conflicted: str = "",
+        inspected: str = "",
+        running: str = "",
+        ci_passed: str = "",
+        approved: str = "",
+        high_quality: str = "",
+        pr: str = "",
+        author: str = "",
+        config: str = "",
     ) -> dict[str, Any]:
         store = _store(context)
         action = (action or "queue").strip().lower()
+        if action == "urgent":
+            if not (repo or "").strip():
+                return {"ok": False,
+                        "error": "give a repo: action=urgent "
+                                 "repo=owner/name"}
+            try:
+                keep_n = int(keep or 10)
+            except ValueError:
+                return {"ok": False,
+                        "error": f"keep must be a number, got {keep!r}"}
+            engine = _read_engine(context)
+            return {"ok": True, **engine.urgent(
+                repo.strip(),
+                latest_tag=(latest_tag or "").strip() or None,
+                keep=max(1, keep_n))}
+        if action == "urgency":
+            try:
+                issue = _urgency.IssueInput.from_dict({
+                    "title": title,
+                    "labels": [part.strip() for part in
+                               (labels or "").split(",") if part.strip()],
+                    "comments": _tool_int(comments),
+                    "reactions": _tool_int(reactions),
+                    "author_association": author_association,
+                    "created_at": created_at or None,
+                    "updated_at": updated_at or None,
+                })
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc)}
+            scored = _urgency.score_issue(
+                issue, latest_tag=(latest_tag or "").strip() or None)
+            if scored is None:
+                return {"ok": True, "score": None, "critical": False,
+                        "reasons": [],
+                        "note": "closed-in-spirit: wontfix, duplicate, "
+                                "invalid or not planned"}
+            return {"ok": True, "score": scored.score,
+                    "critical": scored.critical,
+                    "reasons": scored.reasons}
+        if action == "prstate":
+            signals = _prassess.Signals.from_dict({
+                "draft": draft, "problem": problem,
+                "conflicted": conflicted, "inspected": inspected,
+                "running": running, "ci_passed": ci_passed,
+                "approved": approved, "high_quality": high_quality,
+            })
+            return {"ok": True,
+                    "state": _prassess.headline(signals)}
+        if action == "pr":
+            try:
+                pr_row = json.loads(pr or "{}")
+                author_row = json.loads(author or "{}")
+                config_row = json.loads(config or "{}")
+            except ValueError as exc:
+                return {"ok": False,
+                        "error": f"bad JSON: {exc}"}
+            if not isinstance(pr_row, dict):
+                return {"ok": False,
+                        "error": "pr must be a JSON object"}
+            if not isinstance(author_row, dict):
+                return {"ok": False,
+                        "error": "author must be a JSON object"}
+            if not isinstance(config_row, dict):
+                return {"ok": False,
+                        "error": "config must be a JSON object"}
+            out = _prassess.assess_pr(
+                _prassess.PrInput.from_dict(pr_row),
+                _prassess.AuthorFacts.from_dict(author_row),
+                _prassess.PrConfig.from_dict(config_row))
+            return {"ok": True, **out}
         if action == "track":
             if not (repo or "").strip():
                 return {"ok": False,
@@ -213,7 +339,8 @@ def register(registry: Any) -> None:
         return {"ok": False,
                 "error": f"unknown action {action!r} — track, untrack, "
                          "repos, sync, triage, queue, item, duplicates, "
-                         "decisions, answer, apply"}
+                         "decisions, answer, apply, urgent, urgency, "
+                         "prstate, pr"}
 
     @registry.register(
         TRIAGE_SYNC_TOOL,

@@ -30,6 +30,7 @@ from typing import Any
 from ..core.logging_setup import get_logger
 from . import classify as _classify
 from . import similarity as _similarity
+from . import urgency as _urgency
 from .store import TriageStore
 
 __all__ = ["TriageEngine", "DUPLICATE_CLOSE_TEXT"]
@@ -110,6 +111,9 @@ class TriageEngine:
                 "state": str(raw.get("state", "open")),
                 "labels": list(raw.get("labels") or []),
                 "author": str(raw.get("author", "")),
+                "author_association": str(
+                    raw.get("author_association", "")),
+                "reactions": int(raw.get("reactions") or 0),
                 "comments": int(raw.get("comments") or 0),
                 "created_at": str(raw.get("created_at", "")),
                 "updated_at": str(raw.get("updated_at", "")),
@@ -466,6 +470,24 @@ class TriageEngine:
         items.sort(key=lambda row: (-int(row.get("work_rank") or 0),
                                     int(row.get("number", 0))))
         return items
+
+    def urgent(self, repo: str, *, latest_tag: str | None = None,
+               keep: int = 10) -> dict[str, Any]:
+        """The repo's open issues ranked by the urgency points table
+        (:mod:`nomorals.triage.urgency`): score, critical flag and
+        reasons per issue, the repo urgency (sum of the top five
+        scores) and the critical count. Store-only — no GitHub call.
+        Rows mirrored before the urgency fields landed score without
+        reactions / author association, which the next sync fills in.
+        """
+        items = self.store.items_for(repo, state="open")
+        ranked, urgency, critical = _urgency.rank_issues(
+            [_urgency.IssueInput.from_dict(row) for row in items],
+            self.now, latest_tag, keep)
+        return {"repo": repo,
+                "ranked": [row.as_dict() for row in ranked],
+                "urgency": urgency, "critical": critical,
+                "open": len(items), "scored": len(ranked)}
 
     # ── decisions ──────────────────────────────────────────────────
     def decisions(self, repo: str | None = None, *,
