@@ -16,6 +16,102 @@ from .failures import record_failure
 _log = get_logger(__name__)
 
 
+class _VerbUsage(Exception):
+    """A verb argument is missing or malformed — the handler answers
+    with the usage line, not a traceback."""
+
+
+def _verb_num(value: str | None, what: str,
+              cast: Any = float) -> Any | None:
+    """A chat token as a number, or None when absent. A malformed
+    token raises _VerbUsage naming the argument — the artist tool
+    passes numbers straight to the scene model, whose validation
+    compares them, so a string would raise TypeError instead of an
+    honest refusal; the handler coerces first.
+    """
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        raise _VerbUsage(
+            f"{what} needs a number, got {value!r}") from None
+    return cast(number)
+
+
+def _verb_pairs(words: list[str], keys: set[str]
+                ) -> tuple[list[str], dict[str, str]]:
+    """Split tokens into positionals and `key value` pairs.
+
+    A token naming a key in ``keys`` consumes the next token as its
+    value; everything else stays positional, in order. A key with
+    nothing after it stays positional, so the handler reports usage
+    instead of silently dropping it.
+    """
+    pairs: dict[str, str] = {}
+    rest: list[str] = []
+    i = 0
+    while i < len(words):
+        if words[i] in keys and i + 1 < len(words):
+            pairs[words[i]] = words[i + 1]
+            i += 2
+        else:
+            rest.append(words[i])
+            i += 1
+    return rest, pairs
+
+
+def _verb_trailing(words: list[str], key: str
+                   ) -> tuple[list[str], str]:
+    """Split tokens at a free-text key: everything after the key is
+    the text, joined; the head is parsed on its own. An absent key
+    means empty text.
+    """
+    if key in words:
+        at = words.index(key)
+        return words[:at], " ".join(words[at + 1:])
+    return words, ""
+
+
+def _call_tool(tools: Any, tool: str, action: str,
+               **kwargs: Any) -> tuple[bool, dict]:
+    """One tool call, normalised to (ok, value-dict). A failed call
+    never raises here — the error text is the reply.
+
+    The registry turns a ``{"ok": False}`` dict into an error
+    outcome ONLY for tools registered ``result_protocol="dict_ok"`` —
+    every other dict passes through as a success whose VALUE carries
+    the failure. Both shapes are checked here, so a verb never
+    reports a failed render as a finished one.
+    """
+    outcome = tools.call(tool, action=action, **kwargs)
+    if not outcome.ok:
+        error = getattr(outcome, "error", None)
+        text = getattr(error, "message", None) or str(error)
+        return False, {"error": text}
+    value = getattr(outcome, "value", None) or {}
+    if not isinstance(value, dict):
+        value = {"value": value}
+    if value.get("ok") is False:
+        return False, {"error": value.get("error")
+                       or "the tool reported failure"}
+    return True, value
+
+
+def _send_rendered(runtime: Any, path: str, message: Any,
+                   caption: str) -> str:
+    """Send a rendered file back in this chat: "sent." when it went
+    out, else the honest reason (the path is still named).
+    """
+    if message is None:
+        return (f"written to {path} — run the verb from a chat to "
+                "have the file sent there.")
+    failed = runtime._scene_send_file(path, message, caption)
+    if failed is not None:
+        return failed
+    return "sent."
+
+
 class RuntimeMetaMixin:
     """RuntimeMetaMixin for :class:`PartnerRuntime`."""
 
@@ -1780,6 +1876,837 @@ class RuntimeMetaMixin:
                              f"({row.get('slot')})")
             return "\n".join(lines)
         return "usage: " + usage
+
+    def _control_filmcraft(self, tail: str, message: Any = None) -> str:
+        """The /filmcraft reply: the video editor, in chat.
+
+        A thin dispatch to the same ``filmcraft`` tool the brain
+        uses — no organ logic duplicated here, so the command's
+        output is the tool's output.
+
+        ``/filmcraft`` lists the projects. ``create <name> [width
+        height fps]`` starts one. ``clip <name> <track> <source>
+        <at> <duration> [kind <kind>] [start <n>] [gain <n>]`` adds
+        a clip (a ``#rrggbb`` source is a solid); ``insert`` is the
+        ripple form. ``split <name> <clip> <at>``,
+        ``trim <name> <clip> <in|out> <delta> [ripple]``,
+        ``lift|extract|ripple_delete <name> <clip>`` cut.
+        ``transition <name> <from> <to> [kind] [duration]`` joins
+        two clips. ``title <name> <track> <at> <duration> <text>``,
+        ``caption <name> <track> <words-json>``,
+        ``marker <name> <time> [label]`` annotate.
+        ``grade <name> <clip> [lift <n>] [gamma <n>] [gain <n>]
+        [saturation <n>]`` grades; ``duck <name> [gain]`` sets the
+        bed ducking. ``show <name>`` and ``delete <name>`` manage
+        projects. ``render <name> [out]`` renders the finished
+        video (no out names ``<home>/film/renders/<name>.mp4``) and
+        sends it in chat when called from one. Owner-only. A
+        failure reports in words — never silence, never a fake
+        render.
+        """
+        import shlex
+
+        from ...media.film.store import film_path
+
+        usage = ("usage: /filmcraft [list] | create <name> [width "
+                 "height fps] | clip|insert <name> <track> <source> "
+                 "<at> <duration> [kind <kind>] [start <n>] [gain <n>] "
+                 "| split <name> <clip> <at> | trim <name> <clip> "
+                 "<in|out> <delta> [ripple] | lift|extract|ripple_delete "
+                 "<name> <clip> | transition <name> <from> <to> [kind] "
+                 "[duration] | title <name> <track> <at> <duration> "
+                 "<text> | caption <name> <track> <words-json> | marker "
+                 "<name> <time> [label] | grade <name> <clip> [lift <n>] "
+                 "[gamma <n>] [gain <n>] [saturation <n>] | duck <name> "
+                 "[gain] | show <name> | render <name> [out] | delete "
+                 "<name>")
+        raw = (tail or "").strip()
+        # Caption words are JSON — quotes are structural, so the JSON
+        # comes from the raw tail, not the shlex split (which strips
+        # quotes and would corrupt it).
+        first = raw.split(None, 1)[0].lower() if raw else ""
+        if first == "caption":
+            parts = raw.split(None, 3)
+            if len(parts) < 4:
+                return usage
+            ok, value = _call_tool(
+                self.context.tools, "filmcraft", action="caption",
+                name=parts[1], track=parts[2], words=parts[3])
+            if not ok:
+                return f"filmcraft caption failed: {value['error']}"
+            return (f"caption added to {parts[1]} track {parts[2]}.")
+        try:
+            words = shlex.split(raw)
+        except ValueError:
+            return usage
+        verb = words[0].lower() if words else "list"
+        if verb not in ("list", "create", "show", "delete", "clip",
+                        "insert", "split", "trim", "lift", "extract",
+                        "ripple_delete", "transition", "title",
+                        "marker", "grade", "duck", "render"):
+            return usage
+        tools = self.context.tools
+
+        def _project_lines(proj: dict) -> str:
+            lines = [f"film {proj.get('name')} — "
+                     f"{proj.get('width')}x{proj.get('height')} @ "
+                     f"{proj.get('fps')}fps, "
+                     f"{float(proj.get('duration') or 0):.1f}s"]
+            for track in proj.get("tracks") or []:
+                lines.append(f"  {track.get('name')} "
+                             f"({track.get('kind')}) — "
+                             f"{track.get('clips')} clip(s)"
+                             + (" [sync-locked]"
+                                if track.get("sync_locked") else ""))
+            if proj.get("transitions"):
+                lines.append(f"  {proj['transitions']} transition(s)")
+            for marker in proj.get("markers") or []:
+                lines.append(f"  marker {marker.get('time')}s — "
+                             f"{marker.get('name')}")
+            return "\n".join(lines)
+
+        if verb == "list":
+            ok, value = _call_tool(tools, "filmcraft", action="list")
+            if not ok:
+                return f"filmcraft list failed: {value['error']}"
+            projects = value.get("projects") or []
+            if not projects:
+                return ("no film projects yet — /filmcraft create "
+                        "<name> starts one.")
+            lines = ["film projects:"]
+            for row in projects:
+                lines.append(f"  {row.get('name')} — "
+                             f"{row.get('width')}x{row.get('height')}, "
+                             f"{len(row.get('tracks') or [])} track(s), "
+                             f"{float(row.get('duration') or 0):.1f}s")
+            return "\n".join(lines)
+        if verb == "create":
+            if len(words) < 2:
+                return usage
+            kwargs: dict[str, Any] = {}
+            if len(words) > 2:
+                kwargs["width"] = words[2]
+            if len(words) > 3:
+                kwargs["height"] = words[3]
+            if len(words) > 4:
+                kwargs["fps"] = words[4]
+            ok, value = _call_tool(tools, "filmcraft", action="create",
+                                   name=words[1], **kwargs)
+            if not ok:
+                return f"filmcraft create failed: {value['error']}"
+            proj = value.get("project") or {}
+            return (f"film project created: {proj.get('name')} — "
+                    f"{proj.get('width')}x{proj.get('height')} @ "
+                    f"{proj.get('fps')}fps.")
+        if verb in ("show", "delete"):
+            if len(words) < 2:
+                return usage
+            ok, value = _call_tool(tools, "filmcraft", action=verb,
+                                   name=words[1])
+            if not ok:
+                return f"filmcraft {verb} failed: {value['error']}"
+            if verb == "delete":
+                return f"deleted film project {words[1]}."
+            return _project_lines(value.get("project") or {})
+        if verb in ("clip", "insert"):
+            rest, pairs = _verb_pairs(
+                words[1:], {"kind", "start", "gain"})
+            if len(rest) != 5:
+                return usage
+            name, track, source, at, duration = rest
+            ok, value = _call_tool(
+                tools, "filmcraft",
+                action="add_clip" if verb == "clip" else "insert",
+                name=name, track=track,
+                source=source, at=at, duration=duration,
+                kind=pairs.get("kind") or "",
+                start=pairs.get("start"),
+                gain=pairs.get("gain"))
+            if not ok:
+                return f"filmcraft {verb} failed: {value['error']}"
+            clip = value.get("clip") or {}
+            return (f"clip {clip.get('id', '')} added to {name} track "
+                    f"{track} ({clip.get('kind', '')}, "
+                    f"{clip.get('duration', duration)}s at "
+                    f"{clip.get('at', at)}s).")
+        if verb == "split":
+            if len(words) != 4:
+                return usage
+            ok, value = _call_tool(tools, "filmcraft", action="split",
+                                   name=words[1], clip=words[2],
+                                   at=words[3])
+            if not ok:
+                return f"filmcraft split failed: {value['error']}"
+            first = value.get("first") or {}
+            second = value.get("second") or {}
+            return (f"split {words[2]} into {first.get('id')} "
+                    f"({first.get('duration')}s) + {second.get('id')} "
+                    f"({second.get('duration')}s).")
+        if verb == "trim":
+            if len(words) < 5:
+                return usage
+            ok, value = _call_tool(
+                tools, "filmcraft", action="trim", name=words[1],
+                clip=words[2], edge=words[3], delta=words[4],
+                ripple="ripple" in words[5:])
+            if not ok:
+                return f"filmcraft trim failed: {value['error']}"
+            clip = value.get("clip") or {}
+            return (f"trimmed {words[2]} — now "
+                    f"{clip.get('duration')}s.")
+        if verb in ("lift", "extract", "ripple_delete"):
+            if len(words) != 3:
+                return usage
+            ok, value = _call_tool(tools, "filmcraft", action=verb,
+                                   name=words[1], clip=words[2])
+            if not ok:
+                return f"filmcraft {verb} failed: {value['error']}"
+            removed = value.get("removed") or {}
+            return (f"removed {removed.get('id', words[2])} "
+                    f"({removed.get('kind', '')}) from {words[1]}.")
+        if verb == "transition":
+            rest, pairs = _verb_pairs(
+                words[1:], {"kind", "duration"})
+            if len(rest) != 3:
+                return usage
+            name, from_id, to_id = rest
+            ok, value = _call_tool(
+                tools, "filmcraft", action="transition", name=name,
+                from_id=from_id, to_id=to_id,
+                kind=pairs.get("kind") or "",
+                duration=pairs.get("duration"))
+            if not ok:
+                return (f"filmcraft transition failed: "
+                        f"{value['error']}")
+            trans = value.get("transition") or {}
+            return (f"transition {trans.get('kind')} "
+                    f"({trans.get('duration')}s) between {from_id} "
+                    f"and {to_id}.")
+        if verb == "title":
+            if len(words) < 5:
+                return usage
+            ok, value = _call_tool(
+                tools, "filmcraft", action="title", name=words[1],
+                track=words[2], at=words[3], duration=words[4],
+                text=" ".join(words[5:]))
+            if not ok:
+                return f"filmcraft title failed: {value['error']}"
+            return (f"title added to {words[1]} track {words[2]}.")
+        if verb == "marker":
+            if len(words) < 3:
+                return usage
+            label = " ".join(words[3:]) or "marker"
+            ok, value = _call_tool(
+                tools, "filmcraft", action="marker", name=words[1],
+                time=words[2], label=label)
+            if not ok:
+                return f"filmcraft marker failed: {value['error']}"
+            return f"marker '{label}' at {words[2]}s on {words[1]}."
+        if verb == "grade":
+            rest, pairs = _verb_pairs(
+                words[1:], {"lift", "gamma", "gain", "saturation"})
+            if len(rest) != 2:
+                return usage
+            ok, value = _call_tool(
+                tools, "filmcraft", action="grade", name=rest[0],
+                clip=rest[1], lift=pairs.get("lift"),
+                gamma=pairs.get("gamma"), gain=pairs.get("gain"),
+                saturation=pairs.get("saturation"))
+            if not ok:
+                return f"filmcraft grade failed: {value['error']}"
+            return f"graded {rest[1]} on {rest[0]}."
+        if verb == "duck":
+            if len(words) < 2:
+                return usage
+            ok, value = _call_tool(
+                tools, "filmcraft", action="duck", name=words[1],
+                duck_gain=words[2] if len(words) > 2 else None)
+            if not ok:
+                return f"filmcraft duck failed: {value['error']}"
+            ducking = value.get("ducking") or {}
+            if isinstance(ducking, dict) and \
+                    ducking.get("duck_gain") is not None:
+                gain_text = str(ducking["duck_gain"])
+            elif len(words) > 2:
+                gain_text = words[2]
+            else:
+                gain_text = "0.25"
+            return f"bed ducking on {words[1]} (gain {gain_text})."
+        if verb == "render":
+            if len(words) < 2:
+                return usage
+            rest, pairs = _verb_pairs(words[1:],
+                                      {"narration", "bed"})
+            if len(rest) > 2:
+                return usage
+            name = rest[0]
+            out = rest[1] if len(rest) > 1 else ""
+            if not out:
+                settings = getattr(self.context, "settings", None)
+                out = str(film_path(settings).parent / "renders"
+                          / f"{name}.mp4")
+            ok, value = _call_tool(
+                tools, "filmcraft", action="render", name=name, out=out,
+                narration_wav=pairs.get("narration") or "",
+                bed_wav=pairs.get("bed") or "")
+            if not ok:
+                return f"filmcraft render failed: {value['error']}"
+            note = _send_rendered(
+                self, value.get("path", out), message,
+                f"film — {name}")
+            return (f"film rendered: {value.get('path', out)} "
+                    f"({value.get('duration')}s, "
+                    f"{value.get('width')}x{value.get('height')}). "
+                    f"{note}")
+        return usage
+
+    def _control_effect(self, tail: str, message: Any = None) -> str:
+        """The /effect reply: the motion compositor, in chat.
+
+        A thin dispatch to the same ``effectcraft`` tool the brain
+        uses — no organ logic duplicated here, so the command's
+        output is the tool's output.
+
+        ``/effect`` lists the compositions. ``create <name> [width
+        height fps duration]`` starts one. ``layer <name> <kind>
+        [color [r,g,b]] [text <words>] [image <path>] [size [w,h]]
+        [blend <mode>] [opacity <n>]`` adds a layer (text, when
+        given, is last). ``keyframe <name> <layer> <property>
+        <time> <value> [easing]`` animates one; ``expression <name>
+        <layer> <property> <expr>`` drives it from the safe value
+        language. ``effect <name> <layer> <effect> [params-json]``
+        applies a raster effect (validated at once, not at render
+        time). ``camera <name> [position [x,y,z]] [rotation
+        [x,y,z]] [fov <n>]`` sets the 3D plate camera.
+        ``effects`` lists every effect with a real implementation.
+        ``show <name>`` and ``delete <name>`` manage compositions.
+        ``render <name> [out]`` renders the finished video (no out
+        names ``<home>/effects/renders/<name>.mp4``) and sends it in
+        chat when called from one. Owner-only. A failure reports
+        in words — never silence, never a fake render.
+        """
+        import shlex
+
+        from ...media.effects.store import effects_path
+
+        usage = ("usage: /effect [list] | create <name> [width "
+                 "height fps duration] | layer <name> <kind> [color "
+                 "[r,g,b]] [text <words>] [image <path>] [size [w,h]] "
+                 "[blend <mode>] [opacity <n>] | keyframe <name> "
+                 "<layer> <property> <time> <value> [easing] | "
+                 "expression <name> <layer> <property> <expr> | "
+                 "effect <name> <layer> <effect> [params-json] | "
+                 "camera <name> [position [x,y,z]] [rotation [x,y,z]] "
+                 "[fov <n>] | show <name> | effects | render <name> "
+                 "[out] | delete <name>")
+        raw = (tail or "").strip()
+        # Effect params are JSON — quotes are structural, so they
+        # come from the raw tail, not the shlex split.
+        first = raw.split(None, 1)[0].lower() if raw else ""
+        if first == "effect":
+            parts = raw.split(None, 4)
+            if len(parts) < 4:
+                return usage
+            ok, value = _call_tool(
+                self.context.tools, "effectcraft", action="effect",
+                name=parts[1], layer=parts[2], effect=parts[3],
+                params=parts[4] if len(parts) > 4 else None)
+            if not ok:
+                return f"effect failed: {value['error']}"
+            return (f"effect {parts[3]} on layer {parts[2]} of "
+                    f"{parts[1]}.")
+        try:
+            words = shlex.split(raw)
+        except ValueError:
+            return usage
+        verb = words[0].lower() if words else "list"
+        if verb not in ("list", "create", "show", "delete", "effects",
+                        "layer", "keyframe", "expression", "camera",
+                        "render"):
+            return usage
+        tools = self.context.tools
+
+        def _comp_lines(name: str, comp: dict) -> str:
+            lines = [f"composition {name} — "
+                     f"{comp.get('width')}x{comp.get('height')} @ "
+                     f"{comp.get('fps')}fps, "
+                     f"{comp.get('duration')}s"]
+            for i, layer in enumerate(comp.get("layers") or []):
+                effects = layer.get("effects") or []
+                lines.append(f"  [{i}] {layer.get('kind')} — "
+                             f"{layer.get('blend')}, effects: "
+                             + (", ".join(effects) if effects
+                                else "none"))
+            if comp.get("camera"):
+                lines.append(f"  camera: {comp['camera']}")
+            return "\n".join(lines)
+
+        if verb == "list":
+            ok, value = _call_tool(tools, "effectcraft", action="list")
+            if not ok:
+                return f"effect list failed: {value['error']}"
+            comps = value.get("compositions") or []
+            if not comps:
+                return ("no motion compositions yet — /effect create "
+                        "<name> starts one.")
+            lines = ["motion compositions:"]
+            for row in comps:
+                lines.append(f"  {row.get('name')} — "
+                             f"{row.get('width')}x{row.get('height')}, "
+                             f"{len(row.get('layers') or [])} layer(s), "
+                             f"{row.get('duration')}s")
+            return "\n".join(lines)
+        if verb == "create":
+            if len(words) < 2:
+                return usage
+            kwargs: dict[str, Any] = {}
+            for key, pos in (("width", 2), ("height", 3), ("fps", 4),
+                             ("duration", 5)):
+                if len(words) > pos:
+                    kwargs[key] = words[pos]
+            ok, value = _call_tool(tools, "effectcraft",
+                                   action="create", name=words[1],
+                                   **kwargs)
+            if not ok:
+                return f"effect create failed: {value['error']}"
+            comp = value.get("composition") or {}
+            return (f"composition created: {words[1]} — "
+                    f"{comp.get('width')}x{comp.get('height')} @ "
+                    f"{comp.get('fps')}fps, {comp.get('duration')}s.")
+        if verb in ("show", "delete"):
+            if len(words) < 2:
+                return usage
+            ok, value = _call_tool(tools, "effectcraft", action=verb,
+                                   name=words[1])
+            if not ok:
+                return f"effect {verb} failed: {value['error']}"
+            if verb == "delete":
+                return f"deleted composition {words[1]}."
+            return _comp_lines(words[1],
+                               value.get("composition") or {})
+        if verb == "effects":
+            ok, value = _call_tool(tools, "effectcraft",
+                                   action="list_effects")
+            if not ok:
+                return f"effect effects failed: {value['error']}"
+            names = [row.get("name", "") for row in
+                     value.get("effects") or []]
+            return ("effects with real implementations "
+                    f"({len(names)}): " + ", ".join(names))
+        if verb == "layer":
+            head, text = _verb_trailing(words, "text")
+            rest, pairs = _verb_pairs(
+                head[1:], {"color", "image", "size", "blend",
+                          "opacity"})
+            if len(rest) != 2:
+                return usage
+            name, kind = rest
+            ok, value = _call_tool(
+                tools, "effectcraft", action="add_layer", name=name,
+                kind=kind, color=pairs.get("color"),
+                text=text, image_path=pairs.get("image") or "",
+                size=pairs.get("size"),
+                blend=pairs.get("blend") or "normal",
+                opacity=pairs.get("opacity"))
+            if not ok:
+                return f"effect layer failed: {value['error']}"
+            return (f"layer added to {name} "
+                    f"({value.get('layers')} layer(s) now).")
+        if verb == "keyframe":
+            if len(words) not in (6, 7):
+                return usage
+            ok, value = _call_tool(
+                tools, "effectcraft", action="keyframe",
+                name=words[1], layer=words[2], property=words[3],
+                time=words[4], value=words[5],
+                easing=words[6] if len(words) > 6 else "smooth")
+            if not ok:
+                return f"effect keyframe failed: {value['error']}"
+            return (f"keyframe on layer {words[2]} of {words[1]}: "
+                    f"{words[3]} = {words[5]} at {words[4]}s.")
+        if verb == "expression":
+            if len(words) < 5:
+                return usage
+            ok, value = _call_tool(
+                tools, "effectcraft", action="expression",
+                name=words[1], layer=words[2], property=words[3],
+                expr=" ".join(words[4:]))
+            if not ok:
+                return f"effect expression failed: {value['error']}"
+            return (f"expression on layer {words[2]} of {words[1]}: "
+                    f"{words[3]} = {' '.join(words[4:])}.")
+        if verb == "camera":
+            if len(words) < 2:
+                return usage
+            _rest, pairs = _verb_pairs(
+                words[2:], {"position", "rotation", "fov"})
+            ok, value = _call_tool(
+                tools, "effectcraft", action="camera", name=words[1],
+                position=pairs.get("position"),
+                rotation=pairs.get("rotation"),
+                fov_y=pairs.get("fov"))
+            if not ok:
+                return f"effect camera failed: {value['error']}"
+            return (f"camera set on {words[1]}: "
+                    f"{value.get('camera')}.")
+        if verb == "render":
+            if len(words) < 2:
+                return usage
+            rest, pairs = _verb_pairs(words[1:], {"audio"})
+            if len(rest) > 2:
+                return usage
+            name = rest[0]
+            out = rest[1] if len(rest) > 1 else ""
+            if not out:
+                settings = getattr(self.context, "settings", None)
+                out = str(effects_path(settings).parent / "renders"
+                          / f"{name}.mp4")
+            ok, value = _call_tool(
+                tools, "effectcraft", action="render", name=name,
+                out=out, audio=pairs.get("audio") or "")
+            if not ok:
+                return f"effect render failed: {value['error']}"
+            note = _send_rendered(
+                self, value.get("path", out), message,
+                f"motion — {name}")
+            return (f"composition rendered: {value.get('path', out)} "
+                    f"({value.get('frames')} frames, "
+                    f"{value.get('duration')}s). {note}")
+        return usage
+
+    def _control_artist(self, tail: str, message: Any = None) -> str:
+        """The /artist reply: the artist studio, in chat.
+
+        A thin dispatch to the same ``artist`` tool the brain uses
+        — no organ logic duplicated here, so the command's output
+        is the tool's output.
+
+        ``/artist`` lists the scenes. ``create <title>`` starts
+        one. ``layer <id> <kind> [name <n>] [path <p>] [text
+        <words>] [color <c>] [x <n>] [y <n>] [opacity <n>] [shape
+        <s>] [font_size <n>]`` adds a 2D layer (text, when given,
+        is last). ``pose <id> <character> <pose>`` poses a
+        character; ``camera <id> [x <n>] [y <n>] [z <n>] [fov
+        <n>]`` places the camera; ``location <id> <name>`` sets
+        the location and ``backdrop <id> <path>`` its backdrop
+        image; ``stage <id> <name> [image <path>] [depth <n>] [x
+        <n>] [y <n>] [character <c>] [scale <n>]`` stages a 3D
+        item; ``shot <id> <name> [mode <m>] [duration <n>] [prompt
+        <words>]`` adds a shot. ``compose <id>`` renders the
+        staged frame; ``generate <id> <prompt>`` generates the
+        image; ``edit <id> <image> <prompt>`` edits one; ``cutout
+        <id> <image>`` removes its background; ``upscale <id>
+        <image> [scale <n>]`` upscales it; ``video <id> [backend
+        <b>] [narrate]`` cuts the shots into one video. ``show
+        <id>``, ``status`` and ``delete <id>`` manage scenes.
+        Owner-only. A failure reports in words — never silence,
+        never a fake image.
+        """
+        import shlex
+
+        usage = ("usage: /artist [list] | create <title> | layer <id> "
+                 "<kind> [name <n>] [path <p>] [text <words>] [color "
+                 "<c>] [x <n>] [y <n>] [opacity <n>] [shape <s>] "
+                 "[font_size <n>] | pose <id> <character> <pose> | "
+                 "camera <id> [x <n>] [y <n>] [z <n>] [fov <n>] | "
+                 "location <id> <name> | backdrop <id> <path> | stage "
+                 "<id> <name> [image <path>] [depth <n>] [x <n>] "
+                 "[y <n>] [character <c>] [scale <n>] | shot <id> "
+                 "<name> [mode <m>] [duration <n>] [prompt <words>] | "
+                 "show <id> | status | compose <id> | generate <id> "
+                 "<prompt> | edit <id> <image> <prompt> | cutout <id> "
+                 "<image> | upscale <id> <image> [scale <n>] | video "
+                 "<id> [backend <b>] [narrate] | delete <id>")
+        try:
+            words = shlex.split(tail or "")
+        except ValueError:
+            return usage
+        verb = words[0].lower() if words else "list"
+        if verb not in ("list", "create", "show", "delete", "status",
+                        "layer", "pose", "camera", "location",
+                        "backdrop", "stage", "shot", "compose",
+                        "generate", "edit", "cutout", "upscale",
+                        "video"):
+            return usage
+        tools = self.context.tools
+        try:
+            return self._control_artist_inner(verb, words, message,
+                                              usage, tools)
+        except _VerbUsage as exc:
+            return f"{exc}\n{usage}"
+
+    def _control_artist_inner(self, verb: str, words: list[str],
+                              message: Any, usage: str,
+                              tools: Any) -> str:
+        """The /artist branches, split out so a malformed number
+        raises _VerbUsage into the usage reply above.
+        """
+        if verb == "list":
+            ok, value = _call_tool(tools, "artist", action="list")
+            if not ok:
+                return f"artist list failed: {value['error']}"
+            scenes = value.get("scenes") or []
+            if not scenes:
+                return ("no artist scenes yet — /artist create "
+                        "<title> starts one.")
+            lines = ["artist scenes:"]
+            for row in scenes:
+                lines.append(f"  {str(row.get('id', ''))[:8]} — "
+                             f"{row.get('title')} "
+                             f"({row.get('width')}x{row.get('height')}, "
+                             f"{row.get('shots')} shot(s), "
+                             f"{row.get('layers')} layer(s))")
+            return "\n".join(lines)
+        if verb == "create":
+            title = " ".join(words[1:])
+            if not title.strip():
+                return usage
+            ok, value = _call_tool(tools, "artist", action="create",
+                                   title=title)
+            if not ok:
+                return f"artist create failed: {value['error']}"
+            return (f"artist scene created: {value.get('id')} — "
+                    f"{value.get('title')} ({value.get('width')}x"
+                    f"{value.get('height')}).")
+        if verb in ("show", "delete"):
+            if len(words) < 2:
+                return usage
+            ok, value = _call_tool(tools, "artist", action=verb,
+                                   id=words[1])
+            if not ok:
+                return f"artist {verb} failed: {value['error']}"
+            if verb == "delete":
+                return f"deleted artist scene {words[1]}."
+            return self._artist_scene_lines(value.get("scene") or {})
+        if verb == "status":
+            ok, value = _call_tool(tools, "artist", action="status")
+            if not ok:
+                return f"artist status failed: {value['error']}"
+            lines = ["artist rungs:"]
+            for rung, detail in (value.get("capabilities") or {}).items():
+                if isinstance(detail, dict):
+                    state = ("available" if detail.get("available")
+                             else "unavailable")
+                    lines.append(f"  {rung}: {state} — "
+                                 f"{detail.get('reason', '')}")
+                else:
+                    lines.append(f"  {rung}: {detail}")
+            return "\n".join(lines)
+        if verb == "layer":
+            head, text = _verb_trailing(words, "text")
+            rest, pairs = _verb_pairs(
+                head[1:], {"name", "path", "color", "x", "y",
+                          "opacity", "shape", "font_size"})
+            if len(rest) != 2:
+                return usage
+            scene_id, kind = rest
+            ok, value = _call_tool(
+                tools, "artist", action="layer", id=scene_id, kind=kind,
+                name=pairs.get("name") or kind,
+                path=pairs.get("path") or "",
+                text=text, color=pairs.get("color") or "",
+                x=_verb_num(pairs.get("x"), "x") or 0.0,
+                y=_verb_num(pairs.get("y"), "y") or 0.0,
+                opacity=_verb_num(pairs.get("opacity"), "opacity")
+                if pairs.get("opacity") is not None else 1.0,
+                shape=pairs.get("shape") or "",
+                font_size=_verb_num(pairs.get("font_size"), "font_size",
+                                    cast=int) or 0)
+            if not ok:
+                return f"artist layer failed: {value['error']}"
+            layer = value.get("layer") or {}
+            return (f"layer {layer.get('name')} ({kind}) added to "
+                    f"scene {scene_id}.")
+        if verb == "pose":
+            if len(words) < 4:
+                return usage
+            ok, value = _call_tool(
+                tools, "artist", action="pose", id=words[1],
+                name=words[2], pose=" ".join(words[3:]))
+            if not ok:
+                return f"artist pose failed: {value['error']}"
+            char = value.get("character") or {}
+            return (f"character {char.get('name')} posed "
+                    f"'{char.get('pose')}' in scene {words[1]}.")
+        if verb == "camera":
+            if len(words) < 2:
+                return usage
+            _rest, pairs = _verb_pairs(
+                words[2:], {"x", "y", "z", "fov"})
+            ok, value = _call_tool(
+                tools, "artist", action="camera", id=words[1],
+                x=_verb_num(pairs.get("x"), "x") or 0.0,
+                y=_verb_num(pairs.get("y"), "y") or 0.0,
+                z=_verb_num(pairs.get("z"), "z") or 0.0,
+                fov=_verb_num(pairs.get("fov"), "fov") or 0.0)
+            if not ok:
+                return f"artist camera failed: {value['error']}"
+            cam = value.get("camera") or {}
+            return (f"camera on scene {words[1]}: "
+                    f"({cam.get('x')}, {cam.get('y')}, {cam.get('z')}) "
+                    f"fov {cam.get('fov')}.")
+        if verb == "location":
+            if len(words) < 3:
+                return usage
+            ok, value = _call_tool(
+                tools, "artist", action="location", id=words[1],
+                name=" ".join(words[2:]))
+            if not ok:
+                return f"artist location failed: {value['error']}"
+            loc = value.get("location") or {}
+            return (f"location on scene {words[1]}: "
+                    f"{loc.get('name')}.")
+        if verb == "backdrop":
+            if len(words) < 3:
+                return usage
+            ok, shown = _call_tool(tools, "artist", action="show",
+                                   id=words[1])
+            if not ok:
+                return f"artist backdrop failed: {shown['error']}"
+            scene = shown.get("scene") or {}
+            current = (scene.get("location") or {}).get("name") or ""
+            ok, value = _call_tool(
+                tools, "artist", action="location", id=words[1],
+                name=current or "Untitled", backdrop=words[2])
+            if not ok:
+                return f"artist backdrop failed: {value['error']}"
+            return (f"backdrop set on scene {words[1]} "
+                    f"({words[2]}).")
+        if verb == "stage":
+            rest, pairs = _verb_pairs(
+                words[1:], {"image", "depth", "x", "y", "character",
+                           "scale"})
+            if len(rest) != 2:
+                return usage
+            scene_id, name = rest
+            ok, value = _call_tool(
+                tools, "artist", action="stage", id=scene_id,
+                name=name, image=pairs.get("image") or "",
+                depth=_verb_num(pairs.get("depth"), "depth") or 1.0,
+                x=_verb_num(pairs.get("x"), "x") or 0.0,
+                y=_verb_num(pairs.get("y"), "y") or 0.0,
+                character=pairs.get("character") or "",
+                scale=_verb_num(pairs.get("scale"), "scale") or 0.0)
+            if not ok:
+                return f"artist stage failed: {value['error']}"
+            item = value.get("item") or {}
+            return (f"staged {item.get('name')} in scene {scene_id} "
+                    f"(depth {item.get('depth')}).")
+        if verb == "shot":
+            head, prompt = _verb_trailing(words, "prompt")
+            rest, pairs = _verb_pairs(head[1:], {"mode", "duration"})
+            if len(rest) != 2:
+                return usage
+            scene_id, name = rest
+            ok, value = _call_tool(
+                tools, "artist", action="shot", id=scene_id, name=name,
+                mode=pairs.get("mode") or "",
+                duration_s=_verb_num(pairs.get("duration"), "duration")
+                or 0.0,
+                prompt=prompt)
+            if not ok:
+                return f"artist shot failed: {value['error']}"
+            shot = value.get("shot") or {}
+            return (f"shot {shot.get('name')} ({shot.get('mode')}) "
+                    f"added to scene {scene_id}.")
+        if verb in ("compose", "generate", "edit", "cutout",
+                    "upscale", "video"):
+            return self._control_artist_media(verb, words, message,
+                                              usage, tools)
+        return usage
+
+    def _control_artist_media(self, verb: str, words: list[str],
+                              message: Any, usage: str,
+                              tools: Any) -> str:
+        """The /artist verbs that produce a file (compose, generate,
+        edit, cutout, upscale, video): call the tool, then send the
+        file in chat when called from one.
+        """
+        labels = {"compose": ("staged frame", "compose"),
+                  "generate": ("image generated", "generate"),
+                  "edit": ("image edited", "edit"),
+                  "cutout": ("background removed", "cutout"),
+                  "upscale": ("image upscaled", "upscale"),
+                  "video": ("video cut", "video")}
+        if verb == "compose":
+            if len(words) < 2:
+                return usage
+            ok, value = _call_tool(tools, "artist", action="compose",
+                                   id=words[1])
+        elif verb == "generate":
+            prompt = " ".join(words[2:])
+            if len(words) < 3 or not prompt.strip():
+                return usage
+            ok, value = _call_tool(tools, "artist", action="generate",
+                                   id=words[1], prompt=prompt)
+        elif verb == "edit":
+            prompt = " ".join(words[3:])
+            if len(words) < 4 or not prompt.strip():
+                return usage
+            ok, value = _call_tool(tools, "artist", action="edit",
+                                   id=words[1], image=words[2],
+                                   prompt=prompt)
+        elif verb == "cutout":
+            if len(words) < 3:
+                return usage
+            ok, value = _call_tool(tools, "artist", action="cutout",
+                                   id=words[1], image=words[2])
+        elif verb == "upscale":
+            if len(words) < 3:
+                return usage
+            _rest, pairs = _verb_pairs(words[3:], {"scale"})
+            ok, value = _call_tool(
+                tools, "artist", action="upscale", id=words[1],
+                image=words[2],
+                scale=_verb_num(pairs.get("scale"), "scale") or 0.0)
+        else:  # video
+            if len(words) < 2:
+                return usage
+            _rest, pairs = _verb_pairs(words[2:], {"backend"})
+            ok, value = _call_tool(
+                tools, "artist", action="video", id=words[1],
+                backend=pairs.get("backend") or "",
+                narrate="narrate" in words[2:])
+        if not ok:
+            return f"artist {verb} failed: {value['error']}"
+        path = value.get("path") or ""
+        if not path:
+            return f"artist {verb} done: {value}"
+        label, _action = labels[verb]
+        note = _send_rendered(self, path, message,
+                              f"artist — {value.get('id', '')[:8]}")
+        extra = ""
+        if verb == "video":
+            extra = (f" ({value.get('shots')} shot(s), "
+                     f"{value.get('rung')}, narration: "
+                     f"{value.get('narration')})")
+        if verb == "generate":
+            extra = (f" ({value.get('mode')}, "
+                     f"{value.get('rung')})")
+        return f"{label}: {path}.{extra} {note}"
+
+    def _artist_scene_lines(self, scene: dict) -> str:
+        """One scene, whole, in words."""
+        lines = [f"artist scene {scene.get('id')} — "
+                 f"{scene.get('title')} "
+                 f"({scene.get('width')}x{scene.get('height')})"]
+        location = scene.get("location") or {}
+        if location.get("name"):
+            lines.append(f"  location: {location.get('name')}"
+                         + (f" (backdrop: {location.get('backdrop')})"
+                            if location.get("backdrop") else ""))
+        lines.append(f"  {len(scene.get('layers') or [])} layer(s), "
+                     f"{len(scene.get('characters') or [])} "
+                     f"character(s), {len(scene.get('shots') or [])} "
+                     f"shot(s), {len(scene.get('staging') or [])} "
+                     f"staged item(s)")
+        for shot in scene.get("shots") or []:
+            lines.append(f"  shot {shot.get('name')} "
+                         f"({shot.get('mode')}, "
+                         f"{shot.get('duration_s')}s)")
+        for name in scene.get("artifacts") or []:
+            lines.append(f"  artifact: {name}")
+        return "\n".join(lines)
 
     def _control_arena_research(self, tail: str,
                                  message: Any = None) -> str:

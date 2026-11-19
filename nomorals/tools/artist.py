@@ -33,6 +33,36 @@ from ..media.artist.scene import ArtistError, Scene
 from ..media.artist.store import ArtistStore, artist_dir, artist_path
 
 
+def parse_artist_request(
+        text: str, known: list[tuple[str, str]]
+        ) -> tuple[str, str] | None:
+    """Natural phrasing -> (verb, ref) for the artist studio, or None.
+
+    Matches only when the text says "artist", "scene" or "stage"
+    and names a known scene by id or title (``show`` / ``compose`` /
+    ``video``), or asks for the scene list — a bare "stage a scene"
+    with no scene to act on is not a match, so the hook never steals
+    an unrelated question (and "scene" here never steals the Clicky
+    /scene organ's phrasing: that organ's commands name points and
+    tags, never a known scene title).
+    """
+    low = (text or "").lower()
+    if ("artist" not in low and "scene" not in low
+            and "stage" not in low):
+        return None
+    for ident, title in known:
+        for name in (title, ident):
+            if name and name.lower() in low:
+                if "video" in low or "cut" in low:
+                    return ("video", ident)
+                if "compose" in low or "preview" in low:
+                    return ("compose", ident)
+                return ("show", ident)
+    if "list" in low and ("artist" in low or "scene" in low):
+        return ("list", "")
+    return None
+
+
 def _store(context: Any) -> ArtistStore:
     settings = getattr(context, "settings", None)
     return ArtistStore(artist_path(settings))

@@ -702,6 +702,9 @@ CONTROL_COMMANDS: dict[str, tuple[int, int]] = {
     "board": (0, None),  # /board new <title> | add <board> <type> <label> [x y w h] | move | remove | bind | undo | redo | show | list | render | page — whiteboard organ (owner-only)
     "photo": (0, None),  # /photo open <path.psd> | edit <id> <op> ... | undo | redo | show | list | save | render | page — Studio photo editor, the PhotoCraft port (owner-only)
     "extensions": (0, None),  # /extensions | install <path-or-url> [sha256=… size=…] | enable|disable <id> | uninstall <id> | theme <id>|none | themes | panels [page] — Studio extensions, the craft-extensions port (owner-only; /studio stays the AniList studio lookup)
+    "filmcraft": (0, None),  # /filmcraft create <name> [w h fps] | clip|insert <name> <track> <source> <at> <dur> [kind <k>] | split|trim|lift|extract|ripple_delete <name> <clip> ... | transition|title|caption|marker|grade|duck <name> ... | show <name> | list | render <name> [out] | delete <name> — video editor, the FilmCraft port (owner-only; /film stays the VOD film study)
+    "effect": (0, None),  # /effect create <name> [w h fps dur] | layer <name> <kind> ... | keyframe|expression|effect <name> <layer> ... | camera <name> ... | show <name> | list | effects | render <name> [out] | delete <name> — motion compositor, the EffectCraft port (owner-only)
+    "artist": (0, None),  # /artist create <title> | layer|pose|camera|location|backdrop|stage|shot <id> ... | show <id> | list | status | compose|generate|edit|cutout|upscale|video <id> ... — artist studio, the ArtCraft port (owner-only)
     "tour": (0, 1),         # /tour — smoke-test every command; /tour <cmd> deep-probes one
     "heal": (0, 1),         # /heal [--dry] | /heal <cmd> — self-healing loop: diagnose + auto-fix broken commands
     "ekiti": (0, None),       # /ekiti converse <text> | debate <topic> | say <text> | check "<expected>" | tones
@@ -2589,6 +2592,18 @@ COMMAND_DETAILS: dict[str, dict[str, str]] = {
                 "usage": "/extensions | install <path-or-url> [sha256=… size=…] | enable|disable <id> | uninstall <id> | theme <id>|none | themes | panels [page]",
                 "example": "/extensions",
                 "related": "/photo"},
+    "filmcraft": {"what": "Devon's own non-linear video editor (the FilmCraft port): a multi-track timeline with the Premiere edit algebra — overwrite, ripple insert, lift/extract/ripple-delete, trims, transitions, titles, captions, colour grade, audio ducking and loudness — rendered through the render queue into finished videos of any length. /film stays the VOD film study; this is the editor. Owner only.",
+                "usage": "/filmcraft create <name> [width height fps] | clip <name> <track> <source> <at> <duration> [kind <kind>] | insert <name> <track> <source> <at> <duration> | split <name> <clip> <at> | trim <name> <clip> <in|out> <delta> [ripple] | lift|extract|ripple_delete <name> <clip> | transition <name> <from> <to> [kind] [duration] | title <name> <track> <at> <duration> <text> | caption <name> <track> <words-json> | marker <name> <time> [label] | grade <name> <clip> [lift <n>] [gamma <n>] [gain <n>] [saturation <n>] | duck <name> [gain] | show <name> | list | render <name> [out] | delete <name>",
+                "example": "/filmcraft create launch 1280 720 24",
+                "related": "/effect /artist /video"},
+    "effect": {"what": "Devon's own motion graphics compositor (the EffectCraft port): compositions of layers with keyframed transforms, blend modes, raster effects with real implementations, safe value expressions, and a 3D plate camera — rendered to finished video. Only effects with a real implementation are listed, so a name here always does what it says. Owner only.",
+                "usage": "/effect create <name> [width height fps duration] | layer <name> <kind> [color [r,g,b]] [text <words>] [image <path>] [size WxH] [blend <mode>] [opacity <n>] | keyframe <name> <layer> <property> <time> <value> [easing] | expression <name> <layer> <property> <expr> | effect <name> <layer> <effect> [params-json] | camera <name> [position [x,y,z]] [rotation [x,y,z]] [fov <n>] | show <name> | list | effects | render <name> [out] | delete <name>",
+                "example": "/effect create intro 1280 720 24 2",
+                "related": "/filmcraft /artist"},
+    "artist": {"what": "Devon's artist studio (the ArtCraft port): build the scene before generating — 2D layers, 3D staging with depth and camera, posed characters, one consistent location across shots — then generate the image, cut it out, upscale it, or cut the shots into one video through her own image/video rungs. A character with no reference renders as a labelled mannequin, never presented as the character. Owner only.",
+                "usage": "/artist create <title> | layer <id> <kind> [name <n>] [path <p>] [text <words>] [color <c>] [x <n>] [y <n>] [opacity <n>] | pose <id> <character> <pose> | camera <id> [x <n>] [y <n>] [z <n>] [fov <n>] | location <id> <name> | backdrop <id> <path> | stage <id> <name> [image <path>] [depth <n>] [x <n>] [y <n>] [character <c>] [scale <n>] | shot <id> <name> [mode <m>] [duration <n>] [prompt <words>] | show <id> | list | status | compose <id> | generate <id> <prompt> | edit <id> <image> <prompt> | cutout <id> <image> | upscale <id> <image> [scale <n>] | video <id> [backend <b>] [narrate] | delete <id>",
+                "example": "/artist create Rooftop at dusk",
+                "related": "/filmcraft /effect /photo"},
     "learn": {"what": "one front door over learn/ — Socratic/direct tutoring, quiz formats, FSRS flashcards from the mistake notebook, BKT mastery, and WAEC/JAMB syllabus. Owner only.",
                 "usage": "/learn tutor [guide me] <topic> | answer <text> | hint | status | stop | /learn quiz formats | /learn flashcards due | stats | list | review <id> <1-4> | export <path> | /learn mastery [weakest] | /learn waec <subject> | waec grade <pct> | /learn jamb <subject> | jamb formats",
                 "example": "/learn tutor guide me fractions",
@@ -5010,7 +5025,7 @@ _HELP_GROUPS: list[tuple[str, list[str]]] = [
                            "identity", "book", "books", "features",
                            "checkpoint", "checkpoints", "rewind", "novel"]),
     ("memory & thinking", ["remember", "recall", "forget", "memories", "think",
-                           "benchmark", "redteam", "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board", "photo", "extensions", "wiki", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
+                           "benchmark", "redteam", "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion", "immune", "impossible", "scene", "board", "photo", "extensions", "wiki", "filmcraft", "effect", "artist", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("money & spending", ["spend", "budget", "spending", "mandate",
                           "balances", "goal", "goals", "careers", "recruit", "ticket", "triage", "ideas", "insights", "subscriptions", "recurring", "trade", "import", "alert"]),
     ("games — 41, DM + group, start them directly",
@@ -5347,7 +5362,7 @@ LIST_GROUPS: list[tuple[str, list[str]]] = [
     ("memory & thinking",
      ["remember", "recall", "forget", "memories", "think", "benchmark", "redteam",
       "review", "representations", "tutor", "learn", "ekiti", "course", "health", "train", "form", "film", "graph", "route", "eta", "congestion",
-      "immune", "impossible", "scene", "board", "photo", "extensions", "wiki", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
+      "immune", "impossible", "scene", "board", "photo", "extensions", "wiki", "filmcraft", "effect", "artist", "people", "commitments", "decisions", "iddocs", "focus", "assets", "legacy", "family", "show", "life", "prefs", "presence", "publicface"]),
     ("games — 41, DM + group, start them directly",
      ["game", "inventory", "equip", "unequip", "repair", "level",
       "skill", "title", "stats", "daily", "mastery", "gift",
@@ -5937,6 +5952,9 @@ LIST_ONELINERS: dict[str, str] = {
     "board": "Whiteboard: /board new <title> [--theme sketch] | add <board> <type> <label> [x y w h] | move | remove | bind | undo | redo | show | list | render | page",
     "photo": "Photo editor: /photo open <path.psd> | edit <id> crop <l> <t> <r> <b> | edit <id> enhance [brightness <n>] | edit <id> develop [...] | undo | redo | show | list | save | render | page",
     "extensions": "Studio extensions: /extensions | install <path-or-url> [sha256=… size=…] | enable|disable <id> | uninstall <id> | theme <id>|none | themes | panels [page]",
+    "filmcraft": "Video editor: /filmcraft create <name> [w h fps] | clip <name> <track> <source> <at> <dur> [kind <k>] | split|trim|lift|extract|ripple_delete <name> <clip> ... | transition|title|caption|marker|grade|duck <name> ... | show <name> | list | render <name> [out] | delete <name>",
+    "effect": "Motion compositor: /effect create <name> [w h fps dur] | layer <name> <kind> ... | keyframe|expression|effect <name> <layer> ... | camera <name> ... | show <name> | list | effects | render <name> [out] | delete <name>",
+    "artist": "Artist studio: /artist create <title> | layer|pose|camera|location|backdrop|stage|shot <id> ... | show <id> | list | status | compose|generate|edit|cutout|upscale|video <id> ...",
     "like": "last production was good: /like [notes…]",
     "novel": "webnovel tracker: /novel follow <url|title> | list | read <slug> [ch] | continue <slug> [n]",
     "produce": "compose original music, taste-aware: /produce [spotify-url|vibe words…]",

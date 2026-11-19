@@ -57,6 +57,61 @@ from ..media.film.store import FilmStore, film_path
 __all__ = ["register"]
 
 
+def parse_filmcraft_request(
+        text: str, known: list[str]
+        ) -> tuple[str, str] | None:
+    """Natural phrasing -> (verb, ref) for the film editor, or None.
+
+    Matches only when the text says "film" and names a known film
+    project (``show`` / ``render``), or asks for the project list
+    with the words "film project" — a bare "edit this video" is not
+    a match, so the hook never steals a video-generation question,
+    and VOD wording ("analyze this match video") never matches
+    either (the VOD film study owns that phrasing).
+    """
+    low = (text or "").lower()
+    if "film" not in low:
+        return None
+    for name in known:
+        if name and name.lower() in low:
+            if ("render" in low or "export" in low
+                    or "finish" in low):
+                return ("render", name)
+            return ("show", name)
+    if "film project" in low and (
+            "list" in low or "projects" in low):
+        return ("list", "")
+    return None
+
+
+def parse_effect_request(
+        text: str, known: list[str]
+        ) -> tuple[str, str] | None:
+    """Natural phrasing -> (verb, ref) for the compositor, or None.
+
+    Matches only when the text says "effect", "composition" or
+    "motion" and names a known composition (``show`` / ``render``),
+    asks what effects exist, or asks for the composition list — a
+    bare "great effects" with nothing to act on is not a match, so
+    the hook never steals an unrelated question.
+    """
+    low = (text or "").lower()
+    if ("effect" not in low and "composition" not in low
+            and "motion" not in low):
+        return None
+    for name in known:
+        if name and name.lower() in low:
+            if "render" in low or "export" in low:
+                return ("render", name)
+            return ("show", name)
+    if ("what effects" in low or "list effects" in low
+            or "show effects" in low):
+        return ("effects", "")
+    if "list" in low and ("composition" in low or "effect" in low):
+        return ("list", "")
+    return None
+
+
 def _film_store(context: Any) -> FilmStore:
     settings = getattr(context, "settings", None)
     return FilmStore(film_path(settings))

@@ -2826,6 +2826,24 @@ class PartnerRuntime(
                 except Exception as exc:  # noqa: BLE001
                     _log.warning("radio reply send failed: %s", exc)
                 return
+            # Film / motion / artist surface (lane 95): "show me the
+            # film project <name>" / "show the artist scene <name>"
+            # → the matching verb. Owner only, non-slash, never eats
+            # chat — the parsers match known names only.
+            try:
+                film_reply = self._film_surface_hook(message)
+            except Exception:  # noqa: BLE001 - the hook must never eat chat
+                _log.exception("film surface hook failed")
+                film_reply = None
+            if film_reply is not None:
+                self._bump("controls")
+                try:
+                    self._typing_for(message.chat, film_reply)
+                    self.gateway.send(message.chat.platform, message.chat,
+                                      film_reply)
+                except Exception as exc:  # noqa: BLE001
+                    _log.warning("film surface reply send failed: %s", exc)
+                return
             try:
                 union_reply = self._union_catalog_hook(message)
             except Exception:  # noqa: BLE001 - the hook must never eat chat
@@ -7750,6 +7768,74 @@ class PartnerRuntime(
             return None
         return added_message(trip) + f"\n(trip id: {trip.id})"
 
+    def _film_surface_hook(self, message: ChatMessage) -> str | None:
+        """Artist studio / film editor / motion compositor, in plain
+        words: "show me the film project <name>" / "render the film
+        <name>" / "show the motion composition <name>" / "show the
+        artist scene <name>" / "compose the scene <name>" / "list my
+        film projects" — routed to the matching /filmcraft, /effect
+        or /artist verb.
+
+        Returns a reply string when one of the three parsers matched
+        a KNOWN project/composition/scene, else None. Owner only,
+        non-slash, never eats chat. Never raises. The match is
+        deliberately narrow — a known name, or the list/effects
+        phrasing — so ordinary conversation never lands here; the
+        brain owns everything else. (An earlier revision put these
+        parsers inside _handle_control_inner, where they could never
+        fire: plain text never reaches the control dispatch — the
+        brain owns it — so the hooks live here, where NL flows.)
+        """
+        text = (message.text or "").strip()
+        if not text or text.startswith("/"):
+            return None
+        if message is not None and not self._is_operator(message):
+            return None
+        try:
+            from ...tools.artist import parse_artist_request
+            from ...tools.filmcraft import parse_effect_request, parse_filmcraft_request
+            settings = getattr(self.context, "settings", None)
+            try:
+                from ...media.film.store import FilmStore, film_path
+
+                film_parsed = parse_filmcraft_request(
+                    text, FilmStore(film_path(settings)).list_names())
+            except Exception:  # noqa: BLE001 — no store, no hook
+                film_parsed = None
+            if film_parsed is not None:
+                verb, ref = film_parsed
+                return self._control_filmcraft(
+                    f"{verb} {ref}".strip(), message)
+            try:
+                from ...media.effects.store import CompositionStore, effects_path
+
+                effect_parsed = parse_effect_request(
+                    text, CompositionStore(
+                        effects_path(settings)).list_names())
+            except Exception:  # noqa: BLE001 — no store, no hook
+                effect_parsed = None
+            if effect_parsed is not None:
+                verb, ref = effect_parsed
+                return self._control_effect(
+                    f"{verb} {ref}".strip(), message)
+            try:
+                from ...media.artist.store import ArtistStore, artist_path
+
+                known = [(row.get("id", ""), row.get("title") or "")
+                         for row in ArtistStore(
+                             artist_path(settings)).list()]
+                artist_parsed = parse_artist_request(text, known)
+            except Exception:  # noqa: BLE001 — no store, no hook
+                artist_parsed = None
+            if artist_parsed is not None:
+                verb, ref = artist_parsed
+                return self._control_artist(
+                    f"{verb} {ref}".strip(), message)
+        except Exception as exc:  # noqa: BLE001 - never eat chat
+            record_failure("runtime.PartnerRuntime._film_surface_hook", exc)
+            return None
+        return None
+
     def _music_full_hook(self, message: ChatMessage) -> str | None:
         """Build-map #58: "make me a song about X" → full vocal pipeline.
 
@@ -9097,6 +9183,11 @@ class PartnerRuntime(
             if _verb == "search":
                 return self._control_wiki(f"search {_ref}", message)
             return self._control_wiki(f"read {_ref}", message)
+
+        # Film / motion / artist in plain words live in
+        # _film_surface_hook, not here: plain text never reaches
+        # the control dispatch, so a hook here could never fire
+        # for natural language (it only ever saw slash text).
 
         # Living-card taps (Living Chat P2): a card button's
         # payload is a fencing stamp, not a command —
@@ -10593,6 +10684,27 @@ class PartnerRuntime(
             if message is not None and not self._is_operator(message):
                 return "that one's just for the owner."
             return self._control_extensions(command.tail or arg, message)
+        if kind == "filmcraft":
+            # Video editor (FilmCraft port, lane 93) — the
+            # multi-track timeline the owner cuts in chat.
+            # Owner-only, like /photo. /film stays the VOD film study.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_filmcraft(command.tail or arg, message)
+        if kind == "effect":
+            # Motion compositor (EffectCraft port, lane 93) —
+            # layers, keyframes, raster effects and the 3D plate
+            # camera, in chat. Owner-only, like /filmcraft.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_effect(command.tail or arg, message)
+        if kind == "artist":
+            # Artist studio (ArtCraft port, lane 92) — scene-first
+            # image/video generation, in chat. Owner-only, like
+            # /effect.
+            if message is not None and not self._is_operator(message):
+                return "that one's just for the owner."
+            return self._control_artist(command.tail or arg, message)
         if kind == "immune":
             # Defensive immune system — owner-only, like /learn.
             if message is not None and not self._is_operator(message):
